@@ -1,0 +1,20 @@
+# Nextflow files
+work/
+.nextflow/
+.nextflow.log*
+
+# Results and testing
+results/
+test_results/
+test_data/
+
+# Environment and logs
+archive/
+*.log
+*.tmp
+tmp/
+
+# Conda/Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
