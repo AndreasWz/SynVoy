@@ -8,7 +8,7 @@ process GENERATE_REPORT {
     path qc_json
     
     output:
-    path "synterra_report.json"
+    path "synterra_report.json", emit: report
     
     script:
     """

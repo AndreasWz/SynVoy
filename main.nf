@@ -24,43 +24,89 @@ include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
 
-// Log parameters
-log.info """
-    S Y N T E R R A
-    ===========================
-    Gene            : ${params.gene ?: params.query_id}
-    Home Genome     : ${params.home_genome}
-    Target Genomes  : ${params.target_genomes}
-    Mode            : ${params.mode}
-    """
+// ==============================================================================
+// ASCII Banner & Pipeline Info
+// ==============================================================================
+
+def printHeader() {
+    log.info """
+    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
+    ${c_cyan}S Y N T E R R A${c_reset}   ${c_dim}v2.0${c_reset}
+    ${c_dim}Phylogenetically-informed syntenic ortholog discovery${c_reset}
+    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
+    """.stripIndent()
+}
+
+def printParams() {
+    def query_display = params.gene ? new File(params.gene).name : params.query_id
+    def home_display = new File(params.home_genome).name
+    
+    log.info """
+    ${c_blue}═══════════════════════════════════════════════════════════════
+    ${c_white}RUN CONFIGURATION${c_reset}
+    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
+    ${c_dim}Query Gene      :${c_reset} ${c_green}${query_display}${c_reset}
+    ${c_dim}Home Genome     :${c_reset} ${c_green}${home_display}${c_reset}
+    ${c_dim}Mode            :${c_reset} ${c_yellow}${params.mode}${c_reset}
+    ${c_dim}Flanking Genes  :${c_reset} ${params.n_flanking_genes}
+    ${c_dim}MMseqs Sens.    :${c_reset} ${params.mmseqs_sensitivity}
+    ${c_dim}Output Dir      :${c_reset} ${params.outdir}
+    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
+    """.stripIndent()
+}
+
+// ANSI color codes
+def c_reset = "\033[0m"
+def c_bold = "\033[1m"
+def c_dim = "\033[2m"
+def c_black = "\033[0;30m"
+def c_red = "\033[0;31m"
+def c_green = "\033[0;32m"
+def c_yellow = "\033[0;33m"
+def c_blue = "\033[0;34m"
+def c_purple = "\033[0;35m"
+def c_cyan = "\033[0;36m"
+def c_white = "\033[0;37m"
+
+printHeader()
+printParams()
 
 workflow {
-    log.info "SynTerra pipeline started..."
+    log.info ""
     
     // ========== INPUT VALIDATION ==========
     
     // Check if we have EITHER gene file OR query_id
     if (!params.gene && !params.query_id) { 
-        error """
-        ❌ ERROR: No query provided!
+        log.error """
+        ${c_red}╔════════════════════════════════════════╗
+        ║  ERROR: No query provided!         ║
+        ╚════════════════════════════════════════╝${c_reset}
+        Please provide either --gene or --query_id
         """
+        exit 1
     }
     
     if (params.gene && params.query_id) {
-        log.warn "Both --gene and --query_id provided. Using --gene (${params.gene}) and ignoring ID."
+        log.warn "${c_yellow}WARNING: Both --gene and --query_id provided. Using --gene${c_reset}"
     }
     
     if (!params.home_genome) { 
-        error "❌ ERROR: No home genome provided!"
+        log.error "${c_red}ERROR: No home genome provided!${c_reset}"
+        exit 1
     }
     
     if (params.gene && !file(params.gene).exists()) {
-        error "❌ ERROR: Gene file not found: ${params.gene}"
+        log.error "${c_red}ERROR: Gene file not found: ${params.gene}${c_reset}"
+        exit 1
     }
     
     if (!file(params.home_genome).exists()) {
-        error "❌ ERROR: Home genome file not found: ${params.home_genome}"
+        log.error "${c_red}ERROR: Home genome not found: ${params.home_genome}${c_reset}"
+        exit 1
     }
+    
+    log.info "${c_green}Input validation passed${c_reset}"
     
     // Channel setup
     if (params.gene) {
@@ -92,33 +138,61 @@ workflow {
     // Targets - Handle Easy vs Pro mode
     if (params.mode == 'easy') {
         if (!params.easy_species) {
-            error "❌ ERROR: Easy mode requires --easy_species parameter!"
+            log.error "${c_red}ERROR: Easy mode requires --easy_species parameter!${c_reset}"
+            exit 1
         }
         
+        log.info "${c_cyan}Fetching related genomes for: ${c_white}${params.easy_species}${c_reset}"
         FETCH_RELATED_GENOMES(params.easy_species, params.easy_max_genomes)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
         
+        // Count genomes found
+        genomes_dir_ch.view { dir ->
+            def genome_count = new File(dir.toString()).listFiles().findAll { 
+                it.name.endsWith('.fna') || it.name.endsWith('.fasta') || it.name.endsWith('.fa')
+            }.size()
+            "${c_green}Found ${genome_count} related genome(s)${c_reset}"
+        }
+        
     } else {
         if (params.target_genomes) {
+            log.info "${c_cyan}Loading target genomes list...${c_reset}"
             target_genomes_list = Channel.fromPath(params.target_genomes).collect()
+            
+            // Show count
+            target_genomes_list.view { genomes ->
+                "${c_green}[STAGE] Staged ${genomes.size()} target genomes${c_reset}"
+            }
+            
             STAGE_GENOMES(target_genomes_list)
             genomes_dir_ch = STAGE_GENOMES.out.dir
             
         } else {
+            log.warn "${c_yellow}WARNING: No target genomes provided - running home genome analysis only${c_reset}"
             genomes_dir_ch = Channel.empty()
         }
     }
 
     // PHASE 1: Core Localization
+    log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
+    log.info "${c_white}PHASE 1: Gene Localization in Home Genome${c_reset}"
+    log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+    
     LOCATE_GENE(query_gene_source_ch, home_genome_ch)
     
     // 5. SPLIT LOCI
     SPLIT_LOCI(LOCATE_GENE.out.bed)
     
+    SPLIT_LOCI.out.beds.flatten().count().view { count ->
+        "${c_green}Identified ${count} distinct locus/loci${c_reset}"
+    }
+    
     distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
         .map { file -> tuple(file.name, file) }
     
     // 6. Extract Flanking Genes
+    log.info "${c_cyan}Extracting flanking genes (n=${params.n_flanking_genes})...${c_reset}"
+    
     EXTRACT_FLANKING(
         distinct_loci_ch, 
         home_gff_ch, 
@@ -129,6 +203,8 @@ workflow {
     )
         # 6b. CRITICAL FIX: Prepare Initial Database with GOI included
     // Combine flanking genes with query gene for iterative search
+    log.info "${c_cyan}Preparing initial database with query gene...${c_reset}"
+    
     PREPARE_INITIAL_DB(
         EXTRACT_FLANKING.out.faa,
         query_gene_source_ch.first()  // Use first instance of query gene
@@ -136,14 +212,24 @@ workflow {
         // Only run if we have targets
     if (params.target_genomes || params.mode == 'easy') {
         
+        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
+        log.info "${c_white}PHASE 2: Phylogenetic Ordering & Iterative Search${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        
         EXTRACT_FLANKING.out.faa
             .combine(genomes_dir_ch)
             .set { phylo_sort_inputs } // [locus, faa, genomes_dir]
 
+        log.info "${c_cyan}[PHYLO] Sorting genomes by phylogenetic distance...${c_reset}"
+        
         PHYLO_SORT(
             phylo_sort_inputs.map { tuple(it[0], it[1]) },
             phylo_sort_inputs.map { it[2] }  // genomes_dir
         )
+        
+        PHYLO_SORT.out.sorted_list.view { locus, sorted ->
+            "${c_green}[PHYLO] Phylogenetic ordering complete for ${locus}${c_reset}"
+        }
         
         // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
         PREPARE_INITIAL_DB.out.db
@@ -155,10 +241,14 @@ workflow {
             .set { iterative_search_inputs } // [locus_id, faa, sorted_list, genomes_dir]
 
         // QC
+        log.info "${c_cyan}[QC] Assessing genome quality...${c_reset}"
+        
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
 
         // Prepare Home Proteome (Run once)
+        log.info "${c_cyan}[PREPARE] Preparing home proteome database...${c_reset}"
+        
         PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch)
         home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
         
@@ -172,6 +262,8 @@ workflow {
             .combine(home_proteome_db_ch)
             .set { iterative_search_final_inputs } // [locus_id, faa, sorted_list, genomes_dir, home_db]
 
+        log.info "${c_cyan}[SEARCH] Running iterative phylogenetic search...${c_reset}"
+        
         ITERATIVE_SEARCH(
             iterative_search_final_inputs.map { tuple(it[0], it[1]) }, // [locus, faa]
             iterative_search_final_inputs.map { it[2] }, // sorted_list
@@ -182,9 +274,17 @@ workflow {
             params.mmseqs_sensitivity
         )
         
-        ITERATIVE_SEARCH.out.expanded_db.view { "Final Expanded DB: $it" }
+        ITERATIVE_SEARCH.out.expanded_db.view { locus, db ->
+            "${c_green}[SEARCH] Iterative search complete: ${locus}${c_reset}"
+        }
 
         // PHASE 3: Region Identification & Augmented Search
+        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
+        log.info "${c_white}PHASE 3: Region Clustering & Augmented Search${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        
+        log.info "${c_cyan}[CLUSTER] Clustering genomic regions by synteny...${c_reset}"
+        
         ITERATIVE_SEARCH.out.hits
             .join(EXTRACT_FLANKING.out.faa)
             .join(EXTRACT_FLANKING.out.bed)
@@ -222,6 +322,10 @@ workflow {
             .combine(genomes_dir_ch) // [unique, locus, bed, faa, gname, genomes_dir]
             .set { joined_ch }
             
+        CLUSTER_REGIONS.out.bed.view { genome, payload, locus, bed ->
+            "${c_green}[CLUSTER] Clustered regions for ${locus} in ${genome}${c_reset}"
+        }
+        
         // Tracker for plotting
         locus_tracker_ch = joined_ch.map { unique, locus, rb, pf, gname, gd -> 
             tuple(unique, locus) 
@@ -234,11 +338,17 @@ workflow {
             // homology: tuple(unique, pf) 
         }.set { phase3_inputs }
         
+        log.info "${c_cyan}[AUGMENT] Running augmented orthology search...${c_reset}"
+        
         AUGMENTED_SEARCH(
             phase3_inputs.aug,
             aug_query_gene_ch, // Reusable Value Channel
             params.region_padding
         )
+        
+        AUGMENTED_SEARCH.out.bed.view { unique, bed ->
+            "${c_green}[AUGMENT] Augmented search complete for region ${unique}${c_reset}"
+        }
         
         /*
         ANNOTATE_STRUCTURE(
@@ -266,9 +376,19 @@ workflow {
         // expanded_db contains everything found so far.
         // Let's use expanded_db per locus.
         
+        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
+        log.info "${c_white}PHASE 4: Phylogenetics & Visualization${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        
+        log.info "${c_cyan}[TREE] Computing phylogenetic trees...${c_reset}"
+        
         COMPUTE_TREE(
             ITERATIVE_SEARCH.out.expanded_db
         )
+        
+        COMPUTE_TREE.out.tree.view { locus, tree ->
+            "${c_green}[TREE] Phylogenetic tree computed: ${locus}${c_reset}"
+        }
         
         // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
         miniprot_gffs_ch = ITERATIVE_SEARCH.out.gff
@@ -311,6 +431,8 @@ workflow {
         // Get first home_bed and tree (should be same for all loci in single-locus case)
         home_bed_ch = EXTRACT_FLANKING.out.bed.map { it[1] }.first()
         tree_ch = COMPUTE_TREE.out.tree.map { it[1] }.first()
+        
+        log.info "${c_cyan}[PLOT] Generating synteny visualizations...${c_reset}"
             
         PLOT_SYNTENY(
             home_bed_ch,                     // home_bed
@@ -323,7 +445,17 @@ workflow {
             tree_ch                          // tree
         )
         
+        PLOT_SYNTENY.out.plot.view { plot ->
+            "${c_green}[PLOT] Synteny visualization complete${c_reset}"
+        }
+        
         // Final Reporting
+        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
+        log.info "${c_white}PHASE 5: Report Generation${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        
+        log.info "${c_cyan}[REPORT] Generating comprehensive report...${c_reset}"
+        
         ITERATIVE_SEARCH.out.region_genes
             .map { it[1] } 
             .flatten()
@@ -344,5 +476,34 @@ workflow {
             .set { collected_augmented }
         
         GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
+        
+        GENERATE_REPORT.out.report.view { report ->
+            "${c_green}[REPORT] Analysis report generated successfully${c_reset}"
+        }
     }
 }
+
+workflow.onComplete {
+    log.info "\n${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+    if (workflow.success) {
+        log.info "${c_green}Pipeline completed successfully!${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        log.info "${c_white}  Results Directory:${c_reset} ${c_cyan}${params.outdir}${c_reset}"
+        log.info "${c_white}  Duration:${c_reset}          ${c_dim}${workflow.duration}${c_reset}"
+        log.info "${c_white}  Tasks Completed:${c_reset}   ${c_dim}${workflow.stats.succeedCount}${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        log.info "${c_dim}  Key outputs:${c_reset}"
+        log.info "${c_dim}    - synterra_report.json    (Analysis summary)${c_reset}"
+        log.info "${c_dim}    - synteny_plot.pdf        (Visualization)${c_reset}"
+        log.info "${c_dim}    - expanded_databases/     (Ortholog databases)${c_reset}"
+        log.info "${c_dim}    - augmented_regions/      (Identified regions)${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}\n"
+    } else {
+        log.info "${c_red}Pipeline execution failed${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        log.info "${c_white}  Duration:${c_reset}    ${c_dim}${workflow.duration}${c_reset}"
+        log.info "${c_white}  Error:${c_reset}       ${c_red}${workflow.errorMessage}${c_reset}"
+        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}\n"
+    }
+}
+
