@@ -28,6 +28,7 @@ process ITERATIVE_SEARCH {
         --home_db_dir $home_db \\
         --output_dir iterative_results \\
         --threads ${task.cpus} \\
+        --mmseqs_sens ${sensitivity} \\
         --prefix ${locus_id}
     """
 }

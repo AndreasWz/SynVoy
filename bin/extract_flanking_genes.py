@@ -9,16 +9,16 @@ import subprocess
 try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate
+        load_genome, reverse_complement, translate, parse_gff as parse_gff_base
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate
+        load_genome, reverse_complement, translate, parse_gff as parse_gff_base
     )
 
-def parse_gff(gff_file):
+def parse_gff_for_genes(gff_file):
     """
     Parse GFF3 file into a list of gene dictionaries.
     Standardizes to BED Coordinates (0-based start, 1-based end, half-open).

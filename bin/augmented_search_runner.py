@@ -23,6 +23,10 @@ def parse_args():
     parser.add_argument("--output_base", required=True, help="Output basename for .bed and .faa")
     parser.add_argument("--padding", type=int, default=10000, help="Padding around regions")
     parser.add_argument("--mmseqs_sens", type=str, default="8.5")
+    parser.add_argument("--enable_sw", action="store_true", help="Use Smith-Waterman in addition to MMseqs2")
+    parser.add_argument("--sw_method", default="auto", choices=["auto", "parasail", "ssearch36"])
+    parser.add_argument("--sw_min_score", type=int, default=50)
+    parser.add_argument("--sw_min_identity", type=float, default=20.0)
     return parser.parse_args()
 
 def extract_regions(bed_file, genome_file, padding):

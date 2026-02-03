@@ -183,9 +183,27 @@ results/
 - **Synteny score 0.5-0.7**: Moderate confidence, some rearrangement
 - **Synteny score < 0.5**: Low confidence, verify manually
 
-## Algorithm Details
+## Documentation
 
-See [instructions.md](instructions.md) for complete algorithm description and implementation details.
+Comprehensive documentation is available in the `docs/` directory:
+
+- **[USAGE.md](USAGE.md)** - Detailed usage guide and examples
+- **[docs/FIXES_SUMMARY.md](docs/FIXES_SUMMARY.md)** - Complete overview of all improvements and bug fixes
+- **[docs/CRITICAL_ANALYSIS.md](docs/CRITICAL_ANALYSIS.md)** - Technical analysis of the pipeline
+- **[docs/PIPELINE_DETAILS.md](docs/PIPELINE_DETAILS.md)** - Algorithm details and implementation
+
+### Fix Documentation
+- **[docs/FIXES_APPLIED.md](docs/FIXES_APPLIED.md)** - Critical bug fixes
+- **[docs/MAJOR_FIXES_APPLIED.md](docs/MAJOR_FIXES_APPLIED.md)** - Major enhancements
+- **[docs/MODERATE_FIXES_APPLIED.md](docs/MODERATE_FIXES_APPLIED.md)** - Moderate improvements
+- **[docs/MINOR_FIXES_APPLIED.md](docs/MINOR_FIXES_APPLIED.md)** - Code quality improvements
+
+## Testing
+
+Run the test suite to verify installation:
+```bash
+python3 tests/test_core_functions.py
+```
 
 ## Citation
 

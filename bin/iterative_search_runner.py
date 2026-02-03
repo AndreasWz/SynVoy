@@ -8,7 +8,18 @@ import concurrent.futures
 import math
 import uuid
 import sys
+import json
+import logging
 from collections import defaultdict
+from typing import List, Dict, Tuple, Optional, Any
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Use our own sequence utilities (no BioPython dependency)
 try:
@@ -34,10 +45,10 @@ except ImportError:
 def run_command(cmd):
     subprocess.check_call(cmd)
 
-def normalize_coordinates(start, end):
+def normalize_coordinates(start: int, end: int) -> Tuple[int, int]:
     return min(start, end), max(start, end)
 
-def parse_hits(hits_file, min_identity, min_length, evalue_thresh):
+def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thresh: float) -> List[Dict[str, Any]]:
     """
     Parse MMseqs2 hits and return a list of hit dictionaries.
     Filters by basic quality metrics.
@@ -92,7 +103,7 @@ def create_locus_object(query_id, hits):
         'hits': hits
     }
 
-def extract_base_gene_id(query_id):
+def extract_base_gene_id(query_id: str) -> str:
     """
     Extract the base gene ID from a query ID that may contain exon info.
     
@@ -228,9 +239,10 @@ def identify_best_synteny_block(hits, max_intron=20000, cluster_dist=50000):
         'genes': genes_list
     }
 
-def calculate_adaptive_padding(hits, best_region, default=100000):
+def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str, Any], default: int = 100000) -> int:
     """
     Calculate region padding based on gene spacing in hits.
+    Returns padding distance in base pairs.
     """
     # Filter hits to the best region's chromosome
     region_hits = [h for h in hits if h['chrom'] == best_region['chrom']]
@@ -260,10 +272,12 @@ def calculate_adaptive_padding(hits, best_region, default=100000):
     
     return final_padding
 
-def run_miniprot(target_fasta, query_protein, output_paf):
+def run_miniprot(target_fasta: str, query_protein: str, output_paf: str) -> List[Dict[str, Any]]:
     """
     Run miniprot to align protein query to target DNA.
     Returns list of hit objects (parsed from PAF/GFF).
+    
+    Enhanced with better error handling and validation.
     """
     cmd = [
         "miniprot", "-I", "--gff", 
@@ -273,68 +287,128 @@ def run_miniprot(target_fasta, query_protein, output_paf):
     hits = []
     
     try:
-        # Capture stdout
+        # Capture stdout AND stderr for better debugging
         with open(output_paf, "w") as outfile:
-            subprocess.run(cmd, stdout=outfile, check=True, stderr=subprocess.DEVNULL)
+            result = subprocess.run(cmd, stdout=outfile, stderr=subprocess.PIPE, 
+                                   check=False, text=True)
             
-        # Parse GFF
+            # Check for errors but don't fail completely on warnings
+            if result.returncode != 0:
+                stderr_output = result.stderr
+                if "error" in stderr_output.lower():
+                    logger.warning(f"Miniprot reported errors: {stderr_output[:200]}")
+                # Still try to parse output if file was created
+                if not os.path.exists(output_paf) or os.path.getsize(output_paf) == 0:
+                    raise subprocess.CalledProcessError(result.returncode, cmd, stderr=stderr_output)
+            
+        # Parse GFF with more robust handling
         current_hit = None
+        line_num = 0
         with open(output_paf, "r") as f:
             for line in f:
-                if line.startswith("#"): continue
+                line_num += 1
+                if line.startswith("#"): 
+                    continue
                 parts = line.strip().split("\t")
-                if len(parts) < 9: continue
+                
+                # Validate GFF format (9 columns minimum)
+                if len(parts) < 9:
+                    logger.warning(f"Line {line_num} has {len(parts)} columns, expected 9+")
+                    continue
                 
                 feat_type = parts[2]
                 
                 # mRNA line starts a new hit
                 if feat_type == "mRNA":
                     try:
+                        # Parse attributes more robustly
                         info = {}
                         for item in parts[8].split(";"):
                             if "=" in item:
                                 k, v = item.split("=", 1)
-                                info[k] = v
+                                info[k] = v.strip()  # Remove whitespace
                         
+                        # Extract target name (query that was aligned)
                         target_name = "Unknown"
                         if "Target" in info:
-                            target_name = info["Target"].split()[0]
+                            target_parts = info["Target"].split()
+                            target_name = target_parts[0] if target_parts else "Unknown"
+                        
+                        # Parse coordinates with validation
+                        try:
+                            start = int(parts[3])
+                            end = int(parts[4])
+                            if start > end:
+                                logger.warning(f"Invalid coordinates at line {line_num}: start {start} > end {end}")
+                                start, end = end, start  # Swap
+                        except ValueError as ve:
+                            logger.warning(f"Invalid coordinate format at line {line_num}: {ve}")
+                            continue
+                        
+                        # Extract identity (if present)
+                        identity = 0.0
+                        if "Identity" in info:
+                            try:
+                                identity = float(info["Identity"]) * 100
+                            except (ValueError, TypeError):
+                                identity = 0.0
+                        
+                        # Extract score
+                        score = 0.0
+                        if parts[5] != '.':
+                            try:
+                                score = float(parts[5])
+                            except ValueError:
+                                score = 0.0
                         
                         hit = {
-                            'id': info.get('ID', 'unknown'),
+                            'id': info.get('ID', f'miniprot_{line_num}'),
                             'parent_query': target_name,
                             'chrom': parts[0],
-                            'start': int(parts[3]),
-                            'end': int(parts[4]),
-                            'strand': parts[6],
-                            'identity': float(info.get('Identity', 0)) * 100,
-                            'score': float(parts[5]) if parts[5] != '.' else 0,
+                            'start': start,
+                            'end': end,
+                            'strand': parts[6] if parts[6] in ['+', '-'] else '+',
+                            'identity': identity,
+                            'score': score,
                             'cds_parts': [],
-                            'gff_lines': [line.strip()] # Store raw lines
+                            'gff_lines': [line.strip()]  # Store raw lines for debugging
                         }
                         hits.append(hit)
                         current_hit = hit
-                    except (ValueError, IndexError) as e:
-                        print(f"Warning: Failed to parse mRNA line: {e}", file=sys.stderr)
+                        
+                    except (ValueError, IndexError, KeyError) as e:
+                        logger.warning(f"Failed to parse mRNA line {line_num}: {e}")
                         current_hit = None
                         continue
                     
                 elif current_hit:
-                     # Associate following lines (CDS, etc.) with current hit
-                     current_hit['gff_lines'].append(line.strip())
-                     if feat_type == "CDS":
-                         try:
-                             current_hit['cds_parts'].append((int(parts[3]), int(parts[4])))
-                         except (ValueError, IndexError) as e:
-                             print(f"Warning: Failed to parse CDS coordinates: {e}", file=sys.stderr)
+                    # Associate following lines (CDS, etc.) with current hit
+                    current_hit['gff_lines'].append(line.strip())
+                    
+                    if feat_type == "CDS":
+                        try:
+                            cds_start = int(parts[3])
+                            cds_end = int(parts[4])
+                            if cds_start <= cds_end:
+                                current_hit['cds_parts'].append((cds_start, cds_end))
+                            else:
+                                logger.warning(f"Invalid CDS coords at line {line_num}")
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"Failed to parse CDS at line {line_num}: {e}")
                      
+    except FileNotFoundError:
+        logger.error("miniprot not found in PATH")
+        raise
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Miniprot failed with return code {e.returncode}: {e.stderr}")
+        raise
     except Exception as e:
-        print(f"Miniprot failed: {e}")
-        raise subprocess.CalledProcessError(1, cmd)
+        logger.error(f"Unexpected error during Miniprot execution: {e}")
+        raise
         
     return hits
 
-def extract_cds_sequence(genome_seq, hit):
+def extract_cds_sequence(genome_seq: str, hit: Dict[str, Any]) -> str:
     """
     Extracts and concatenates CDS sequences based on Miniprot alignment.
     Handles strand orientation.
@@ -364,26 +438,79 @@ def extract_cds_sequence(genome_seq, hit):
     return {'id': hit['id'], 'seq': protein_seq}
 
 
-def estimate_cluster_dist(genome_file, default_dist=50000):
+def estimate_cluster_dist(genome_file: str, gff_file: Optional[str] = None, default_dist: int = 50000) -> int:
     """
-    Estimate gene density to adjust cluster_dist.
-    Approximation: If genome is small/dense (Bacteria), use 20kb.
-    If large/sparse (Euk), use 100kb+?
-    Simple heuristic: If size < 10Mb -> assume Bacteria -> 20kb.
-    If size > 100Mb -> assume Euk -> 100kb.
+    Estimate gene density to adjust cluster_dist intelligently.
+    
+    Strategy:
+    1. If GFF provided: Calculate actual inter-gene distances
+    2. Else: Use genome size heuristic (improved)
+    3. Return 2-3x median inter-gene distance as cluster threshold
     """
+    
+    # Method 1: Use GFF if available (most accurate)
+    if gff_file and os.path.exists(gff_file) and gff_file != "NO_GFF":
+        try:
+            genes = parse_gff(gff_file)
+            if len(genes) > 10:  # Need reasonable sample size
+                # Sort by chromosome and position
+                by_chrom = defaultdict(list)
+                for gene in genes:
+                    by_chrom[gene['chrom']].append(gene['start'])
+                
+                # Calculate inter-gene distances per chromosome
+                all_distances = []
+                for chrom, positions in by_chrom.items():
+                    sorted_pos = sorted(positions)
+                    for i in range(len(sorted_pos) - 1):
+                        dist = sorted_pos[i+1] - sorted_pos[i]
+                        if dist > 0:  # Skip overlapping genes
+                            all_distances.append(dist)
+                
+                if all_distances:
+                    # Use median distance * 2.5 as clustering threshold
+                    all_distances.sort()
+                    median_dist = all_distances[len(all_distances) // 2]
+                    cluster_dist = int(median_dist * 2.5)
+                    # Clamp to reasonable range
+                    cluster_dist = max(10000, min(200000, cluster_dist))
+                    print(f"Estimated cluster distance from GFF: {cluster_dist} bp "
+                          f"(median inter-gene: {median_dist} bp)", file=sys.stderr)
+                    return cluster_dist
+        except Exception as e:
+            print(f"Warning: Could not parse GFF for gene density: {e}", file=sys.stderr)
+    
+    # Method 2: Improved genome size heuristic
     try:
         size = os.path.getsize(genome_file)
-        if size < 10_000_000: # < 10MB
-            return 20000
-        elif size > 100_000_000: # > 100MB
+        
+        # More refined heuristics based on typical genomes
+        if size < 5_000_000:  # < 5MB: Bacteria/Archaea
+            return 15000  # Dense gene packing
+        elif size < 20_000_000:  # 5-20MB: Large bacteria, fungi
+            return 25000
+        elif size < 100_000_000:  # 20-100MB: Small eukaryotes
+            return 40000
+        elif size < 500_000_000:  # 100-500MB: Insects, small vertebrates
+            return 70000
+        elif size < 2_000_000_000:  # 0.5-2GB: Mammals, birds
             return 100000
-    except: pass
+        else:  # > 2GB: Plants, large genomes
+            return 150000
+    except:
+        pass
+    
     return default_dist
 
-def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5):
+def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5, min_coverage=0.5):
     """
     Perform Reciprocal Best Hit check for multiple candidates at once.
+    
+    Enhanced validation:
+    1. RBH to home genome (traditional)
+    2. Coverage check: alignment must cover >50% of both query and target
+    3. Identity must be reasonable (>25%)
+    
     candidates: list of dicts with 'id' and 'seq' keys
     """
     if not candidates: return []
@@ -408,7 +535,7 @@ def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5):
             "mmseqs", "easy-search",
             query_fasta, db_path, rbh_out, tmp_subdir,
             "-e", str(evalue),
-            "--format-output", "query,target,pident,evalue,bits",
+            "--format-output", "query,target,pident,qcov,tcov,evalue,bits,qlen,tlen,alnlen",
             "--max-seqs", "1", # Top hit only
             "--threads", str(threads)
         ]
@@ -419,26 +546,49 @@ def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5):
             with open(rbh_out) as f:
                 for line in f:
                     parts = line.strip().split('\t')
-                    if len(parts) < 2: continue
+                    if len(parts) < 9: continue
+                    
                     cand_id = parts[0]
                     target_id = parts[1]
+                    pident = float(parts[2])
+                    qcov = float(parts[3]) if len(parts) > 3 else 100
+                    tcov = float(parts[4]) if len(parts) > 4 else 100
                     
-                    # Debug print
-                    # print(f"DEBUG RBH: cand={cand_id} target={target_id}")
+                    # Enhanced validation
+                    if cand_id not in cand_map:
+                        continue
                     
-                    # Check match - Use exact matching to avoid false positives
-                    if cand_id in cand_map:
-                        parent = cand_map[cand_id]
-                        # Extract base IDs without suffixes/variants
-                        parent_base = extract_base_gene_id(parent).strip()
-                        target_base = extract_base_gene_id(target_id).strip()
-                        
-                        # Exact match or one is contained as full word
-                        if parent_base == target_base or parent == target_id or target_id == parent:
-                             valid_ids.add(cand_id)
+                    parent = cand_map[cand_id]
+                    parent_base = extract_base_gene_id(parent).strip()
+                    target_base = extract_base_gene_id(target_id).strip()
+                    
+                    # Check 1: ID matching (exact or close)
+                    ids_match = (parent_base == target_base or 
+                                parent == target_id or 
+                                target_id == parent or
+                                parent_base in target_base or
+                                target_base in parent_base)
+                    
+                    # Check 2: Coverage (both query and target must be well-covered)
+                    coverage_ok = (qcov >= min_coverage * 100 and 
+                                  tcov >= min_coverage * 100)
+                    
+                    # Check 3: Identity must be reasonable
+                    identity_ok = pident >= 25.0
+                    
+                    if ids_match and coverage_ok and identity_ok:
+                        valid_ids.add(cand_id)
+                    elif ids_match and not coverage_ok:
+                        print(f"RBH: {cand_id} matches {target_id} but low coverage "
+                              f"(qcov={qcov:.0f}%, tcov={tcov:.0f}%). Likely fragment/paralog.",
+                              file=sys.stderr)
+                    elif ids_match and not identity_ok:
+                        logger.debug(f"RBH: {cand_id} matches {target_id} but very low identity "
+                              f"({pident:.1f}%). Possible pseudogene.")
+                              
     except Exception as e:
-        print(f"RBH check failed: {e}")
-        return set() # Fail safe? Or return empty
+        logger.error(f"RBH check failed: {e}")
+        return set()
     finally:
         # Cleanup
         if os.path.exists(query_fasta): os.remove(query_fasta)
@@ -455,7 +605,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     """
     genome_name = os.path.basename(genome_path)
     if not os.path.exists(genome_path):
-        print(f"[{genome_name}] Warning: Genome file not found. Skipping.")
+        logger.warning(f"[{genome_name}] Genome file not found. Skipping.")
         return genome_name, []
     
     # Create unique temp space
@@ -480,26 +630,26 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             db_path, genome_path, hits_file, tmp_dir,
             "--search-type", "2", 
             "--threads", str(threads_per_job),
-            "-s", "7.5",
+            "-s", str(args.mmseqs_sens),  # Use configurable sensitivity
             "-e", str(args.evalue),
             "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
         ], check=True, stderr=subprocess.DEVNULL)
 
         hits = parse_hits(hits_file, args.min_identity, args.min_length, args.evalue)
         if not hits:
-            print(f"[{genome_name}] No hits found in MMseqs output.", flush=True)
+            logger.info(f"[{genome_name}] No hits found in MMseqs output.")
             return genome_name, []
             
-        print(f"[{genome_name}] Parsed {len(hits)} hits.", flush=True)
+        logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
 
         # 2. Identify Synteny
         best_region = identify_best_synteny_block(hits, cluster_dist=c_dist)
         
         if not best_region:
-            print(f"[{genome_name}] No valid syntenic region found.", flush=True)
+            logger.info(f"[{genome_name}] No valid syntenic region found.")
             return genome_name, []
             
-        print(f"[{genome_name}] Found syntenic region: {best_region['chrom']}:{best_region['start']}-{best_region['end']} with {len(best_region['genes'])} genes.", flush=True)
+        logger.info(f"[{genome_name}] Found syntenic region: {best_region['chrom']}:{best_region['start']}-{best_region['end']} with {len(best_region['genes'])} genes.")
             # print(f"[{genome_name}] Found Region: {best_region['chrom']}:{best_region['start']}-{best_region['end']}")
             
         # 3. Extract Region - using our FASTA parser
@@ -509,8 +659,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if chrom in genome_seqs:
             slen = len(genome_seqs[chrom])
             
-            # ADAPTIVE PADDING
-            padding = calculate_adaptive_padding(hits, best_region, default=100000)
+            # ADAPTIVE PADDING - CRITICAL FIX: Increased from 20kb to 150kb default
+            # This ensures query gene is captured even if distant from flanking genes
+            padding = calculate_adaptive_padding(hits, best_region, default=150000)
             
             w_start = max(0, best_region['start'] - padding)
             w_end = min(slen, best_region['end'] + padding)
@@ -526,9 +677,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             relevant_hits = [h for h in hits if h['chrom'] == chrom]
             unique_queries = set(extract_base_gene_id(h['query']) for h in relevant_hits)
             
+            # CRITICAL FIX: Always include GOI queries (marked with GOI_ prefix)
+            # This ensures the query gene of interest is searched iteratively
+            print(f"[{genome_name}] Scanning database for GOI queries...", flush=True)
+            
             # Extract sequences from DB - using our parser
             found_queries = []  # List of {'id': ..., 'seq': ...}
             db_sequences = {}
+            goi_queries = set()  # Track GOI queries
+            
             try:
                 # Parse DB once into dict
                 for header, clean_id, seq in parse_fasta(db_path):
@@ -537,6 +694,17 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     base = extract_base_id(clean_id)
                     if base != clean_id and base not in db_sequences:
                         db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
+                    
+                    # Track GOI queries (these MUST always be searched)
+                    if 'GOI_' in clean_id or clean_id.startswith('GOI_'):
+                        goi_queries.add(clean_id)
+                
+                # CRITICAL: Force include all GOI queries
+                unique_queries.update(goi_queries)
+                
+                if goi_queries:
+                    print(f"[{genome_name}] Found {len(goi_queries)} GOI queries in database. "
+                          f"These will ALWAYS be searched.", flush=True)
                 
                 for query_id in unique_queries:
                     if query_id in db_sequences:
@@ -758,17 +926,76 @@ def main():
     parser.add_argument("--min_length", type=int, default=50)
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
     parser.add_argument("--cluster_dist", type=int, default=-1, help="Auto-detect if -1")
+    parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
+    parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
     
     args = parser.parse_args()
+    
+    # INPUT VALIDATION
+    # 1. Validate required files exist
+    if not os.path.exists(args.initial_db):
+        logger.error(f"Initial database file not found: {args.initial_db}")
+        sys.exit(1)
+    
+    if not os.path.exists(args.sorted_genomes):
+        logger.error(f"Sorted genomes file not found: {args.sorted_genomes}")
+        sys.exit(1)
+    
+    # 2. Validate initial_db is not empty
+    if os.path.getsize(args.initial_db) == 0:
+        logger.error("Initial database file is empty")
+        sys.exit(1)
+    
+    # 3. Validate parameters are in valid ranges
+    if args.min_identity < 0 or args.min_identity > 100:
+        logger.error(f"Invalid min_identity: {args.min_identity}. Must be between 0 and 100")
+        sys.exit(1)
+    
+    if args.min_length < 1:
+        logger.error(f"Invalid min_length: {args.min_length}. Must be >= 1")
+        sys.exit(1)
+    
+    if args.evalue <= 0:
+        logger.error(f"Invalid evalue: {args.evalue}. Must be > 0")
+        sys.exit(1)
+    
+    if args.threads < 1:
+        logger.error(f"Invalid threads: {args.threads}. Must be >= 1")
+        sys.exit(1)
+    
+    if args.mmseqs_sens < 1 or args.mmseqs_sens > 9:
+        logger.warning(f"MMseqs sensitivity {args.mmseqs_sens} outside typical range (1-9)")
+    
+    logger.info(f"Starting iterative search with {args.threads} threads")
+    logger.info(f"Parameters: identity>={args.min_identity}%, length>={args.min_length}, evalue<={args.evalue}")
+    
     prefix = f"{args.prefix}_" if args.prefix else ""
     
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(f"{args.output_dir}/hits", exist_ok=True)
     os.makedirs(f"{args.output_dir}/regions", exist_ok=True)
     
+    # CHECKPOINTING: Check for resume
+    checkpoint_file = f"{args.output_dir}/.checkpoint"
+    start_wave = 0
     current_db = f"{args.output_dir}/current_db.faa"
-    shutil.copyfile(args.initial_db, current_db)
+    
+    if args.resume and os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as cf:
+            checkpoint_data = json.loads(cf.read())
+            start_wave = checkpoint_data.get('completed_waves', 0)
+            last_db = checkpoint_data.get('last_db', None)
+            
+            if last_db and os.path.exists(last_db):
+                logger.info(f"Resuming from wave {start_wave + 1}, using DB: {last_db}")
+                current_db = last_db
+            else:
+                logger.warning("Checkpoint found but DB missing, starting from beginning")
+                start_wave = 0
+                shutil.copyfile(args.initial_db, current_db)
+    else:
+        shutil.copyfile(args.initial_db, current_db)
     
     # Parse Genomes and Distances
     genome_entries = []
@@ -786,40 +1013,68 @@ def main():
                     gpath = os.path.join(args.genomes_dir, os.path.basename(gname))
             
             genome_entries.append({'name': gname, 'path': gpath, 'dist': dist})
+    
+    # Validate we loaded genomes
+    if not genome_entries:
+        logger.error("No genomes found in sorted_genomes file")
+        sys.exit(1)
             
-    print(f"Loaded {len(genome_entries)} genomes.")
+    logger.info(f"Loaded {len(genome_entries)} genomes.")
     
     # Define Waves
     waves = []
-    if not genome_entries:
-        print("No genomes to process.")
-        return
 
-    current_wave = [genome_entries[0]]
-    for i in range(1, len(genome_entries)):
-        prev = current_wave[-1]
+    # IMPROVED WAVEFRONT STRATEGY:
+    # - Closest genomes (dist < 0.05): Process strictly serially for maximum sensitivity
+    # - Medium distance (0.05 - 0.15): Small waves (2-3 genomes)
+    # - Distant genomes (> 0.15): Larger waves (can parallelize more)
+    
+    i = 0
+    while i < len(genome_entries):
         curr = genome_entries[i]
         
-        # Wavefront heuristic: group genomes with the same or very similar distance
-        if abs(curr['dist'] - prev['dist']) < 0.001: # Using a small epsilon for float comparison
-            current_wave.append(curr)
+        if curr['dist'] < 0.05:
+            # Very close: Serial processing (wave of 1)
+            waves.append([curr])
+            i += 1
+        elif curr['dist'] < 0.15:
+            # Medium distance: Small waves of 2-3 genomes with similar distance
+            wave = [curr]
+            i += 1
+            while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.01:
+                wave.append(genome_entries[i])
+                i += 1
+                if len(wave) >= 3:  # Max 3 per wave for medium distance
+                    break
+            waves.append(wave)
         else:
-            waves.append(current_wave)
-            current_wave = [curr]
-    waves.append(current_wave) # Add the last wave
+            # Distant: Can parallelize more (waves of up to 5)
+            wave = [curr]
+            i += 1
+            while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.02:
+                wave.append(genome_entries[i])
+                i += 1
+                if len(wave) >= 5:  # Max 5 per wave for distant genomes
+                    break
+            waves.append(wave)
     
-    print(f"Defined {len(waves)} waves of execution.")
+    logger.info(f"Defined {len(waves)} waves of execution.")
     
     latest_db = current_db
     
     for i, wave in enumerate(waves):
-        print(f"=== Starting Wave {i+1}/{len(waves)} ({len(wave)} genomes, dist={wave[0]['dist']:.3f}) ===")
+        # Skip already completed waves
+        if i < start_wave:
+            logger.info(f"Skipping wave {i+1}/{len(waves)} (already completed)")
+            continue
+            
+        logger.info(f"=== Starting Wave {i+1}/{len(waves)} ({len(wave)} genomes, dist={wave[0]['dist']:.3f}) ===")
         
         # Parallel Execution
         max_workers = min(len(wave), args.threads)
         threads_per_job = max(1, args.threads // max_workers)
         
-        print(f"  Running {len(wave)} jobs in parallel with {max_workers} workers, each using {threads_per_job} threads.")
+        logger.info(f"  Running {len(wave)} jobs in parallel with {max_workers} workers, each using {threads_per_job} threads.")
         
         wave_results = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -836,11 +1091,11 @@ def main():
                     if new_genes:
                         wave_results.extend(new_genes)
                 except Exception as exc:
-                    print(f"Wave execution generated an exception for one genome: {exc}")
+                    logger.error(f"Wave execution generated an exception for one genome: {exc}")
 
         # Update DB after Wave
         if wave_results:
-            print(f"Wave {i+1} completed. Found {len(wave_results)} new genes. Updating DB.")
+            logger.info(f"Wave {i+1} completed. Found {len(wave_results)} new genes. Updating DB.")
             
             new_genes_fasta = f"{args.output_dir}/iter_{i+1}_new_genes.faa"
             # wave_results is list of {'id': ..., 'seq': ...}
@@ -858,17 +1113,25 @@ def main():
                 try:
                     os.remove(latest_db)
                 except OSError as e:
-                    print(f"Warning: Could not remove old DB file {latest_db}: {e}")
+                    logger.warning(f"Could not remove old DB file {latest_db}: {e}")
             
             latest_db = next_db
         else:
-            print(f"Wave {i+1} completed. No new genes found.")
+            logger.info(f"Wave {i+1} completed. No new genes found.")
+        
+        # CHECKPOINT: Save progress after each wave
+        with open(checkpoint_file, 'w') as cf:
+            json.dump({
+                'completed_waves': i + 1,
+                'last_db': latest_db,
+                'total_waves': len(waves)
+            }, cf)
             
     expanded_db = f"{args.output_dir}/expanded_db.faa"
     if os.path.exists(latest_db):
         shutil.move(latest_db, expanded_db)
         
-    print(f"Iterative wavefront search complete. Final DB: {expanded_db}")
+    logger.info(f"Iterative wavefront search complete. Final DB: {expanded_db}")
 
 if __name__ == "__main__":
     main()

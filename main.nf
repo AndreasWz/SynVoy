@@ -6,6 +6,7 @@ nextflow.enable.dsl=2
 include { LOCATE_GENE } from './modules/locate_gene.nf'
 include { SPLIT_LOCI } from './modules/split_loci.nf'
 include { EXTRACT_FLANKING } from './modules/extract_flanking.nf'
+include { PREPARE_INITIAL_DB } from './modules/prepare_initial_db.nf'
 include { ITERATIVE_SEARCH } from './modules/iterative_search.nf'
 include { CLUSTER_REGIONS } from './modules/cluster_regions.nf'
 include { AUGMENTED_SEARCH } from './modules/augmented_search.nf'
@@ -126,8 +127,13 @@ workflow {
         params.min_flanking_size,
         params.prefer_large_genes
     )
-    
-    // Only run if we have targets
+        # 6b. CRITICAL FIX: Prepare Initial Database with GOI included
+    // Combine flanking genes with query gene for iterative search
+    PREPARE_INITIAL_DB(
+        EXTRACT_FLANKING.out.faa,
+        query_gene_source_ch.first()  // Use first instance of query gene
+    )
+        // Only run if we have targets
     if (params.target_genomes || params.mode == 'easy') {
         
         EXTRACT_FLANKING.out.faa
@@ -139,10 +145,10 @@ workflow {
             phylo_sort_inputs.map { it[2] }  // genomes_dir
         )
         
-        // 8. Iterative Search (FOR EACH LOCUS)
-        EXTRACT_FLANKING.out.faa 
+        // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
+        PREPARE_INITIAL_DB.out.db
             .join(PHYLO_SORT.out.sorted_list) 
-            .set { iterative_search_inputs_partial } // [locus_id, faa, sorted_list]
+            .set { iterative_search_inputs_partial } // [locus_id, initial_db, sorted_list]
             
         iterative_search_inputs_partial
             .combine(genomes_dir_ch)

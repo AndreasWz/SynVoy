@@ -23,6 +23,7 @@ process EXTRACT_FLANKING {
         --n_flank $n_flank \\
         --min_size $min_size \\
         --prefer_large $prefer_large \\
+        --exon_mode true \\
         --out_bed synteny_block.bed \\
         --out_faa flanking_proteins.faa
     """
