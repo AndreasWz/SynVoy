@@ -1,6 +1,8 @@
 process CLUSTER_REGIONS {
     tag "cluster_regions"
     label 'process_medium'
+    errorStrategy 'ignore'
+    publishDir "${params.outdir}", mode: 'copy'
 
     input:
     tuple val(genome_name), val(payload), path(hits_file), path(genomes_dir)

@@ -15,6 +15,8 @@ process ITERATIVE_SEARCH {
     tuple val(locus_id), path("iterative_results/expanded_db.faa"), emit: expanded_db
     tuple val(locus_id), path("iterative_results/hits"), emit: hits, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.faa"), emit: region_genes, optional: true
+    tuple val(locus_id), path("iterative_results/regions/*.gff"), emit: gff, optional: true
+    tuple val(locus_id), path("iterative_results/regions/*.homology.tsv"), emit: homology, optional: true
 
 
     script:
@@ -26,7 +28,6 @@ process ITERATIVE_SEARCH {
         --home_db_dir $home_db \\
         --output_dir iterative_results \\
         --threads ${task.cpus} \\
-        --prefix ${locus_id} \\
-        --diamond_sensitivity "very-sensitive"
+        --prefix ${locus_id}
     """
 }

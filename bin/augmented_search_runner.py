@@ -2,9 +2,14 @@
 import argparse
 import subprocess
 import os
-from Bio import SeqIO
-from Bio.SeqRecord import SeqRecord
-from Bio.Seq import Seq
+import sys
+
+# Use our own sequence utilities (no BioPython)
+try:
+    from sequence_utils import parse_fasta, write_fasta, load_genome, reverse_complement
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sequence_utils import parse_fasta, write_fasta, load_genome, reverse_complement
 
 def run_command(cmd):
     print(f"CMD: {' '.join(cmd)}")
@@ -21,7 +26,7 @@ def parse_args():
     return parser.parse_args()
 
 def extract_regions(bed_file, genome_file, padding):
-    genome_seqs = SeqIO.to_dict(SeqIO.parse(genome_file, "fasta"))
+    genome_seqs = load_genome(genome_file)
     regions_seqs = []
     
     with open(bed_file) as f:
@@ -41,22 +46,39 @@ def extract_regions(bed_file, genome_file, padding):
             p_end = min(slen, end + padding)
             
             # Extract
-            seq = genome_seqs[chrom].seq[p_start:p_end]
+            seq = genome_seqs[chrom][p_start:p_end]
             
             # ID contains coordinate info for mapping back
             # ID: name|chrom|p_start
             rid = f"{name}|{chrom}|{p_start}"
-            regions_seqs.append(SeqRecord(seq, id=rid, description=""))
+            regions_seqs.append((rid, seq))
+            
+    return regions_seqs
             
     return regions_seqs
 
 def main():
     args = parse_args()
     
+    # Input Validation
+    if not os.path.exists(args.regions_bed):
+        sys.stderr.write(f"ERROR: regions_bed file not found: {args.regions_bed}\n")
+        sys.exit(1)
+        
+    if os.path.getsize(args.regions_bed) == 0:
+        sys.stderr.write(f"INFO: regions_bed is empty. No regions to search.\n")
+        # Create empty outputs for workflow consistency
+        open(f"{args.output_base}.bed", 'w').close()
+        open(f"{args.output_base}.fna", 'w').close()
+        open(f"{args.output_base}_regions.fna", 'w').close()
+        open(f"{args.output_base}_variants.faa", 'w').close()
+        open(f"{args.output_base}_hits.m8", 'w').close()
+        sys.exit(0)
+    
     # 1. Extract Regions
     regions_fna = f"{args.output_base}_regions.fna"
     regions = extract_regions(args.regions_bed, args.target_genome, args.padding)
-    SeqIO.write(regions, regions_fna, "fasta")
+    write_fasta(regions, regions_fna)
     
     if not regions:
         print("No regions extracted. Exiting.")
@@ -157,19 +179,19 @@ def main():
     # 6. Extract Candidates FASTA
     # We can extract from genome using global coords
     # output.faa
-    genome_seqs = SeqIO.to_dict(SeqIO.parse(args.target_genome, "fasta"))
+    genome_seqs = load_genome(args.target_genome)
     cand_recs = []
     
     for c in candidates:
         if c['chrom'] in genome_seqs:
-            seq = genome_seqs[c['chrom']].seq[c['start']:c['end']]
+            seq = genome_seqs[c['chrom']][c['start']:c['end']]
             # Reverse complement if strand -
             if c['strand'] == '-':
-                seq = seq.reverse_complement()
+                seq = reverse_complement(seq)
             
-            cand_recs.append(SeqRecord(seq, id=c['name'], description=f"score={c['score']}"))
+            cand_recs.append((c['name'], seq))
             
-    SeqIO.write(cand_recs, f"{args.output_base}.fna", "fasta")
+    write_fasta(cand_recs, f"{args.output_base}.fna")
     print(f"Found {len(candidates)} candidate genes.")
 
 if __name__ == "__main__":

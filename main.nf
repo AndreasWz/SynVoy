@@ -1,4 +1,4 @@
-#!/usr/bin/env nextflow
+#! /usr/bin/env nextflow
 
 nextflow.enable.dsl=2
 
@@ -13,6 +13,7 @@ include { ANNOTATE_STRUCTURE } from './modules/annotate_structure.nf'
 include { HOMOLOGY_SEARCH } from './modules/homology_search.nf'
 include { PREPARE_HOME_PROTEOME } from './modules/prepare_home.nf'
 include { PLOT_SYNTENY } from './modules/plot_synteny.nf'
+include { COMPUTE_TREE } from './modules/compute_tree.nf'
 
 // New Modules
 include { STAGE_GENOMES } from './modules/stage_genomes.nf'
@@ -78,8 +79,11 @@ workflow {
 
     home_genome_ch = Channel.fromPath(params.home_genome)
     
+    // Track if user provided GFF or not
+    user_provided_gff = params.home_gff ? true : false
+    
     if (params.home_gff) {
-        home_gff_ch = Channel.fromPath(params.home_gff)
+        home_gff_ch = Channel.fromPath(params.home_gff).first()
     } else {
         home_gff_ch = Channel.value(file("NO_GFF"))
     }
@@ -149,8 +153,14 @@ workflow {
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
 
         // Prepare Home Proteome (Run once)
-        PREPARE_HOME_PROTEOME(home_genome_ch)
+        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch)
         home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
+        
+        // Use predicted GFF if no user GFF was provided
+        // If user provided GFF, use that; otherwise use Prodigal-generated GFF
+        effective_home_gff_ch = user_provided_gff 
+            ? home_gff_ch 
+            : PREPARE_HOME_PROTEOME.out.gff.ifEmpty(file("NO_GFF"))
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
@@ -214,8 +224,8 @@ workflow {
         joined_ch.multiMap { unique, locus, rb, pf, gname, gd ->
             // Inputs for processes - Pass unique_id as first val for key propagation
             aug: tuple(unique, gname, rb, gd) 
-            anno: tuple(unique, gname, rb, gd)
-            homology: tuple(unique, pf) 
+            // anno: tuple(unique, gname, rb, gd)
+            // homology: tuple(unique, pf) 
         }.set { phase3_inputs }
         
         AUGMENTED_SEARCH(
@@ -224,6 +234,7 @@ workflow {
             params.region_padding
         )
         
+        /*
         ANNOTATE_STRUCTURE(
             phase3_inputs.anno,
             params.augustus_species
@@ -241,11 +252,39 @@ workflow {
             homology_inputs.map { tuple(it[0], it[1]) }, 
             homology_inputs.map { it[2] } 
         )
+        */
         
-        // Collect Data
-        plot_data_by_unique = ANNOTATE_STRUCTURE.out.gff
+        // --- PHYLOGENY & PLOTTING ---
+        // Collect all proteins for tree: Flanking Genes + Discovered Genes (from Expanded DB or Regions?)
+        // Iterative Search output might be best source of all gene sequences found.
+        // expanded_db contains everything found so far.
+        // Let's use expanded_db per locus.
+        
+        COMPUTE_TREE(
+            ITERATIVE_SEARCH.out.expanded_db
+        )
+        
+        // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
+        miniprot_gffs_ch = ITERATIVE_SEARCH.out.gff
+            .transpose()
+            .map { locus_id, gff ->
+                def gname = gff.name.replace(".gff", "")
+                def unique_id = "${gname}_${locus_id}"
+                tuple(unique_id, gff)
+            }
+
+        miniprot_tsvs_ch = ITERATIVE_SEARCH.out.homology
+            .transpose()
+            .map { locus_id, tsv ->
+                def gname = tsv.name.replace(".homology.tsv", "")
+                def unique_id = "${gname}_${locus_id}"
+                tuple(unique_id, tsv)
+            }
+
+        // Collect Data for Plotting
+        plot_data_by_unique = miniprot_gffs_ch
             .join(AUGMENTED_SEARCH.out.bed)
-            .join(HOMOLOGY_SEARCH.out.tsv)
+            .join(miniprot_tsvs_ch)
             
         plot_data_with_locus = plot_data_by_unique
             .join(locus_tracker_ch) 
@@ -256,15 +295,26 @@ workflow {
             }
             .groupTuple(by: 0) 
         
-        final_plot_inputs = grouped_plot_data
-            .join(EXTRACT_FLANKING.out.bed) 
+        // Simplified plot input preparation
+        // Collect all files instead of complex joins
+        all_gffs = miniprot_gffs_ch.map { it[1] }.collect().ifEmpty([])
+        all_beds = AUGMENTED_SEARCH.out.bed.map { it[1] }.collect().ifEmpty([])
+        all_tsvs = miniprot_tsvs_ch.map { it[1] }.collect().ifEmpty([])
+        all_names = miniprot_gffs_ch.map { it[0] }.collect().ifEmpty([])
+        
+        // Get first home_bed and tree (should be same for all loci in single-locus case)
+        home_bed_ch = EXTRACT_FLANKING.out.bed.map { it[1] }.first()
+        tree_ch = COMPUTE_TREE.out.tree.map { it[1] }.first()
             
         PLOT_SYNTENY(
-            final_plot_inputs.map { it[5] },
-            final_plot_inputs.map { it[1] },
-            final_plot_inputs.map { it[4] },
-            final_plot_inputs.map { it[2] },
-            final_plot_inputs.map { it[3] }
+            home_bed_ch,                     // home_bed
+            LOCATE_GENE.out.bed.first(),     // query_bed
+            effective_home_gff_ch,           // home_gff (user-provided or Prodigal-predicted)
+            all_gffs,                        // target_gffs
+            all_names,                       // target_names
+            all_beds,                        // candidate_beds
+            all_tsvs,                        // homology_tsvs
+            tree_ch                          // tree
         )
         
         // Final Reporting
@@ -280,7 +330,13 @@ workflow {
             .collect()
             .ifEmpty([])
             .set { collected_hits }
+            
+        AUGMENTED_SEARCH.out.proteins
+            .map { it[1] }
+            .collect()
+            .ifEmpty([])
+            .set { collected_augmented }
         
-        GENERATE_REPORT(collected_regions, collected_hits, qc_summary_ch)
+        GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
     }
 }

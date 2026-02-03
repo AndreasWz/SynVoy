@@ -40,22 +40,38 @@ Home genome → Close species (90% ID) → Medium species (70% ID) → Distant s
 git clone https://github.com/yourusername/SynTerra.git
 cd SynTerra
 
-# Install dependencies via conda
+# Option 1: Conda (recommended for development)
 conda env create -f environment.yml
 conda activate syntenyfinder
 
-# Or use Docker (recommended)
-docker pull syntenyfinder:latest
+# Option 2: Docker (recommended for reproducibility)
+docker build -t synterra .
+
+# Option 3: Singularity (for HPC)
+singularity build synterra.sif docker://synterra:latest
+```
+
+### Running the Pipeline
+
+```bash
+# With Conda
+nextflow run main.nf -profile conda --gene query.faa ...
+
+# With Docker
+nextflow run main.nf -profile docker --gene query.faa ...
+
+# With Singularity (HPC)
+nextflow run main.nf -profile singularity --gene query.faa ...
 ```
 
 ### Test Run
 
 ```bash
-# Run with test data (honeybee gene)
-nextflow run main.nf -profile test
+# Run with test data (honeybee melettin gene)
+nextflow run main.nf -profile test_melettin,conda
 
 # View results
-open results/synteny_plot.html
+open results/test_melettin/synteny_plot.html
 ```
 
 ## Usage

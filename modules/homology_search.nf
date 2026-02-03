@@ -34,7 +34,10 @@ process HOMOLOGY_SEARCH {
     
     if [ -s "${genome_name}.homology.m8" ]; then
         sort -k1,1 -k3,3g ${genome_name}.homology.m8 | sort -u -k1,1 > best_hits.m8
-        cut -f1,2 best_hits.m8 > ${genome_name}.homology.tsv
+        # Extract Gene Name from Transcript ID (remove .t*)
+        # Input: g1.t1 \t P12345
+        # Output: g1 \t P12345
+        cut -f1,2 best_hits.m8 | sed 's/\\.t[0-9]*\\t/\\t/' > ${genome_name}.homology.tsv
     else
         touch ${genome_name}.homology.tsv
     fi

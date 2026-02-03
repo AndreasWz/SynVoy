@@ -3,7 +3,13 @@ import argparse
 import sys
 import json
 import os
-from Bio import SeqIO
+
+# Use our own sequence utilities (no BioPython)
+try:
+    from sequence_utils import parse_fasta
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sequence_utils import parse_fasta
 
 def calculate_n50(lengths):
     sorted_lens = sorted(lengths, reverse=True)
@@ -33,9 +39,8 @@ def main():
     
     lengths = []
     try:
-        with open(args.genome) as f:
-             for record in SeqIO.parse(f, "fasta"):
-                 lengths.append(len(record.seq))
+        for _, _, rec_seq in parse_fasta(args.genome):
+            lengths.append(len(rec_seq))
     except Exception as e:
         print(f"Error reading genome: {e}")
         sys.exit(1)

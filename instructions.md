@@ -1,17 +1,11 @@
-okay das is zu naiv implementiert. schau dir das gesamte script nochmal an. schau dir auch die @organized_results an, ich denke hier passiert ein ersteer fehler. was wir wollen:
-wir suchen eine GR von unserem home genome oder (nach x iterartionen) eben diese GR allgemein. das ist eine GR. jetzt wollen wir die finden, also eine list an genen in einer bestimmten reihenfolge.
+# SynTerra Pipeline Implementation Guide
 
-dazu wollen wir folgendes beachten: es geht nicht darum, im target genome hits zu clustern und dann 10 GR zu finden, sondern eben die eine GR zu finden. dazu wollen wir für jedes gen schauen: wo haben wir die meisten CDS hits? sind das unterschiedliche CDD von dem gen (also die einzelenn CDS vom exon) (WIR WOLLEN DIE CDS VON JEDEM EXON IN ALLEN FALNKING GENES EINZUEN SUCHEN) 
-und anhand von den infos wollen wir dann das gen einmalig localisieren. wenn wir also im target genome unsere flanking genes gefunden haben, schauen wir uns an, ob die GR konserviert ist, oder eben nicht. wenn es also einen cluster unserer flanking genes gibt, dann wollen wir dort unsere GR definieren.
+## Overview
 
+This document provides technical implementation details for the SynTerra pipeline.
+For user-facing documentation, see README.md and USAGE.md.
 
-vergleiche das, was ich geschrieben habe, mit dem aktuellen Wissenschaftlichen Stand in der Genomik. 
-
-dann schaue die nextflow pipeline an und passe alles dementsprechend an. ! :)
-
-kürze nichts, priorisiere nichts und überspringe den rest. nimm dir zeit. wenn es zu viel auf einmal ist, schreibe eine lsite mit allem, was getan werden muss, und arbeite erstmal nur ein paar schritte davon ab, sodass danach noch weitergearbeitet werden kann.
-
-
+---
 
 # Task: Implement SynTerra Pipeline in Nextflow DSL2
 

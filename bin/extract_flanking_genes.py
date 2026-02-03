@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
 
 import argparse
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
 import sys
 import os
 import subprocess
+
+# Use our own sequence utilities (no BioPython dependency)
+try:
+    from sequence_utils import (
+        parse_fasta, write_fasta, extract_id, extract_base_id,
+        load_genome, reverse_complement, translate
+    )
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sequence_utils import (
+        parse_fasta, write_fasta, extract_id, extract_base_id,
+        load_genome, reverse_complement, translate
+    )
 
 def parse_gff(gff_file):
     """
     Parse GFF3 file into a list of gene dictionaries.
     Standardizes to BED Coordinates (0-based start, 1-based end, half-open).
-        GFF: 1-based start, 1-based end (closed)
-        Internal: start - 1, end
+    
+    Detailed Coordinate Handling:
+    - GFF3 Standard: 1-based, closed interval [start, end].
+    - Python/BED Standard: 0-based, half-open interval [start, end).
+    
+    Conversion:
+    - BED Start = GFF Start - 1
+    - BED End   = GFF End (unchanged, as Python slice includes element at (End-1))
     """
     genes = []
     cds_by_parent = {}
@@ -94,8 +110,7 @@ def parse_gff(gff_file):
 
     return sorted(processed_genes, key=lambda x: (x['chrom'], x['start']))
 
-def load_genome(fasta_file):
-    return SeqIO.to_dict(SeqIO.parse(fasta_file, "fasta"))
+# load_genome now imported from sequence_utils
 
 def run_prediction(genome_file, chrom, start, end, output_faa):
     """
@@ -121,11 +136,17 @@ def main():
     parser.add_argument("--n_flank", type=int, default=10, help="Number of flanking genes")
     parser.add_argument("--min_size", type=int, default=500, help="Min gene size")
     parser.add_argument("--prefer_large", type=str, default="true", help="Prefer large genes")
+    parser.add_argument("--exon_mode", type=str, default="false", 
+                        help="If true, output individual exon CDS sequences instead of full protein")
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
     args = parser.parse_args()
     prefer_large = args.prefer_large.lower() == 'true'
+    exon_mode = args.exon_mode.lower() == 'true'
+    
+    if exon_mode:
+        print("Exon mode enabled: extracting individual CDS exon sequences")
 
     # Load INPUT Genes
     target_regions = []
@@ -168,14 +189,13 @@ def main():
             w_start = max(0, center - FLANK_WINDOW)
             w_end = min(slen, center + FLANK_WINDOW)
             
-            # Extract sequence
-            subseq = genome_seqs[chrom].seq[w_start:w_end]
+            # Extract sequence - genome_seqs is now dict of strings
+            subseq = genome_seqs[chrom][w_start:w_end]
             sub_id = f"{chrom}_{w_start}_{w_end}"
             
-            # Write temp fasta
+            # Write temp fasta using our utility
             temp_fa = f"temp_{sub_id}.fasta"
-            with open(temp_fa, 'w') as tf:
-                SeqIO.write(SeqRecord(subseq, id=sub_id, description=""), tf, "fasta")
+            write_fasta([(sub_id, subseq)], temp_fa)
                 
             # Run Prodigal
             # prodigal -i inputs.fna -a proteins.faa -o coords.gff -p meta
@@ -185,13 +205,12 @@ def main():
             try:
                 subprocess.run(cmd, check=True)
                 
-                # Parse output FAA
-                for record in SeqIO.parse(temp_out_faa, "fasta"):
-                    # Prodigal header: >id_1 # start # end # ...
+                # Parse output FAA using our utility
+                for header, clean_id, seq in parse_fasta(temp_out_faa):
+                    # Prodigal header: id_1 # start # end # strand # ...
                     # We need to map back to genomic coordinates
-                    # Header: k12_1 # 34 # 456 # ...
-                    parts = record.description.split(" # ")
-                    if len(parts) >= 3:
+                    parts = header.split(" # ")
+                    if len(parts) >= 4:
                         local_start = int(parts[1]) # 1-based
                         local_end = int(parts[2])   # 1-based inclusive
                         strand_code = parts[3] # 1 or -1
@@ -201,7 +220,6 @@ def main():
                         # global_start (0-based) = w_start (0-based) + (local_start - 1)
                         global_start = w_start + (local_start - 1)
                         # global_end (1-based half-open) = w_start (0-based) + local_end
-                        # e.g. w=0. local=1..3. glob=0..3. len=3. Correct.
                         global_end = w_start + local_end
                         
                         extracted_genes.append({
@@ -210,7 +228,7 @@ def main():
                             'end': global_end,
                             'strand': strand,
                             'attrs': {'ID': f"pred_{chrom}_{global_start}"},
-                            'seq': record.seq # Store seq directly
+                            'seq': seq  # Store seq directly (string)
                         })
                         
             except Exception as e:
@@ -251,58 +269,106 @@ def main():
                 extracted_genes.append(chrom_genes[i])
 
     # Write Outputs
-    with open(args.out_bed, 'w') as bed_out, open(args.out_faa, 'w') as faa_out:
+    all_fasta_records = []  # Collect all FASTA records
+    
+    with open(args.out_bed, 'w') as bed_out:
         seen = set()
         for gene in extracted_genes:
             gid = gene['attrs'].get('ID', f"{gene['chrom']}_{gene['start']}")
             if gid in seen: continue
             seen.add(gid)
             
-            # Write BED
+            # Write BED (always the full gene)
             bed_out.write(f"{gene['chrom']}\t{gene['start']}\t{gene['end']}\t{gid}\t.\t{gene['strand']}\n")
             
-            # Write FASTA
-            # If we already have seq (from prediction), use it. Else extract.
+            # Write FASTA - depends on exon_mode
             if 'seq' in gene:
-                prot_seq = gene['seq']
+                # From prediction - no exon info available, use whole sequence
+                prot_seq = str(gene['seq'])
+                if len(prot_seq) * 3 >= args.min_size:
+                    all_fasta_records.append((gid, prot_seq))
             else:
-                if gene['chrom'] in genome_seqs:
-                    seq_record = genome_seqs[gene['chrom']]
+                if gene['chrom'] not in genome_seqs:
+                    continue
                     
-                    if gene.get('cds_parts'):
-                        # SPLICED EXTRACTION
-                        cds_parts = sorted(gene['cds_parts'], key=lambda x: x['start'])
-                        
-                        # Concatenate sequence
-                        dna_seq = Seq("")
+                seq_record = genome_seqs[gene['chrom']]  # Now a string, not SeqRecord
+                
+                if gene.get('cds_parts'):
+                    # We have CDS parts (exons)
+                    cds_parts = sorted(gene['cds_parts'], key=lambda x: x['start'])
+                    
+                    if exon_mode:
+                        # EXON MODE: Output each exon as separate sequence
+                        # ID format: gene_id|exon_N (1-indexed)
+                        for exon_idx, part in enumerate(cds_parts, start=1):
+                            exon_id = f"{gid}|exon_{exon_idx}"
+                            
+                            # Extract exon DNA sequence
+                            exon_dna = seq_record[part['start']:part['end']]
+                            
+                            # Handle strand for this exon
+                            if gene['strand'] == '-':
+                                exon_dna = reverse_complement(exon_dna)
+                            
+                            # Translate with correct frame (use phase from GFF if available)
+                            phase = int(part.get('phase', 0)) if part.get('phase', '.') != '.' else 0
+                            
+                            # Skip phase nucleotides at start
+                            if phase > 0:
+                                exon_dna = exon_dna[phase:]
+                            
+                            # Pad if needed for translation
+                            remainder = len(exon_dna) % 3
+                            if remainder:
+                                exon_dna = exon_dna[:-remainder]
+                            
+                            if len(exon_dna) < 9:  # Skip very short exons (< 3 amino acids)
+                                continue
+                                
+                            exon_prot = translate(exon_dna)
+                            # Remove stop codons
+                            exon_prot = exon_prot.replace('*', '')
+                            
+                            # Write exon sequence with metadata in header
+                            exon_header = f"{exon_id} parent={gid} exon={exon_idx}/{len(cds_parts)} coords={part['start']}-{part['end']} strand={gene['strand']}"
+                            all_fasta_records.append((exon_header, exon_prot))
+                    else:
+                        # WHOLE PROTEIN MODE: Concatenate all exons
+                        dna_seq = ""
                         for part in cds_parts:
-                            # 0-based slicing: [start:end]
-                            part_seq = seq_record.seq[part['start']:part['end']]
+                            part_seq = seq_record[part['start']:part['end']]
                             dna_seq += part_seq
                         
                         if gene['strand'] == '-':
-                            dna_seq = dna_seq.reverse_complement()
+                            dna_seq = reverse_complement(dna_seq)
                             
-                        # Translate
-                        # Pad if not multiple of 3?
                         remainder = len(dna_seq) % 3
                         if remainder:
-                            dna_seq = dna_seq[:-remainder] # Truncate for now
+                            dna_seq = dna_seq[:-remainder]
                             
-                        prot_seq = dna_seq.translate(to_stop=True)
+                        prot_seq = translate(dna_seq)
+                        # Stop at first stop codon
+                        if '*' in prot_seq:
+                            prot_seq = prot_seq.split('*')[0]
                         
-                    else:
-                        # NAIVE FALLBACK (Genomic extraction)
-                        # 0-based slicing
-                        feature_seq = seq_record.seq[gene['start']:gene['end']]
-                        if gene['strand'] == '-':
-                            feature_seq = feature_seq.reverse_complement()
-                        prot_seq = feature_seq.translate(to_stop=True)
+                        if len(prot_seq) * 3 >= args.min_size:
+                            all_fasta_records.append((gid, prot_seq))
+                        
                 else:
-                    continue
-
-            if len(prot_seq) * 3 >= args.min_size: # Approximate check
-                SeqIO.write(SeqRecord(prot_seq, id=gid, description=""), faa_out, "fasta")
+                    # NAIVE FALLBACK (No CDS parts, use full genomic)
+                    feature_seq = seq_record[gene['start']:gene['end']]
+                    if gene['strand'] == '-':
+                        feature_seq = reverse_complement(feature_seq)
+                    prot_seq = translate(feature_seq)
+                    # Stop at first stop codon
+                    if '*' in prot_seq:
+                        prot_seq = prot_seq.split('*')[0]
+                    
+                    if len(prot_seq) * 3 >= args.min_size:
+                        all_fasta_records.append((gid, prot_seq))
+    
+    # Write all FASTA records at once
+    write_fasta(all_fasta_records, args.out_faa)
 
 if __name__ == "__main__":
     main()

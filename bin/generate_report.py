@@ -36,23 +36,62 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to load QC JSON: {e}")
         
-    # Scan Results - Regions (New Genes)
+    # Scan Results - Regions & Augmented (Combined)
     genes_added_per_genome = {}
+    
+    # 1. Standard Regions (from Iterative Search, typically .faa)
     regions_dir = os.path.join(args.results_dir, "regions")
     if os.path.exists(regions_dir):
-        for f in glob.glob(os.path.join(regions_dir, "*_new_genes.faa")):
-            gname = os.path.basename(f).replace("_new_genes.faa", "")
-            # Strip locus prefix if present (e.g. locus_1.bed_)
-            if "_GCA_" in gname or "_GCF_" in gname:
-                gname = gname.split('_GCA_')[1] if '_GCA_' in gname else gname.split('_GCF_')[1]
-                gname = ("GCA_" if "GCA_" in os.path.basename(f) else "GCF_") + gname
+        # Scan for both old style and new output types
+        for f in glob.glob(os.path.join(regions_dir, "*.faa")) + glob.glob(os.path.join(regions_dir, "*.fna")):
+            gname = os.path.basename(f)
+            # Remove suffixes
+            suffixes = ["_new_genes.faa", ".regions.faa", ".candidates.fna"]
+            for s in suffixes:
+                if gname.endswith(s):
+                    gname = gname.replace(s, "")
+                    break
+            
+            # Robust ID extraction
+            if "_GCA_" in gname:
+                gname = "GCA_" + gname.split("_GCA_")[-1]
+            elif "_GCF_" in gname:
+                gname = "GCF_" + gname.split("_GCF_")[-1]
+            # If no prefix, check if it starts with GCA/GCF
+            if not (gname.startswith("GCA_") or gname.startswith("GCF_")):
+                 # Maybe it's just the name
+                 pass
             
             count = 0
-            with open(f) as fa:
-                count = sum(1 for line in fa if line.startswith('>'))
+            try:
+                with open(f) as fa:
+                    count = sum(1 for line in fa if line.startswith('>'))
+            except Exception as e:
+                print(f"Error reading {f}: {e}")
+                
             genes_added_per_genome[gname] = genes_added_per_genome.get(gname, 0) + count
             
-            # Scan Results - Hits (Found via synteny)
+    # 2. Augmented Genes (if in a specific folder or moved to regions)
+    # We will update the module to copy valid candidates to 'results/regions' as well
+    # or scan 'augmented' directory if present
+    aug_dir = os.path.join(args.results_dir, "augmented")
+    if os.path.exists(aug_dir):
+         for f in glob.glob(os.path.join(aug_dir, "*.candidates.fna")):
+            gname = os.path.basename(f).replace(".candidates.fna", "")
+            if "GCA_" in gname: gname = "GCA_" + gname.split("GCA_")[-1]
+            elif "GCF_" in gname: gname = "GCF_" + gname.split("GCF_")[-1]
+            
+            count = 0
+            try:
+                with open(f) as fa:
+                    count = sum(1 for line in fa if line.startswith('>'))
+            except: pass
+            
+            # Add to existing count (should be disjoint usually, or additive)
+            genes_added_per_genome[gname] = genes_added_per_genome.get(gname, 0) + count
+
+
+    # Scan Results - Hits (Found via synteny)
     hits_per_genome = {}
     hits_dir = os.path.join(args.results_dir, "hits")
     if os.path.exists(hits_dir):

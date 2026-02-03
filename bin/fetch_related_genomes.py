@@ -12,48 +12,85 @@ import os
 from pathlib import Path
 import shlex
 
-def run_command(cmd, check=True):
-    """Run shell command and return output."""
+def run_safe_command(cmd, check=True):
+    """Run command with list arguments safely."""
     try:
-        result = subprocess.run(cmd, shell=True, check=check, 
-                              capture_output=True, text=True)
+        # print(f"DEBUG: running command: {cmd}")
+        result = subprocess.run(cmd, check=check, capture_output=True, text=True)
         return result.stdout
     except subprocess.CalledProcessError as e:
-        print(f"Error running command: {cmd}", file=sys.stderr)
+        print(f"Error running command: {' '.join(cmd)}", file=sys.stderr)
         print(f"Error: {e.stderr}", file=sys.stderr)
         if check:
-            sys.exit(1)
+            # Propagate error if check=True
+            raise e
         return None
+
+def run_piped_command(cmds):
+    """
+    Run a chain of commands connected by pipes.
+    cmds: List of command lists. E.g. [['esearch', ...], ['efetch', ...]]
+    """
+    procs = []
+    # Start first process
+    try:
+        p1 = subprocess.Popen(cmds[0], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        procs.append(p1)
+        
+        # Chain subsequent processes
+        prev_stdout = p1.stdout
+        for i in range(1, len(cmds)):
+            p_next = subprocess.Popen(cmds[i], stdin=prev_stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            procs.append(p_next)
+            # Allow p1 to receive SIGPIPE if p2 exits
+            prev_stdout.close()
+            prev_stdout = p_next.stdout
+            
+        # Get output from last process
+        last_proc = procs[-1]
+        output, error = last_proc.communicate()
+        
+        if last_proc.returncode != 0:
+            print(f"Error in piped command chain: {cmds[-1]}", file=sys.stderr)
+            print(f"Stderr: {error.decode() if error else ''}", file=sys.stderr)
+            return None
+            
+        return output.decode().strip()
+            
+    except Exception as e:
+        print(f"Exception running pipe chain: {e}", file=sys.stderr)
+        return None
+    finally:
+        # Ensure cleanup
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
 
 def get_taxid_from_name(species_name):
     """Get NCBI taxonomy ID from species name."""
-    # Use esearch from NCBI E-utilities
-    safe_name = shlex.quote(species_name)
-    cmd = f'esearch -db taxonomy -query {safe_name} | efetch -format uid'
-    taxid = run_command(cmd, check=False)
-    if taxid:
-        return taxid.strip()
-    return None
+    # esearch -db taxonomy -query name | efetch -format uid
+    cmds = [
+        ['esearch', '-db', 'taxonomy', '-query', species_name],
+        ['efetch', '-format', 'uid']
+    ]
+    return run_piped_command(cmds)
 
 def get_related_species(taxid, max_genomes=10):
     """Get list of related species using NCBI taxonomy."""
     print(f"Finding related species for TaxID: {taxid}")
     
-    # Get lineage
-    cmd = f'efetch -db taxonomy -id {taxid} -format xml'
-    xml_output = run_command(cmd, check=False)
+    # Get lineage check (optional, can skip directly to esearch)
     
-    if not xml_output:
-        print("Warning: Could not fetch taxonomy information", file=sys.stderr)
-        return []
+    # esearch -db assembly -query "txid{taxid}[Organism:exp]" | efetch -format docsum | xtract ...
+    query = f"txid{taxid}[Organism:exp]"
     
-    # Parse to find genus or family level
-    # For simplicity, search for genomes in the same genus
-    cmd = f'esearch -db assembly -query "txid{taxid}[Organism:exp]" | '
-    cmd += 'efetch -format docsum | '
-    cmd += 'xtract -pattern DocumentSummary -element AssemblyAccession SpeciesName'
+    cmds = [
+        ['esearch', '-db', 'assembly', '-query', query],
+        ['efetch', '-format', 'docsum'],
+        ['xtract', '-pattern', 'DocumentSummary', '-element', 'AssemblyAccession', 'SpeciesName']
+    ]
     
-    results = run_command(cmd, check=False)
+    results = run_piped_command(cmds)
     
     if not results:
         print("Warning: No assemblies found", file=sys.stderr)
@@ -69,7 +106,6 @@ def get_related_species(taxid, max_genomes=10):
                     'species': parts[1]
                 })
     
-    # Limit number
     return assemblies[:max_genomes]
 
 def download_genome(accession, output_dir):
@@ -79,50 +115,44 @@ def download_genome(accession, output_dir):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Try using datasets command if available
-    cmd = f'datasets download genome accession {accession} --filename {output_dir}/{accession}.zip'
-    result = run_command(cmd, check=False)
+    zip_file = output_path / f"{accession}.zip"
     
-    if result is not None:
-        # Unzip
-        cmd = f'unzip -o {output_dir}/{accession}.zip -d {output_dir}/{accession}/'
-        run_command(cmd, check=False)
+    # Try using datasets command
+    cmd = ['datasets', 'download', 'genome', 'accession', accession, '--filename', str(zip_file)]
+    
+    try:
+        run_safe_command(cmd)
         
-        # Find the .fna file
-        fna_files = list(Path(f"{output_dir}/{accession}").rglob("*.fna"))
+        # Unzip
+        # unzip -o file.zip -d output_dir/result
+        extract_dir = output_path / accession
+        cmd_unzip = ['unzip', '-o', str(zip_file), '-d', str(extract_dir)]
+        run_safe_command(cmd_unzip)
+        
+        # Find .fna file
+        fna_files = list(extract_dir.rglob("*.fna"))
         if fna_files:
-            # Copy to main directory with simple name
             target = output_path / f"{accession}.fna"
-            cmd = f'cp {fna_files[0]} {target}'
-            run_command(cmd)
+            # Move/Copy
+            os.rename(fna_files[0], target)
             print(f"  ✓ Downloaded to {target}")
+            
+            # Cleanup zip and extracted dir
+            if zip_file.exists(): zip_file.unlink()
+            import shutil
+            if extract_dir.exists(): shutil.rmtree(extract_dir)
+                
             return str(target)
+            
+    except Exception as e:
+        print(f"  ✗ Could not download {accession}: {e}")
     
-    # Fallback: try direct FTP download
-    print(f"  Trying FTP download for {accession}...")
-    # This is complex and depends on assembly structure
-    # For now, just report failure
-    print(f"  ✗ Could not download {accession}")
     return None
 
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch related genomes from NCBI for easy mode",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Fetch 5 related genomes for Drosophila melanogaster
-  fetch_related_genomes.py --species "Drosophila melanogaster" --max 5 --outdir genomes/
-  
-  # Using taxonomy ID
-  fetch_related_genomes.py --taxid 7227 --max 10 --outdir genomes/
-  
-Requirements:
-  - NCBI E-utilities (esearch, efetch, xtract)
-    Install: conda install -c bioconda entrez-direct
-  - NCBI Datasets CLI (optional, for faster downloads)
-    Install: conda install -c conda-forge ncbi-datasets-cli
-        """
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     parser.add_argument("--species", help="Species name (e.g., 'Apis mellifera')")
@@ -139,9 +169,10 @@ Requirements:
     args = parser.parse_args()
     
     # Check for required tools
-    if not run_command("which esearch", check=False):
-        print("ERROR: NCBI E-utilities not found!", file=sys.stderr)
-        print("Install with: conda install -c bioconda entrez-direct", file=sys.stderr)
+    try:
+        run_safe_command(['which', 'esearch'])
+    except:
+        print("ERROR: NCBI E-utilities (esearch) not found!", file=sys.stderr)
         sys.exit(1)
     
     # Get taxonomy ID
@@ -193,9 +224,6 @@ Requirements:
             f.write(f"{path}\n")
     
     print(f"\nGenome paths written to: {manifest_path}")
-    print("\nUse these genomes with:")
-    print(f"  nextflow run main.nf --gene gene.fasta --home_genome home.fna \\")
-    print(f"    --target_genomes '{args.outdir}/*.fna'")
 
 if __name__ == "__main__":
     main()

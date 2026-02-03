@@ -54,7 +54,55 @@ with open('$regions_bed') as f:
     
     if [ -s regions.fasta ]; then
         # Run Augustus
-        augustus --species=${augustus_species} --gff3=on regions.fasta > ${genome_name}.augustus.gff
+        augustus --species=${augustus_species} --gff3=on regions.fasta > raw_augustus.gff
+        
+        # FIX COORDINATES (Relative -> Global)
+        python3 -c "
+import sys
+
+# 1. Load Offsets
+offsets = {}
+with open('$regions_bed') as f:
+    for line in f:
+        if not line.strip(): continue
+        p = line.strip().split('\t')
+        if len(p) >= 4:
+            # name -> (chrom, start)
+            offsets[p[3]] = (p[0], int(p[1]))
+
+# 2. Process GFF
+with open('raw_augustus.gff') as fin, open('${genome_name}.augustus.gff', 'w') as fout:
+    for line in fin:
+        if line.startswith('#'):
+            fout.write(line)
+            continue
+            
+        parts = line.strip().split('\t')
+        if len(parts) < 9:
+            fout.write(line)
+            continue
+            
+        seqid = parts[0]
+        start = int(parts[3])
+        end = int(parts[4])
+        
+        if seqid in offsets:
+            chrom, offset = offsets[seqid]
+            
+            # Shift Coordinates
+            new_start = start + offset
+            new_end = end + offset
+            
+            # Update line
+            parts[0] = chrom
+            parts[3] = str(new_start)
+            parts[4] = str(new_end)
+            
+            fout.write('\\t'.join(parts) + '\\n')
+        else:
+            # Fallback (shouldn't happen matching names)
+            fout.write(line)
+"
         
         # Extract protein sequences
         if command -v getAnnoFasta.pl &> /dev/null; then

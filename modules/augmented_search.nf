@@ -1,6 +1,8 @@
 process AUGMENTED_SEARCH {
     tag "augmented_search"
     label 'process_high'
+    errorStrategy 'ignore'
+    publishDir "${params.outdir}", mode: 'copy'
 
     input:
     tuple val(unique_id), val(genome_name), path(regions_bed), path(genomes_dir)

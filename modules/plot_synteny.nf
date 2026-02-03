@@ -3,29 +3,40 @@ process PLOT_SYNTENY {
 
     input:
     path home_bed
+    path query_bed
+    path home_gff
     path target_gffs
     val target_names
     path candidate_beds
     path homology_tsvs
+    path tree
 
     output:
     path "*_synteny_plot.html", emit: plot
 
     script:
-    // target_names is a list like ['genome1', 'genome2']
-    // We need to pass them as space-separated string
-    def names_str = target_names.join(' ')
-    def cands_str = candidate_beds.join(' ')
-    def homo_str = homology_tsvs.join(' ')
-    def out_name = "${home_bed.baseName}_synteny_plot.html"
+    // Handle empty collections gracefully
+    def gffs_str = target_gffs ? target_gffs.join(' ') : ''
+    def names_str = target_names ? target_names.join(' ') : ''
+    def cands_str = candidate_beds ? candidate_beds.join(' ') : ''
+    def homo_str = homology_tsvs ? homology_tsvs.join(' ') : ''
+    
+    // Only include arguments if they have values
+    def gffs_arg = gffs_str ? "--target_gffs ${gffs_str}" : ""
+    def names_arg = names_str ? "--target_names ${names_str}" : ""
+    def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
+    def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     
     """
     plot_synteny.py \\
+        --query_bed $query_bed \\
         --home_bed $home_bed \\
-        --target_gffs $target_gffs \\
-        --target_names $names_str \\
-        --candidate_beds $cands_str \\
-        --homology_tsvs $homo_str \\
-        --output $out_name
+        --home_gff $home_gff \\
+        $gffs_arg \\
+        $names_arg \\
+        $cands_arg \\
+        $homo_arg \\
+        --tree $tree \\
+        --output ${home_bed.baseName}_synteny_plot.html
     """
 }
