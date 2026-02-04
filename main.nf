@@ -25,6 +25,22 @@ include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
 
 // ==============================================================================
+// ANSI Color Codes (Script-level variables)
+// ==============================================================================
+
+c_reset = "\033[0m"
+c_bold = "\033[1m"
+c_dim = "\033[2m"
+c_black = "\033[0;30m"
+c_red = "\033[0;31m"
+c_green = "\033[0;32m"
+c_yellow = "\033[0;33m"
+c_blue = "\033[0;34m"
+c_purple = "\033[0;35m"
+c_cyan = "\033[0;36m"
+c_white = "\033[0;37m"
+
+// ==============================================================================
 // ASCII Banner & Pipeline Info
 // ==============================================================================
 
@@ -54,19 +70,6 @@ def printParams() {
     ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
     """.stripIndent()
 }
-
-// ANSI color codes
-def c_reset = "\033[0m"
-def c_bold = "\033[1m"
-def c_dim = "\033[2m"
-def c_black = "\033[0;30m"
-def c_red = "\033[0;31m"
-def c_green = "\033[0;32m"
-def c_yellow = "\033[0;33m"
-def c_blue = "\033[0;34m"
-def c_purple = "\033[0;35m"
-def c_cyan = "\033[0;36m"
-def c_white = "\033[0;37m"
 
 printHeader()
 printParams()
@@ -201,7 +204,8 @@ workflow {
         params.min_flanking_size,
         params.prefer_large_genes
     )
-        # 6b. CRITICAL FIX: Prepare Initial Database with GOI included
+    
+    // 6b. CRITICAL FIX: Prepare Initial Database with GOI included
     // Combine flanking genes with query gene for iterative search
     log.info "${c_cyan}Preparing initial database with query gene...${c_reset}"
     

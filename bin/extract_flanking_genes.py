@@ -239,7 +239,7 @@ def main():
 
     else:
         # EXISTING LOGIC FOR GFF
-        all_genes = parse_gff(args.gff)
+        all_genes = parse_gff_for_genes(args.gff)
         
         for region in target_regions:
             # Filter genes on same chrom
