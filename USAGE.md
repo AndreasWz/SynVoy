@@ -10,152 +10,138 @@
 6. [Troubleshooting](#troubleshooting)
 7. [Advanced Usage](#advanced-usage)
 
+---
+
 ## Quick Start
 
-### Minimal Example
+### Minimal Example (Easy Mode)
+
+```bash
+nextflow run main.nf \
+  --query_id P01501 \
+  --home_species "Apis mellifera" \
+  --outdir results/melittin
+```
+
+This will:
+1. Fetch query protein from UniProt
+2. Download the reference genome and GFF from NCBI
+3. Download related genomes from the same taxonomic family
+4. Locate the GOI in the home genome (tblastn + MMseqs2)
+5. Annotate GOI exons (GFF match or hit-based splice-site detection)
+6. Extract flanking genes (synteny block)
+7. Iteratively search target genomes in phylogenetic order
+8. Generate an interactive synteny plot and report
+
+### Minimal Example (Pro Mode)
 
 ```bash
 nextflow run main.nf \
   --gene my_gene.fasta \
   --home_genome home_genome.fna \
-  --target_genomes "target_genomes/*.fna"
+  --target_genomes "target_genomes/*.fna" \
+  --mode pro
 ```
 
-This will:
-1. Find your gene in the home genome
-2. Extract flanking genes (synteny block)
-3. Search for this synteny block in target genomes
-4. Locate and annotate the gene in each target genome
-5. Generate an interactive synteny plot
+---
 
 ## Input Preparation
 
-### 1. Query Gene (`--gene`)
+### 1. Query Gene
 
-**Format**: FASTA file (DNA or protein)
+You can provide the query in two ways:
 
-**Example**:
-```fasta
->my_gene_of_interest
-ATGGCTAGCTAGCTAGCTAGCTAG...
+**Option A — UniProt ID** (recommended for Easy mode):
+```bash
+--query_id P01501     # Melittin
+--query_id Q16553     # LY6E
+```
+SynTerra fetches the protein sequence from the UniProt REST API automatically.
+
+**Option B — FASTA file**:
+```bash
+--gene my_query.fasta
 ```
 
-**Requirements**:
-- Single sequence or multi-exon gene fragments
-- DNA or amino acid sequence
-- Minimum length: ~50 bp (DNA) or ~15 aa (protein)
+The query should be a **protein** sequence. SynTerra always searches protein → DNA (never DNA → DNA). If you provide a DNA sequence, it will be auto-detected and handled, but protein input is preferred.
 
-**Tips**:
-- If gene has multiple exons, provide all exons in one file
-- SynTerra will detect them if they hit close together
+**Requirements**:
+- Single sequence recommended (multi-exon gene in one file is fine)
+- Minimum length: ~15 amino acids
+- Standard FASTA format
 
 ### 2. Home Genome (`--home_genome`)
 
-**Format**: FASTA file (genomic sequences)
+The genome of the species where your query gene originates.
 
-**Example**:
+**In Easy mode**: Automatically fetched from NCBI based on `--home_species`.
+
+**In Pro mode**:
 ```bash
 --home_genome my_species.genome.fna
 ```
 
 **Requirements**:
-- Assembled genome (scaffolds/chromosomes)
-- Can be draft assembly
-- FASTA format
+- Assembled genome (scaffolds or chromosomes)
+- FASTA format (`.fna`, `.fasta`, `.fa`)
+- Can be draft assembly — SynTerra handles fragmented assemblies
 
-**Tips**:
-- Use the highest quality assembly available
-- Compress with gzip is OK (`.fna.gz`)
+### 3. Home Annotation (`--home_gff`) — Optional but recommended
 
-### 3. Home Annotation (`--home_gff`) - Optional
+**In Easy mode**: Fetched automatically with the genome (if NCBI provides one).
 
-**Format**: GFF3 file
-
-**Example**:
+**In Pro mode**:
 ```bash
 --home_gff my_species.genes.gff
 ```
 
-**Requirements**:
-- GFF3 format with gene features
-- Must match chromosome names in genome file
-
-**If not provided**:
-- SynTerra will use ab initio gene prediction (Prodigal)
-- Still works, but less accurate flanking gene identification
+**Why it matters**: With a GFF, SynTerra can:
+- Match the GOI to an annotated gene by name and extract proper CDS/exon sequences
+- Extract accurate flanking genes with correct protein translations
+- Without GFF, SynTerra falls back to Prodigal gene prediction and hit-based exon annotation
 
 ### 4. Target Genomes (`--target_genomes`)
 
-**Format**: Multiple FASTA files
+**In Easy mode**: Automatically downloaded from NCBI — related species from the same genus/family.
 
-**Example**:
+**In Pro mode**:
 ```bash
-# Glob pattern
 --target_genomes "genomes/*.fna"
-
-# Or explicit list (in nextflow)
---target_genomes "genome1.fna,genome2.fna,genome3.fna"
 ```
 
-**Requirements**:
-- Assembled genomes (can be draft)
-- FASTA format
-- No annotation required
-
 **Tips**:
-- Include 3-10 genomes for best results
-- Mix close and distant relatives
-- More genomes = better phylogenetic coverage
+- 5–15 genomes works best
+- Mix close and distant relatives for best phylogenetic coverage
+- No annotation required for targets — SynTerra annotates genes during search
+
+---
 
 ## Running the Pipeline
 
-### Easy Mode (Recommended for beginners)
-
-**Best for**: First-time users, exploring a gene family, quick analyses
-
-**No files needed!** Just provide the species name and a query ID:
+### Easy Mode (Recommended for most users)
 
 ```bash
-# Minimal command - everything fetched automatically
+# Everything fetched automatically
 nextflow run main.nf \
   --query_id P01501 \
   --home_species "Apis mellifera" \
-  --outdir results
+  --max_genomes 10 \
+  --outdir results/melittin
 
-# With more genomes
+# With a local query file instead of UniProt ID
 nextflow run main.nf \
-  --query_id P01501 \
+  --gene my_query.fasta \
   --home_species "Apis mellifera" \
   --max_genomes 10 \
   --outdir results
 ```
 
-**How it works**:
-1. Fetches query sequence from UniProt (using `--query_id`)
-2. Downloads reference genome for your species from NCBI
-3. Downloads related genomes from the same genus (excluding your species)
-4. Runs full synteny analysis
-5. Generates report and plots
-
-**Parameters**:
-| Parameter | Required | Description | Example |
-|-----------|----------|-------------|---------|
-| `--query_id` | Yes* | UniProt ID for query gene | `P01501` |
-| `--gene` | Yes* | OR provide sequence file | `query.fasta` |
-| `--home_species` | Yes | Species name (genus will be searched) | `"Apis mellifera"` |
-| `--max_genomes` | No | Related genomes to download (default: 10) | `5` |
-| `--outdir` | No | Output directory (default: results) | `my_results` |
-
-*Either `--query_id` or `--gene` is required
-
 **Requirements**:
+- Internet connection (for NCBI/UniProt)
 - NCBI datasets CLI: `conda install -c conda-forge ncbi-datasets-cli`
 - NCBI E-utilities: `conda install -c bioconda entrez-direct`
-- Internet connection
 
-### Pro Mode (Your own genomes)
-
-**Best for**: Custom genome sets, offline analysis, specific comparisons
+### Pro Mode (Custom genomes)
 
 ```bash
 nextflow run main.nf \
@@ -167,37 +153,47 @@ nextflow run main.nf \
   --outdir results
 ```
 
-### With Custom Parameters
-
-```bash
-nextflow run main.nf \
-  --gene gene.fasta \
-  --home_genome home.fna \
-  --target_genomes "targets/*.fna" \
-  --mode pro \
-  --n_flanking_genes 15 \
-  --min_synteny_score 0.5 \
-  --mmseqs_sensitivity 8.5 \
-  --outdir my_results
-```
-
 ### Using Test Data
 
 ```bash
-# Quick test with provided test data
-nextflow run main.nf -profile test
+# Melittin test
+nextflow run main.nf -profile test_melettin
 
-# Results will be in test_results/
+# Tetramorium test
+nextflow run main.nf -profile test_tetramorium
+
+# Generic test
+nextflow run main.nf -profile test
 ```
 
-### Resume Failed Run
+### Resume a Failed Run
 
 ```bash
-# If pipeline failed or was interrupted
 nextflow run main.nf -resume \
   --query_id P01501 \
   --home_species "Apis mellifera"
 ```
+
+### HPC / SLURM
+
+```bash
+# SLURM + Singularity
+nextflow run main.nf \
+  -profile hpc_singularity \
+  --query_id P01501 \
+  --home_species "Apis mellifera" \
+  --max_genomes 10 \
+  --outdir results/my_run \
+  -work-dir $SCRATCH/work
+
+# SLURM + Conda
+nextflow run main.nf \
+  -profile hpc_conda \
+  --query_id P01501 \
+  --home_species "Apis mellifera"
+```
+
+---
 
 ## Understanding Parameters
 
@@ -212,9 +208,9 @@ nextflow run main.nf -resume \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--query_id` | - | UniProt/NCBI ID for query (e.g., P01501) |
-| `--gene` | - | OR: Path to query sequence file |
-| `--home_species` | Required | Species name (e.g., "Apis mellifera") |
+| `--query_id` | - | UniProt accession (e.g., `P01501`) |
+| `--gene` | - | OR: Path to query protein FASTA |
+| `--home_species` | Required | Species name (e.g., `"Apis mellifera"`) |
 | `--max_genomes` | 10 | Number of related genomes to download |
 
 ### Pro Mode Parameters
@@ -223,30 +219,36 @@ nextflow run main.nf -resume \
 |-----------|---------|-------------|
 | `--gene` | Required | Path to query gene FASTA |
 | `--home_genome` | Required | Path to home genome FASTA |
-| `--home_gff` | Optional | Path to home genome GFF annotation |
-| `--target_genomes` | Required | Glob pattern for targets (e.g., "genomes/*.fna") |
+| `--home_gff` | Optional | Path to home genome GFF3 annotation |
+| `--target_genomes` | Required | Glob pattern for targets (e.g., `"genomes/*.fna"`) |
 
 ### Synteny Parameters
 
 | Parameter | Default | Description | When to Change |
 |-----------|---------|-------------|----------------|
-| `--n_flanking_genes` | 10 | Number of flanking genes | Increase for large genomes (15-20) |
-| `--min_synteny_score` | 0.6 | Minimum synteny conservation (0-1) | Lower (0.4-0.5) for distant species |
+| `--n_flanking_genes` | 10 | Number of flanking genes per side | Increase to 15–20 for large genomes |
+| `--min_synteny_score` | 0.6 | Minimum synteny conservation (0–1) | Lower to 0.4–0.5 for distant species |
 | `--cluster_distance` | 50000 | Max distance to cluster hits (bp) | Increase for gene-poor genomes |
+| `--prefer_large_genes` | true | Prefer longer flanking genes | Set false for compact genomes |
+| `--min_flanking_size` | 500 | Minimum flanking gene size (bp) | Lower for small gene-dense genomes |
 
 ### Search Sensitivity
 
 | Parameter | Default | Description | When to Change |
 |-----------|---------|-------------|----------------|
-| `--mmseqs_sensitivity` | 8.5 | MMseqs2 sensitivity (1-9) | Lower (7.5) for fast search |
-| `--min_gene_identity` | 30 | Min % identity for gene hits | Increase (40-50) for close species |
-| `--mutation_rate` | 0.05 | Simulation divergence rate | Increase (0.10) for very divergent |
+| `--mmseqs_sensitivity` | 8.5 | MMseqs2 sensitivity (1–9) | Lower to 7.5 for faster search |
+| `--min_gene_identity` | 30 | Min % identity for gene hits | Raise to 40–50 for close species |
+| `--enable_smith_waterman` | true | Use Smith-Waterman for GOI | Disable for speed |
+| `--sw_min_identity` | 20.0 | Min SW alignment identity (%) | Lower for very divergent genes |
 
 ### Output
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--outdir` | results | Output directory |
+| `--keep_intermediate` | false | Keep work dir files for debugging |
+
+---
 
 ## Interpreting Results
 
@@ -254,157 +256,134 @@ nextflow run main.nf -resume \
 
 ```
 results/
-├── synteny_plot.html              # 🎨 Main result: Interactive plot
-├── synterra_report.json           # 📊 Final pipeline summary & discovery stats
+├── query/
+│   └── P01501.fasta                # Query sequence
+├── home_genome/                    # Home genome + GFF (easy mode)
+├── downloaded_genomes/             # Target genomes (easy mode)
 ├── qc/
-│   └── genome_qc_summary.json     # 🧪 Genome quality metrics (N50, L50)
-├── synteny_block.bed              # Flanking genes in home genome
-├── flanking_proteins.faa          # Protein sequences of flanking genes
-├── {genome}_regions.bed           # Identified syntenic regions
-├── {genome}_gene_candidates.bed   # Gene candidates per genome
-├── {genome}_genes_annotated.gff   # Final annotated genes
-└── {genome}_proteins.faa          # Translated proteins
+│   └── genome_qc_summary.json     # Assembly quality (N50, L50, contig count)
+├── iterative_results/
+│   ├── expanded_db.faa             # All discovered orthologs (growing DB)
+│   ├── hits/                       # Per-genome MMseqs2 hit files
+│   └── regions/
+│       ├── {genome}.gff            # Gene annotations per genome
+│       ├── {genome}.faa            # Translated proteins per genome
+│       └── {genome}.homology.tsv   # Gene-to-home mappings
+├── *_synteny_plot.html             # Interactive synteny visualization
+└── synterra_report.json            # Pipeline summary
 ```
 
-### Interactive Synteny Plot (`synteny_plot.html`)
+### Interactive Synteny Plot (`*_synteny_plot.html`)
 
-**How to use**:
-1. Open in web browser
-2. Each horizontal track = one genome
-3. Colored blocks = genes
-4. **Red blocks** = your query gene (target)
-5. Gray/blue blocks = flanking genes
-6. Lines connect orthologous genes
+Open in a web browser. Each horizontal track represents one genome.
 
-**Hover** over genes to see:
-- Gene name
-- Coordinates
-- Synteny score
+- **Colored blocks** = genes (arrows show strand direction)
+- **Red blocks** = your query gene / GOI
+- **Gray/blue blocks** = flanking genes
+- **Lines** connect orthologous genes across genomes
+- **Hover** over genes for name, coordinates, and synteny score
 
 **What to look for**:
-- **Strong synteny**: Flanking genes in same order across genomes
-- **Gene location**: Query gene (red) in syntenic region
-- **Rearrangements**: Breaks in synteny = genomic changes
+- **Strong synteny**: Flanking genes in same order across genomes → high confidence
+- **Gene present**: GOI (red) appears in the syntenic region → ortholog found
+- **Rearrangements**: Breaks in gene order → genomic changes (inversions, translocations)
 
 ### Synteny Scores
 
 | Score | Interpretation | Confidence |
 |-------|----------------|------------|
-| ≥ 0.7 | Excellent synteny | High ✅ |
-| 0.5-0.7 | Good synteny (some rearrangement) | Medium ⚠️ |
-| 0.3-0.5 | Weak synteny (major rearrangement) | Low ⚠️ |
-| < 0.3 | Very weak/no synteny | Very Low ❌ |
+| ≥ 0.7 | Excellent synteny | High |
+| 0.5–0.7 | Good synteny (some rearrangement) | Medium |
+| 0.3–0.5 | Weak synteny (major rearrangement) | Low |
+| < 0.3 | Very weak / no synteny | Very Low |
 
-**Action**:
+**Guidelines**:
 - Score ≥ 0.6: Trust the result
-- Score 0.4-0.6: Manually verify with BLAST
-- Score < 0.4: May be false positive
+- Score 0.4–0.6: Manually verify with BLAST
+- Score < 0.4: Likely false positive
+
+---
 
 ## Troubleshooting
 
 ### Common Issues
 
-#### 1. "No hits found in home genome"
+#### "No hits found in home genome"
 
-**Cause**: Gene sequence doesn't match home genome
+- Check that the query sequence is from the home species
+- Try protein input instead of DNA
+- Ensure query is long enough (≥15 aa)
 
-**Solutions**:
-- Check that gene sequence is from this species
-- Try both DNA and protein versions
-- Check for typos in gene sequence
+#### "No flanking genes found"
 
-#### 2. "No flanking genes found"
+- Provide `--home_gff` for accurate gene extraction
+- Check that the gene is in a gene-rich region
+- Try increasing `--n_flanking_genes`
 
-**Cause**: No annotation provided or region is gene-poor
+#### "Low synteny scores everywhere"
 
-**Solutions**:
-- Provide `--home_gff` annotation file
-- Check that gene is in gene-rich region
-- Try with ab initio prediction (don't provide GFF)
+- Lower `--min_synteny_score` to 0.4
+- Increase `--n_flanking_genes` to 15–20
+- The gene region may not be syntenic (common for lineage-specific genes)
 
-#### 3. "Low synteny scores everywhere"
+#### "Pipeline runs forever"
 
-**Cause**: Gene region not conserved, or wrong parameters
+- Reduce `--max_genomes` or `--mmseqs_sensitivity`
+- Use `-resume` to avoid re-running completed steps
+- Run on HPC with `-profile hpc_singularity`
 
-**Solutions**:
-- Lower `--min_synteny_score` to 0.4-0.5
-- Increase `--n_flanking_genes` to 15-20
-- Check if gene is in conserved region (core genes work best)
+#### "Multiple gene copies found"
 
-#### 4. "Pipeline runs forever"
-
-**Cause**: Too many genomes or very large genomes
-
-**Solutions**:
-- Use `-resume` to continue
-- Reduce `--mmseqs_sensitivity` to 7.5
-- Test with 2-3 genomes first
-- Use HPC cluster with `-profile cluster`
-
-#### 5. "Multiple gene copies found"
-
-**Cause**: Gene duplication (paralogs)
-
-**Solutions**:
-- This is expected for multi-copy genes
-- Check synteny score to find ortholog (highest score)
+- Expected for duplicated genes
+- The copy with the highest synteny score is the ortholog
 - All copies are reported in output
 
-### Getting Help
+### Logs
 
 ```bash
-# Show all parameters
-nextflow run main.nf --help
-
-# Check pipeline info
-nextflow info main.nf
-
-# See detailed logs
+# Full pipeline log
 cat .nextflow.log
+
+# See what ran
+nextflow log
 ```
+
+---
 
 ## Advanced Usage
 
-### Custom Phylogenetic Sorting
+### Phylogenetic Sorting with NCBI Taxonomy
 
-To enable phylogenetic ordering of genomes:
+To sort target genomes by phylogenetic distance (improves iterative search):
 
 ```bash
-# 1. Download NCBI taxonomy
+# 1. Download NCBI taxonomy dump
 wget ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
-tar -xzf taxdump.tar.gz -C taxdb/
+mkdir -p taxdb && tar -xzf taxdump.tar.gz -C taxdb/
 
 # 2. Set environment variable
 export TAXDB=$PWD/taxdb
 
-# 3. Run pipeline
-nextflow run main.nf --gene gene.fasta ...
+# 3. Run — genomes will be searched in phylogenetic order
+nextflow run main.nf --query_id P01501 --home_species "Apis mellifera"
 ```
 
-### Custom Species for Gene Prediction
-
-```bash
-# If Augustus supports your species
-nextflow run main.nf \
-  --gene gene.fasta \
-  --home_genome genome.fna \
-  --target_genomes "targets/*.fna" \
-  --augustus_species "drosophila"  # or human, arabidopsis, etc.
-```
+Without `TAXDB`, genomes are searched in alphabetical order (still works, just less optimal).
 
 ### Very Divergent Genes
 
-For very divergent genes (>60% divergence):
+For genes with >60% divergence:
 
 ```bash
 nextflow run main.nf \
   --gene gene.fasta \
   --home_genome genome.fna \
   --target_genomes "targets/*.fna" \
+  --mode pro \
   --min_synteny_score 0.4 \
   --min_gene_identity 25 \
-  --mutation_rate 0.10 \
-  --mmseqs_sensitivity 9.0
+  --sw_min_identity 15.0 \
+  --mmseqs_sensitivity 8.5
 ```
 
 ### Gene-Poor Genomes
@@ -416,33 +395,31 @@ nextflow run main.nf \
   --gene gene.fasta \
   --home_genome genome.fna \
   --target_genomes "targets/*.fna" \
+  --mode pro \
   --n_flanking_genes 5 \
   --cluster_distance 100000 \
   --prefer_large_genes true
 ```
 
-### Keeping Intermediate Files
+### Profiles Reference
 
-For debugging or analysis:
+| Profile | Executor | Container | Use Case |
+|---------|----------|-----------|----------|
+| `standard` | local | Conda | Default local |
+| `conda` | local | Conda | Explicit Conda |
+| `docker` | local | Docker | Docker users |
+| `singularity` | local | Singularity | Singularity users |
+| `slurm` | SLURM | (none) | Basic SLURM |
+| `hpc_singularity` | SLURM | Singularity | HPC (recommended) |
+| `hpc_conda` | SLURM | Conda/Mamba | HPC + Conda |
+| `test` | local | Conda | Quick test |
+| `test_melettin` | local | Conda | Melittin test |
+| `test_tetramorium` | local | Conda | Tetramorium test |
 
-```bash
-nextflow run main.nf \
-  --gene gene.fasta \
-  --home_genome genome.fna \
-  --target_genomes "targets/*.fna" \
-  --keep_intermediate true
-```
-
-## Citation
-
-If you use SynTerra in your research, please cite:
-
-```
-[Your citation here]
-```
+---
 
 ## Support
 
-- **Documentation**: See README.md and instructions.md
+- **Full parameter list**: See `nextflow.config`
+- **Pipeline details**: See `README.md`
 - **Issues**: https://github.com/yourusername/SynTerra/issues
-- **Email**: your.email@institution.edu
