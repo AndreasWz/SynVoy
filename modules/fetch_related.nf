@@ -3,7 +3,7 @@ process FETCH_RELATED_GENOMES {
     publishDir "${params.outdir}/downloaded_genomes", mode: 'copy'
     
     input:
-    val species_name
+    val home_species
     val max_genomes
     
     output:
@@ -13,7 +13,7 @@ process FETCH_RELATED_GENOMES {
     script:
     """
     fetch_related_genomes.py \\
-        --species "${species_name}" \\
+        --home-species "${home_species}" \\
         --max ${max_genomes} \\
         --outdir easy_mode_genomes
     """

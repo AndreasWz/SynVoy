@@ -25,7 +25,7 @@ def run_fasttree(input_aln, output_nwk):
     with open(output_nwk, "w") as out_f:
         # Pass input_aln as argument or redirect? FastTree accepts filename.
         # fasttree alignment.fasta > tree.nwk
-        r = subprocess.run(cmd + [input_aln], stdout=out_f, check=True)
+        subprocess.run(cmd + [input_aln], stdout=out_f, check=True)
 
 def main():
     parser = argparse.ArgumentParser(description="Compute Phylogenetic Tree from Fasta")
@@ -47,9 +47,9 @@ def main():
             
     if count < 3:
         print("Not enough sequences to build a tree (<3).")
-        # Write dummy tree or exit?
-        # Create a dummy "tree" just to satisfy pipeline?
-        # Or just exit.
+        # Write a stub tree so downstream pipeline steps don't fail
+        with open(args.output, 'w') as f:
+            f.write("(placeholder:0.0);\n")
         sys.exit(0)
 
     # 1. Align

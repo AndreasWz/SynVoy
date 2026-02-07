@@ -85,7 +85,8 @@ def main():
             try:
                 with open(f) as fa:
                     count = sum(1 for line in fa if line.startswith('>'))
-            except: pass
+            except Exception as e:
+                print(f"Warning: Could not read {f}: {e}")
             
             # Add to existing count (should be disjoint usually, or additive)
             genes_added_per_genome[gname] = genes_added_per_genome.get(gname, 0) + count

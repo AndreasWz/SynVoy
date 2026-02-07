@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import os
 
 def parse_args():

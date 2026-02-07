@@ -4,7 +4,7 @@ process PREPARE_INITIAL_DB {
 
     input:
     tuple val(locus_id), path(flanking_faa)
-    path query_gene
+    path goi_exons  // From ANNOTATE_GOI: contains full GOI + individual exon sequences
 
     output:
     tuple val(locus_id), path("initial_db_${locus_id}.faa"), emit: db
@@ -13,13 +13,14 @@ process PREPARE_INITIAL_DB {
     """
     #!/usr/bin/env python3
     
-    # This critical fix ensures the Query Gene of Interest (GOI) is included
-    # in the iterative search database, along with its fragments and exons
+    # Build the initial search database from:
+    # 1. Flanking genes (from GFF or Prodigal prediction)
+    # 2. GOI exon sequences (from ANNOTATE_GOI - real exons, not arbitrary fragments)
+    # 3. Fallback fragments (halves/thirds) only if no real exons were found
     
     import sys
     import os
     
-    # Import our sequence utilities
     sys.path.insert(0, "${projectDir}/bin")
     from sequence_utils import parse_fasta, write_fasta
     from fragment_query import generate_fragments
@@ -31,43 +32,57 @@ process PREPARE_INITIAL_DB {
     print("Loading flanking genes from ${flanking_faa}...")
     for header, clean_id, seq in parse_fasta("${flanking_faa}"):
         all_records.append((clean_id, seq))
-    print(f"  Loaded {len(all_records)} flanking genes")
+    flanking_count = len(all_records)
+    print(f"  Loaded {flanking_count} flanking genes")
     
-    # 2. Add the Query Gene of Interest (GOI) - CRITICAL FIX!
-    print("Loading query gene from ${query_gene}...")
-    goi_records = list(parse_fasta("${query_gene}"))
+    # 2. Add GOI sequences (full protein + individual exons from ANNOTATE_GOI)
+    print("Loading GOI exon sequences from ${goi_exons}...")
+    goi_records = list(parse_fasta("${goi_exons}"))
     if not goi_records:
-        print("ERROR: No sequences found in query gene file!", file=sys.stderr)
+        print("ERROR: No sequences found in GOI exons file!", file=sys.stderr)
         sys.exit(1)
     
-    goi_count = 0
+    goi_full_count = 0
+    exon_count = 0
+    full_goi_seq = None
+    full_goi_id = None
+    
     for header, clean_id, seq in goi_records:
-        # Mark as GOI for special handling in iterative search
-        goi_id = f"GOI_{clean_id}"
-        all_records.append((goi_id, seq))
-        goi_count += 1
+        all_records.append((clean_id, seq))
         
-        # 3. Generate systematic fragments (halves, thirds, quarters)
-        # This allows detection of partial genes, truncations, pseudogenes
+        if '|exon_' in clean_id:
+            exon_count += 1
+            print(f"  Added exon: {clean_id} ({len(seq)} aa)")
+        else:
+            goi_full_count += 1
+            full_goi_seq = seq
+            full_goi_id = clean_id
+            print(f"  Added full GOI: {clean_id} ({len(seq)} aa)")
+    
+    # 3. Fallback: Generate arbitrary fragments ONLY if no real exons found
+    fragment_count = 0
+    if exon_count == 0 and full_goi_seq:
+        print("  No real exons found, generating fallback fragments...")
         min_fragment_size = 20  # amino acids
-        fragments = generate_fragments(seq, goi_id, min_size=min_fragment_size)
+        fragments = generate_fragments(full_goi_seq, full_goi_id, min_size=min_fragment_size)
         
         for frag_id, frag_seq, frag_desc in fragments:
-            # Skip the full-length duplicate (already added)
             if "fragment_type=full" not in frag_desc:
                 all_records.append((frag_id, frag_seq))
+                fragment_count += 1
         
-        print(f"  Added GOI: {goi_id} ({len(seq)} aa)")
-        print(f"  Generated {len(fragments)-1} fragments for progressive search")
+        print(f"  Generated {fragment_count} fallback fragments")
+    elif exon_count > 0:
+        print(f"  Using {exon_count} real exon sequences (no arbitrary fragments needed)")
     
     # 4. Write combined database
     write_fasta(all_records, output_faa)
     
     print(f"\\nInitial database created: {output_faa}")
     print(f"  Total sequences: {len(all_records)}")
-    print(f"  - Flanking genes: {len(all_records) - goi_count - len(fragments) + 1}")
-    print(f"  - Query genes (GOI): {goi_count}")
-    print(f"  - Query fragments: {len(fragments) - 1}")
-    print(f"\\nCRITICAL: GOI is now included in iterative search!")
+    print(f"  - Flanking genes: {flanking_count}")
+    print(f"  - GOI (full): {goi_full_count}")
+    print(f"  - GOI exons: {exon_count}")
+    print(f"  - Fallback fragments: {fragment_count}")
     """
 }

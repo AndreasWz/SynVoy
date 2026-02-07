@@ -16,6 +16,7 @@ dependencies:
   - mafft >=7.505
   - miniprot
   - fasttree
+  - ncbi-datasets-cli  # For easy mode genome downloading
   
   # Python packages
   - plotly >=5.0.0

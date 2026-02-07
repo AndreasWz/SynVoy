@@ -136,9 +136,9 @@ def parse_gff(gff_file):
                 if feat_type == 'mRNA' and 'Parent' in attrs and 'product' in attrs:
                     gene_products[attrs['Parent']] = attrs['product']
                 
-                # Handle Miniprot mRNA (our main target gene features)
-                if source == 'miniprot' and feat_type == 'mRNA':
-                    # Miniprot GFF uses mRNA as the main feature
+                # Handle SynTerra annotated mRNA (miniprot, augmented_search, or mmseqs2)
+                if source in ('miniprot', 'augmented_search', 'mmseqs2') and feat_type == 'mRNA':
+                    # mRNA is the main feature for target gene annotation
                     gene_id = attrs.get('ID', '')
                     
                     # SynTerra attributes for home gene mapping
@@ -146,7 +146,17 @@ def parse_gff(gff_file):
                     synterra_id = attrs.get('SynTerra_ID', '')
                     identity = attrs.get('Identity', '0')
                     
-                    # For name, use SynTerra_Parent (the home gene name)
+                    # Extract base home gene name for consistent coloring
+                    # SynTerra_Parent format: gene-LOC726866 or GOI_P01501
+                    home_gene_base = synterra_parent
+                    if home_gene_base:
+                        # Remove prefix like 'gene-' for cleaner matching
+                        if home_gene_base.startswith('gene-'):
+                            home_gene_base = home_gene_base  # Keep as-is for lookup
+                        elif home_gene_base.startswith('GOI_'):
+                            home_gene_base = home_gene_base  # Keep GOI prefix
+                    
+                    # For display name, use SynTerra_Parent (the home gene name)
                     name = synterra_parent if synterra_parent else gene_id
                     
                     genes.append({
@@ -465,7 +475,11 @@ def main():
             if cand_file != "NO_CANDIDATES" and os.path.exists(cand_file):
                  tracks[-1]['cands'] = parse_bed(cand_file)
 
-    fig = make_subplots(rows=len(tracks), cols=1, shared_xaxes=False, vertical_spacing=0.1, subplot_titles=[t['name'] for t in tracks])
+    # Dynamic vertical spacing based on number of tracks
+    n_tracks = len(tracks)
+    vertical_spacing = min(0.05, 0.8 / max(1, n_tracks - 1)) if n_tracks > 2 else 0.1
+    
+    fig = make_subplots(rows=n_tracks, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing, subplot_titles=[t['name'] for t in tracks])
     
     for i, track in enumerate(tracks):
         genes = track['genes']
@@ -599,7 +613,21 @@ def main():
                     row=row, col=1
                 )
 
-    fig.update_layout(height=300 * len(tracks), title_text="Synteny Plot (Phylo-Colored)")
+    # Dynamic height: minimum 200px per track, maximum 400px per track
+    track_height = max(150, min(300, 2000 // max(1, n_tracks)))
+    fig_height = track_height * n_tracks + 100  # +100 for title/margins
+    
+    fig.update_layout(
+        height=fig_height, 
+        title_text="Synteny Plot (Phylo-Colored)",
+        showlegend=False
+    )
+    
+    # Hide y-axes for cleaner look (gene bars use y=0-1 range)
+    for i in range(1, n_tracks + 1):
+        yaxis_name = f'yaxis{i}' if i > 1 else 'yaxis'
+        fig.update_layout(**{yaxis_name: dict(showticklabels=False, showgrid=False, zeroline=False)})
+    
     fig.write_html(args.output)
     print(f"Plot saved to {args.output}")
 

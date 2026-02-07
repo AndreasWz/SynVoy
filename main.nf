@@ -9,12 +9,10 @@ include { EXTRACT_FLANKING } from './modules/extract_flanking.nf'
 include { PREPARE_INITIAL_DB } from './modules/prepare_initial_db.nf'
 include { ITERATIVE_SEARCH } from './modules/iterative_search.nf'
 include { CLUSTER_REGIONS } from './modules/cluster_regions.nf'
-include { AUGMENTED_SEARCH } from './modules/augmented_search.nf'
-include { ANNOTATE_STRUCTURE } from './modules/annotate_structure.nf'
-include { HOMOLOGY_SEARCH } from './modules/homology_search.nf'
 include { PREPARE_HOME_PROTEOME } from './modules/prepare_home.nf'
 include { PLOT_SYNTENY } from './modules/plot_synteny.nf'
 include { COMPUTE_TREE } from './modules/compute_tree.nf'
+include { ANNOTATE_GOI } from './modules/annotate_goi.nf'
 
 // New Modules
 include { STAGE_GENOMES } from './modules/stage_genomes.nf'
@@ -22,6 +20,7 @@ include { ASSESS_GENOME_QUALITY } from './modules/assess_quality.nf'
 include { FETCH_QUERY_FROM_ID } from './modules/fetch_query.nf'
 include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
+include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
 
 // ==============================================================================
@@ -55,7 +54,7 @@ def printHeader() {
 
 def printParams() {
     def query_display = params.gene ? new File(params.gene).name : params.query_id
-    def home_display = new File(params.home_genome).name
+    def home_display = params.mode == 'easy' ? params.home_species : (params.home_genome ? new File(params.home_genome).name : 'N/A')
     
     log.info """
     ${c_blue}═══════════════════════════════════════════════════════════════
@@ -94,18 +93,27 @@ workflow {
         log.warn "${c_yellow}WARNING: Both --gene and --query_id provided. Using --gene${c_reset}"
     }
     
-    if (!params.home_genome) { 
-        log.error "${c_red}ERROR: No home genome provided!${c_reset}"
-        exit 1
+    // Easy mode: require home_species, Pro mode: require home_genome
+    if (params.mode == 'easy') {
+        if (!params.home_species) {
+            log.error "${c_red}ERROR: Easy mode requires --home_species parameter!${c_reset}"
+            log.error "${c_red}Example: --home_species 'Apis mellifera'${c_reset}"
+            exit 1
+        }
+    } else {
+        if (!params.home_genome) { 
+            log.error "${c_red}ERROR: Pro mode requires --home_genome parameter!${c_reset}"
+            exit 1
+        }
+        
+        if (!file(params.home_genome).exists()) {
+            log.error "${c_red}ERROR: Home genome not found: ${params.home_genome}${c_reset}"
+            exit 1
+        }
     }
     
     if (params.gene && !file(params.gene).exists()) {
         log.error "${c_red}ERROR: Gene file not found: ${params.gene}${c_reset}"
-        exit 1
-    }
-    
-    if (!file(params.home_genome).exists()) {
-        log.error "${c_red}ERROR: Home genome not found: ${params.home_genome}${c_reset}"
         exit 1
     }
     
@@ -127,26 +135,26 @@ workflow {
     query_gene_source_ch = gene_inputs.loc
     aug_query_gene_ch = gene_inputs.aug.first()
 
-    home_genome_ch = Channel.fromPath(params.home_genome)
-    
-    // Track if user provided GFF or not
-    user_provided_gff = params.home_gff ? true : false
-    
-    if (params.home_gff) {
-        home_gff_ch = Channel.fromPath(params.home_gff).first()
-    } else {
-        home_gff_ch = Channel.value(file("NO_GFF"))
-    }
-
-    // Targets - Handle Easy vs Pro mode
+    // Handle Easy vs Pro mode for home genome and targets
     if (params.mode == 'easy') {
-        if (!params.easy_species) {
-            log.error "${c_red}ERROR: Easy mode requires --easy_species parameter!${c_reset}"
+        if (!params.home_species) {
+            log.error "${c_red}ERROR: Easy mode requires --home_species parameter!${c_reset}"
+            log.error "${c_red}Example: --home_species 'Apis mellifera'${c_reset}"
             exit 1
         }
         
-        log.info "${c_cyan}Fetching related genomes for: ${c_white}${params.easy_species}${c_reset}"
-        FETCH_RELATED_GENOMES(params.easy_species, params.easy_max_genomes)
+        log.info "${c_cyan}Easy mode: Fetching genomes for ${c_white}${params.home_species}${c_reset}"
+        
+        // Fetch home genome from NCBI
+        log.info "${c_cyan}  - Downloading reference genome...${c_reset}"
+        FETCH_HOME_GENOME(params.home_species)
+        home_genome_ch = FETCH_HOME_GENOME.out.genome
+        home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(file("NO_GFF"))
+        user_provided_gff = true  // NCBI reference genomes have GFF
+        
+        // Fetch related genomes
+        log.info "${c_cyan}  - Downloading related genomes...${c_reset}"
+        FETCH_RELATED_GENOMES(params.home_species, params.max_genomes)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
         
         // Count genomes found
@@ -154,10 +162,27 @@ workflow {
             def genome_count = new File(dir.toString()).listFiles().findAll { 
                 it.name.endsWith('.fna') || it.name.endsWith('.fasta') || it.name.endsWith('.fa')
             }.size()
-            "${c_green}Found ${genome_count} related genome(s)${c_reset}"
+            "${c_green}Downloaded ${genome_count} related genome(s)${c_reset}"
         }
         
     } else {
+        // Pro mode - user provides files
+        if (!params.home_genome) {
+            log.error "${c_red}ERROR: Pro mode requires --home_genome parameter!${c_reset}"
+            exit 1
+        }
+        
+        home_genome_ch = Channel.fromPath(params.home_genome)
+        
+        // Track if user provided GFF or not
+        user_provided_gff = params.home_gff ? true : false
+        
+        if (params.home_gff) {
+            home_gff_ch = Channel.fromPath(params.home_gff).first()
+        } else {
+            home_gff_ch = Channel.value(file("NO_GFF"))
+        }
+        
         if (params.target_genomes) {
             log.info "${c_cyan}Loading target genomes list...${c_reset}"
             target_genomes_list = Channel.fromPath(params.target_genomes).collect()
@@ -182,6 +207,28 @@ workflow {
     log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
     
     LOCATE_GENE(query_gene_source_ch, home_genome_ch)
+    
+    // 4b. ANNOTATE GOI EXONS
+    // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
+    // If GFF available: matches GOI to annotated gene and extracts CDS/exons
+    // If no GFF: uses tblastn hits to detect exon boundaries (splice sites, start/stop codons)
+    log.info "${c_cyan}Annotating GOI exons...${c_reset}"
+    
+    // Determine query_id for name-based GFF matching
+    def effective_query_id = params.query_id ?: ''
+    
+    ANNOTATE_GOI(
+        query_gene_source_ch.first(),
+        home_genome_ch,
+        home_gff_ch,
+        LOCATE_GENE.out.blast_hits,
+        LOCATE_GENE.out.mmseqs_hits,
+        effective_query_id
+    )
+    
+    ANNOTATE_GOI.out.info.view { info ->
+        "${c_green}GOI exon annotation complete${c_reset}"
+    }
     
     // 5. SPLIT LOCI
     SPLIT_LOCI(LOCATE_GENE.out.bed)
@@ -211,7 +258,7 @@ workflow {
     
     PREPARE_INITIAL_DB(
         EXTRACT_FLANKING.out.faa,
-        query_gene_source_ch.first()  // Use first instance of query gene
+        ANNOTATE_GOI.out.exons  // GOI full protein + individual exon sequences
     )
         // Only run if we have targets
     if (params.target_genomes || params.mode == 'easy') {
@@ -329,51 +376,7 @@ workflow {
         CLUSTER_REGIONS.out.bed.view { genome, payload, locus, bed ->
             "${c_green}[CLUSTER] Clustered regions for ${locus} in ${genome}${c_reset}"
         }
-        
-        // Tracker for plotting
-        locus_tracker_ch = joined_ch.map { unique, locus, rb, pf, gname, gd -> 
-            tuple(unique, locus) 
-        }
 
-        joined_ch.multiMap { unique, locus, rb, pf, gname, gd ->
-            // Inputs for processes - Pass unique_id as first val for key propagation
-            aug: tuple(unique, gname, rb, gd) 
-            // anno: tuple(unique, gname, rb, gd)
-            // homology: tuple(unique, pf) 
-        }.set { phase3_inputs }
-        
-        log.info "${c_cyan}[AUGMENT] Running augmented orthology search...${c_reset}"
-        
-        AUGMENTED_SEARCH(
-            phase3_inputs.aug,
-            aug_query_gene_ch, // Reusable Value Channel
-            params.region_padding
-        )
-        
-        AUGMENTED_SEARCH.out.bed.view { unique, bed ->
-            "${c_green}[AUGMENT] Augmented search complete for region ${unique}${c_reset}"
-        }
-        
-        /*
-        ANNOTATE_STRUCTURE(
-            phase3_inputs.anno,
-            params.augustus_species
-        )
-        
-        // Homology Search
-        ANNOTATE_STRUCTURE.out.proteins
-            .join(phase3_inputs.homology) 
-            .map { unique_id, proteins_file, flanking_faa ->
-                 tuple(unique_id, proteins_file, flanking_faa)
-            }
-            .set { homology_inputs }
-
-        HOMOLOGY_SEARCH(
-            homology_inputs.map { tuple(it[0], it[1]) }, 
-            homology_inputs.map { it[2] } 
-        )
-        */
-        
         // --- PHYLOGENY & PLOTTING ---
         // Collect all proteins for tree: Flanking Genes + Discovered Genes (from Expanded DB or Regions?)
         // Iterative Search output might be best source of all gene sequences found.
@@ -412,25 +415,20 @@ workflow {
             }
 
         // Collect Data for Plotting
-        plot_data_by_unique = miniprot_gffs_ch
-            .join(AUGMENTED_SEARCH.out.bed)
-            .join(miniprot_tsvs_ch)
-            
-        plot_data_with_locus = plot_data_by_unique
-            .join(locus_tracker_ch) 
-            
-        grouped_plot_data = plot_data_with_locus
-            .map { unique, gff, bed, tsv, locus ->
-                tuple(locus, gff, bed, tsv, unique)
-            }
-            .groupTuple(by: 0) 
+        // Use CLUSTER_REGIONS output for candidate beds (the discovered syntenic regions)
         
-        // Simplified plot input preparation
-        // Collect all files instead of complex joins
+        // Collect clustered region BED files for plotting
+        all_beds = CLUSTER_REGIONS.out.bed
+            .map { genome_name, payload, locus_id, bed -> bed }
+            .collect()
+            .ifEmpty([])
+        
         all_gffs = miniprot_gffs_ch.map { it[1] }.collect().ifEmpty([])
-        all_beds = AUGMENTED_SEARCH.out.bed.map { it[1] }.collect().ifEmpty([])
         all_tsvs = miniprot_tsvs_ch.map { it[1] }.collect().ifEmpty([])
-        all_names = miniprot_gffs_ch.map { it[0] }.collect().ifEmpty([])
+        all_names = CLUSTER_REGIONS.out.bed
+            .map { genome_name, payload, locus_id, bed -> genome_name }
+            .collect()
+            .ifEmpty([])
         
         // Get first home_bed and tree (should be same for all loci in single-locus case)
         home_bed_ch = EXTRACT_FLANKING.out.bed.map { it[1] }.first()
@@ -473,11 +471,8 @@ workflow {
             .ifEmpty([])
             .set { collected_hits }
             
-        AUGMENTED_SEARCH.out.proteins
-            .map { it[1] }
-            .collect()
-            .ifEmpty([])
-            .set { collected_augmented }
+        // No standalone augmented proteins - integrated into iterative search
+        collected_augmented = Channel.of([]).collect()
         
         GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
         

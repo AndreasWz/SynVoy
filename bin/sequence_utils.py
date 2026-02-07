@@ -226,7 +226,9 @@ def extract_base_id(id_string: str) -> str:
     id_string = re.sub(r'\.\d+$', '', id_string)
     
     # Remove trailing underscore + number (like _1, _2 for CDS copies)
-    id_string = re.sub(r'_\d+$', '', id_string)
+    # But protect NCBI accession prefixes (XP_, NP_, WP_, YP_, XM_, NM_, NC_, etc.)
+    if not re.match(r'^[A-Z]{1,2}P_\d+$', id_string) and not re.match(r'^[A-Z]{2}_\d+$', id_string):
+        id_string = re.sub(r'_\d+$', '', id_string)
     
     return id_string if id_string else original
 
@@ -261,9 +263,10 @@ def ids_match(id1: str, id2: str) -> bool:
     if normalize_id(base1) == normalize_id(base2):
         return True
     
-    # One contains the other (for complex IDs)
-    if base1 in id2 or base2 in id1:
-        return True
+    # One contains the other (for complex IDs) - require minimum length to avoid false positives
+    if len(base1) >= 6 and len(base2) >= 6:
+        if base1 in id2 or base2 in id1:
+            return True
     
     return False
 

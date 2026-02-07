@@ -80,7 +80,7 @@ def parse_gff(gff_file):
         visited = set()
         while ancestor in relationships and ancestor not in visited:
             visited.add(ancestor)
-            if ancestor.startswith('gene-'):
+            if ancestor.startswith('gene-') or ancestor.startswith('gene:'):
                 break
             ancestor = relationships[ancestor]
         
@@ -128,7 +128,8 @@ def main():
                 prot_seq = prot_seq.split('*')[0]
             if len(prot_seq) > 0:
                 records.append((gene_id, prot_seq))
-        except: pass
+        except Exception as e:
+            print(f"Warning: Failed to translate {gene_id}: {e}", file=sys.stderr)
         
     write_fasta(records, args.output)
 

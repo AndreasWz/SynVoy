@@ -10,7 +10,6 @@ import json
 import sys
 import os
 from pathlib import Path
-import shlex
 
 def run_safe_command(cmd, check=True):
     """Run command with list arguments safely."""
@@ -75,19 +74,26 @@ def get_taxid_from_name(species_name):
     ]
     return run_piped_command(cmds)
 
-def get_related_species(taxid, max_genomes=10):
-    """Get list of related species using NCBI taxonomy."""
+def get_related_species(taxid, max_genomes=10, refseq_only=True, exclude_species=None):
+    """Get list of related species using NCBI taxonomy.
+    
+    Args:
+        taxid: NCBI taxonomy ID
+        max_genomes: Maximum number of genomes to return
+        refseq_only: Only return RefSeq assemblies (GCF_ prefix) - higher quality
+        exclude_species: Species name to exclude (e.g., home species)
+    """
     print(f"Finding related species for TaxID: {taxid}")
     
-    # Get lineage check (optional, can skip directly to esearch)
-    
-    # esearch -db assembly -query "txid{taxid}[Organism:exp]" | efetch -format docsum | xtract ...
+    # Query NCBI and get assembly info including RefSeq category
     query = f"txid{taxid}[Organism:exp]"
+    print(f"  Query: {query}")
     
     cmds = [
         ['esearch', '-db', 'assembly', '-query', query],
         ['efetch', '-format', 'docsum'],
-        ['xtract', '-pattern', 'DocumentSummary', '-element', 'AssemblyAccession', 'SpeciesName']
+        ['xtract', '-pattern', 'DocumentSummary', '-element', 
+         'AssemblyAccession', 'SpeciesName', 'RefSeq_category']
     ]
     
     results = run_piped_command(cmds)
@@ -96,17 +102,57 @@ def get_related_species(taxid, max_genomes=10):
         print("Warning: No assemblies found", file=sys.stderr)
         return []
     
-    assemblies = []
-    for line in results.strip().split('\n'):
-        if line:
-            parts = line.split('\t')
-            if len(parts) >= 2:
-                assemblies.append({
-                    'accession': parts[0],
-                    'species': parts[1]
-                })
+    exclude_lower = exclude_species.lower().strip() if exclude_species else None
     
-    return assemblies[:max_genomes]
+    # Parse results and categorize
+    reference_genomes = []
+    other_refseq = []
+    genbank_only = []
+    
+    for line in results.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 2:
+            accession = parts[0]
+            species = parts[1]
+            refseq_cat = parts[2] if len(parts) > 2 else 'na'
+            
+            # Skip excluded species
+            if exclude_lower and species.lower().strip() == exclude_lower:
+                continue
+            
+            entry = {'accession': accession, 'species': species, 'category': refseq_cat}
+            
+            is_refseq = accession.startswith('GCF_')
+            is_reference = refseq_cat in ('reference genome', 'representative genome')
+            
+            if is_refseq and is_reference:
+                reference_genomes.append(entry)
+            elif is_refseq:
+                other_refseq.append(entry)
+            elif not refseq_only:
+                genbank_only.append(entry)
+    
+    # Prioritize: reference genomes > other RefSeq > GenBank
+    assemblies = reference_genomes + other_refseq + genbank_only
+    
+    # Deduplicate by species (keep first/best per species)
+    seen_species = set()
+    unique_assemblies = []
+    for asm in assemblies:
+        sp = asm['species'].lower().strip()
+        if sp not in seen_species:
+            seen_species.add(sp)
+            unique_assemblies.append(asm)
+            if len(unique_assemblies) >= max_genomes:
+                break
+    
+    print(f"  Found {len(unique_assemblies)} unique species (excluding {exclude_species or 'none'})")
+    if unique_assemblies:
+        print(f"  Reference/representative genomes: {len([a for a in unique_assemblies if a['category'] in ('reference genome', 'representative genome')])}")
+    
+    return unique_assemblies
 
 def download_genome(accession, output_dir):
     """Download genome from NCBI using datasets."""
@@ -155,14 +201,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument("--species", help="Species name (e.g., 'Apis mellifera')")
-    parser.add_argument("--taxid", help="NCBI Taxonomy ID")
+    parser.add_argument("--home-species", dest="home_species", required=True,
+                       help="Home species name (e.g., 'Apis mellifera') - searches genus, excludes this species")
     parser.add_argument("--max", type=int, default=10, 
                        help="Maximum number of genomes to fetch (default: 10)")
     parser.add_argument("--outdir", default="easy_mode_genomes",
                        help="Output directory for genomes (default: easy_mode_genomes)")
-    parser.add_argument("--include-outgroup", action="store_true",
-                       help="Also fetch one distant outgroup species")
     parser.add_argument("--list-only", action="store_true",
                        help="Only list available genomes, don't download")
     
@@ -175,26 +219,59 @@ def main():
         print("ERROR: NCBI E-utilities (esearch) not found!", file=sys.stderr)
         sys.exit(1)
     
-    # Get taxonomy ID
-    taxid = args.taxid
-    if not taxid and args.species:
-        print(f"Looking up taxonomy ID for '{args.species}'...")
-        taxid = get_taxid_from_name(args.species)
-        if not taxid:
-            print(f"ERROR: Could not find taxonomy ID for '{args.species}'", file=sys.stderr)
-            sys.exit(1)
-        print(f"  Found TaxID: {taxid}")
+    # Extract genus from home species (first word)
+    genus = args.home_species.split()[0]
+    print(f"Home species: {args.home_species}")
+    print(f"Searching genus: {genus}")
     
+    # Get taxonomy ID for genus
+    print(f"Looking up taxonomy ID for '{genus}'...")
+    taxid = get_taxid_from_name(genus)
     if not taxid:
-        print("ERROR: Must provide either --species or --taxid", file=sys.stderr)
+        print(f"ERROR: Could not find taxonomy ID for '{genus}'", file=sys.stderr)
         sys.exit(1)
+    print(f"  Found TaxID: {taxid}")
     
-    # Get related species
-    assemblies = get_related_species(taxid, args.max)
+    # Get related species - pass exclude_species to filter early
+    assemblies = get_related_species(taxid, args.max, refseq_only=True, exclude_species=args.home_species)
+    
+    # If no assemblies found at genus level, try family level
+    # This is important for cases like Homo (only has extinct relatives)
+    # or genera with few species
+    if not assemblies:
+        print(f"No non-home assemblies found at genus level. Trying broader search...")
+        
+        # Known family mappings for common problematic cases
+        family_mappings = {
+            'homo': 'Hominidae',  # Great apes
+            'pan': 'Hominidae',   # Chimps
+            'gorilla': 'Hominidae',
+            'pongo': 'Hominidae',  # Orangutans
+        }
+        
+        family = family_mappings.get(genus.lower())
+        if family:
+            print(f"Searching family: {family}")
+            family_taxid = get_taxid_from_name(family)
+            if family_taxid:
+                print(f"  Found family TaxID: {family_taxid}")
+                # Fetch more for family-level search
+                family_fetch_count = max(50, args.max * 5)
+                assemblies = get_related_species(family_taxid, family_fetch_count, 
+                                                  refseq_only=True, exclude_species=args.home_species)
     
     if not assemblies:
-        print("No related assemblies found.", file=sys.stderr)
-        sys.exit(1)
+        print("WARNING: No related assemblies found.", file=sys.stderr)
+        # Create empty manifest to avoid downstream errors
+        output_path = Path(args.outdir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        manifest_path = output_path / "genomes_manifest.txt"
+        manifest_path.touch()
+        print(f"Created empty manifest: {manifest_path}")
+        sys.exit(0)  # Exit gracefully, not with error
+    
+    # assemblies already filtered above; limit to requested max
+    assemblies = assemblies[:args.max]
     
     print(f"\nFound {len(assemblies)} related assemblies:")
     for i, asm in enumerate(assemblies, 1):
@@ -217,8 +294,12 @@ def main():
     print(f"✓ Successfully downloaded {len(downloaded)}/{len(assemblies)} genomes")
     print(f"{'='*60}")
     
+    # Ensure output directory exists
+    output_path = Path(args.outdir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
     # Write manifest file
-    manifest_path = Path(args.outdir) / "genomes_manifest.txt"
+    manifest_path = output_path / "genomes_manifest.txt"
     with open(manifest_path, 'w') as f:
         for path in downloaded:
             f.write(f"{path}\n")

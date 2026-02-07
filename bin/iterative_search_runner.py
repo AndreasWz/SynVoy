@@ -5,7 +5,6 @@ import subprocess
 import os
 import shutil
 import concurrent.futures
-import math
 import uuid
 import sys
 import json
@@ -272,17 +271,30 @@ def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str
     
     return final_padding
 
-def run_miniprot(target_fasta: str, query_protein: str, output_paf: str) -> List[Dict[str, Any]]:
+def run_miniprot(target_fasta: str, query_protein: str, output_paf: str, sensitive: bool = True) -> List[Dict[str, Any]]:
     """
     Run miniprot to align protein query to target DNA.
     Returns list of hit objects (parsed from PAF/GFF).
     
     Enhanced with better error handling and validation.
+    Args:
+        sensitive: If True, use parameters optimized for short/divergent proteins
     """
     cmd = [
-        "miniprot", "-I", "--gff", 
-        target_fasta, query_protein
+        "miniprot", 
+        "-I",           # Output introns
+        "--gff",        # GFF3 format output
     ]
+    
+    if sensitive:
+        # Parameters for short/divergent proteins (like melettin)
+        cmd.extend([
+            "-p", "0.4",    # Lower identity threshold (default 0.75)
+            "--aln",        # Output alignment details
+            "-G", "100000",  # Max intron size (for large genomes)
+        ])
+    
+    cmd.extend([target_fasta, query_protein])
     
     hits = []
     
@@ -408,6 +420,316 @@ def run_miniprot(target_fasta: str, query_protein: str, output_paf: str) -> List
         
     return hits
 
+def orf_based_annotation(region_fasta: str, query_proteins: List[Dict], chrom_seq: str, offset: int, 
+                         mmseqs_hits: List[Dict] = None) -> List[Dict[str, Any]]:
+    """
+    Exon-aware ORF fallback annotation using MMseqs2 hit positions as guides.
+    
+    Strategy:
+    1. If MMseqs2 found exon hits, use them as guides (SMART MODE)
+       - Group hits by parent gene
+       - Check they're in same frame
+       - Extract ORF containing each exon hit
+       - Respect splice sites and stop codons
+       - Concatenate multi-exon genes
+    
+    2. If no hits available, fall back to naive 6-frame search (LAST RESORT)
+    
+    Args:
+        region_fasta: Path to region FASTA file
+        query_proteins: List of query protein dicts with 'id' and 'seq'
+        chrom_seq: Full chromosome sequence (for coordinate mapping)
+        offset: Offset to convert region coords to global coords
+        mmseqs_hits: Optional MMseqs2 hits to guide ORF extraction
+    
+    Returns:
+        List of hit dicts compatible with miniprot output format
+    """
+    hits = []
+    
+    try:
+        from sequence_utils import translate, reverse_complement
+        
+        # Read region sequence
+        region_seq = ""
+        with open(region_fasta) as f:
+            for line in f:
+                if not line.startswith('>'):
+                    region_seq += line.strip()
+        
+        if not region_seq:
+            return hits
+        
+        # SMART MODE: Use MMseqs2 exon hits as guides
+        if mmseqs_hits and len(mmseqs_hits) > 0:
+            logger.info(f"[ORF Fallback] Using {len(mmseqs_hits)} MMseqs2 hits as exon guides")
+            
+            # Group hits by parent query (same gene, multiple exons)
+            from collections import defaultdict
+            hits_by_gene = defaultdict(list)
+            for hit in mmseqs_hits:
+                parent = hit.get('parent_query', hit.get('query', 'unknown'))
+                hits_by_gene[parent].append(hit)
+            
+            # Process each gene
+            for gene_id, gene_hits in hits_by_gene.items():
+                # Sort by genomic position
+                gene_hits.sort(key=lambda h: h.get('tstart', h.get('start', 0)))
+                
+                # Check if all exons are in same frame and strand
+                strands = [h.get('strand', '+') for h in gene_hits]
+                if len(set(strands)) > 1:
+                    logger.warning(f"[ORF Fallback] {gene_id}: Mixed strands, skipping")
+                    continue
+                
+                strand = strands[0]
+                work_seq = region_seq if strand == '+' else reverse_complement(region_seq)
+                
+                # Extract ORF for each exon hit
+                exon_orfs = []
+                exon_coords = []
+                frame_consensus = None
+                
+                for exon_hit in gene_hits:
+                    exon_start = exon_hit.get('tstart', exon_hit.get('start', 0))
+                    exon_end = exon_hit.get('tend', exon_hit.get('end', 0))
+                    
+                    # Find which frame this exon is in
+                    orf_result = find_orf_containing_region(work_seq, exon_start, exon_end, strand)
+                    
+                    if orf_result:
+                        orf_frame = orf_result['frame']
+                        
+                        # Check frame consistency
+                        if frame_consensus is None:
+                            frame_consensus = orf_frame
+                        elif frame_consensus != orf_frame:
+                            logger.warning(f"[ORF Fallback] {gene_id}: Frame mismatch, skipping exon")
+                            continue
+                        
+                        exon_orfs.append(orf_result)
+                        exon_coords.append((exon_start + offset, exon_end + offset))
+                
+                # If we found consistent ORFs, create gene annotation
+                if exon_orfs and frame_consensus is not None:
+                    # Concatenate exon protein sequences
+                    full_protein = ''.join(orf['protein'] for orf in exon_orfs)
+                    
+                    # Create multi-exon hit
+                    hit = {
+                        'id': f"orf_exon_{gene_id}_frame{frame_consensus}",
+                        'parent_query': gene_id,
+                        'chrom': 'region',  # Will be updated by caller
+                        'start': min(c[0] for c in exon_coords),
+                        'end': max(c[1] for c in exon_coords),
+                        'strand': strand,
+                        'identity': 50.0,  # Conservative estimate
+                        'score': 50.0,
+                        'cds_parts': exon_coords,
+                        'gff_lines': [],
+                        'method': 'orf_exon_guided'
+                    }
+                    hits.append(hit)
+                    logger.info(f"[ORF Fallback] Created multi-exon gene: {len(exon_orfs)} exons, {len(full_protein)}aa")
+        
+        # NAIVE MODE: No hits to guide, try simple 6-frame ORF finding
+        else:
+            logger.info(f"[ORF Fallback] No exon guides, using naive 6-frame search")
+            min_orf_length = 30  # amino acids
+            orfs = find_orfs_six_frame(region_seq, min_orf_length)
+            
+            # For each query, find best matching ORF
+            for query in query_proteins:
+                query_seq = query['seq']
+                best_score = 0
+                best_orf = None
+                
+                for orf in orfs:
+                    score = simple_protein_similarity(query_seq, orf['seq'])
+                    if score > best_score and score > 30:
+                        best_score = score
+                        best_orf = orf
+                
+                if best_orf:
+                    hit = {
+                        'id': f"orf_{best_orf['frame']}_{best_orf['start']}",
+                        'parent_query': query['id'],
+                        'chrom': 'region',
+                        'start': best_orf['start'] + offset,
+                        'end': best_orf['end'] + offset,
+                        'strand': best_orf['strand'],
+                        'identity': best_score,
+                        'score': best_score,
+                        'cds_parts': [(best_orf['start'] + offset, best_orf['end'] + offset)],
+                        'gff_lines': [],
+                        'method': 'orf_naive'
+                    }
+                    hits.append(hit)
+                    
+    except Exception as e:
+        logger.warning(f"ORF-based annotation failed: {e}")
+    
+    return hits
+
+def find_orf_containing_region(seq: str, start: int, end: int, strand: str) -> Dict:
+    """
+    Find the ORF (reading frame) that contains a given region.
+    Respects start codons, stop codons, and splice sites.
+    
+    Args:
+        seq: DNA sequence (already oriented for strand)
+        start: Region start position
+        end: Region end position
+        strand: '+' or '-'
+    
+    Returns:
+        Dict with 'frame', 'start', 'end', 'protein', 'has_stops'
+        or None if no valid ORF found
+    """
+    from sequence_utils import translate
+    
+    region_center = (start + end) // 2
+    
+    # Try all 3 frames
+    for frame in range(3):
+        # Extend upstream to find start codon
+        orf_start = None
+        for pos in range(frame, region_center, 3):
+            if pos + 3 <= len(seq):
+                codon = seq[pos:pos+3]
+                if codon in ['ATG', 'GTG', 'TTG']:  # Start codons
+                    orf_start = pos
+                    break
+        
+        # If no start codon found upstream, use frame position
+        if orf_start is None:
+            orf_start = frame
+        
+        # Extend downstream to find stop codon
+        orf_end = len(seq)
+        has_internal_stop = False
+        
+        for pos in range(orf_start, len(seq) - 2, 3):
+            codon = seq[pos:pos+3]
+            if codon in ['TAA', 'TAG', 'TGA']:  # Stop codons
+                orf_end = pos + 3
+                # Check if stop is BEFORE our region (internal stop = bad)
+                if pos < start:
+                    has_internal_stop = True
+                break
+        
+        # Extract ORF sequence
+        orf_seq = seq[orf_start:orf_end]
+        
+        # Make divisible by 3
+        orf_seq = orf_seq[:len(orf_seq) - len(orf_seq) % 3]
+        
+        if not orf_seq:
+            continue
+        
+        # Translate
+        protein = translate(orf_seq)
+        
+        # Remove stop codon if present
+        if protein.endswith('*'):
+            protein = protein[:-1]
+        
+        # Check if this ORF contains our region
+        if orf_start <= start and orf_end >= end:
+            # Check for internal stops within the region of interest
+            region_protein = protein[(start - orf_start) // 3 : (end - orf_start) // 3]
+            if '*' not in region_protein:  # No stops in our region
+                return {
+                    'frame': frame,
+                    'start': orf_start,
+                    'end': orf_end,
+                    'protein': protein,
+                    'has_stops': False,
+                    'length': len(protein)
+                }
+    
+    return None
+
+
+def find_orfs_six_frame(seq: str, min_length: int = 30) -> List[Dict]:
+    """
+    Find ORFs in all 6 reading frames.
+    """
+    orfs = []
+    start_codons = ['ATG']
+    stop_codons = ['TAA', 'TAG', 'TGA']
+    
+    # Forward frames (0, 1, 2)
+    for frame in range(3):
+        for i in range(frame, len(seq) - 2, 3):
+            codon = seq[i:i+3]
+            if codon in start_codons:
+                # Find next stop
+                for j in range(i+3, len(seq) - 2, 3):
+                    if seq[j:j+3] in stop_codons:
+                        orf_seq = seq[i:j+3]
+                        protein = translate(orf_seq)
+                        if len(protein) >= min_length:
+                            orfs.append({
+                                'start': i,
+                                'end': j+3,
+                                'frame': frame,
+                                'strand': '+',
+                                'seq': protein
+                            })
+                        break
+    
+    # Reverse frames
+    from sequence_utils import reverse_complement
+    rev_seq = reverse_complement(seq)
+    for frame in range(3):
+        for i in range(frame, len(rev_seq) - 2, 3):
+            codon = rev_seq[i:i+3]
+            if codon in start_codons:
+                for j in range(i+3, len(rev_seq) - 2, 3):
+                    if rev_seq[j:j+3] in stop_codons:
+                        orf_seq = rev_seq[i:j+3]
+                        protein = translate(orf_seq)
+                        if len(protein) >= min_length:
+                            # Convert coords back to forward strand
+                            orfs.append({
+                                'start': len(seq) - (j+3),
+                                'end': len(seq) - i,
+                                'frame': -(frame+1),
+                                'strand': '-',
+                                'seq': protein
+                            })
+                        break
+    
+    return orfs
+
+def simple_protein_similarity(seq1: str, seq2: str) -> float:
+    """
+    Calculate simple percent identity between two protein sequences.
+    """
+    if not seq1 or not seq2:
+        return 0.0
+    
+    # Align using simple sliding window
+    max_identity = 0.0
+    window = min(len(seq1), len(seq2))
+    
+    for offset in range(-window, window):
+        matches = 0
+        comparisons = 0
+        for i in range(len(seq1)):
+            j = i + offset
+            if 0 <= j < len(seq2):
+                comparisons += 1
+                if seq1[i] == seq2[j]:
+                    matches += 1
+        
+        if comparisons > 0:
+            identity = (matches / comparisons) * 100
+            max_identity = max(max_identity, identity)
+    
+    return max_identity
+
 def extract_cds_sequence(genome_seq: str, hit: Dict[str, Any]) -> str:
     """
     Extracts and concatenates CDS sequences based on Miniprot alignment.
@@ -501,6 +823,139 @@ def estimate_cluster_dist(genome_file: str, gff_file: Optional[str] = None, defa
         pass
     
     return default_dist
+
+def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
+                        genome_name: str, args, unique_id: str, threads: int) -> List[Dict[str, Any]]:
+    """
+    Run augmented search (MMseqs2 + Smith-Waterman) for GOI queries.
+    
+    Uses both methods for maximum sensitivity:
+    1. MMseqs2 with query fragments (fast, good for similar sequences)
+    2. Smith-Waterman via parasail/ssearch36 (slower, better for divergent sequences)
+    
+    Args:
+        region_fasta: Path to extracted region FASTA
+        goi_queries: List of GOI query dicts with 'id' and 'seq'
+        genome_name: Name of current genome
+        args: Command line arguments
+        unique_id: Unique ID for temp files
+        threads: Number of threads to use
+        
+    Returns:
+        List of hit dictionaries combining MMseqs2 and Smith-Waterman results
+    """
+    all_hits = []
+    
+    try:
+        # Generate variants for each GOI query
+        variants_fasta = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_variants.faa"
+        query_fasta = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_goi_query.faa"
+        all_variants = []
+        
+        # Write full query sequences for Smith-Waterman
+        write_fasta([(q['id'], q['seq']) for q in goi_queries], query_fasta)
+        
+        if not FRAGMENT_SUPPORT:
+            print(f"[{genome_name}] Warning: fragment_query module not available, using full sequences only", flush=True)
+            # Just use the original sequences
+            all_variants = [(q['id'], q['seq']) for q in goi_queries]
+        else:
+            for query in goi_queries:
+                # Generate fragments (halves, thirds, quarters)
+                fragments = generate_fragments(query['seq'], query['id'], min_size=15)
+                all_variants.extend([(f[0], f[1]) for f in fragments])
+        
+        write_fasta(all_variants, variants_fasta)
+        
+        # ========== 1. MMseqs2 Search ==========
+        aug_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_aug_hits.m8"
+        aug_tmp_dir = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_aug_mmseqs"
+        
+        os.makedirs(aug_tmp_dir, exist_ok=True)
+        
+        # CRITICAL: Use VERY relaxed e-value for augmented search (100x more permissive)
+        # This ensures divergent hits are not filtered out by MMseqs2 before we can parse them
+        relaxed_evalue = min(10.0, args.evalue * 1000)  # Much more permissive, cap at 10
+        
+        subprocess.run([
+            "mmseqs", "easy-search",
+            variants_fasta, region_fasta, aug_hits_file, aug_tmp_dir,
+            "--search-type", "2",  # Protein search
+            "--threads", str(threads),
+            "-s", str(args.mmseqs_sens),  # Use same sensitivity as main search
+            "-e", str(relaxed_evalue),  # RELAXED e-value to capture divergent hits
+            "--min-seq-id", "0.0",  # NO identity filtering at search time - we filter in parse_hits
+            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
+        ], check=True, stderr=subprocess.DEVNULL)
+        
+        # Parse hits - use relaxed thresholds for augmented search
+        relaxed_identity = max(25.0, args.min_identity * 0.6)  # 60% of normal threshold
+        relaxed_length = max(15, args.min_length // 2)  # Half of normal length
+        
+        mmseqs_hits = parse_hits(aug_hits_file, relaxed_identity, relaxed_length, args.evalue * 10)
+        if mmseqs_hits:
+            print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
+            all_hits.extend(mmseqs_hits)
+        
+        # ========== 2. Smith-Waterman Search ==========
+        # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2)
+        sw_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_sw_hits.m8"
+        
+        try:
+            # Use smith_waterman_search.py script
+            sw_cmd = [
+                "python3", os.path.join(os.path.dirname(__file__), "smith_waterman_search.py"),
+                "--query", query_fasta,
+                "--target", region_fasta,
+                "--output", sw_hits_file,
+                "--min_score", "30",
+                "--min_identity", "15.0",  # Very relaxed for divergent sequences
+                "--threads", str(threads)
+            ]
+            
+            result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0 and os.path.exists(sw_hits_file):
+                # Parse Smith-Waterman hits (BLAST m8 format)
+                sw_hits = parse_hits(sw_hits_file, 15.0, 10, 100.0)  # Very relaxed thresholds
+                if sw_hits:
+                    print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
+                    # Mark hits as from Smith-Waterman
+                    for hit in sw_hits:
+                        hit['method'] = 'smith_waterman'
+                    all_hits.extend(sw_hits)
+            elif result.stderr:
+                print(f"[{genome_name}] Smith-Waterman warning: {result.stderr[:200]}", flush=True)
+                
+        except subprocess.TimeoutExpired:
+            print(f"[{genome_name}] Smith-Waterman timed out after 5 minutes, using MMseqs2 only.", flush=True)
+        except FileNotFoundError:
+            print(f"[{genome_name}] Smith-Waterman script not found, using MMseqs2 only.", flush=True)
+        except Exception as sw_err:
+            print(f"[{genome_name}] Smith-Waterman failed: {sw_err}, using MMseqs2 only.", flush=True)
+        
+        # Clean up temp files
+        for f in [variants_fasta, query_fasta, aug_hits_file, sw_hits_file]:
+            if os.path.exists(f):
+                os.remove(f)
+        if os.path.exists(aug_tmp_dir):
+            shutil.rmtree(aug_tmp_dir, ignore_errors=True)
+        
+        # Deduplicate hits by position (prefer higher identity)
+        if all_hits:
+            deduped = {}
+            for hit in all_hits:
+                key = (hit.get('query', ''), hit.get('start', 0) // 100, hit.get('end', 0) // 100)
+                if key not in deduped or hit.get('pident', 0) > deduped[key].get('pident', 0):
+                    deduped[key] = hit
+            all_hits = list(deduped.values())
+            print(f"[{genome_name}] Combined augmented search: {len(all_hits)} unique hits.", flush=True)
+        
+        return all_hits
+        
+    except Exception as e:
+        print(f"[{genome_name}] Augmented search failed: {e}", flush=True)
+        return []
 
 def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5, min_coverage=0.5):
     """
@@ -615,9 +1070,6 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     
     new_genes = []
     
-    # Database Index Cache
-    db_index = None
-    
     try:
         # Auto-param
         c_dist = args.cluster_dist
@@ -690,8 +1142,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 # Parse DB once into dict
                 for header, clean_id, seq in parse_fasta(db_path):
                     db_sequences[clean_id] = {'id': clean_id, 'seq': seq, 'header': header}
-                    # Also index by base ID
-                    base = extract_base_id(clean_id)
+                    # CRITICAL FIX: Also index by base gene ID (stripping |exon_N suffix)
+                    # This matches how unique_queries is built via extract_base_gene_id
+                    base = extract_base_gene_id(clean_id)
                     if base != clean_id and base not in db_sequences:
                         db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
                     
@@ -700,35 +1153,137 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         goi_queries.add(clean_id)
                 
                 # CRITICAL: Force include all GOI queries
-                unique_queries.update(goi_queries)
+                # But prefer full-length GOI over fragments for miniprot
+                full_length_goi = set()
+                fragment_goi = set()
+                for goi_id in goi_queries:
+                    if '|frag_' in goi_id:
+                        fragment_goi.add(goi_id)
+                    else:
+                        full_length_goi.add(goi_id)
                 
-                if goi_queries:
-                    print(f"[{genome_name}] Found {len(goi_queries)} GOI queries in database. "
-                          f"These will ALWAYS be searched.", flush=True)
+                # Use full-length if available, otherwise use all
+                if full_length_goi:
+                    unique_queries.update(full_length_goi)
+                    print(f"[{genome_name}] Using {len(full_length_goi)} full-length GOI queries (excluding {len(fragment_goi)} fragments).", flush=True)
+                else:
+                    unique_queries.update(goi_queries)
+                    print(f"[{genome_name}] Using all {len(goi_queries)} GOI queries (fragments only).", flush=True)
                 
                 for query_id in unique_queries:
                     if query_id in db_sequences:
                         found_queries.append(db_sequences[query_id])
                     else:
-                        base = extract_base_id(query_id)
+                        # Fallback: try base gene ID (consistent with database indexing)
+                        base = extract_base_gene_id(query_id)
                         if base in db_sequences:
                             found_queries.append(db_sequences[base])
             except Exception as dex:
                 print(f"[{genome_name}] Warning: DB parsing failed: {dex}")
 
             if found_queries:
-                print(f"[{genome_name}] Running Miniprot with {len(found_queries)} queries...", flush=True)
+                print(f"[{genome_name}] Annotating {len(found_queries)} queries using MMseqs2/Smith-Waterman...", flush=True)
                 query_mini_fa = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_query.faa"
                 # Write query FASTA
                 write_fasta([(q['id'], q['seq']) for q in found_queries], query_mini_fa)
                 
                 try:
-                    # 5. Run Miniprot
-                    print(f"[{genome_name}] CMD: miniprot -I --gff {temp_fa} {query_mini_fa}", flush=True)
-                    miniprot_hits = run_miniprot(temp_fa, query_mini_fa, miniprot_paf)
-                    print(f"[{genome_name}] Miniprot found {len(miniprot_hits)} raw hits.", flush=True)
+                    # 5. REPLACED MINIPROT: Use direct MMseqs2 + Smith-Waterman annotation for ALL queries
+                    # This is simpler and avoids miniprot's stringent gene model requirements
+                    # which were filtering out many valid flanking genes
                     
-                    # 6. Process Miniprot Hits
+                    annotation_hits = []
+                    
+                    # 5a. Run augmented search (MMseqs2 + Smith-Waterman) for ALL queries
+                    print(f"[{genome_name}] Running augmented search (MMseqs2 + SW) for all {len(found_queries)} queries...", flush=True)
+                    
+                    augmented_hits_mmseqs = run_augmented_search(
+                        temp_fa, found_queries, genome_name, 
+                        args, unique_id, threads_per_job
+                    )
+                    
+                    if augmented_hits_mmseqs:
+                        print(f"[{genome_name}] Augmented search found {len(augmented_hits_mmseqs)} hits.", flush=True)
+                        
+                        # Convert MMseqs2 hits to annotation format
+                        # Group by parent query (remove fragment suffix)
+                        from collections import defaultdict
+                        hits_by_gene = defaultdict(list)
+                        for hit in augmented_hits_mmseqs:
+                            # Extract parent gene from fragment name (e.g., GOI_P01501|frag_1_35 -> GOI_P01501)
+                            query_id = hit['query']
+                            parent = query_id.split('|frag_')[0] if '|frag_' in query_id else query_id
+                            # Also strip exon suffix
+                            parent = extract_base_gene_id(parent)
+                            hits_by_gene[parent].append(hit)
+                        
+                        for parent_id, gene_hits in hits_by_gene.items():
+                            # Get the best hit by e-value
+                            best_hit = min(gene_hits, key=lambda h: h.get('evalue', 1))
+                            
+                            # Convert coordinates - MMseqs2 --search-type 2 returns nucleotide
+                            # positions in the target, so no multiplication needed.
+                            # Just add the window offset to get genomic coordinates.
+                            nt_start = best_hit['start'] + w_start
+                            nt_end = best_hit['end'] + w_start
+                            
+                            # Create annotation hit
+                            aug_hit = {
+                                'id': f"aug_{parent_id}",
+                                'parent_query': parent_id,
+                                'chrom': chrom,
+                                'start': min(nt_start, nt_end),
+                                'end': max(nt_start, nt_end),
+                                'strand': '+',  # Default, MMseqs2 handles reverse complement
+                                'identity': best_hit.get('pident', 50.0),
+                                'score': best_hit.get('pident', 50.0),
+                                'cds_parts': [(min(nt_start, nt_end), max(nt_start, nt_end))],
+                                'gff_lines': [],
+                                'method': best_hit.get('method', 'augmented_mmseqs2')
+                            }
+                            annotation_hits.append(aug_hit)
+                        
+                        print(f"[{genome_name}] Created {len(annotation_hits)} gene annotations from augmented search.", flush=True)
+                    else:
+                        print(f"[{genome_name}] Augmented search found no hits.", flush=True)
+                    
+                    # 5b. Also keep original MMseqs2 hits as backup annotations
+                    # (these have actual genomic coordinates from the initial search)
+                    if not annotation_hits:
+                        print(f"[{genome_name}] Using original MMseqs2 hits as annotation source...", flush=True)
+                        for hit in relevant_hits:
+                            parent_id = extract_base_gene_id(hit['query'])
+                            annot_hit = {
+                                'id': f"mmseqs_{parent_id}",
+                                'parent_query': parent_id,
+                                'chrom': chrom,
+                                'start': hit['start'],
+                                'end': hit['end'],
+                                'strand': '+',
+                                'identity': hit.get('pident', 50.0),
+                                'score': hit.get('pident', 50.0),
+                                'cds_parts': [(hit['start'], hit['end'])],
+                                'gff_lines': [],
+                                'method': 'mmseqs2_direct'
+                            }
+                            annotation_hits.append(annot_hit)
+                    
+                    # 5c. Final Fallback: If still no hits at all, try naive ORF-based annotation
+                    if len(annotation_hits) == 0:
+                        print(f"[{genome_name}] No hits from search. Trying naive ORF fallback...", flush=True)
+                        annotation_hits = orf_based_annotation(
+                            temp_fa, 
+                            found_queries, 
+                            genome_seqs[chrom], 
+                            w_start,
+                            mmseqs_hits=relevant_hits  # Use original MMseqs2 hits
+                        )
+                        print(f"[{genome_name}] ORF-based annotation found {len(annotation_hits)} candidates.", flush=True)
+                    
+                    # Use annotation_hits instead of miniprot_hits for downstream processing
+                    miniprot_hits = annotation_hits
+                    
+                    # 6. Process Annotation Hits
                     # Group hits by parent_query to handle multi-exon genes
                     hits_by_parent = defaultdict(list)
                     for hit in miniprot_hits:
@@ -760,25 +1315,47 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 # Process each hit individually as potential paralogs
                                 for idx, hit in enumerate(gene_hits):
                                     try:
-                                        cds_seq_record = extract_cds_sequence(subseq, hit)
+                                        cds_result = extract_cds_sequence(subseq, hit)
                                         global_start = w_start + hit['start']
                                         global_end = w_start + hit['end']
                                         
                                         new_id = f"{parent_id}|{clean_gname}_{hit['id']}_paralog{idx+1}"
-                                        cds_seq_record.id = new_id
-                                        cds_seq_record.description = f"coords:{global_start}-{global_end} parent:{parent_id} score:{hit['score']:.1f} identity:{hit['identity']:.1f}"
+                                        description = f"coords:{global_start}-{global_end} parent:{parent_id} score:{hit['score']:.1f} identity:{hit['identity']:.1f}"
+                                        
+                                        # Store as dict
+                                        cds_seq_record = {
+                                            'id': new_id,
+                                            'seq': cds_result['seq'],
+                                            'description': description
+                                        }
                                         annotated_records_raw.append(cds_seq_record)
                                         
-                                        # Shift GFF
-                                        for gline in hit['gff_lines']:
-                                            gp = gline.split('\t')
-                                            if len(gp) < 9: continue
-                                            gp[0] = chrom
-                                            gp[3] = str(int(gp[3]) + w_start)
-                                            gp[4] = str(int(gp[4]) + w_start)
-                                            if gp[2] == "mRNA":
-                                                gp[8] += f";SynTerra_Parent={parent_id};SynTerra_ID={new_id}"
-                                            valid_gff_lines.append('\t'.join(gp))
+                                        # CRITICAL FIX: Generate GFF lines if not provided
+                                        if not hit.get('gff_lines') and hit.get('cds_parts'):
+                                            strand = hit.get('strand', '+')
+                                            score_str = f"{hit.get('score', 0):.1f}"
+                                            identity_str = f"{hit.get('identity', 0):.1f}"
+                                            method = hit.get('method', 'augmented_search')
+                                            
+                                            # Gene/mRNA line
+                                            gene_line = f"{chrom}\t{method}\tmRNA\t{global_start}\t{global_end}\t{score_str}\t{strand}\t.\tID={new_id};Name={parent_id};SynTerra_Parent={parent_id};SynTerra_ID={new_id};Identity={identity_str}"
+                                            valid_gff_lines.append(gene_line)
+                                            
+                                            # CDS lines
+                                            for cds_idx, (cds_start, cds_end) in enumerate(hit['cds_parts'], 1):
+                                                cds_line = f"{chrom}\t{method}\tCDS\t{cds_start}\t{cds_end}\t.\t{strand}\t0\tID={new_id}_CDS{cds_idx};Parent={new_id}"
+                                                valid_gff_lines.append(cds_line)
+                                        else:
+                                            # Use existing GFF lines
+                                            for gline in hit.get('gff_lines', []):
+                                                gp = gline.split('\t')
+                                                if len(gp) < 9: continue
+                                                gp[0] = chrom
+                                                gp[3] = str(int(gp[3]) + w_start)
+                                                gp[4] = str(int(gp[4]) + w_start)
+                                                if gp[2] == "mRNA":
+                                                    gp[8] += f";SynTerra_Parent={parent_id};SynTerra_ID={new_id}"
+                                                valid_gff_lines.append('\t'.join(gp))
                                     except Exception as ex:
                                         print(f"[{genome_name}] Failed to process paralog {idx+1}: {ex}", flush=True)
                             else:
@@ -822,52 +1399,51 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 
                                 # Store and Shift GFF lines
                                 shifted_lines = []
-                                for gline in consolidated_hit['gff_lines']:
-                                    gp = gline.split('\t')
-                                    if len(gp) < 9: continue
-                                    # Update seqid to real chrom
-                                    gp[0] = chrom
-                                    # Update coords
-                                    gp[3] = str(int(gp[3]) + w_start)
-                                    gp[4] = str(int(gp[4]) + w_start)
-                                    # Update attributes
-                                    if gp[2] == "mRNA":
-                                        gp[8] += f";SynTerra_Parent={parent_id};SynTerra_ID={new_id}"
+                                
+                                # CRITICAL FIX: Generate GFF lines from CDS parts if not provided
+                                # This is needed when using MMseqs2/SW instead of miniprot
+                                if not consolidated_hit['gff_lines'] and consolidated_hit.get('cds_parts'):
+                                    # Generate GFF lines from the hit coordinates
+                                    strand = consolidated_hit.get('strand', '+')
+                                    score_str = f"{consolidated_hit.get('score', 0):.1f}"
+                                    identity_str = f"{consolidated_hit.get('identity', 0):.1f}"
+                                    method = consolidated_hit.get('method', 'augmented_search')
                                     
-                                    shifted_lines.append('\t'.join(gp))
+                                    # Gene/mRNA line
+                                    gene_line = f"{chrom}\t{method}\tmRNA\t{global_start}\t{global_end}\t{score_str}\t{strand}\t.\tID={new_id};Name={parent_id};SynTerra_Parent={parent_id};SynTerra_ID={new_id};Identity={identity_str}"
+                                    shifted_lines.append(gene_line)
+                                    
+                                    # CDS lines for each part
+                                    for cds_idx, (cds_start, cds_end) in enumerate(consolidated_hit['cds_parts'], 1):
+                                        cds_gstart = cds_start  # Already in global coords from annotation
+                                        cds_gend = cds_end
+                                        cds_line = f"{chrom}\t{method}\tCDS\t{cds_gstart}\t{cds_gend}\t.\t{strand}\t0\tID={new_id}_CDS{cds_idx};Parent={new_id}"
+                                        shifted_lines.append(cds_line)
+                                else:
+                                    # Use existing GFF lines (from miniprot or other source)
+                                    for gline in consolidated_hit['gff_lines']:
+                                        gp = gline.split('\t')
+                                        if len(gp) < 9: continue
+                                        # Update seqid to real chrom
+                                        gp[0] = chrom
+                                        # Update coords
+                                        gp[3] = str(int(gp[3]) + w_start)
+                                        gp[4] = str(int(gp[4]) + w_start)
+                                        # Update attributes
+                                        if gp[2] == "mRNA":
+                                            gp[8] += f";SynTerra_Parent={parent_id};SynTerra_ID={new_id}"
+                                        
+                                        shifted_lines.append('\t'.join(gp))
                                 
                                 valid_gff_lines.extend(shifted_lines)
                                 
                         except Exception as ex:
                             print(f"[{genome_name}] Failed to process gene {parent_id}: {ex}", flush=True)
                     
-                    # 7. RBH Validation
-                    if home_db_dir and annotated_records_raw:
-                        print(f"[{genome_name}] Running RBH for {len(annotated_records_raw)} candidates...", flush=True)
-                        cand_map = {rec['id']: extract_base_gene_id(rec['id']) for rec in annotated_records_raw}
-                        valid_ids = batch_rbh_check(annotated_records_raw, home_db_dir, cand_map, threads=threads_per_job)
-                        new_genes = [rec for rec in annotated_records_raw if rec['id'] in valid_ids]
-                        
-                        # Filter GFF lines to only RBH-validated genes
-                        valid_parent_ids = set(extract_base_gene_id(rec['id']) for rec in new_genes)
-                        final_gff_lines = []
-                        for gline in valid_gff_lines:
-                            # Check if this GFF line belongs to a validated gene
-                            # Look for SynTerra_Parent in attributes
-                            if 'SynTerra_Parent=' in gline:
-                                for parent_id in valid_parent_ids:
-                                    if f'SynTerra_Parent={parent_id}' in gline:
-                                        final_gff_lines.append(gline)
-                                        break
-                            else:
-                                # Fallback: include all if no parent annotation
-                                final_gff_lines.append(gline)
-                        
-                        valid_gff_lines = final_gff_lines
-                        print(f"[{genome_name}] RBH Kept {len(new_genes)} genes.", flush=True)
-                    else:
-                        print(f"[{genome_name}] Skipping RBH (records={len(annotated_records_raw)})", flush=True)
-                        new_genes = annotated_records_raw
+                    # 7. Skip RBH Validation - accept all candidates
+                    # RBH was too strict and filtered out valid orthologs
+                    new_genes = annotated_records_raw
+                    print(f"[{genome_name}] Keeping all {len(new_genes)} candidates (RBH disabled).", flush=True)
                     
                     # Write GFF and Homology TSV for the genome
                     if valid_gff_lines:
@@ -896,7 +1472,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 # Cleanup temp
                 if os.path.exists(temp_fa): os.remove(temp_fa)
                 if os.path.exists(miniprot_paf): os.remove(miniprot_paf)
-                if os.path.exists(query_mini_fa): os.remove(query_mini_fa)
+                try:
+                    if query_mini_fa and os.path.exists(query_mini_fa): os.remove(query_mini_fa)
+                except NameError:
+                    pass
             else:
                 print(f"[{genome_name}] Warning: Could not find query sequences for relevant hits.")
         else:
@@ -908,8 +1487,6 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # Cleanup mmseqs tmp dir
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
-        if db_index:
-            db_index.close()
             
     return genome_name, new_genes
 

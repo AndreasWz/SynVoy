@@ -109,36 +109,49 @@ ATGGCTAGCTAGCTAGCTAGCTAG...
 
 ## Running the Pipeline
 
-### Easy Mode (Auto-fetch genomes)
+### Easy Mode (Recommended for beginners)
 
 **Best for**: First-time users, exploring a gene family, quick analyses
 
+**No files needed!** Just provide the species name and a query ID:
+
 ```bash
-# Automatically download related genomes from NCBI
+# Minimal command - everything fetched automatically
 nextflow run main.nf \
-  --gene gene.fasta \
-  --home_genome home.fna \
-  --home_gff home.gff \
-  --mode easy \
-  --easy_species "Apis mellifera" \
-  --easy_max_genomes 10 \
+  --query_id P01501 \
+  --home_species "Apis mellifera" \
+  --outdir results
+
+# With more genomes
+nextflow run main.nf \
+  --query_id P01501 \
+  --home_species "Apis mellifera" \
+  --max_genomes 10 \
   --outdir results
 ```
 
 **How it works**:
-1. Searches NCBI for assemblies related to your species
-2. Downloads top N related genomes (default: 10)
-3. Runs synteny analysis on downloaded genomes
-4. Cleans up temporary files
+1. Fetches query sequence from UniProt (using `--query_id`)
+2. Downloads reference genome for your species from NCBI
+3. Downloads related genomes from the same genus (excluding your species)
+4. Runs full synteny analysis
+5. Generates report and plots
+
+**Parameters**:
+| Parameter | Required | Description | Example |
+|-----------|----------|-------------|---------|
+| `--query_id` | Yes* | UniProt ID for query gene | `P01501` |
+| `--gene` | Yes* | OR provide sequence file | `query.fasta` |
+| `--home_species` | Yes | Species name (genus will be searched) | `"Apis mellifera"` |
+| `--max_genomes` | No | Related genomes to download (default: 10) | `5` |
+| `--outdir` | No | Output directory (default: results) | `my_results` |
+
+*Either `--query_id` or `--gene` is required
 
 **Requirements**:
+- NCBI datasets CLI: `conda install -c conda-forge ncbi-datasets-cli`
 - NCBI E-utilities: `conda install -c bioconda entrez-direct`
 - Internet connection
-
-**Tips**:
-- Use scientific name in quotes: `"Drosophila melanogaster"`
-- Start with 5-10 genomes to test
-- Downloaded genomes saved in `results/downloaded_genomes/`
 
 ### Pro Mode (Your own genomes)
 
@@ -161,6 +174,7 @@ nextflow run main.nf \
   --gene gene.fasta \
   --home_genome home.fna \
   --target_genomes "targets/*.fna" \
+  --mode pro \
   --n_flanking_genes 15 \
   --min_synteny_score 0.5 \
   --mmseqs_sensitivity 8.5 \
@@ -181,24 +195,36 @@ nextflow run main.nf -profile test
 ```bash
 # If pipeline failed or was interrupted
 nextflow run main.nf -resume \
-  --gene gene.fasta \
-  --home_genome home.fna \
-  --target_genomes "targets/*.fna"
+  --query_id P01501 \
+  --home_species "Apis mellifera"
 ```
 
 ## Understanding Parameters
 
-### Core Parameters
+### Mode Selection
 
-| Parameter | Default | Description | When to Change |
-|-----------|---------|-------------|----------------|
-| `--gene` | Required | Query gene sequence | - |
-| `--home_genome` | Required | Home genome FASTA | - |
-| `--home_gff` | Optional | Home genome annotation | Provide if available |
-| `--mode` | 'pro' | Pipeline mode ('easy' or 'pro') | Use 'easy' for auto-fetch |
-| `--easy_species` | Only for easy mode | Species name for NCBI | Required in easy mode |
-| `--easy_max_genomes` | 10 | Max genomes to fetch | Adjust based on needs |
-| `--target_genomes` | Only for pro mode | Target genome files | Required in pro mode |
+| Mode | Use Case | Required Parameters |
+|------|----------|---------------------|
+| `easy` (default) | Auto-fetch from NCBI | `--query_id` or `--gene`, `--home_species` |
+| `pro` | Custom genome files | `--gene`, `--home_genome`, `--target_genomes` |
+
+### Easy Mode Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--query_id` | - | UniProt/NCBI ID for query (e.g., P01501) |
+| `--gene` | - | OR: Path to query sequence file |
+| `--home_species` | Required | Species name (e.g., "Apis mellifera") |
+| `--max_genomes` | 10 | Number of related genomes to download |
+
+### Pro Mode Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--gene` | Required | Path to query gene FASTA |
+| `--home_genome` | Required | Path to home genome FASTA |
+| `--home_gff` | Optional | Path to home genome GFF annotation |
+| `--target_genomes` | Required | Glob pattern for targets (e.g., "genomes/*.fna") |
 
 ### Synteny Parameters
 

@@ -112,22 +112,6 @@ def parse_gff_for_genes(gff_file):
 
 # load_genome now imported from sequence_utils
 
-def run_prediction(genome_file, chrom, start, end, output_faa):
-    """
-    Run Prodigal (or Augustus) on the specific region.
-    1. Extract region to temp fasta.
-    2. Run predictor.
-    3. Return list of genes/proteins.
-    """
-    print(f"Running gene prediction on {chrom}:{start}-{end}...")
-    
-    # 1. Extract sequence
-    # Use samtools faidx if available, or just python
-    # We loaded genome in memory anyway for main script, but here we might want just a chunk.
-    # Let's simple use the in-memory genome if mapped, or re-read.
-    # The main function loads genome, so pass seq record?
-    pass # logic moved to main
-    
 def main():
     parser = argparse.ArgumentParser(description="Extract flanking genes")
     parser.add_argument("--bed", required=True, help="Input BED file with gene location")

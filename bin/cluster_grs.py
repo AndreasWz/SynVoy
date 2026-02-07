@@ -3,7 +3,6 @@
 import argparse
 import sys
 import csv
-import random
 import os
 from collections import defaultdict
 

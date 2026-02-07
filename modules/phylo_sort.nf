@@ -23,7 +23,7 @@ process PHYLO_SORT {
             --taxdb \$TAXDB \\
             --output sorted_genomes.txt || {
                 echo "Phylogenetic sorting failed, falling back to alphabetical"
-                phylo_sort.py --home $home_genome --targets_dir $genomes_dir --taxdb \$TAXDB --output sorted_genomes.txt
+                phylo_sort.py --home $home_genome --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
             }
     else
         echo "No TaxDB found (set TAXDB environment variable)"

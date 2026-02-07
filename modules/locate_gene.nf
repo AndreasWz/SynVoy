@@ -14,10 +14,9 @@ process LOCATE_GENE {
     script:
     """
     # 1. MMseqs2 Search
-    mmseqs createdb $home_genome genome_db
-    
-    # Check query type (Protein vs DNA)
-    is_prot=\$(grep -v "^>" $gene | head -n 1 | grep -q "[EFILPQ]" && echo "true" || echo "false")
+    # Check query type (Protein vs DNA) - look for amino acid-specific chars
+    # Exclude E (valid IUPAC nucleotide) to avoid false positives
+    is_prot=\$(grep -v "^>" $gene | head -c 200 | grep -q "[DFHIKLMPQRSVWY]" && echo "true" || echo "false")
     
     if [ "\$is_prot" = "true" ]; then
         echo "Detected Protein Query"

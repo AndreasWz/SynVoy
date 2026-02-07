@@ -22,7 +22,7 @@ def check_rbh(candidate_fasta, home_db, query_id):
     cmd = [
         "mmseqs", "easy-search", 
         candidate_fasta, home_db, tmp_out, "tmp_rbh",
-        "--search-type", "2", # try auto? usually 2 (prot) or 3 (nuc)
+        "--search-type", "1", # protein vs protein
         "--format-output", "query,target,pident,evalue,bits",
         "-e", "1e-3",
         "--max-seqs", "1" # We only care about the top hit

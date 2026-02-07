@@ -47,12 +47,6 @@ def main():
         fallback_sort(args)
         return
 
-    # If NCBITaxa is not available, fallback immediately
-    if NCBITaxa is None:
-        print("ETE3 not installed. Falling back to alphabetical sorting.")
-        fallback_sort(args)
-        return
-
     # 1. Initialize NCBITaxa
     # ... (rest of code)
     # ETE3 uses a sqlite database. If args.taxdb serves a directory with dump files, 
@@ -128,10 +122,6 @@ def main():
             continue
             
         try:
-            # ... (distance calc)
-            tree = ncbi.get_topology([home_taxid, tid])
-            dist = 0 # Placeholder if simple method used above
-            
             # Simple lineage overlap measure:
             target_lineage = ncbi.get_lineage(tid)
             shared = 0
