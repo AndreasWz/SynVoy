@@ -608,43 +608,116 @@ def extract_exons_from_gff_match(match, genome_file):
 # HIT-BASED EXON ANNOTATION (Scenario A - No GFF)
 # =============================================================================
 
+def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
+                                  search_missing=True):
+    """
+    Core exon annotation from pre-parsed hit dicts.
+
+    Reusable entry point for both home-genome (annotate_goi_exons.py) and
+    target-genome (iterative_search_runner.py) annotation.
+
+    Each hit dict should have at minimum:
+        qstart, qend:  query protein positions (1-based)
+        gstart, gend:  genomic positions within chrom_seq (0-based)
+        evalue:        e-value
+        pident:        percent identity
+    Optional hit fields:
+        alnlen, strand, chrom, bitscore
+
+    Args:
+        hits:           list of hit dicts
+        query_seq:      full query protein sequence
+        chrom_seq:      DNA sequence of the chromosome/region
+        chrom_name:     chromosome/region name (for output IDs)
+        search_missing: if True, run tblastn to search for missing exons
+
+    Returns:
+        (annotated_exons, full_protein) where annotated_exons is a list of
+        exon dicts and full_protein is the original query sequence
+    """
+    if not hits or not query_seq or not chrom_seq:
+        return [], query_seq or ''
+
+    # Sort by e-value (best first)
+    hits = sorted(hits, key=lambda h: h.get('evalue', 999))
+
+    # Deduplicate overlapping hits
+    hits = _deduplicate_hits(hits)
+
+    if not hits:
+        return [], query_seq
+
+    print(f"[Exon Annotate] Working with {len(hits)} unique hits")
+
+    query_len = len(query_seq)
+
+    # Determine strand consensus
+    strand_votes = {'+': 0, '-': 0}
+    for h in hits:
+        strand_votes[h.get('strand', '+')] += 1
+    consensus_strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
+
+    # Sort by query position (tells us exon order)
+    hits.sort(key=lambda h: h.get('qstart', 0))
+
+    # Annotate each hit as a candidate exon
+    annotated_exons = []
+    for i, hit in enumerate(hits, start=1):
+        exon = _annotate_single_exon(
+            hit, chrom_seq, query_seq, consensus_strand,
+            i, len(hits), chrom_name
+        )
+        if exon:
+            annotated_exons.append(exon)
+
+    if not annotated_exons:
+        return [], query_seq
+
+    # Check query coverage
+    covered = [False] * query_len
+    for exon in annotated_exons:
+        for j in range(exon['qstart'] - 1, min(exon['qend'], query_len)):
+            covered[j] = True
+
+    coverage = sum(covered) / query_len * 100 if query_len > 0 else 0
+    print(f"[Exon Annotate] Query coverage: {coverage:.1f}%")
+
+    # Search for missing exons if requested
+    if search_missing:
+        missing_regions = _find_gaps(covered, min_gap_size=10)
+        if missing_regions:
+            print(f"[Exon Annotate] {len(missing_regions)} gap(s), searching nearby...")
+            new_exons = _search_missing_exons(
+                query_seq, missing_regions, annotated_exons,
+                None, chrom_name, chrom_seq, consensus_strand
+            )
+            annotated_exons.extend(new_exons)
+            annotated_exons.sort(key=lambda e: e.get('qstart', 0))
+
+    return annotated_exons, query_seq
+
+
 def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hits_file):
     """
-    Use tblastn/MMseqs2 hits to annotate individual exons of the GOI.
+    Use tblastn/MMseqs2 hit files to annotate individual exons of the GOI.
 
-    Each protein→DNA hit likely corresponds to one exon. We:
-    1. Parse hits to get query coverage (qstart/qend) and genomic position
-    2. For each hit, examine splice sites, start/stop codons
-    3. Check which parts of the GOI are covered
-    4. Search nearby for missing parts
-    5. Return annotated exon sequences
+    Parses format-6 hit files, picks the best chromosome, then delegates
+    to annotate_exons_from_hit_list() for the core annotation logic.
 
     Returns:
         list of exon dicts, full_protein string
     """
     print("[Hit Annotate] Annotating exons from protein→DNA hits...")
 
-    # Parse all raw hits (format 6: query target pident alnlen ... qstart qend tstart tend evalue bits)
     all_hits = _parse_format6_hits(blast_hits_file, mmseqs_hits_file)
-
     if not all_hits:
         print("[Hit Annotate] No hits found!")
         return [], query_seq
 
-    # Sort by e-value (best first)
-    all_hits.sort(key=lambda h: h['evalue'])
-
-    # Deduplicate overlapping hits, keeping best e-value
-    all_hits = _deduplicate_hits(all_hits)
-
-    print(f"[Hit Annotate] Working with {len(all_hits)} unique hits")
-
     # Load genome
     genome_seqs = load_genome(genome_file)
 
-    query_len = len(query_seq)
-
-    # Group hits by chromosome (most hits should be on same chrom)
+    # Group hits by chromosome
     hits_by_chrom = {}
     for h in all_hits:
         chrom = h['chrom']
@@ -657,59 +730,17 @@ def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hit
                      key=lambda c: (len(hits_by_chrom[c]),
                                     -min(h['evalue'] for h in hits_by_chrom[c])))
 
-    chrom_hits = hits_by_chrom[best_chrom]
     chrom_seq = genome_seqs.get(best_chrom)
     if not chrom_seq:
         print(f"[Hit Annotate] Chromosome {best_chrom} not found!")
         return [], query_seq
 
-    print(f"[Hit Annotate] Best chromosome: {best_chrom} with {len(chrom_hits)} hits")
+    print(f"[Hit Annotate] Best chromosome: {best_chrom} with {len(hits_by_chrom[best_chrom])} hits")
 
-    # Determine strand consensus
-    strand_votes = {'+': 0, '-': 0}
-    for h in chrom_hits:
-        strand_votes[h['strand']] += 1
-    consensus_strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
-
-    # Sort hits by query position (tells us exon order)
-    chrom_hits.sort(key=lambda h: h['qstart'])
-
-    # Each hit = one candidate exon
-    annotated_exons = []
-    for i, hit in enumerate(chrom_hits, start=1):
-        exon = _annotate_single_exon(
-            hit, chrom_seq, query_seq, consensus_strand, i, len(chrom_hits), best_chrom
-        )
-        if exon:
-            annotated_exons.append(exon)
-
-    # Check query coverage
-    covered = [False] * query_len
-    for exon in annotated_exons:
-        for j in range(exon['qstart'] - 1, min(exon['qend'], query_len)):
-            covered[j] = True
-
-    coverage = sum(covered) / query_len * 100
-    print(f"[Hit Annotate] Query coverage: {coverage:.1f}%")
-
-    # Find missing regions
-    missing_regions = _find_gaps(covered, min_gap_size=10)
-
-    if missing_regions:
-        print(f"[Hit Annotate] {len(missing_regions)} gap(s) in coverage, searching nearby...")
-
-        # Search for missing parts near existing exons
-        new_exons = _search_missing_exons(
-            query_seq, missing_regions, annotated_exons,
-            genome_file, best_chrom, chrom_seq, consensus_strand
-        )
-        annotated_exons.extend(new_exons)
-        annotated_exons.sort(key=lambda e: e['qstart'])
-
-    # Build full protein from exon concatenation
-    full_protein = query_seq  # Use original query as the full protein
-
-    return annotated_exons, full_protein
+    return annotate_exons_from_hit_list(
+        hits_by_chrom[best_chrom], query_seq, chrom_seq, best_chrom,
+        search_missing=True
+    )
 
 
 def _parse_format6_hits(blast_file, mmseqs_file):
