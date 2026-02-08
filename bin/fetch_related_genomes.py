@@ -274,6 +274,8 @@ def main():
                        help="Output directory for genomes (default: easy_mode_genomes)")
     parser.add_argument("--list-only", action="store_true",
                        help="Only list available genomes, don't download")
+    parser.add_argument("--target-species", dest="target_species", default=None,
+                       help="Comma-separated list of species names to fetch (bypasses automatic search)")
     
     args = parser.parse_args()
     
@@ -283,6 +285,83 @@ def main():
     except:
         print("ERROR: NCBI E-utilities (esearch) not found!", file=sys.stderr)
         sys.exit(1)
+    
+    # --- TARGET SPECIES MODE ---
+    # If user provided specific species names, fetch those directly
+    if args.target_species:
+        species_list = [s.strip() for s in args.target_species.split(',') if s.strip()]
+        print(f"Target species mode: fetching {len(species_list)} specified species")
+        
+        assemblies = []
+        for sp_name in species_list:
+            print(f"\nLooking up '{sp_name}'...")
+            sp_taxid = get_taxid_from_name(sp_name)
+            if not sp_taxid:
+                print(f"  WARNING: Could not find taxonomy ID for '{sp_name}', skipping")
+                continue
+            
+            # Search for assemblies of this specific species
+            sp_assemblies = get_related_species(sp_taxid, max_genomes=3, refseq_only=False,
+                                                 exclude_species=args.home_species)
+            # Also try exact species name search
+            if not sp_assemblies:
+                sp_assemblies = get_related_species(sp_taxid, max_genomes=3, refseq_only=False,
+                                                     exclude_species=None)
+            
+            if sp_assemblies:
+                # Keep best assembly for this species
+                best = sp_assemblies[0]
+                assemblies.append(best)
+                print(f"  Found: {best['accession']} ({best['species']}, {best['category']})")
+            else:
+                print(f"  WARNING: No assemblies found for '{sp_name}'")
+        
+        if not assemblies:
+            print("ERROR: No assemblies found for any of the specified species", file=sys.stderr)
+            output_path = Path(args.outdir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            (output_path / "genomes_manifest.txt").touch()
+            (output_path / "species_mapping.tsv").touch()
+            sys.exit(0)
+        
+        print(f"\nFound {len(assemblies)} assemblies for specified species:")
+        for i, asm in enumerate(assemblies, 1):
+            print(f"  {i}. {asm['accession']} - {asm['species']}")
+        
+        if not args.list_only:
+            # Download genomes
+            print(f"\nDownloading genomes to {args.outdir}/...")
+            downloaded = []
+            for asm in assemblies:
+                fna_path = download_genome(asm['accession'], args.outdir)
+                if fna_path:
+                    downloaded.append(fna_path)
+            
+            print(f"\n{'='*60}")
+            print(f"✓ Successfully downloaded {len(downloaded)}/{len(assemblies)} genomes")
+            print(f"{'='*60}")
+            
+            # Ensure output directory exists
+            output_path = Path(args.outdir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Write manifest file
+            manifest_path = output_path / "genomes_manifest.txt"
+            with open(manifest_path, 'w') as f:
+                for path in downloaded:
+                    f.write(f"{path}\n")
+            print(f"\nGenome paths written to: {manifest_path}")
+            
+            # Write species mapping file
+            species_map_path = output_path / "species_mapping.tsv"
+            with open(species_map_path, 'w') as f:
+                for asm in assemblies:
+                    f.write(f"{asm['accession']}\t{asm['species']}\n")
+            print(f"Species mapping written to: {species_map_path}")
+        
+        return
+    
+    # --- AUTOMATIC TAXONOMIC SEARCH MODE ---
     
     # Extract genus from home species (first word)
     genus = args.home_species.split()[0]

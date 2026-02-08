@@ -20,11 +20,23 @@ process COMPUTE_TREE {
     python3 -c "
 import sys
 keep = False
+seen_names = {}
 for line in open('all_sequences.faa'):
     if line.startswith('>'):
-        # Keep only GOI sequences (marked with GOI_ prefix)
-        keep = 'GOI_' in line or 'GOI|' in line
-    if keep:
+        name = line.strip()[1:]
+        is_goi = 'GOI_' in name or 'GOI|' in name
+        if is_goi:
+            if name in seen_names:
+                seen_names[name] += 1
+                unique = name + '_dup' + str(seen_names[name])
+            else:
+                seen_names[name] = 1
+                unique = name
+            sys.stdout.write('>' + unique + chr(10))
+            keep = True
+        else:
+            keep = False
+    elif keep:
         sys.stdout.write(line)
 " > goi_only.faa
     

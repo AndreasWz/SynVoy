@@ -221,6 +221,59 @@ def main():
                 if os.path.exists(temp_fa): os.remove(temp_fa)
                 if os.path.exists(temp_out_faa): os.remove(temp_out_faa)
 
+        # FILTER: Keep only top 10% longest Prodigal predictions
+        # Prodigal on eukaryotic genomes greatly overpredicts tiny ORFs,
+        # drowning out real genes and inflating synteny denominators.
+        if extracted_genes:
+            original_count = len(extracted_genes)
+            extracted_genes.sort(key=lambda g: g['end'] - g['start'], reverse=True)
+            keep_count = max(args.n_flank * 2 + 1, int(len(extracted_genes) * 0.10))
+            kept_genes = set()
+            for g in extracted_genes[:keep_count]:
+                kept_genes.add((g['chrom'], g['start'], g['end']))
+            # CRITICAL: Always re-inject genes overlapping the GOI hit region
+            # The GOI itself (e.g. a tiny 67aa peptide) may be filtered out by
+            # the top-10% size filter. Without it, the home track won't show GOI.
+            for g in extracted_genes:
+                for region in target_regions:
+                    if (g['chrom'] == region['chrom'] and
+                        g['start'] < region['end'] and
+                        g['end'] > region['start']):
+                        kept_genes.add((g['chrom'], g['start'], g['end']))
+                        break
+            extracted_genes = [g for g in extracted_genes
+                              if (g['chrom'], g['start'], g['end']) in kept_genes]
+            # FALLBACK: If no predicted gene overlaps a target region,
+            # inject the target region itself as a GOI pseudo-gene.
+            # This handles cases where Prodigal can't predict the GOI at all.
+            for region in target_regions:
+                has_overlap = any(
+                    g['chrom'] == region['chrom'] and
+                    g['start'] < region['end'] and
+                    g['end'] > region['start']
+                    for g in extracted_genes
+                )
+                if not has_overlap and region['chrom'] in genome_seqs:
+                    goi_start = region['start']
+                    goi_end = region['end']
+                    goi_dna = genome_seqs[region['chrom']][goi_start:goi_end]
+                    goi_prot = translate(goi_dna)
+                    if '*' in goi_prot:
+                        goi_prot = goi_prot.split('*')[0]
+                    goi_id = f"GOI_{region['chrom']}_{goi_start}"
+                    extracted_genes.append({
+                        'chrom': region['chrom'],
+                        'start': goi_start,
+                        'end': goi_end,
+                        'strand': '+',
+                        'attrs': {'ID': goi_id},
+                        'seq': goi_prot
+                    })
+                    print(f"Injected GOI pseudo-gene at {region['chrom']}:{goi_start}-{goi_end}")
+            # Re-sort by genomic position for proper flanking order
+            extracted_genes.sort(key=lambda g: (g['chrom'], g['start']))
+            print(f"Prodigal filter: kept {len(extracted_genes)} genes from {original_count} predictions (top {keep_count} longest + GOI overlaps)")
+
     else:
         # EXISTING LOGIC FOR GFF
         all_genes = parse_gff_for_genes(args.gff)

@@ -124,7 +124,7 @@ def extract_region_cds(gff_file, genome_file, chrom, region_start, region_end,
         if f_end < start or f_start > end:
             continue
         
-        fid = get_feature_id(attrs)
+        fid = get_feature_id(feature)
         
         if f_type in ('gene', 'mRNA', 'transcript'):
             parent = attrs.get('Parent', '')

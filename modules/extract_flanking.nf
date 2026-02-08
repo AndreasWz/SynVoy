@@ -16,6 +16,7 @@ process EXTRACT_FLANKING {
 
     script:
     """
+    # v3: GOI overlap re-injection + fallback pseudo-gene (force re-run)
     extract_flanking_genes.py \\
         --bed $bed \\
         --gff $gff \\

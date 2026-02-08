@@ -56,6 +56,7 @@ def printHeader() {
 def printParams() {
     def query_display = params.gene ? new File(params.gene).name : params.query_id
     def home_display = params.mode == 'easy' ? params.home_species : (params.home_genome ? new File(params.home_genome).name : 'N/A')
+    def target_display = params.target_species ?: 'auto (taxonomic search)'
     
     log.info """
     ${c_blue}═══════════════════════════════════════════════════════════════
@@ -64,6 +65,7 @@ def printParams() {
     ${c_dim}Query Gene      :${c_reset} ${c_green}${query_display}${c_reset}
     ${c_dim}Home Genome     :${c_reset} ${c_green}${home_display}${c_reset}
     ${c_dim}Mode            :${c_reset} ${c_yellow}${params.mode}${c_reset}
+    ${c_dim}Target Species  :${c_reset} ${c_cyan}${target_display}${c_reset}
     ${c_dim}Flanking Genes  :${c_reset} ${params.n_flanking_genes}
     ${c_dim}MMseqs Sens.    :${c_reset} ${params.mmseqs_sensitivity}
     ${c_dim}Output Dir      :${c_reset} ${params.outdir}
@@ -151,11 +153,11 @@ workflow {
         FETCH_HOME_GENOME(params.home_species)
         home_genome_ch = FETCH_HOME_GENOME.out.genome
         home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(file("NO_GFF"))
-        user_provided_gff = true  // NCBI reference genomes have GFF
         
         // Fetch related genomes
         log.info "${c_cyan}  - Downloading related genomes...${c_reset}"
-        FETCH_RELATED_GENOMES(params.home_species, params.max_genomes)
+        def target_species_val = params.target_species ?: ''
+        FETCH_RELATED_GENOMES(params.home_species, params.max_genomes, target_species_val)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
         species_map_ch = FETCH_RELATED_GENOMES.out.species_map
         
@@ -175,9 +177,6 @@ workflow {
         }
         
         home_genome_ch = Channel.fromPath(params.home_genome)
-        
-        // Track if user provided GFF or not
-        user_provided_gff = params.home_gff ? true : false
         
         if (params.home_gff) {
             home_gff_ch = Channel.fromPath(params.home_gff).first()
@@ -262,7 +261,7 @@ workflow {
     
     PREPARE_INITIAL_DB(
         EXTRACT_FLANKING.out.faa,
-        ANNOTATE_GOI.out.exons  // GOI full protein + individual exon sequences
+        ANNOTATE_GOI.out.exons.first()  // .first() → value channel so it pairs with ALL loci
     )
         // Only run if we have targets
     if (params.target_genomes || params.mode == 'easy') {
@@ -309,32 +308,48 @@ workflow {
         
         // Use predicted GFF if no user GFF was provided
         // If user provided GFF, use that; otherwise use Prodigal-generated GFF
-        effective_home_gff_ch = user_provided_gff 
-            ? home_gff_ch 
-            : PREPARE_HOME_PROTEOME.out.gff.ifEmpty(file("NO_GFF"))
+        // For easy mode: GFF availability determined at runtime (some NCBI genomes lack GFF)
+        // Strategy: Always attempt to borrow annotations from annotated targets;
+        //           build effective GFF from all available sources
 
-        // Borrow annotations from annotated target genomes (when no user GFF)
-        if (!user_provided_gff) {
-            log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
-            
-            BORROW_ANNOTATIONS(
-                home_genome_ch,
-                PREPARE_HOME_PROTEOME.out.faa,
-                genomes_dir_ch,
-                LOCATE_GENE.out.bed.first(),
-                params.n_flanking_genes
-            )
-            
-            BORROW_ANNOTATIONS.out.gff.view { gff ->
-                "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
-            }
-            
-            // Merge borrowed GFF with Prodigal GFF for a richer annotation
-            effective_home_gff_ch = PREPARE_HOME_PROTEOME.out.gff
-                .mix(BORROW_ANNOTATIONS.out.gff)
-                .collectFile(name: 'merged_home_annotations.gff')
-                .ifEmpty(file("NO_GFF"))
+        // Always borrow annotations - valuable when home genome lacks GFF
+        log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
+        
+        BORROW_ANNOTATIONS(
+            home_genome_ch,
+            PREPARE_HOME_PROTEOME.out.faa,
+            genomes_dir_ch,
+            LOCATE_GENE.out.bed.first(),
+            params.n_flanking_genes
+        )
+        
+        BORROW_ANNOTATIONS.out.gff.view { gff ->
+            "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
         }
+        
+        // Build effective GFF from all available sources:
+        // 1. User-provided / NCBI GFF (if present and real)
+        // 2. Prodigal-predicted GFF (when no annotation was available)
+        // 3. Borrowed annotations from annotated target genomes
+        // Branch to check if home_gff is a real file or the NO_GFF placeholder
+        home_gff_ch.branch { gff ->
+            real: gff.name != 'NO_GFF'
+            missing: true
+        }.set { gff_status }
+        
+        // Fallback: merge Prodigal predictions + borrowed annotations
+        fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
+            .mix(BORROW_ANNOTATIONS.out.gff)
+            .collectFile(name: 'merged_home_annotations.gff')
+            .ifEmpty(file("NO_GFF"))
+        
+        // Use real GFF if available, otherwise merged fallback
+        // concat ensures ordering: real GFF tried first, fallback second
+        effective_home_gff_ch = gff_status.real
+            .concat(
+                gff_status.missing.combine(fallback_gff_ch).map { it[1] }
+            )
+            .first()
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
@@ -442,24 +457,65 @@ workflow {
             }
 
         // Collect Data for Plotting
+        // Select best locus FIRST: pick the one with the best (lowest) e-value
+        // from LOCATE_GENE hits. This ensures we use the true GOI locus,
+        // not a spurious cross-hit on another chromosome.
+        best_locus_id_ch = SPLIT_LOCI.out.beds.flatten()
+            .map { bed_file ->
+                def locus_id = bed_file.name
+                // Read BED file and find best e-value (column 5)
+                def best_eval = Double.MAX_VALUE
+                bed_file.eachLine { line ->
+                    def parts = line.split('\t')
+                    if (parts.size() >= 5) {
+                        try {
+                            def eval = Double.parseDouble(parts[4])
+                            if (eval < best_eval) best_eval = eval
+                        } catch (Exception e) {}
+                    }
+                }
+                tuple(locus_id, best_eval)
+            }
+            .toSortedList { a, b -> a[1] <=> b[1] }
+            .map { sorted -> sorted[0][0] }  // Best locus ID
+            .first()  // Convert to value channel — reusable across multiple combine() calls
+        
+        best_locus_marker = best_locus_id_ch
+            .map { id -> tuple(id, true) }
+        
+        // Filter ALL channels to only the best locus before plotting
         // Use CLUSTER_REGIONS output for candidate beds (the discovered syntenic regions)
         
-        // Collect clustered region BED files for plotting
-        all_beds = CLUSTER_REGIONS.out.bed
-            .map { genome_name, payload, locus_id, bed -> bed }
+        // Filter cluster results to best locus — collect tuples of [genome_name, bed]
+        def best_cluster_collected = CLUSTER_REGIONS.out.bed
+            .combine(best_locus_id_ch)
+            .filter { genome_name, payload, locus_id, bed, best_id -> locus_id == best_id }
+            .map { genome_name, payload, locus_id, bed, best_id -> tuple(genome_name, bed) }
+            .toList()  // value channel: list of [name, bed] tuples
+        
+        all_beds = best_cluster_collected.map { tuples -> tuples.collect { it[1] } }.ifEmpty([])
+        all_names = best_cluster_collected.map { tuples -> tuples.collect { it[0] } }.ifEmpty([])
+        
+        all_gffs = miniprot_gffs_ch
+            .combine(best_locus_id_ch)
+            .filter { unique_id, gff, best_id -> unique_id.endsWith("_${best_id}") }
+            .map { unique_id, gff, best_id -> gff }
+            .collect()
+            .ifEmpty([])
+        all_tsvs = miniprot_tsvs_ch
+            .combine(best_locus_id_ch)
+            .filter { unique_id, tsv, best_id -> unique_id.endsWith("_${best_id}") }
+            .map { unique_id, tsv, best_id -> tsv }
             .collect()
             .ifEmpty([])
         
-        all_gffs = miniprot_gffs_ch.map { it[1] }.collect().ifEmpty([])
-        all_tsvs = miniprot_tsvs_ch.map { it[1] }.collect().ifEmpty([])
-        all_names = CLUSTER_REGIONS.out.bed
-            .map { genome_name, payload, locus_id, bed -> genome_name }
-            .collect()
-            .ifEmpty([])
+        home_bed_ch = EXTRACT_FLANKING.out.bed  // [locus_id, bed]
+            .join(best_locus_marker)
+            .map { locus_id, bed, marker -> bed }
         
-        // Get first home_bed and tree (should be same for all loci in single-locus case)
-        home_bed_ch = EXTRACT_FLANKING.out.bed.map { it[1] }.first()
-        tree_ch = COMPUTE_TREE.out.tree.map { it[1] }.first()
+        tree_ch = COMPUTE_TREE.out.tree  // [locus_id, tree]
+            .join(best_locus_marker)
+            .map { locus_id, tree, marker -> tree }
         
         log.info "${c_cyan}[PLOT] Generating synteny visualizations...${c_reset}"
             

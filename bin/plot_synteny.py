@@ -656,7 +656,7 @@ def main():
             "chrom":        genes[0]["chrom"],
         })
 
-    # Order targets by phylogenetic distance (if tree available)
+    # Order targets by phylogenetic distance (if tree available), else alphabetically by species name
     if tree_target_order:
         def _tree_key(t):
             for i, gid in enumerate(tree_target_order):
@@ -664,6 +664,9 @@ def main():
                     return i
             return 999
         target_tracks.sort(key=_tree_key)
+    else:
+        # Fallback: order by display name (species name) alphabetically
+        target_tracks.sort(key=lambda t: t["display_name"])
 
     # -- 3. Colour map ---------------------------------------------------
 
