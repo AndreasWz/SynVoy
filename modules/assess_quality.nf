@@ -12,7 +12,7 @@ process ASSESS_GENOME_QUALITY {
     echo "[" > genome_qc_summary.json
     first=true
     # Find files safely - follow symlinks
-    find -L ${genomes_dir} -maxdepth 1 -type f \( -name "*.fna" -o -name "*.fasta" -o -name "*.fa" \) > genome_files.txt
+    find -L ${genomes_dir} -maxdepth 1 -type f \\( -name "*.fna" -o -name "*.fasta" -o -name "*.fa" \\) > genome_files.txt
     while read f; do
         if [ "\$first" = "true" ]; then first=false; else echo "," >> genome_qc_summary.json; fi
         assess_genome_quality.py --genome "\$f" --output tmp.json

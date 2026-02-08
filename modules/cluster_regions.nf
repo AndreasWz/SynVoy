@@ -29,7 +29,12 @@ process CLUSTER_REGIONS {
         --output regions/${genome_name}.regions.bed \\
         --min_score $min_score
         
-    # Create simple scores output
-    grep "Region" regions/${genome_name}.regions.bed > regions/${genome_name}.scores.tsv || touch regions/${genome_name}.scores.tsv
+    # Create simple scores output from BED regions
+    # BED lines start with chrom, extract all non-empty lines as scores
+    if [ -s regions/${genome_name}.regions.bed ]; then
+        cp regions/${genome_name}.regions.bed regions/${genome_name}.scores.tsv
+    else
+        touch regions/${genome_name}.scores.tsv
+    fi
     """
 }

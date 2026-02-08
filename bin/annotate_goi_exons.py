@@ -338,8 +338,9 @@ def _parse_hit_regions(blast_hits_file, mmseqs_hits_file):
                         evalue = float(parts[10])
 
                         strand = '+' if tstart < tend else '-'
-                        gstart = min(tstart, tend)
-                        gend = max(tstart, tend)
+                        # Convert 1-based BLAST/mmseqs coords to 0-based half-open
+                        gstart = min(tstart, tend) - 1  # 0-based start
+                        gend = max(tstart, tend)         # exclusive end
 
                         regions.append({
                             'chrom': parts[1],
@@ -766,8 +767,9 @@ def _parse_format6_hits(blast_file, mmseqs_file):
                         alnlen = int(parts[3])
 
                         strand = '+' if tstart < tend else '-'
-                        gstart = min(tstart, tend)
-                        gend = max(tstart, tend)
+                        # Convert 1-based BLAST/mmseqs coords to 0-based half-open
+                        gstart = min(tstart, tend) - 1  # 0-based start
+                        gend = max(tstart, tend)         # exclusive end
 
                         hits.append({
                             'query': parts[0],
@@ -792,13 +794,20 @@ def _parse_format6_hits(blast_file, mmseqs_file):
 
 
 def _deduplicate_hits(hits, overlap_threshold=0.5):
-    """Remove overlapping hits, keeping the one with best e-value."""
+    """Remove overlapping hits, keeping the one with best e-value.
+    
+    Two-pass deduplication:
+    1. Remove hits redundant in BOTH query AND genomic space
+    2. Merge hits that overlap significantly in GENOMIC space only
+       (from fragment-based search producing many overlapping hits)
+    """
     if len(hits) <= 1:
         return hits
 
     # Sort by e-value
     hits.sort(key=lambda h: h['evalue'])
 
+    # Pass 1: Remove hits redundant in both query AND genomic space
     kept = []
     for hit in hits:
         is_redundant = False
@@ -824,6 +833,35 @@ def _deduplicate_hits(hits, overlap_threshold=0.5):
 
         if not is_redundant:
             kept.append(hit)
+
+    # Pass 2: Merge hits that overlap significantly in GENOMIC space
+    # This handles fragment-based search producing many hits covering
+    # different query ranges but the same genomic region
+    if len(kept) > 1:
+        kept.sort(key=lambda h: h['evalue'])
+        merged = []
+        for hit in kept:
+            is_genomic_dup = False
+            for existing in merged:
+                g_overlap = _calc_overlap(
+                    hit['gstart'], hit['gend'],
+                    existing['gstart'], existing['gend']
+                )
+                smaller_span = min(
+                    hit['gend'] - hit['gstart'] + 1,
+                    existing['gend'] - existing['gstart'] + 1
+                )
+                if smaller_span > 0 and g_overlap / smaller_span > 0.6:
+                    # Merge: expand the existing hit to cover both ranges
+                    existing['gstart'] = min(existing['gstart'], hit['gstart'])
+                    existing['gend'] = max(existing['gend'], hit['gend'])
+                    existing['qstart'] = min(existing['qstart'], hit['qstart'])
+                    existing['qend'] = max(existing['qend'], hit['qend'])
+                    is_genomic_dup = True
+                    break
+            if not is_genomic_dup:
+                merged.append(hit)
+        kept = merged
 
     return kept
 

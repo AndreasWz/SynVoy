@@ -1,10 +1,38 @@
 #!/usr/bin/env python3
+"""
+plot_synteny.py  –  Interactive synteny visualization for SynTerra
+
+Layout
+──────
+  •  Home genome at top, target genomes below (ordered by phylogenetic distance)
+  •  Gene arrows (pentagons) coloured by homology group
+  •  Connecting ribbons between homologous genes in adjacent tracks
+  •  GOI highlighted with warm/red clade colours from the phylogenetic tree
+  •  Flanking genes share a consistent colour derived from the home-genome name
+
+Inputs
+──────
+  --home_bed        Synteny-block BED for the home genome
+  --home_gff        NCBI GFF for the home genome (product-name lookup)
+  --query_bed       BED file with query-gene location (GOI identification)
+  --target_gffs     Target-genome GFFs (SynTerra exon_annotation format)
+  --target_names    Display names (optional – derived from GFF filename if absent)
+  --candidate_beds  Cluster-region BED files (optional, not currently drawn)
+  --homology_tsvs   Homology TSV files (target -> home mapping, fallback)
+  --tree            Newick tree for GOI clade colouring + target ordering
+
+Output
+──────
+  --output          Interactive HTML file (Plotly)
+"""
+
 import argparse
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import sys
-import os
 import colorsys
+import json
+import os
+import sys
+
+import plotly.graph_objects as go
 
 try:
     from ete3 import Tree
@@ -12,624 +40,664 @@ try:
 except ImportError:
     ETE3_AVAILABLE = False
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Generate interactive synteny plot")
-    parser.add_argument("--home_bed", required=True, help="Synteny block BED for home genome")
-    parser.add_argument("--home_gff", help="Annotated GFF for home genome (optional, for product names)")
-    parser.add_argument("--target_gffs", nargs='*', default=[], help="List of annotated GFF files for targets")
-    parser.add_argument("--target_names", nargs='*', default=[], help="List of target genome names corresponding to GFFs")
-    parser.add_argument("--candidate_beds", nargs='*', default=[], help="List of candidate BED files (optional, order matching targets)")
-    parser.add_argument("--homology_tsvs", nargs='*', default=[], help="List of homology TSV files (optional)")
-    parser.add_argument("--tree", help="Newick tree file for coloring by clade")
-    parser.add_argument("--query_bed", help="BED file with query location for highlighting")
-    parser.add_argument("--output", required=True, help="Output HTML file")
-    return parser.parse_args()
 
-# ... (existing functions) ...
+# ======================================================================
+# Colour palettes
+# ======================================================================
 
-def parse_product_map(gff_file):
-    """
-    Parse GFF to extract ID -> Product Name mapping.
-    Handles 'Parent' in mRNA linking to 'ID' in gene/CDS, or direct on gene.
-    """
-    product_map = {}
-    if not gff_file or not os.path.exists(gff_file) or gff_file == "NO_GFF":
-        return product_map
-        
-    try:
-        from urllib.parse import unquote
-        # First pass: Link Transcript Parent -> Product
-        transcript_products = {}
-        
-        with open(gff_file) as f:
-            for line in f:
-                if line.startswith('#'): continue
-                p = line.strip().split('\t')
-                if len(p) < 9: continue
-                
-                feat = p[2]
-                attr = p[8]
-                attrs = {}
-                for x in attr.split(';'):
-                    if '=' in x:
-                        k, v = x.split('=', 1)
-                        attrs[k] = unquote(v)
-                
-                # Check for product description
-                product = attrs.get('product')
-                
-                if feat == 'mRNA' and 'Parent' in attrs and product:
-                    transcript_products[attrs['Parent']] = product
-                elif feat == 'gene' and product:
-                    # sometimes gene has product
-                    if 'ID' in attrs:
-                        product_map[attrs['ID']] = product
-                    if 'Name' in attrs:
-                         product_map[attrs['Name']] = product
+# Tableau-20 style qualitative palette for flanking genes
+GENE_PALETTE = [
+    "#4e79a7", "#f28e2b", "#59a14f", "#b07aa1", "#76b7b2",
+    "#edc948", "#ff9da7", "#9c755f", "#86bcb6", "#e15759",
+    "#8cd17d", "#499894", "#d4a6c8", "#a0cbe8", "#ffbe7d",
+    "#d37295", "#fabfd2", "#b6992d", "#7b848f", "#f1ce63",
+]
 
-        # Second Pass: If needed, or just allow gene ID lookup from transcript map
-        # Actually 'Parent' of mRNA is usually the Gene ID.
-        product_map.update(transcript_products)
-        
-    except Exception as e:
-        print(f"Error parsing Home GFF for products: {e}")
-        
-    return product_map
+GOI_COLOUR    = "#e31a1c"   # bright red (default for GOI)
+GOI_BORDER    = "#8b0000"   # dark red
+UNMATCHED_CLR = "#d9d9d9"   # light gray
+TRACK_BG_CLR  = "#f5f5f5"   # very light gray track background
+
+
+# ======================================================================
+# Parsing helpers
+# ======================================================================
 
 def parse_bed(bed_file):
+    """Parse a BED file -> list of dicts with chrom/start/end/name/strand."""
     genes = []
-    try:
-        with open(bed_file) as f:
-            for line in f:
-                p = line.strip().split('\t')
-                if len(p) < 6: continue
-                genes.append({
-                    'chrom': p[0],
-                    'start': int(p[1]),
-                    'end': int(p[2]),
-                    'name': p[3],
-                    'strand': p[5],
-                    'type': 'gene'
-                })
-    except Exception as e:
-        print(f"Error reading BED {bed_file}: {e}")
+    if not bed_file or not os.path.exists(bed_file):
+        return genes
+    with open(bed_file) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) < 4:
+                continue
+            genes.append({
+                "chrom":  p[0],
+                "start":  int(p[1]),
+                "end":    int(p[2]),
+                "name":   p[3],
+                "strand": p[5] if len(p) > 5 else "+",
+            })
     return genes
 
-def parse_gff(gff_file):
-    """
-    Parse GFF to extract genes for synteny plotting.
-    Handles both standard NCBI GFF and Miniprot GFF (with SynTerra_* attributes).
-    
-    For Miniprot GFF:
-    - Uses SynTerra_Parent for home gene ID mapping (color assignment)
-    - Uses SynTerra_ID for unique identification
-    - Extracts Identity for quality info
-    
-    For standard GFF:
-    - Uses ID/Name attributes as before
-    """
-    gene_products = {}
-    genes = []
-    
-    try:
-        from urllib.parse import unquote
-        
-        # First Pass: Collect Products from mRNA (standard GFF)
-        # And collect genes/mRNA features
-        with open(gff_file) as f:
-            for line in f:
-                if line.startswith('#'): continue
-                p = line.strip().split('\t')
-                if len(p) < 9: continue
-                
-                feat_type = p[2]
-                attr = p[8]
-                source = p[1]  # e.g., "miniprot", "NCBI", etc.
-                
-                # Helper to parse attributes
-                attrs = {}
-                for x in attr.split(';'):
-                    if '=' in x:
-                        k, v = x.split('=', 1)
-                        attrs[k] = unquote(v)
-                
-                if feat_type == 'mRNA' and 'Parent' in attrs and 'product' in attrs:
-                    gene_products[attrs['Parent']] = attrs['product']
-                
-                # Handle SynTerra annotated mRNA (miniprot, augmented_search, or mmseqs2)
-                if source in ('miniprot', 'augmented_search', 'mmseqs2') and feat_type == 'mRNA':
-                    # mRNA is the main feature for target gene annotation
-                    gene_id = attrs.get('ID', '')
-                    
-                    # SynTerra attributes for home gene mapping
-                    synterra_parent = attrs.get('SynTerra_Parent', '')
-                    synterra_id = attrs.get('SynTerra_ID', '')
-                    identity = attrs.get('Identity', '0')
-                    
-                    # Extract base home gene name for consistent coloring
-                    # SynTerra_Parent format: gene-LOC726866 or GOI_P01501
-                    home_gene_base = synterra_parent
-                    if home_gene_base:
-                        # Remove prefix like 'gene-' for cleaner matching
-                        if home_gene_base.startswith('gene-'):
-                            home_gene_base = home_gene_base  # Keep as-is for lookup
-                        elif home_gene_base.startswith('GOI_'):
-                            home_gene_base = home_gene_base  # Keep GOI prefix
-                    
-                    # For display name, use SynTerra_Parent (the home gene name)
-                    name = synterra_parent if synterra_parent else gene_id
-                    
-                    genes.append({
-                        'chrom': p[0],
-                        'start': int(p[3]),
-                        'end': int(p[4]),
-                        'name': name,
-                        'id': gene_id,
-                        'home_gene_id': synterra_parent,  # Key for color mapping!
-                        'synterra_id': synterra_id,
-                        'identity': float(identity) if identity else 0,
-                        'strand': p[6],
-                        'type': 'gene'  # Treat mRNA as gene for plotting
-                    })
-                
-                elif feat_type == 'gene' or feat_type == 'CDS':
-                    # Standard GFF handling
-                    gene_id = attrs.get('ID', '')
-                    name = attrs.get('Name', '')
-                    if not name: name = gene_id
-                    
-                    genes.append({
-                        'chrom': p[0],
-                        'start': int(p[3]),
-                        'end': int(p[4]),
-                        'name': name,
-                        'id': gene_id,
-                        'home_gene_id': gene_id,  # Same as ID for standard
-                        'strand': p[6],
-                        'type': feat_type
-                    })
-                    
-        # Update Names with Products (for standard GFF)
-        for g in genes:
-            # Try to find product using ID
-            if g['id'] in gene_products:
-                g['name'] = gene_products[g['id']]
-            # Fallback: try removing 'gene-' prefix matches
-            elif g['id'].startswith('gene-') and g['id'] in gene_products:
-                g['name'] = gene_products[g['id']]
-            
-            # Clean up long names?
-            if len(g['name']) > 30:
-                g['name'] = g['name'][:27] + "..."
 
-    except Exception as e:
-        print(f"Error reading GFF {gff_file}: {e}")
+def parse_target_gff(gff_file):
+    """
+    Parse a SynTerra target-genome GFF.
+
+    Extracts **mRNA** features only (avoids CDS double-counting).
+    Returns list of gene dicts with 'home_gene_id' from SynTerra_Parent.
+    """
+    genes = []
+    if not gff_file or not os.path.exists(gff_file):
+        return genes
+    with open(gff_file) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) < 9 or p[2] != "mRNA":
+                continue
+            attrs = {}
+            for kv in p[8].split(";"):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    attrs[k] = v
+            genes.append({
+                "chrom":        p[0],
+                "start":        int(p[3]),
+                "end":          int(p[4]),
+                "name":         attrs.get("Name", attrs.get("ID", "")),
+                "strand":       p[6],
+                "identity":     float(attrs.get("Identity", "0")),
+                "home_gene_id": attrs.get("SynTerra_Parent", ""),
+                "n_exons":      int(attrs.get("Exons", "1")),
+            })
     return genes
 
-def parse_homology(tsv_files):
-    """
-    Parse homology TSV files. 
-    Format: TargetGene \t HomeGene
-    Returns: Dict[TargetGene, HomeGene]
-    """
+
+def parse_homology_tsvs(tsv_files):
+    """Parse homology TSVs -> dict mapping target_gene -> home_gene."""
     mapping = {}
     if not tsv_files:
         return mapping
-        
     for tsv in tsv_files:
-        if tsv == "NO_HOMOLOGY": continue
-        try:
-            with open(tsv) as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        mapping[parts[0]] = parts[1]
-        except Exception as e:
-            print(f"Error reading homology {tsv}: {e}")
+        if not tsv or tsv == "NO_HOMOLOGY" or not os.path.exists(tsv):
+            continue
+        with open(tsv) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2:
+                    mapping[parts[0]] = parts[1]
     return mapping
 
-def generate_tree_colors(tree_file, color_mode='clade'):
+
+def parse_home_gff_products(gff_file):
+    """Parse home GFF -> dict mapping gene ID/Name -> product description."""
+    products = {}
+    if not gff_file or not os.path.exists(gff_file) or gff_file == "NO_GFF":
+        return products
+    try:
+        from urllib.parse import unquote
+        with open(gff_file) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                p = line.strip().split("\t")
+                if len(p) < 9:
+                    continue
+                attrs = {}
+                for kv in p[8].split(";"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        attrs[k] = unquote(v)
+                product = attrs.get("product", "")
+                if product:
+                    for key in ("ID", "Name", "Parent"):
+                        if key in attrs:
+                            products[attrs[key]] = product
+    except Exception as exc:
+        print(f"Warning: could not parse home GFF products: {exc}")
+    return products
+
+
+# ======================================================================
+# Tree helpers
+# ======================================================================
+
+def _genome_id_from_leaf(leaf_name):
     """
-    Load tree, assign colors based on phylogenetic relationships.
-    
-    Args:
-        tree_file: Path to Newick tree file
-        color_mode: 
-            'clade' - Group by monophyletic clades (similar sequences same color)
-            'order' - Color by tree traversal order (gradient across tree)
-    
-    Returns: 
-        Dict[leaf_name, hex_color]
+    Extract a GCF/GCA genome accession from a tree leaf name.
+
+    Leaf format examples:
+      GOI_P01501|GCF_029169275_1_fna_exon_ann  ->  GCF_029169275.1
+      GOI_P01501                                ->  None (home)
     """
-    if not ETE3_AVAILABLE:
-        print("Warning: ETE3 not installed. Cannot parse tree for coloring.")
-        return {}
-        
+    if "|" not in leaf_name:
+        return None
+    for part in leaf_name.split("|"):
+        if part.startswith("GCF_") or part.startswith("GCA_"):
+            # GCF_029169275_1_fna_exon_ann -> GCF_029169275.1
+            pieces = part.replace("_fna_exon_ann", "").replace("_fna", "").split("_")
+            if len(pieces) >= 3:
+                return f"{pieces[0]}_{pieces[1]}.{pieces[2]}"
+            return "_".join(pieces)
+    return None
+
+
+def parse_tree_clade_colours(tree_file):
+    """
+    Assign warm-palette colours to GOI leaves based on phylogenetic tree.
+
+    Returns
+    -------
+    goi_genome_colours : dict   genome_id|'home' -> hex colour
+    target_order       : list   genome_ids sorted by distance to home (closest first)
+    """
+    goi_colours = {}
+    target_order = []
+
+    if not tree_file or not os.path.exists(tree_file) or not ETE3_AVAILABLE:
+        return goi_colours, target_order
+
     try:
         t = Tree(tree_file)
-        leaves = [leaf for leaf in t.iter_leaves()]
-        n_leaves = len(leaves)
-        color_map = {}
-        
-        if n_leaves == 0:
-            return {}
-        
-        if color_mode == 'clade' and n_leaves > 2:
-            # Clade-based coloring: Group leaves by common ancestors
-            # This gives similar colors to closely related sequences
-            
-            # Calculate pairwise distances and identify clusters
-            # Using tree topology: leaves from same subtree get similar colors
-            
-            # Get midpoint or arbitrary internal node for reference
-            midpoint = t.get_tree_root()
-            
-            # Get all children of root (major clades)
-            root_children = midpoint.children
-            
-            if len(root_children) >= 2:
-                # Color each major clade with a different base hue
-                hue_step = 1.0 / len(root_children)
-                
-                for clade_idx, child in enumerate(root_children):
-                    base_hue = clade_idx * hue_step
-                    clade_leaves = [l for l in child.iter_leaves()]
-                    
-                    # Within clade, vary saturation/value
-                    for leaf_idx, leaf in enumerate(clade_leaves):
-                        # Slight hue variation within clade
-                        if len(clade_leaves) > 1:
-                            hue_var = 0.05 * (leaf_idx / (len(clade_leaves) - 1) - 0.5)
-                        else:
-                            hue_var = 0
-                        
-                        hue = (base_hue + hue_var) % 1.0
-                        saturation = 0.7 + 0.2 * (leaf_idx / max(1, len(clade_leaves) - 1))
-                        value = 0.9
-                        
-                        rgb = colorsys.hsv_to_rgb(hue, saturation, value)
-                        r, g, b = [int(x * 255) for x in rgb]
-                        hex_col = f"#{r:02x}{g:02x}{b:02x}"
-                        clean_name = leaf.name.replace("'", "").replace('"', "")
-                        color_map[clean_name] = hex_col
+        leaves = list(t.iter_leaves())
+        n = len(leaves)
+        if n == 0:
+            return goi_colours, target_order
+
+        # Identify home-genome leaf (no genome ID in name)
+        home_leaves   = [l for l in leaves if _genome_id_from_leaf(l.name) is None]
+        target_leaves = [l for l in leaves if _genome_id_from_leaf(l.name) is not None]
+
+        # Assign warm colours along tree-traversal order (red -> amber)
+        for i, leaf in enumerate(leaves):
+            hue = 0.0 + (i / max(1, n - 1)) * 0.20
+            sat = 0.90 - (i / max(1, n - 1)) * 0.20
+            r, g, b = colorsys.hsv_to_rgb(hue, sat, 0.90)
+            colour = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+            gid = _genome_id_from_leaf(leaf.name)
+            if gid:
+                goi_colours[gid] = colour
             else:
-                # Fallback to order-based
-                color_mode = 'order'
-        
-        if color_mode == 'order' or not color_map:
-            # Simple order-based coloring (gradient across tree)
-            for i, leaf in enumerate(leaves):
-                hue = i / n_leaves
-                rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.9)
-                r, g, b = [int(x * 255) for x in rgb]
-                hex_col = f"#{r:02x}{g:02x}{b:02x}"
-                clean_name = leaf.name.replace("'", "").replace('"', "")
-                color_map[clean_name] = hex_col
-        
-        print(f"Generated colors for {len(color_map)} tree leaves (mode: {color_mode})")
-        return color_map
-        
-    except Exception as e:
-        print(f"Error parsing tree {tree_file}: {e}")
-        return {}
+                goi_colours["home"] = colour
+
+        # Order targets by phylogenetic distance to home
+        if home_leaves:
+            ref = home_leaves[0]
+            dist_map = {}
+            for tl in target_leaves:
+                gid = _genome_id_from_leaf(tl.name)
+                if gid:
+                    d = t.get_distance(ref, tl)
+                    if gid not in dist_map or d < dist_map[gid]:
+                        dist_map[gid] = d
+            target_order = sorted(dist_map, key=dist_map.get)
+
+        print(f"Tree: assigned {len(goi_colours)} GOI colours, "
+              f"target order = {target_order}")
+    except Exception as exc:
+        print(f"Warning: could not parse tree: {exc}")
+    return goi_colours, target_order
+
+
+# ======================================================================
+# Colour assignment
+# ======================================================================
+
+def is_goi(name):
+    """Return True if *name* represents the Gene of Interest."""
+    if not name:
+        return False
+    return name.startswith("GOI_") or name == "gene-Melt" or "|exon_" in name
+
+
+def _overlaps_any(gene, intervals):
+    for q in intervals:
+        if gene["chrom"] == q["chrom"] and gene["start"] < q["end"] and gene["end"] > q["start"]:
+            return True
+    return False
+
+
+def assign_gene_colours(home_genes, query_intervals=None):
+    """
+    Map each home-gene name -> hex colour.
+
+    GOI genes -> GOI_COLOUR (will be overridden per-genome with tree colours).
+    Flanking genes -> GENE_PALETTE (deterministic order).
+    Uses name-based GOI check only (not coordinate overlap) to avoid
+    marking large container-loci as GOI.
+    """
+    cmap = {}
+    idx = 0
+    for gene in home_genes:
+        name = gene["name"]
+        if name in cmap:
+            continue
+        if is_goi(name):
+            cmap[name] = GOI_COLOUR
+        else:
+            cmap[name] = GENE_PALETTE[idx % len(GENE_PALETTE)]
+            idx += 1
+    return cmap
+
+
+# ======================================================================
+# Genome / gene-name helpers
+# ======================================================================
+
+def clean_genome_name(name):
+    """GCF_029169275.1.fna -> GCF_029169275.1"""
+    name = os.path.basename(name)
+    for sfx in (".fna", ".fa", ".fasta", ".gz"):
+        if name.endswith(sfx):
+            name = name[: -len(sfx)]
+    return name
+
+
+def clean_gene_label(name):
+    """gene-LOC412898 -> LOC412898 ;  GOI_P01501 -> P01501"""
+    if name.startswith("gene-"):
+        return name[5:]
+    if name.startswith("GOI_"):
+        return name[4:]
+    return name
+
+
+# ======================================================================
+# Drawing primitives
+# ======================================================================
+
+def _arrow_xy(x0, x1, y_base, height, strand):
+    """Pentagon vertices for a gene arrow."""
+    w = x1 - x0
+    aw = min(w * 0.25, height * 2.5)       # arrow-head width (capped)
+    if aw < 1:
+        aw = min(w * 0.5, 1)
+    ym = y_base + height / 2
+    yt = y_base + height
+    if strand == "+":
+        xs = [x0, x1 - aw, x1, x1 - aw, x0, x0]
+        ys = [y_base, y_base, ym, yt, yt, y_base]
+    else:
+        xs = [x0, x0 + aw, x1, x1, x0 + aw, x0]
+        ys = [ym, y_base, y_base, yt, yt, ym]
+    return xs, ys
+
+
+def _hex_to_rgba(hexc, alpha):
+    hexc = hexc.lstrip("#")
+    r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def add_gene(fig, gene, x_off, y_base, h, colour, border_clr, border_w,
+             hover, show_legend, legend_group):
+    xs, ys = _arrow_xy(gene["start"] - x_off, gene["end"] - x_off, y_base, h, gene["strand"])
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys,
+        fill="toself",
+        fillcolor=colour,
+        line=dict(color=border_clr, width=border_w),
+        mode="lines",
+        hoverinfo="text",
+        text=hover,
+        showlegend=show_legend,
+        legendgroup=legend_group,
+        name=clean_gene_label(legend_group),
+    ))
+
+
+def add_ribbon(fig, g_upper, g_lower, off_u, off_l, y_u_bot, y_l_top, colour, alpha=0.18):
+    u0 = g_upper["start"] - off_u
+    u1 = g_upper["end"]   - off_u
+    l0 = g_lower["start"] - off_l
+    l1 = g_lower["end"]   - off_l
+    fill = _hex_to_rgba(colour, alpha)
+    edge = _hex_to_rgba(colour, alpha * 1.8)
+    fig.add_trace(go.Scatter(
+        x=[u0, u1, l1, l0, u0],
+        y=[y_u_bot, y_u_bot, y_l_top, y_l_top, y_u_bot],
+        fill="toself", fillcolor=fill,
+        line=dict(color=edge, width=0.5),
+        mode="lines", hoverinfo="skip", showlegend=False,
+    ))
+
+
+def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
+              is_goi_flag=False):
+    xc = (gene["start"] + gene["end"]) / 2 - x_off
+    gw = gene["end"] - gene["start"]
+    if is_goi_flag:
+        text = "* " + text
+        fcolour = GOI_BORDER
+        fsize = max(fsize, 10)
+    fig.add_annotation(
+        x=xc, y=y_base + h + h * 0.35,
+        text=text, showarrow=False,
+        font=dict(size=fsize, color=fcolour),
+        textangle=-35 if gw < 5000 else 0,
+        xanchor="center", yanchor="bottom",
+    )
+
+
+# ======================================================================
+# Internal helpers
+# ======================================================================
+
+def _goi_colour_for_genome(genome_id, goi_genome_colours):
+    """Look up GOI colour for a specific genome, with fuzzy matching."""
+    if not goi_genome_colours:
+        return GOI_COLOUR
+    # Exact match
+    if genome_id in goi_genome_colours:
+        return goi_genome_colours[genome_id]
+    # Prefix match  (e.g. "GCF_029169275.1" in "GCF_029169275.1.fna")
+    for key, clr in goi_genome_colours.items():
+        if key in genome_id or genome_id in key:
+            return clr
+    # Home fallback
+    return goi_genome_colours.get("home", GOI_COLOUR)
+
+
+def _lookup_product(gene_name, products):
+    """Fuzzy product-name lookup."""
+    for candidate in (gene_name, gene_name.replace("gene-", ""),
+                      "gene-" + gene_name if not gene_name.startswith("gene-") else ""):
+        if candidate in products:
+            return products[candidate]
+    return ""
+
+
+# ======================================================================
+# Main
+# ======================================================================
 
 def main():
-    args = parse_args()
-    
-    # 0. Parse Home Products (Link ID -> Real Name)
-    home_product_map = parse_product_map(args.home_gff) if args.home_gff else {}
-    
-    # 1. Parse Homology
-    # Maps TargetGene -> HomeGeneID
-    homology_map = parse_homology(args.homology_tsvs)
-    
-    # 1.5 Parse Query Location (for highlighting)
+    ap = argparse.ArgumentParser(description="SynTerra synteny plot")
+    ap.add_argument("--home_bed",       required=True)
+    ap.add_argument("--home_gff",       default=None)
+    ap.add_argument("--query_bed",      default=None)
+    ap.add_argument("--target_gffs",    nargs="*", default=[])
+    ap.add_argument("--target_names",   nargs="*", default=[])
+    ap.add_argument("--candidate_beds", nargs="*", default=[])
+    ap.add_argument("--homology_tsvs",  nargs="*", default=[])
+    ap.add_argument("--tree",           default=None)
+    ap.add_argument("--output",         required=True)
+    args = ap.parse_args()
+
+    # -- 1. Parse inputs -------------------------------------------------
+
+    home_genes = parse_bed(args.home_bed)
+    if not home_genes:
+        print("ERROR: empty home BED", file=sys.stderr)
+        go.Figure().write_html(args.output)
+        return
+    home_genes.sort(key=lambda g: g["start"])
+
     query_intervals = []
     if args.query_bed and os.path.exists(args.query_bed):
-        try:
-             with open(args.query_bed) as f:
-                 for line in f:
-                     p = line.strip().split('\t')
-                     if len(p) >= 3:
-                         query_intervals.append({
-                             'chrom': p[0],
-                             'start': int(p[1]),
-                             'end': int(p[2])
-                         })
-        except: pass
-    
-    # NEW: Parse Tree Colors
-    tree_colors = {}
-    if args.tree:
-        tree_colors = generate_tree_colors(args.tree)
-        if tree_colors:
-            print(f"Loaded {len(tree_colors)} colors from Phylogenetic Tree.")
-    
-    # Data structure: list of tracks
-    tracks = []
-    
-    # 1. Home Genome
-    home_genes = parse_bed(args.home_bed)
-    
-    # Separate ID from Display Name for proper color mapping
-    for g in home_genes:
-        # Store original ID for color/tree lookup
-        if 'id' not in g:
-            g['id'] = g['name']
-        
-        # Now update display name with product description
-        gid = g['id']
-        if gid in home_product_map:
-            g['display_name'] = home_product_map[gid]
-        elif gid.replace('gene-', '') in home_product_map:
-            g['display_name'] = home_product_map[gid.replace('gene-', '')]
-        elif gid.startswith('gene-'):
-            short_id = gid.split('gene-')[1]
-            if short_id in home_product_map:
-                g['display_name'] = home_product_map[short_id]
-            else:
-                g['display_name'] = g['name']
-        else:
-            g['display_name'] = g['name']
-        
-        # Truncate long names
-        if len(g['display_name']) > 30:
-            g['display_name'] = g['display_name'][:27] + "..."
-             
-    tracks.append({'name': 'Home Genome', 'genes': home_genes})
+        for g in parse_bed(args.query_bed):
+            query_intervals.append({"chrom": g["chrom"],
+                                    "start": g["start"], "end": g["end"]})
 
-    # Target Genomes Parsing...
-    # ...
-    # COLOR LOGIC UPDATE NEEDED?
-    # get_color(gene_name, homolog_name)
-    # gene_name for home was ID. Now it is Product.
-    # Tree likely has IDs.
-    # So we should pass ID to get_color.
-    
-    # Need to update get_color function signature or usuage.
-    
-    palette = [
-        '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
-        '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
-        '#aec7e8', '#ffbb78', '#98df8a', '#ff9896', '#c5b0d5'
-    ]
-    
-    # Default Palette Map (map original IDs)
-    default_home_colors = {}
-    for i, g in enumerate(home_genes):
-        default_home_colors[g['id']] = palette[i % len(palette)]
-    
-    def get_color(gene_id, home_gene_id=None):
-        """
-        Get color for gene based on its home gene ID.
-        
-        Args:
-            gene_id: The local gene ID (e.g., MP000001)
-            home_gene_id: The corresponding home genome gene ID (e.g., gene-LOC726866)
-                         This is the key for consistent coloring across genomes.
-        """
-        # Use home_gene_id as primary key for consistent coloring
-        lookup_id = home_gene_id if home_gene_id else gene_id
-        
-        # 1. Try Tree Color (by ID)
-        if lookup_id in tree_colors:
-            return tree_colors[lookup_id]
-        
-        # Try without gene- prefix
-        clean_id = lookup_id.replace('gene-', '') if lookup_id else ''
-        if clean_id and clean_id in tree_colors:
-            return tree_colors[clean_id]
-            
-        # 2. Try Default Palette (by Home Gene ID)
-        if lookup_id in default_home_colors:
-            return default_home_colors[lookup_id]
-        
-        # Try with gene- prefix if not present
-        if lookup_id and not lookup_id.startswith('gene-'):
-            prefixed_id = f"gene-{lookup_id}"
-            if prefixed_id in default_home_colors:
-                return default_home_colors[prefixed_id]
-             
-        # 3. Fallback gray
-        return '#cccccc'
+    home_products = parse_home_gff_products(args.home_gff) if args.home_gff else {}
+    homology_map  = parse_homology_tsvs(args.homology_tsvs)
 
-    # ...
-    
-    # 2. Target Genomes Loop
-    if len(args.target_gffs) != len(args.target_names):
-        print("Error: Number of GFFs and Names must match.", file=sys.stderr)
-        length = min(len(args.target_gffs), len(args.target_names))
-    else:
-        length = len(args.target_gffs)
-    
-    # Validate other arrays
-    if args.candidate_beds and len(args.candidate_beds) != length:
-        print(f"Warning: Expected {length} candidate BEDs but got {len(args.candidate_beds)}. Some may be missing.", file=sys.stderr)
-    
-    if args.homology_tsvs and len(args.homology_tsvs) != length:
-        print(f"Warning: Expected {length} homology TSVs but got {len(args.homology_tsvs)}. Some may be missing.", file=sys.stderr)
+    goi_genome_colours, tree_target_order = parse_tree_clade_colours(args.tree)
 
-    for i in range(length):
-        gff_file = args.target_gffs[i]
-        name = args.target_names[i]
-        # parse_gff now extracts home_gene_id from SynTerra_Parent attribute
-        genes = parse_gff(gff_file) 
-        
-        plot_genes = [g for g in genes if g['type'] == 'gene']
-        if not plot_genes:
-             plot_genes = genes
-        
-        # Determine Chromosome(s)
-        chroms = sorted(list(set(g['chrom'] for g in plot_genes)))
-        chrom_str = ", ".join(chroms[:2]) # Limit to 2
-        if len(chroms) > 2: chrom_str += "..."
-        
-        full_title = f"{name} ({chrom_str})" if chrom_str else name
-        
-        tracks.append({'name': full_title, 'genes': plot_genes, 'cands': []})
-        
-        # Update cands logic safely
-        if args.candidate_beds and i < len(args.candidate_beds):
-            cand_file = args.candidate_beds[i]
-            # Handle Nextflow's empty list passing as needed, or file existence
-            if cand_file != "NO_CANDIDATES" and os.path.exists(cand_file):
-                 tracks[-1]['cands'] = parse_bed(cand_file)
+    # -- 2. Build target tracks (matched by filename, not positional index)
 
-    # Dynamic vertical spacing based on number of tracks
-    n_tracks = len(tracks)
-    vertical_spacing = min(0.05, 0.8 / max(1, n_tracks - 1)) if n_tracks > 2 else 0.1
-    
-    fig = make_subplots(rows=n_tracks, cols=1, shared_xaxes=False, vertical_spacing=vertical_spacing, subplot_titles=[t['name'] for t in tracks])
-    
-    for i, track in enumerate(tracks):
-        genes = track['genes']
-        row = i + 1
-        
+    target_tracks = []
+    for gff_file in args.target_gffs:
+        genome_id = clean_genome_name(
+            os.path.basename(gff_file).replace(".gff", ""))
+        genes = parse_target_gff(gff_file)
         if not genes:
             continue
-            
-        min_start = min(g['start'] for g in genes)
-        
-        for g in genes:
-            # Determine Color using home_gene_id (from SynTerra_Parent attribute)
-            gid = g.get('id', g['name'])
-            
-            # For Miniprot GFF: home_gene_id is set directly from SynTerra_Parent
-            # For standard GFF or home: home_gene_id equals gid
-            home_gene_id = g.get('home_gene_id', gid)
-            
-            # Also check homology_map as fallback (for old TSV format)
-            if not home_gene_id or home_gene_id == gid:
-                mapped_id = homology_map.get(gid)
-                if mapped_id:
-                    home_gene_id = mapped_id
-            
-            # Resolve Homolog Display Name
-            homolog_display = home_gene_id
-            if home_gene_id:
-                 # Clean ID if needed
-                 clean_hid = home_gene_id.replace('gene-', '')
-                 if home_gene_id in home_product_map:
-                     homolog_display = home_product_map[home_gene_id]
-                 elif clean_hid in home_product_map:
-                     homolog_display = home_product_map[clean_hid]
-                 
-                 # Truncate
-                 if len(homolog_display) > 30:
-                     homolog_display = homolog_display[:27] + "..."
+        genes.sort(key=lambda g: g["start"])
+        target_tracks.append({
+            "genome_id":    genome_id,
+            "display_name": genome_id,
+            "genes":        genes,
+            "chrom":        genes[0]["chrom"],
+        })
 
-            # Get color using home_gene_id for consistent cross-genome coloring
-            color = get_color(gid, home_gene_id)
+    # Order targets by phylogenetic distance (if tree available)
+    if tree_target_order:
+        def _tree_key(t):
+            for i, gid in enumerate(tree_target_order):
+                if gid in t["genome_id"]:
+                    return i
+            return 999
+        target_tracks.sort(key=_tree_key)
 
-            # Hover Text - use display_name if available, otherwise name
-            display_name = g.get('display_name', g['name'])
-            if i == 0:
-                 hover_text = f"{display_name} (Home)"
+    # -- 3. Colour map ---------------------------------------------------
+
+    gene_colours = assign_gene_colours(home_genes, query_intervals)
+
+    # -- 4. Assemble track list ------------------------------------------
+
+    home_chrom  = home_genes[0]["chrom"]
+    home_offset = min(g["start"] for g in home_genes) - 2000
+
+    all_tracks = [{
+        "label":     f"Home genome ({home_chrom})",
+        "genes":     home_genes,
+        "offset":    home_offset,
+        "is_home":   True,
+        "genome_id": "home",
+    }]
+    for tt in target_tracks:
+        off = min(g["start"] for g in tt["genes"]) - 2000
+        all_tracks.append({
+            "label":     f"{tt['display_name']} ({tt['chrom']})",
+            "genes":     tt["genes"],
+            "offset":    off,
+            "is_home":   False,
+            "genome_id": tt["genome_id"],
+        })
+
+    n_tracks = len(all_tracks)
+
+    # -- 5. Layout geometry -----------------------------------------------
+
+    GENE_H      = 0.35          # gene arrow height
+    TRACK_SPACE = 1.4           # vertical pitch between tracks
+    RIBBON_GAP  = 0.12          # gap between gene arrow and ribbon edge
+
+    fig = go.Figure()
+
+    # -- 5a. Track background bands --------------------------------------
+    for ti, track in enumerate(all_tracks):
+        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        x_off = track["offset"]
+        x_min = min(g["start"] for g in track["genes"]) - x_off - 1000
+        x_max = max(g["end"]   for g in track["genes"]) - x_off + 1000
+        fig.add_shape(
+            type="rect",
+            x0=x_min, x1=x_max, y0=yb - 0.02, y1=yb + GENE_H + 0.02,
+            fillcolor=TRACK_BG_CLR, line=dict(width=0), layer="below",
+        )
+
+    # -- 5b. Ribbons (draw first so they sit behind genes) ---------------
+    for ti in range(n_tracks - 1):
+        upper = all_tracks[ti]
+        lower = all_tracks[ti + 1]
+        y_u = (n_tracks - 1 - ti)       * TRACK_SPACE
+        y_l = (n_tracks - 1 - (ti + 1)) * TRACK_SPACE
+        y_ribbon_top = y_u - RIBBON_GAP
+        y_ribbon_bot = y_l + GENE_H + RIBBON_GAP
+
+        for lg in lower["genes"]:
+            home_id = lg.get("home_gene_id", "")
+            if not home_id:
+                continue
+            for ug in upper["genes"]:
+                u_name = ug["name"]
+                u_home = ug.get("home_gene_id", u_name)
+                match = (u_home == home_id or u_name == home_id
+                         or (is_goi(u_home) and is_goi(home_id))
+                         or (is_goi(u_name) and is_goi(home_id)))
+                if match:
+                    # Determine ribbon colour
+                    colour = gene_colours.get(home_id,
+                             gene_colours.get(u_name, UNMATCHED_CLR))
+                    if is_goi(home_id):
+                        colour = _goi_colour_for_genome(
+                            lower["genome_id"], goi_genome_colours)
+                    add_ribbon(fig, ug, lg,
+                               upper["offset"], lower["offset"],
+                               y_ribbon_top, y_ribbon_bot,
+                               colour, alpha=0.20)
+                    break
+
+    # -- 5c. Gene arrows -------------------------------------------------
+    legend_shown = set()
+
+    for ti, track in enumerate(all_tracks):
+        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        x_off = track["offset"]
+
+        # Draw large genes first so small genes render on top
+        sorted_genes = sorted(track["genes"],
+                               key=lambda g: g["end"] - g["start"],
+                               reverse=True)
+
+        for gene in sorted_genes:
+            name    = gene["name"]
+            home_id = gene.get("home_gene_id", name)
+            goi_f   = is_goi(name) or is_goi(home_id)
+
+            # --- colour ---
+            if goi_f:
+                colour = _goi_colour_for_genome(
+                    track["genome_id"], goi_genome_colours)
+                bclr, bw = GOI_BORDER, 2.5
+            elif home_id in gene_colours:
+                colour = gene_colours[home_id]
+                bclr, bw = "rgba(0,0,0,0.35)", 1
+            elif name in gene_colours:
+                colour = gene_colours[name]
+                bclr, bw = "rgba(0,0,0,0.35)", 1
             else:
-                if home_gene_id and home_gene_id != gid:
-                    hover_text = f"{display_name}<br>Homolog: {homolog_display}"
-                else:
-                    hover_text = f"{display_name}<br>No Homolog Found"
-            
-            # Coordinates
-            start = g['start']
-            end = g['end']
-            
-            # Check for Query Overlap (Home Track Only)
-            is_query = False
-            if i == 0 and query_intervals:
-                for q in query_intervals:
-                    if g['chrom'] == q['chrom']:
-                        # Overlap logic
-                        if not (g['end'] < q['start'] or g['start'] > q['end']):
-                            is_query = True
-                            break
+                colour = UNMATCHED_CLR
+                bclr, bw = "rgba(0,0,0,0.15)", 0.5
 
-            # Add Trace
-            line_dict = dict(color=color, width=0)
-            if is_query:
-                line_dict = dict(color="black", width=2.5) # Thick black border for Query
-                
-            fig.add_trace(go.Scatter(
-                x=[start, end, end, start, start],
-                y=[0, 0, 1, 1, 0],
-                fill="toself",
-                mode='lines',
-                name=g['name'],
-                text=f"{hover_text}<br>TYPE: {'QUERY' if is_query else 'Gene'}<br>{g['chrom']}:{start}-{end} ({g['strand']})",
-                line=line_dict,
-                fillcolor=color,
-                showlegend=False
-            ), row=row, col=1)
-            
-            # Add Label
-            display_name = g.get('display_name', g['name'])
-            label_text = display_name
-            font_dict = dict(size=10, color="black")
-            
-            if i > 0 and home_gene_id:
-                label_text = homolog_display
-            
-            if is_query:
-                label_text = "★ " + label_text
-                font_dict = dict(size=12, color="red") # Highlight label
-                
-            fig.add_annotation(
-                x=(start + end)/2,
-                y=0.5,
-                text=label_text,
-                showarrow=False,
-                font=font_dict,
-                row=row, col=1
-            )
+            # --- hover text ---
+            cn = clean_gene_label(name)
+            if track["is_home"]:
+                product = _lookup_product(name, home_products)
+                hover = f"<b>{cn}</b>"
+                if product:
+                    hover += f"<br><i>{product}</i>"
+                hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
+                          f"<br>Strand: {gene['strand']}")
+                if goi_f:
+                    hover += "<br><b>GENE OF INTEREST</b>"
+            else:
+                hover = f"<b>{cn}</b>"
+                hover += f"<br>Homolog: {clean_gene_label(home_id)}"
+                if "identity" in gene:
+                    hover += f"<br>Identity: {gene['identity']:.1f}%"
+                if "n_exons" in gene:
+                    hover += f"<br>Exons: {gene['n_exons']}"
+                hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
+                          f"<br>Strand: {gene['strand']}")
+                if goi_f:
+                    hover += "<br><b>GENE OF INTEREST</b>"
 
-        # Plot Candidates (if any)
-        if 'cands' in track and track['cands']:
-             for cand in track['cands']:
-                  start = cand['start']
-                  end = cand['end']
-                  
-                  # Candidates Style: Red, distinct
-                  color = "#FF0000"
-                  
-                  fig.add_trace(go.Scatter(
-                    x=[start, end, end, start, start],
-                    y=[0, 0, 1, 1, 0],
-                    fill="toself",
-                    mode='lines',
-                    name="Candidate",
-                    text=f"CANDIDATE: {cand['name']}<br>{track['name']}:{start}-{end}",
-                    line=dict(color="red", width=2, dash="dot"),
-                    fillcolor="rgba(255, 0, 0, 0.5)",
-                    showlegend=False
-                ), row=row, col=1)
-                
-                  fig.add_annotation(
-                    x=(start + end)/2,
-                    y=-0.2, # Below the gene track
-                    text="★ CANDIDATE",
-                    showarrow=False,
-                    font=dict(size=9, color="red"),
-                    row=row, col=1
-                )
+            # --- legend (one entry per home-gene name) ---
+            lg_key = home_id if home_id else name
+            show_leg = lg_key not in legend_shown
+            if show_leg:
+                legend_shown.add(lg_key)
 
-    # Dynamic height: minimum 200px per track, maximum 400px per track
-    track_height = max(150, min(300, 2000 // max(1, n_tracks)))
-    fig_height = track_height * n_tracks + 100  # +100 for title/margins
-    
-    fig.update_layout(
-        height=fig_height, 
-        title_text="Synteny Plot (Phylo-Colored)",
-        showlegend=False
+            add_gene(fig, gene, x_off, yb, GENE_H, colour, bclr, bw,
+                     hover, show_leg, lg_key)
+
+    # -- 5d. Gene labels -------------------------------------------------
+    for ti, track in enumerate(all_tracks):
+        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        x_off = track["offset"]
+        for gene in track["genes"]:
+            name    = gene["name"]
+            home_id = gene.get("home_gene_id", name)
+            goi_f   = is_goi(name) or is_goi(home_id)
+            if not track["is_home"] and home_id:
+                label = clean_gene_label(home_id)
+            else:
+                label = clean_gene_label(name)
+            add_label(fig, gene, x_off, yb, GENE_H, label,
+                      fsize=8, is_goi_flag=goi_f)
+
+    # -- 5e. Track labels (left margin) ----------------------------------
+    for ti, track in enumerate(all_tracks):
+        yb = (n_tracks - 1 - ti) * TRACK_SPACE
+        fig.add_annotation(
+            x=-0.01, y=yb + GENE_H / 2,
+            text=f"<b>{track['label']}</b>",
+            showarrow=False,
+            font=dict(size=11, color="black"),
+            xref="paper", yref="y",
+            xanchor="right", yanchor="middle",
+        )
+
+    # -- 6. Figure styling -----------------------------------------------
+
+    # Compute sensible x range across all tracks
+    all_x_max = max(
+        g["end"] - track["offset"]
+        for track in all_tracks for g in track["genes"]
     )
-    
-    # Hide y-axes for cleaner look (gene bars use y=0-1 range)
-    for i in range(1, n_tracks + 1):
-        yaxis_name = f'yaxis{i}' if i > 1 else 'yaxis'
-        fig.update_layout(**{yaxis_name: dict(showticklabels=False, showgrid=False, zeroline=False)})
-    
+    fig_height = max(500, n_tracks * 200 + 80)
+
+    fig.update_layout(
+        title=dict(
+            text=("<b>SynTerra Synteny Plot</b>"
+                  "<br><sup>Genes coloured by homology group | "
+                  "* = Gene of Interest | Ribbons connect orthologs</sup>"),
+            x=0.5, font=dict(size=15),
+        ),
+        height=fig_height,
+        width=1500,
+        xaxis=dict(
+            title="Position (bp, relative to region start)",
+            showgrid=True, gridcolor="rgba(200,200,200,0.3)",
+            zeroline=False,
+            range=[-all_x_max * 0.01, all_x_max * 1.04],
+        ),
+        yaxis=dict(
+            showticklabels=False, showgrid=False, zeroline=False,
+            range=[-0.6,
+                   (n_tracks - 1) * TRACK_SPACE + GENE_H + 1.0],
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=220, r=60, t=85, b=55),
+        legend=dict(
+            title="<b>Gene (home ID)</b>",
+            orientation="v", x=1.01, y=1.0,
+            font=dict(size=9),
+            tracegroupgap=2,
+        ),
+        hovermode="closest",
+    )
+
     fig.write_html(args.output)
-    print(f"Plot saved to {args.output}")
+    print(f"Synteny plot saved to {args.output}")
+    print(f"  Tracks: {n_tracks} (1 home + {len(target_tracks)} targets)")
+    print(f"  Home genes: {len(home_genes)}")
+    for tt in target_tracks:
+        print(f"  {tt['display_name']}: {len(tt['genes'])} genes")
+
 
 if __name__ == "__main__":
     main()

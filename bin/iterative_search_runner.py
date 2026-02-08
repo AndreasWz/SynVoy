@@ -78,6 +78,9 @@ def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thre
                     t_start = int(parts[8])
                     t_end = int(parts[9])
                     start, end = normalize_coordinates(t_start, t_end)
+                    # Convert 1-based mmseqs/BLAST coordinates to 0-based half-open
+                    # for Python slicing: start-1 becomes 0-based, end stays (exclusive)
+                    start -= 1
                     strand = '+' if t_start <= t_end else '-'
                     
                     q_start = int(parts[6])
@@ -800,7 +803,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 strand = exons[0].get('strand', '+')
                                 avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
                                 
-                                global_start = w_start + min(e['gstart'] for e in exons)
+                                # Convert 0-based coords to 1-based for GFF output
+                                global_start = w_start + min(e['gstart'] for e in exons) + 1
                                 global_end = w_start + max(e['gend'] for e in exons)
                                 
                                 new_id = f"{parent_id}|{clean_gname}_exon_ann"
@@ -823,8 +827,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 
                                 # GFF: CDS lines per exon (with splice site metadata)
                                 for eidx, exon in enumerate(exons, 1):
-                                    exon_gs = w_start + exon['gstart']
-                                    exon_ge = w_start + exon['gend']
+                                    exon_gs = w_start + exon['gstart'] + 1  # 1-based for GFF
+                                    exon_ge = w_start + exon['gend']        # 0-based excl = 1-based incl
                                     attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
                                     if exon.get('splice_acceptor'):
                                         attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
@@ -855,8 +859,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 if len(region_dna) >= 9:
                                     hit_protein = translate(region_dna).replace('*', '')
                                     if hit_protein:
-                                        nt_s = w_start + g_s
-                                        nt_e = w_start + g_e
+                                        nt_s = w_start + g_s + 1  # 1-based for GFF
+                                        nt_e = w_start + g_e      # 0-based excl = 1-based incl
                                         new_id = f"{parent_id}|{clean_gname}_raw"
                                         annotated_records_raw.append({
                                             'id': new_id,
@@ -877,9 +881,29 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         
                         print(f"[{genome_name}] Exon-aware annotation: {len(annotated_records_raw)} genes.", flush=True)
                     
-                    # 6. Accept all candidates (RBH disabled)
+                    # 6. Deduplicate: remove entries with identical coordinates
+                    # (e.g., GOI_P01501 and GOI_Melt often annotate the same locus)
+                    seen_coords = {}
+                    deduped_records = []
+                    deduped_gff = []
+                    for rec in annotated_records_raw:
+                        desc = rec.get('description', '')
+                        coords_key = None
+                        if 'coords:' in desc:
+                            coords_key = desc.split('coords:')[1].split(' ')[0]
+                        if coords_key and coords_key in seen_coords:
+                            print(f"[{genome_name}] Removing duplicate: {rec['id']} (same coords as {seen_coords[coords_key]})", flush=True)
+                            # Remove corresponding GFF lines
+                            rid = rec['id']
+                            valid_gff_lines = [g for g in valid_gff_lines if f"ID={rid}" not in g and f"Parent={rid}" not in g]
+                            continue
+                        if coords_key:
+                            seen_coords[coords_key] = rec['id']
+                        deduped_records.append(rec)
+                    annotated_records_raw = deduped_records
+                    
                     new_genes = annotated_records_raw
-                    print(f"[{genome_name}] Keeping all {len(new_genes)} candidates.", flush=True)
+                    print(f"[{genome_name}] Keeping {len(new_genes)} candidates.", flush=True)
                     
                     # Write GFF, FASTA, and Homology TSV
                     if valid_gff_lines:
