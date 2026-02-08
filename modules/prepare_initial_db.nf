@@ -44,6 +44,7 @@ process PREPARE_INITIAL_DB {
     
     goi_full_count = 0
     exon_count = 0
+    tandem_count = 0
     full_goi_seq = None
     full_goi_id = None
     
@@ -53,15 +54,18 @@ process PREPARE_INITIAL_DB {
         if '|exon_' in clean_id:
             exon_count += 1
             print(f"  Added exon: {clean_id} ({len(seq)} aa)")
+        elif clean_id.startswith('GOI_copy_'):
+            tandem_count += 1
+            print(f"  Added tandem copy: {clean_id} ({len(seq)} aa)")
         else:
             goi_full_count += 1
             full_goi_seq = seq
             full_goi_id = clean_id
             print(f"  Added full GOI: {clean_id} ({len(seq)} aa)")
     
-    # 3. Fallback: Generate arbitrary fragments ONLY if no real exons found
+    # 3. Fallback: Generate arbitrary fragments ONLY if no real exons or tandem copies found
     fragment_count = 0
-    if exon_count == 0 and full_goi_seq:
+    if exon_count == 0 and tandem_count == 0 and full_goi_seq:
         print("  No real exons found, generating fallback fragments...")
         min_fragment_size = 20  # amino acids
         fragments = generate_fragments(full_goi_seq, full_goi_id, min_size=min_fragment_size)
@@ -74,6 +78,8 @@ process PREPARE_INITIAL_DB {
         print(f"  Generated {fragment_count} fallback fragments")
     elif exon_count > 0:
         print(f"  Using {exon_count} real exon sequences (no arbitrary fragments needed)")
+    elif tandem_count > 0:
+        print(f"  Using {tandem_count} tandem copies as queries (no arbitrary fragments needed)")
     
     # 4. Write combined database
     write_fasta(all_records, output_faa)
@@ -83,6 +89,7 @@ process PREPARE_INITIAL_DB {
     print(f"  - Flanking genes: {flanking_count}")
     print(f"  - GOI (full): {goi_full_count}")
     print(f"  - GOI exons: {exon_count}")
+    print(f"  - GOI tandem copies: {tandem_count}")
     print(f"  - Fallback fragments: {fragment_count}")
     """
 }

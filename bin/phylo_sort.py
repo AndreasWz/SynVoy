@@ -30,8 +30,11 @@ def main():
                      target_list.append(os.path.join(args.targets_dir, f))
     
     if not target_list:
-        print("Error: No targets provided via --targets or --targets_dir")
-        sys.exit(1)
+        print("Warning: No targets provided via --targets or --targets_dir")
+        print("Writing empty sorted list.")
+        with open(args.output, 'w') as f:
+            pass  # empty file
+        return
         
     # Standardize to basenames for output sorting consistency if needed, 
     # BUT we need full paths or at least consistent identifiers.

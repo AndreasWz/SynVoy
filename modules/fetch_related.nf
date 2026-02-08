@@ -9,6 +9,7 @@ process FETCH_RELATED_GENOMES {
     output:
     path "easy_mode_genomes", emit: genomes_dir
     path "easy_mode_genomes/genomes_manifest.txt", emit: manifest
+    path "easy_mode_genomes/species_mapping.tsv", emit: species_map
     
     script:
     """

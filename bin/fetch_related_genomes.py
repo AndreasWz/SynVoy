@@ -74,6 +74,40 @@ def get_taxid_from_name(species_name):
     ]
     return run_piped_command(cmds)
 
+def get_parent_taxa(taxid):
+    """
+    Walk up the NCBI taxonomy tree from a given taxid.
+    Returns list of (rank_label, taxid) for interesting ranks:
+      family, order, class  (skipping genus since we already tried it).
+    """
+    target_ranks = ['family', 'order', 'class']
+    results = []
+    try:
+        # efetch the full lineage for this taxid
+        cmds = [
+            ['efetch', '-db', 'taxonomy', '-id', str(taxid), '-format', 'xml'],
+            ['xtract', '-pattern', 'Taxon', '-block', 'LineageEx/Taxon',
+             '-element', 'Rank', '-element', 'TaxId', '-element', 'ScientificName'],
+        ]
+        raw = run_piped_command(cmds)
+        if not raw:
+            return results
+        # Output: lines of "rank\ttaxid\tname" repeated for every ancestor
+        parts = raw.split('\t')
+        # Group into triples
+        triples = []
+        for i in range(0, len(parts) - 2, 3):
+            triples.append((parts[i].strip(), parts[i+1].strip(), parts[i+2].strip()))
+        for rank, tid, name in triples:
+            if rank.lower() in target_ranks:
+                results.append((f"{rank} ({name})", tid))
+        # Sort by target_ranks order (family first, then order, then class)
+        rank_order = {r: i for i, r in enumerate(target_ranks)}
+        results.sort(key=lambda x: rank_order.get(x[0].split()[0].lower(), 99))
+    except Exception as e:
+        print(f"Warning: Could not retrieve lineage for TaxID {taxid}: {e}")
+    return results
+
 def get_related_species(taxid, max_genomes=10, refseq_only=True, exclude_species=None):
     """Get list of related species using NCBI taxonomy.
     
@@ -155,7 +189,7 @@ def get_related_species(taxid, max_genomes=10, refseq_only=True, exclude_species
     return unique_assemblies
 
 def download_genome(accession, output_dir):
-    """Download genome from NCBI using datasets."""
+    """Download genome from NCBI using datasets. Also attempts to download GFF if available."""
     print(f"Downloading {accession}...")
     
     output_path = Path(output_dir)
@@ -163,32 +197,63 @@ def download_genome(accession, output_dir):
     
     zip_file = output_path / f"{accession}.zip"
     
-    # Try using datasets command
-    cmd = ['datasets', 'download', 'genome', 'accession', accession, '--filename', str(zip_file)]
+    # Try using datasets command — include GFF annotations if available
+    cmd = ['datasets', 'download', 'genome', 'accession', accession,
+           '--include', 'genome,gff3', '--filename', str(zip_file)]
     
     try:
         run_safe_command(cmd)
         
         # Unzip
-        # unzip -o file.zip -d output_dir/result
         extract_dir = output_path / accession
         cmd_unzip = ['unzip', '-o', str(zip_file), '-d', str(extract_dir)]
         run_safe_command(cmd_unzip)
         
         # Find .fna file
         fna_files = list(extract_dir.rglob("*.fna"))
+        fna_path = None
         if fna_files:
             target = output_path / f"{accession}.fna"
-            # Move/Copy
             os.rename(fna_files[0], target)
-            print(f"  ✓ Downloaded to {target}")
+            fna_path = str(target)
+            print(f"  ✓ Genome: {target}")
+        
+        # Find .gff file (annotations)
+        gff_files = list(extract_dir.rglob("*.gff"))
+        if gff_files:
+            # Check if GFF has actual CDS features (not just scaffold entries)
+            best_gff = None
+            for gff in gff_files:
+                try:
+                    with open(gff) as f:
+                        has_cds = False
+                        for line_num, line in enumerate(f):
+                            if line_num > 500:
+                                break
+                            if '\tCDS\t' in line or '\tgene\t' in line:
+                                has_cds = True
+                                break
+                        if has_cds:
+                            best_gff = gff
+                            break
+                except Exception:
+                    continue
             
-            # Cleanup zip and extracted dir
-            if zip_file.exists(): zip_file.unlink()
-            import shutil
-            if extract_dir.exists(): shutil.rmtree(extract_dir)
-                
-            return str(target)
+            if best_gff:
+                gff_target = output_path / f"{accession}.gff"
+                os.rename(best_gff, gff_target)
+                print(f"  ✓ GFF annotations: {gff_target}")
+            else:
+                print(f"  ○ GFF found but no CDS features (scaffold-only)")
+        else:
+            print(f"  ○ No GFF annotations available")
+        
+        # Cleanup zip and extracted dir
+        if zip_file.exists(): zip_file.unlink()
+        import shutil
+        if extract_dir.exists(): shutil.rmtree(extract_dir)
+            
+        return fna_path
             
     except Exception as e:
         print(f"  ✗ Could not download {accession}: {e}")
@@ -235,30 +300,23 @@ def main():
     # Get related species - pass exclude_species to filter early
     assemblies = get_related_species(taxid, args.max, refseq_only=True, exclude_species=args.home_species)
     
-    # If no assemblies found at genus level, try family level
-    # This is important for cases like Homo (only has extinct relatives)
-    # or genera with few species
+    # If no assemblies found at genus level, try broader taxonomic levels
+    # Walk up the taxonomy tree: genus -> family -> order
     if not assemblies:
         print(f"No non-home assemblies found at genus level. Trying broader search...")
         
-        # Known family mappings for common problematic cases
-        family_mappings = {
-            'homo': 'Hominidae',  # Great apes
-            'pan': 'Hominidae',   # Chimps
-            'gorilla': 'Hominidae',
-            'pongo': 'Hominidae',  # Orangutans
-        }
+        # Get lineage from NCBI taxonomy automatically
+        parent_ranks = get_parent_taxa(taxid)
         
-        family = family_mappings.get(genus.lower())
-        if family:
-            print(f"Searching family: {family}")
-            family_taxid = get_taxid_from_name(family)
-            if family_taxid:
-                print(f"  Found family TaxID: {family_taxid}")
-                # Fetch more for family-level search
-                family_fetch_count = max(50, args.max * 5)
-                assemblies = get_related_species(family_taxid, family_fetch_count, 
-                                                  refseq_only=True, exclude_species=args.home_species)
+        for rank_name, rank_taxid in parent_ranks:
+            print(f"Searching {rank_name} (TaxID: {rank_taxid})...")
+            broader_count = max(50, args.max * 5)
+            assemblies = get_related_species(rank_taxid, broader_count,
+                                              refseq_only=True, exclude_species=args.home_species)
+            if assemblies:
+                print(f"  Found {len(assemblies)} assemblies at {rank_name} level")
+                break
+            print(f"  No assemblies at {rank_name} level either")
     
     if not assemblies:
         print("WARNING: No related assemblies found.", file=sys.stderr)
@@ -305,6 +363,13 @@ def main():
             f.write(f"{path}\n")
     
     print(f"\nGenome paths written to: {manifest_path}")
+
+    # Write species mapping file (accession -> species name)
+    species_map_path = output_path / "species_mapping.tsv"
+    with open(species_map_path, 'w') as f:
+        for asm in assemblies:
+            f.write(f"{asm['accession']}\t{asm['species']}\n")
+    print(f"Species mapping written to: {species_map_path}")
 
 if __name__ == "__main__":
     main()

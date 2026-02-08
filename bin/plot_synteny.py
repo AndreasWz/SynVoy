@@ -252,11 +252,17 @@ def parse_tree_clade_colours(tree_file):
 # Colour assignment
 # ======================================================================
 
+# Module-level set populated during main() with names of GOI genes
+_GOI_NAMES = set()
+
+
 def is_goi(name):
     """Return True if *name* represents the Gene of Interest."""
     if not name:
         return False
-    return name.startswith("GOI_") or name == "gene-Melt" or "|exon_" in name
+    if name.startswith("GOI_") or "|exon_" in name:
+        return True
+    return name in _GOI_NAMES
 
 
 def _overlaps_any(gene, intervals):
@@ -264,6 +270,31 @@ def _overlaps_any(gene, intervals):
         if gene["chrom"] == q["chrom"] and gene["start"] < q["end"] and gene["end"] > q["start"]:
             return True
     return False
+
+
+def identify_goi_names(home_genes, query_intervals):
+    """
+    Identify which home-gene names are GOI by overlapping with query_bed.
+    Populates the module-level _GOI_NAMES set.
+    Only marks genes that are *small* relative to the query span as GOI.
+    Large container genes (e.g. LOC726866 spanning 17kb) are excluded.
+    """
+    _GOI_NAMES.clear()
+    if not query_intervals:
+        return
+    # Query span
+    q_span = sum(q["end"] - q["start"] for q in query_intervals)
+    max_goi_size = max(q_span * 20, 5000)  # generous but bounded
+    for gene in home_genes:
+        gsize = gene["end"] - gene["start"]
+        if gsize <= max_goi_size and _overlaps_any(gene, query_intervals):
+            _GOI_NAMES.add(gene["name"])
+    # Always include GOI_ prefixed names
+    for gene in home_genes:
+        if gene["name"].startswith("GOI_"):
+            _GOI_NAMES.add(gene["name"])
+    if _GOI_NAMES:
+        print(f"GOI genes identified: {_GOI_NAMES}")
 
 
 def assign_gene_colours(home_genes, query_intervals=None):
@@ -417,6 +448,140 @@ def _lookup_product(gene_name, products):
 
 
 # ======================================================================
+# Tree visualization
+# ======================================================================
+
+def _render_tree_html(tree_file, goi_genome_colours, output_path,
+                      species_map=None):
+    """
+    Render a horizontal dendrogram of the GOI phylogenetic tree as an
+    interactive Plotly HTML file.  Leaf nodes are coloured with the same
+    clade palette used in the synteny plot.
+    """
+    if not tree_file or not os.path.exists(tree_file) or not ETE3_AVAILABLE:
+        return
+
+    try:
+        t = Tree(tree_file)
+    except Exception as exc:
+        print(f"Warning: could not parse tree for rendering: {exc}")
+        return
+
+    leaves = list(t.iter_leaves())
+    if len(leaves) < 2:
+        return
+
+    # --- 1. Assign (x, y) coordinates via recursive DFS ----------------
+    # x = branch length (horizontal), y = leaf index (vertical)
+    node_coords = {}           # node -> (x, y)
+    leaf_counter = [0]         # mutable counter
+
+    def _layout(node, x_offset):
+        if node.is_leaf():
+            y = leaf_counter[0]
+            leaf_counter[0] += 1
+            node_coords[node] = (x_offset + node.dist, y)
+        else:
+            child_ys = []
+            for child in node.children:
+                _layout(child, x_offset + node.dist)
+                child_ys.append(node_coords[child][1])
+            node_coords[node] = (x_offset + node.dist, sum(child_ys) / len(child_ys))
+
+    _layout(t, 0)
+
+    # --- 2. Build Plotly traces ----------------------------------------
+    fig = go.Figure()
+
+    # Branch lines (parent -> child: horizontal then vertical)
+    for node in t.traverse():
+        if node.is_root():
+            continue
+        parent = node.up
+        px, py = node_coords[parent]
+        cx, cy = node_coords[node]
+        # Horizontal line from parent x to child x, at child y
+        fig.add_trace(go.Scatter(
+            x=[px, px, cx], y=[py, cy, cy],
+            mode="lines",
+            line=dict(color="black", width=1.5),
+            hoverinfo="skip", showlegend=False,
+        ))
+
+    # Leaf dots + labels
+    for leaf in leaves:
+        lx, ly = node_coords[leaf]
+        gid = _genome_id_from_leaf(leaf.name)
+        key = gid if gid else "home"
+
+        # Colour: try exact, then fuzzy
+        colour = GOI_COLOUR
+        if goi_genome_colours:
+            if key in goi_genome_colours:
+                colour = goi_genome_colours[key]
+            else:
+                for k, c in goi_genome_colours.items():
+                    if k in key or key in k:
+                        colour = c
+                        break
+
+        # Clean label
+        label = leaf.name
+        if "|" in label:
+            parts = label.split("|")
+            goi_part = parts[0]
+            genome_part = parts[1] if len(parts) > 1 else ""
+            # Prettify genome ID — use species name when available
+            genome_pretty = genome_part.replace("_fna_exon_ann", "").replace("_fna", "")
+            if species_map:
+                for acc, sp_name in species_map.items():
+                    if acc in genome_pretty:
+                        genome_pretty = sp_name
+                        break
+            label = f"{goi_part} | {genome_pretty}"
+        else:
+            label = f"{label} (home)"
+
+        fig.add_trace(go.Scatter(
+            x=[lx], y=[ly],
+            mode="markers+text",
+            marker=dict(size=14, color=colour, line=dict(color="black", width=1)),
+            text=[label],
+            textposition="middle right",
+            textfont=dict(size=11),
+            hovertext=f"<b>{leaf.name}</b><br>Branch length: {leaf.dist:.6f}",
+            hoverinfo="text",
+            showlegend=False,
+        ))
+
+    # --- 3. Layout -----------------------------------------------------
+    n_leaves = len(leaves)
+    fig.update_layout(
+        title=dict(
+            text="<b>SynTerra GOI Phylogenetic Tree</b>",
+            x=0.5, font=dict(size=15),
+        ),
+        height=max(300, n_leaves * 60 + 100),
+        width=900,
+        xaxis=dict(
+            title="Evolutionary distance",
+            showgrid=True, gridcolor="rgba(200,200,200,0.3)",
+            zeroline=True,
+        ),
+        yaxis=dict(
+            showticklabels=False, showgrid=False, zeroline=False,
+            range=[-0.5, n_leaves - 0.5],
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=40, r=300, t=60, b=50),
+    )
+
+    fig.write_html(output_path)
+    print(f"Tree plot saved to {output_path}")
+
+
+# ======================================================================
 # Main
 # ======================================================================
 
@@ -430,8 +595,20 @@ def main():
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
+    ap.add_argument("--species_map",    default=None,
+                    help="TSV mapping accession → species name")
     ap.add_argument("--output",         required=True)
     args = ap.parse_args()
+
+    # -- 0. Load species mapping -----------------------------------------
+    species_map = {}  # accession -> species name
+    if args.species_map and os.path.exists(args.species_map):
+        with open(args.species_map) as fh:
+            for line in fh:
+                parts = line.strip().split('\t', 1)
+                if len(parts) == 2:
+                    species_map[parts[0]] = parts[1]
+        print(f"[plot] Loaded species mapping for {len(species_map)} genomes")
 
     # -- 1. Parse inputs -------------------------------------------------
 
@@ -448,6 +625,9 @@ def main():
             query_intervals.append({"chrom": g["chrom"],
                                     "start": g["start"], "end": g["end"]})
 
+    # Identify GOI gene names dynamically from query_bed overlap
+    identify_goi_names(home_genes, query_intervals)
+
     home_products = parse_home_gff_products(args.home_gff) if args.home_gff else {}
     homology_map  = parse_homology_tsvs(args.homology_tsvs)
 
@@ -463,9 +643,15 @@ def main():
         if not genes:
             continue
         genes.sort(key=lambda g: g["start"])
+        # Use species name from mapping if available
+        display = genome_id
+        for acc, sp_name in species_map.items():
+            if acc in genome_id:
+                display = sp_name
+                break
         target_tracks.append({
             "genome_id":    genome_id,
-            "display_name": genome_id,
+            "display_name": display,
             "genes":        genes,
             "chrom":        genes[0]["chrom"],
         })
@@ -697,6 +883,13 @@ def main():
     print(f"  Home genes: {len(home_genes)}")
     for tt in target_tracks:
         print(f"  {tt['display_name']}: {len(tt['genes'])} genes")
+
+    # -- 7. Tree plot (separate HTML) ------------------------------------
+    tree_output = args.output.replace("_synteny_plot.html", "_tree.html")
+    if tree_output == args.output:
+        tree_output = args.output.replace(".html", "_tree.html")
+    _render_tree_html(args.tree, goi_genome_colours, tree_output,
+                      species_map=species_map)
 
 
 if __name__ == "__main__":

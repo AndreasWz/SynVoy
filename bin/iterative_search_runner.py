@@ -788,63 +788,106 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                             
                             # Run exon-aware annotation (same logic as annotate_goi_exons)
                             try:
-                                exons, _ = annotate_exons_from_hit_list(
-                                    gene_hits, parent_query_seq, subseq, chrom,
-                                    search_missing=True
-                                )
+                                # Check for tandem duplications first (GOI genes)
+                                is_goi = parent_id.startswith('GOI_') or 'GOI_' in parent_id
+                                is_tandem = False
+                                if is_goi:
+                                    from annotate_goi_exons import detect_tandem_duplications
+                                    is_tandem, tandem_copies = detect_tandem_duplications(
+                                        gene_hits, parent_query_seq, subseq, chrom
+                                    )
+                                
+                                if is_tandem and tandem_copies:
+                                    exons = tandem_copies
+                                    print(f"[{genome_name}] TANDEM: {len(exons)} copies of {parent_id}", flush=True)
+                                else:
+                                    exons, _ = annotate_exons_from_hit_list(
+                                        gene_hits, parent_query_seq, subseq, chrom,
+                                        search_missing=True
+                                    )
                             except Exception as ann_err:
                                 print(f"[{genome_name}] Exon annotation failed for {parent_id}: {ann_err}", flush=True)
                                 exons = []
                             
                             if exons:
-                                # Build protein from annotated exons
-                                exons.sort(key=lambda e: e.get('qstart', 0))
-                                exon_protein = ''.join(e['seq'] for e in exons)
-                                strand = exons[0].get('strand', '+')
-                                avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+                                # Check if this is tandem (copies, not exons)
+                                is_tandem_result = any(e.get('id', '').startswith('GOI_copy_') for e in exons)
                                 
-                                # Convert 0-based coords to 1-based for GFF output
-                                global_start = w_start + min(e['gstart'] for e in exons) + 1
-                                global_end = w_start + max(e['gend'] for e in exons)
+                                if is_tandem_result:
+                                    # TANDEM: output each copy as separate record
+                                    for copy in exons:
+                                        global_start = w_start + copy['gstart'] + 1
+                                        global_end = w_start + copy['gend']
+                                        strand = copy.get('strand', '+')
+                                        
+                                        copy_id = f"{copy['id']}|{clean_gname}"
+                                        annotated_records_raw.append({
+                                            'id': copy_id,
+                                            'seq': copy['seq'],
+                                            'description': (f"coords:{global_start}-{global_end} "
+                                                           f"parent:{parent_id} tandem_copy "
+                                                           f"identity:{copy.get('pident', 0):.1f}")
+                                        })
+                                        
+                                        valid_gff_lines.append(
+                                            f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
+                                            f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
+                                            f"ID={copy_id};Name={copy['id']};"
+                                            f"SynTerra_Parent={parent_id};SynTerra_ID={copy_id};"
+                                            f"Identity={copy.get('pident', 0):.1f};Type=tandem_copy"
+                                        )
+                                        
+                                        print(f"[{genome_name}]   {copy['id']}: {len(copy['seq'])} aa, "
+                                              f"{copy.get('pident', 0):.1f}% id (tandem copy)", flush=True)
+                                else:
+                                    # EXONS: concatenate into single protein
+                                    exons.sort(key=lambda e: e.get('qstart', 0))
+                                    exon_protein = ''.join(e['seq'] for e in exons)
+                                    strand = exons[0].get('strand', '+')
+                                    avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
                                 
-                                new_id = f"{parent_id}|{clean_gname}_exon_ann"
-                                annotated_records_raw.append({
-                                    'id': new_id,
-                                    'seq': exon_protein,
-                                    'description': (f"coords:{global_start}-{global_end} "
-                                                   f"parent:{parent_id} exons:{len(exons)} "
-                                                   f"identity:{avg_pident:.1f}")
-                                })
-                                
-                                # GFF: mRNA line
-                                valid_gff_lines.append(
-                                    f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
-                                    f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"ID={new_id};Name={parent_id};"
-                                    f"SynTerra_Parent={parent_id};SynTerra_ID={new_id};"
-                                    f"Identity={avg_pident:.1f};Exons={len(exons)}"
-                                )
-                                
-                                # GFF: CDS lines per exon (with splice site metadata)
-                                for eidx, exon in enumerate(exons, 1):
-                                    exon_gs = w_start + exon['gstart'] + 1  # 1-based for GFF
-                                    exon_ge = w_start + exon['gend']        # 0-based excl = 1-based incl
-                                    attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
-                                    if exon.get('splice_acceptor'):
-                                        attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
-                                    if exon.get('splice_donor'):
-                                        attrs += f";SpliceDonor={exon['splice_donor']}"
-                                    if exon.get('has_start_codon'):
-                                        attrs += ";StartCodon=ATG"
-                                    if exon.get('has_stop_codon'):
-                                        attrs += ";StopCodon=yes"
+                                    # Convert 0-based coords to 1-based for GFF output
+                                    global_start = w_start + min(e['gstart'] for e in exons) + 1
+                                    global_end = w_start + max(e['gend'] for e in exons)
+                                    
+                                    new_id = f"{parent_id}|{clean_gname}_exon_ann"
+                                    annotated_records_raw.append({
+                                        'id': new_id,
+                                        'seq': exon_protein,
+                                        'description': (f"coords:{global_start}-{global_end} "
+                                                       f"parent:{parent_id} exons:{len(exons)} "
+                                                       f"identity:{avg_pident:.1f}")
+                                    })
+                                    
+                                    # GFF: mRNA line
                                     valid_gff_lines.append(
-                                        f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t"
-                                        f".\t{strand}\t0\t{attrs}"
+                                        f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
+                                        f"{avg_pident:.1f}\t{strand}\t.\t"
+                                        f"ID={new_id};Name={parent_id};"
+                                        f"SynTerra_Parent={parent_id};SynTerra_ID={new_id};"
+                                        f"Identity={avg_pident:.1f};Exons={len(exons)}"
                                     )
-                                
-                                print(f"[{genome_name}]   {parent_id}: {len(exons)} exon(s), "
-                                      f"{len(exon_protein)} aa, {avg_pident:.1f}% id", flush=True)
+                                    
+                                    # GFF: CDS lines per exon (with splice site metadata)
+                                    for eidx, exon in enumerate(exons, 1):
+                                        exon_gs = w_start + exon['gstart'] + 1  # 1-based for GFF
+                                        exon_ge = w_start + exon['gend']        # 0-based excl = 1-based incl
+                                        attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
+                                        if exon.get('splice_acceptor'):
+                                            attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
+                                        if exon.get('splice_donor'):
+                                            attrs += f";SpliceDonor={exon['splice_donor']}"
+                                        if exon.get('has_start_codon'):
+                                            attrs += ";StartCodon=ATG"
+                                        if exon.get('has_stop_codon'):
+                                            attrs += ";StopCodon=yes"
+                                        valid_gff_lines.append(
+                                            f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t"
+                                            f".\t{strand}\t0\t{attrs}"
+                                        )
+                                    
+                                    print(f"[{genome_name}]   {parent_id}: {len(exons)} exon(s), "
+                                          f"{len(exon_protein)} aa, {avg_pident:.1f}% id", flush=True)
                             else:
                                 # Fallback: translate best raw hit directly
                                 best_hit = min(gene_hits, key=lambda h: h.get('evalue', 1))

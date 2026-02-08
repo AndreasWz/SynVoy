@@ -10,9 +10,11 @@ process PLOT_SYNTENY {
     path candidate_beds
     path homology_tsvs
     path tree
+    path species_map
 
     output:
     path "*_synteny_plot.html", emit: plot
+    path "*_tree.html", emit: tree, optional: true
 
     script:
     // Handle empty collections gracefully
@@ -26,6 +28,7 @@ process PLOT_SYNTENY {
     def names_arg = names_str ? "--target_names ${names_str}" : ""
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
+    def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     
     """
     plot_synteny.py \\
@@ -37,6 +40,7 @@ process PLOT_SYNTENY {
         $cands_arg \\
         $homo_arg \\
         --tree $tree \\
+        $species_arg \\
         --output ${home_bed.baseName}_synteny_plot.html
     """
 }

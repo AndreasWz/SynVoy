@@ -22,6 +22,7 @@ include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
+include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 
 // ==============================================================================
 // ANSI Color Codes (Script-level variables)
@@ -156,6 +157,7 @@ workflow {
         log.info "${c_cyan}  - Downloading related genomes...${c_reset}"
         FETCH_RELATED_GENOMES(params.home_species, params.max_genomes)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
+        species_map_ch = FETCH_RELATED_GENOMES.out.species_map
         
         // Count genomes found
         genomes_dir_ch.view { dir ->
@@ -194,10 +196,12 @@ workflow {
             
             STAGE_GENOMES(target_genomes_list)
             genomes_dir_ch = STAGE_GENOMES.out.dir
+            species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
             
         } else {
             log.warn "${c_yellow}WARNING: No target genomes provided - running home genome analysis only${c_reset}"
             genomes_dir_ch = Channel.empty()
+            species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
         }
     }
 
@@ -308,6 +312,29 @@ workflow {
         effective_home_gff_ch = user_provided_gff 
             ? home_gff_ch 
             : PREPARE_HOME_PROTEOME.out.gff.ifEmpty(file("NO_GFF"))
+
+        // Borrow annotations from annotated target genomes (when no user GFF)
+        if (!user_provided_gff) {
+            log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
+            
+            BORROW_ANNOTATIONS(
+                home_genome_ch,
+                PREPARE_HOME_PROTEOME.out.faa,
+                genomes_dir_ch,
+                LOCATE_GENE.out.bed.first(),
+                params.n_flanking_genes
+            )
+            
+            BORROW_ANNOTATIONS.out.gff.view { gff ->
+                "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
+            }
+            
+            // Merge borrowed GFF with Prodigal GFF for a richer annotation
+            effective_home_gff_ch = PREPARE_HOME_PROTEOME.out.gff
+                .mix(BORROW_ANNOTATIONS.out.gff)
+                .collectFile(name: 'merged_home_annotations.gff')
+                .ifEmpty(file("NO_GFF"))
+        }
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
@@ -444,7 +471,8 @@ workflow {
             all_names,                       // target_names
             all_beds,                        // candidate_beds
             all_tsvs,                        // homology_tsvs
-            tree_ch                          // tree
+            tree_ch,                         // tree
+            species_map_ch                   // species_mapping.tsv
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->

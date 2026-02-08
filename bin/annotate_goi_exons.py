@@ -606,6 +606,165 @@ def extract_exons_from_gff_match(match, genome_file):
 
 
 # =============================================================================
+# TANDEM DUPLICATION DETECTION
+# =============================================================================
+
+def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
+                                max_intergenic_distance=50000):
+    """
+    Detect tandem duplications among search hits.
+    
+    Distinguishes between:
+    - Exons: Hits covering DIFFERENT parts of the query (non-overlapping in query space)
+    - Tandem copies: Hits each covering a LARGE/SIMILAR part of the query 
+      (overlapping in query space, non-overlapping in genome space)
+    
+    Criteria for tandem duplication:
+    1. Multiple hits on same chromosome within max_intergenic_distance
+    2. Hits overlap significantly in QUERY space (each covers >40% of query)
+       OR hits that individually align well to the query
+    3. Translated products from each hit region have high identity to query
+    
+    Returns:
+        (is_tandem, copies) where copies is a list of dicts with:
+        {'id', 'seq', 'chrom', 'gstart', 'gend', 'strand', 'pident', 'qstart', 'qend'}
+        Returns (False, []) if not tandem duplication.
+    """
+    if not hits or len(hits) < 2:
+        return False, []
+    
+    query_len = len(query_seq)
+    if query_len == 0:
+        return False, []
+    
+    # Only consider deduplicated hits
+    hits = _deduplicate_hits(hits, overlap_threshold=0.8)
+    
+    # Check how many hits cover a large fraction of the query
+    # An "exon" would cover a SMALL fraction; a tandem copy covers a LARGE fraction
+    large_coverage_hits = []
+    for h in hits:
+        q_cov = (h['qend'] - h['qstart'] + 1) / query_len
+        if q_cov >= 0.35:  # hit covers >=35% of query → could be full copy
+            large_coverage_hits.append(h)
+    
+    # Also check: do most hits overlap in query space?
+    # Sort by qstart
+    sorted_hits = sorted(hits, key=lambda h: h['qstart'])
+    query_overlap_count = 0
+    for i in range(len(sorted_hits) - 1):
+        for j in range(i + 1, len(sorted_hits)):
+            q_overlap = _calc_overlap(
+                sorted_hits[i]['qstart'], sorted_hits[i]['qend'],
+                sorted_hits[j]['qstart'], sorted_hits[j]['qend']
+            )
+            shorter = min(
+                sorted_hits[i]['qend'] - sorted_hits[i]['qstart'] + 1,
+                sorted_hits[j]['qend'] - sorted_hits[j]['qstart'] + 1
+            )
+            if shorter > 0 and q_overlap / shorter > 0.5:
+                query_overlap_count += 1
+    
+    total_pairs = len(sorted_hits) * (len(sorted_hits) - 1) / 2
+    overlap_fraction = query_overlap_count / total_pairs if total_pairs > 0 else 0
+    
+    # Decision: if most hits cover large parts of query AND overlap in query space
+    # → tandem duplication
+    is_tandem = False
+    
+    if len(large_coverage_hits) >= 2:
+        # Multiple hits each covering >35% of query → likely tandem copies
+        is_tandem = True
+        print(f"[Tandem] {len(large_coverage_hits)} hits each cover >35% of query → tandem copies")
+    elif overlap_fraction > 0.5 and len(hits) >= 3:
+        # Most hit pairs overlap in query space → likely tandem copies, not exons
+        is_tandem = True
+        print(f"[Tandem] {overlap_fraction:.0%} of hit pairs overlap in query space → tandem copies")
+    
+    if not is_tandem:
+        return False, []
+    
+    # Extract each copy as a separate protein
+    # Determine strand consensus
+    strand_votes = {'+': 0, '-': 0}
+    for h in hits:
+        strand_votes[h.get('strand', '+')] += 1
+    consensus_strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
+    
+    copies = []
+    # Use the large-coverage hits as the basis
+    candidate_hits = large_coverage_hits if large_coverage_hits else hits
+    
+    # Sort by genomic position
+    candidate_hits.sort(key=lambda h: h['gstart'])
+    
+    # Cluster nearby hits into individual gene copies
+    gene_clusters = []
+    current_cluster = [candidate_hits[0]]
+    
+    for h in candidate_hits[1:]:
+        prev = current_cluster[-1]
+        # If hits are very close in genome space (<5kb), they're likely same gene
+        if h['gstart'] - prev['gend'] < 5000:
+            current_cluster.append(h)
+        else:
+            gene_clusters.append(current_cluster)
+            current_cluster = [h]
+    gene_clusters.append(current_cluster)
+    
+    for copy_num, cluster in enumerate(gene_clusters, start=1):
+        # Merge cluster hits into one region
+        gstart = min(h['gstart'] for h in cluster)
+        gend = max(h['gend'] for h in cluster)
+        best_hit = min(cluster, key=lambda h: h['evalue'])
+        
+        # Extract and translate the DNA
+        exon_dna = chrom_seq[gstart:gend]
+        strand = best_hit.get('strand', consensus_strand)
+        if strand == '-':
+            exon_dna = reverse_complement(exon_dna)
+        
+        # Trim to codon boundary
+        exon_dna = exon_dna[:len(exon_dna) - len(exon_dna) % 3]
+        if len(exon_dna) < 9:
+            continue
+        
+        prot = translate(exon_dna)
+        # Stop at first stop codon
+        if '*' in prot:
+            prot = prot.split('*')[0]
+        
+        if len(prot) < 10:
+            continue
+        
+        copies.append({
+            'id': f"GOI_copy_{copy_num}",
+            'seq': prot,
+            'chrom': chrom_name,
+            'gstart': gstart,
+            'gend': gend,
+            'strand': strand,
+            'pident': best_hit['pident'],
+            'evalue': best_hit['evalue'],
+            'qstart': best_hit['qstart'],
+            'qend': best_hit['qend'],
+            'exon_num': copy_num,
+            'has_start_codon': False,
+            'has_stop_codon': False,
+            'splice_donor': None,
+            'splice_acceptor': None,
+            'coords': (gstart, gend),
+        })
+    
+    if len(copies) >= 2:
+        print(f"[Tandem] Identified {len(copies)} tandem copies "
+              f"spanning {copies[0]['gstart']}-{copies[-1]['gend']} on {chrom_name}")
+        return True, copies
+    
+    return False, []
+
+
+# =============================================================================
 # HIT-BASED EXON ANNOTATION (Scenario A - No GFF)
 # =============================================================================
 
@@ -737,6 +896,15 @@ def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hit
         return [], query_seq
 
     print(f"[Hit Annotate] Best chromosome: {best_chrom} with {len(hits_by_chrom[best_chrom])} hits")
+
+    # Check for tandem duplications BEFORE exon annotation
+    is_tandem, copies = detect_tandem_duplications(
+        hits_by_chrom[best_chrom], query_seq, chrom_seq, best_chrom
+    )
+    
+    if is_tandem:
+        print(f"[Hit Annotate] TANDEM DUPLICATION detected: {len(copies)} copies")
+        return copies, query_seq
 
     return annotate_exons_from_hit_list(
         hits_by_chrom[best_chrom], query_seq, chrom_seq, best_chrom,
@@ -1228,7 +1396,11 @@ def main():
             exons, full_protein = annotate_exons_from_hits(
                 query_seq, args.genome, args.blast_hits, args.mmseqs_hits
             )
-            method_used = "hit_annotation"
+            # Detect if tandem duplication was found (copies have id "GOI_copy_N")
+            if exons and any(e['id'].startswith('GOI_copy_') for e in exons):
+                method_used = "tandem_duplication"
+            else:
+                method_used = "hit_annotation"
         else:
             print("[annotate_goi_exons] No hits provided, using full protein only")
             method_used = "full_protein_only"
