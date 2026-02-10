@@ -20,6 +20,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Shared helpers
+def str2bool(value: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    val = value.strip().lower()
+    if val in {"true", "1", "yes", "y", "t"}:
+        return True
+    if val in {"false", "0", "no", "n", "f"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
 # Use our own sequence utilities (no BioPython dependency)
 try:
     from sequence_utils import (
@@ -251,7 +264,8 @@ def identify_best_synteny_block(hits, max_intron=20000, cluster_dist=50000):
         'genes': genes_list
     }
 
-def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str, Any], default: int = 100000) -> int:
+def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str, Any],
+                               default: int = 100000, min_pad: int = 50000, max_pad: int = 200000) -> int:
     """
     Calculate region padding based on gene spacing in hits.
     Returns padding distance in base pairs.
@@ -280,7 +294,7 @@ def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str
     adaptive_padding = int(avg_gap * 2)
     
     # Clamp to reasonable range
-    final_padding = max(50000, min(200000, adaptive_padding))
+    final_padding = max(min_pad, min(max_pad, adaptive_padding))
     
     return final_padding
 
@@ -398,9 +412,9 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         
         os.makedirs(aug_tmp_dir, exist_ok=True)
         
-        # CRITICAL: Use VERY relaxed e-value for augmented search (100x more permissive)
+        # CRITICAL: Use relaxed e-value for augmented search
         # This ensures divergent hits are not filtered out by MMseqs2 before we can parse them
-        relaxed_evalue = min(10.0, args.evalue * 1000)  # Much more permissive, cap at 10
+        relaxed_evalue = min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)
         
         subprocess.run([
             "mmseqs", "easy-search",
@@ -414,50 +428,57 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         ], check=True, stderr=subprocess.DEVNULL)
         
         # Parse hits - use relaxed thresholds for augmented search
-        relaxed_identity = max(25.0, args.min_identity * 0.6)  # 60% of normal threshold
-        relaxed_length = max(15, args.min_length // 2)  # Half of normal length
+        relaxed_identity = max(args.aug_relaxed_identity_min, args.min_identity * args.aug_relaxed_identity_factor)
+        relaxed_length = max(args.aug_relaxed_length_min, int(args.min_length // args.aug_relaxed_length_div))
         
-        mmseqs_hits = parse_hits(aug_hits_file, relaxed_identity, relaxed_length, args.evalue * 10)
+        mmseqs_hits = parse_hits(
+            aug_hits_file,
+            relaxed_identity,
+            relaxed_length,
+            args.evalue * args.aug_relaxed_parse_evalue_mult
+        )
         if mmseqs_hits:
             print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
             all_hits.extend(mmseqs_hits)
         
         # ========== 2. Smith-Waterman Search ==========
         # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2)
-        sw_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_sw_hits.m8"
-        
-        try:
-            # Use smith_waterman_search.py script
-            sw_cmd = [
-                "python3", os.path.join(os.path.dirname(__file__), "smith_waterman_search.py"),
-                "--query", query_fasta,
-                "--target", region_fasta,
-                "--output", sw_hits_file,
-                "--min_score", "30",
-                "--min_identity", "15.0",  # Very relaxed for divergent sequences
-                "--threads", str(threads)
-            ]
+        if args.enable_smith_waterman:
+            sw_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_sw_hits.m8"
             
-            result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode == 0 and os.path.exists(sw_hits_file):
-                # Parse Smith-Waterman hits (BLAST m8 format)
-                sw_hits = parse_hits(sw_hits_file, 15.0, 10, 100.0)  # Very relaxed thresholds
-                if sw_hits:
-                    print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
-                    # Mark hits as from Smith-Waterman
-                    for hit in sw_hits:
-                        hit['method'] = 'smith_waterman'
-                    all_hits.extend(sw_hits)
-            elif result.stderr:
-                print(f"[{genome_name}] Smith-Waterman warning: {result.stderr[:200]}", flush=True)
+            try:
+                # Use smith_waterman_search.py script
+                sw_cmd = [
+                    "python3", os.path.join(os.path.dirname(__file__), "smith_waterman_search.py"),
+                    "--query", query_fasta,
+                    "--target", region_fasta,
+                    "--output", sw_hits_file,
+                    "--min_score", str(args.sw_min_score),
+                    "--min_identity", str(args.sw_min_identity),
+                    "--threads", str(threads),
+                    "--method", str(args.sw_method)
+                ]
                 
-        except subprocess.TimeoutExpired:
-            print(f"[{genome_name}] Smith-Waterman timed out after 5 minutes, using MMseqs2 only.", flush=True)
-        except FileNotFoundError:
-            print(f"[{genome_name}] Smith-Waterman script not found, using MMseqs2 only.", flush=True)
-        except Exception as sw_err:
-            print(f"[{genome_name}] Smith-Waterman failed: {sw_err}, using MMseqs2 only.", flush=True)
+                result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=args.sw_timeout_seconds)
+                
+                if result.returncode == 0 and os.path.exists(sw_hits_file):
+                    # Parse Smith-Waterman hits (BLAST m8 format)
+                    sw_hits = parse_hits(sw_hits_file, args.sw_min_identity, 10, 100.0)
+                    if sw_hits:
+                        print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
+                        # Mark hits as from Smith-Waterman
+                        for hit in sw_hits:
+                            hit['method'] = 'smith_waterman'
+                        all_hits.extend(sw_hits)
+                elif result.stderr:
+                    print(f"[{genome_name}] Smith-Waterman warning: {result.stderr[:200]}", flush=True)
+                    
+            except subprocess.TimeoutExpired:
+                print(f"[{genome_name}] Smith-Waterman timed out after {args.sw_timeout_seconds} seconds, using MMseqs2 only.", flush=True)
+            except FileNotFoundError:
+                print(f"[{genome_name}] Smith-Waterman script not found, using MMseqs2 only.", flush=True)
+            except Exception as sw_err:
+                print(f"[{genome_name}] Smith-Waterman failed: {sw_err}, using MMseqs2 only.", flush=True)
         
         # Clean up temp files
         for f in [variants_fasta, query_fasta, aug_hits_file, sw_hits_file]:
@@ -470,7 +491,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         if all_hits:
             deduped = {}
             for hit in all_hits:
-                key = (hit.get('query', ''), hit.get('start', 0) // 100, hit.get('end', 0) // 100)
+                bin_bp = max(1, int(args.aug_dedup_bin_bp))
+                key = (hit.get('query', ''), hit.get('start', 0) // bin_bp, hit.get('end', 0) // bin_bp)
                 if key not in deduped or hit.get('pident', 0) > deduped[key].get('pident', 0):
                     deduped[key] = hit
             all_hits = list(deduped.values())
@@ -554,7 +576,7 @@ def batch_rbh_check(candidates, home_db, cand_map, threads=1, evalue=1e-5, min_c
                                   tcov >= min_coverage * 100)
                     
                     # Check 3: Identity must be reasonable
-                    identity_ok = pident >= 25.0
+                    identity_ok = pident >= args.min_gene_identity
                     
                     if ids_match and coverage_ok and identity_ok:
                         valid_ids.add(cand_id)
@@ -620,7 +642,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
 
         # 2. Identify Synteny
-        best_region = identify_best_synteny_block(hits, cluster_dist=c_dist)
+        best_region = identify_best_synteny_block(hits, max_intron=args.max_intron, cluster_dist=c_dist)
         
         if not best_region:
             logger.info(f"[{genome_name}] No valid syntenic region found.")
@@ -636,9 +658,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if chrom in genome_seqs:
             slen = len(genome_seqs[chrom])
             
-            # ADAPTIVE PADDING - CRITICAL FIX: Increased from 20kb to 150kb default
-            # This ensures query gene is captured even if distant from flanking genes
-            padding = calculate_adaptive_padding(hits, best_region, default=150000)
+            # ADAPTIVE PADDING - configurable to avoid missing distant GOI
+            padding = calculate_adaptive_padding(
+                hits,
+                best_region,
+                default=args.region_padding,
+                min_pad=args.padding_min,
+                max_pad=args.padding_max
+            )
             
             w_start = max(0, best_region['start'] - padding)
             w_end = min(slen, best_region['end'] + padding)
@@ -802,8 +829,17 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                     print(f"[{genome_name}] TANDEM: {len(exons)} copies of {parent_id}", flush=True)
                                 else:
                                     exons, _ = annotate_exons_from_hit_list(
-                                        gene_hits, parent_query_seq, subseq, chrom,
-                                        search_missing=True
+                                        gene_hits,
+                                        parent_query_seq,
+                                        subseq,
+                                        chrom,
+                                        search_missing=True,
+                                        gap_min_size=args.gap_min_size,
+                                        gap_search_window=args.gap_search_window,
+                                        gap_evalue=args.gap_evalue,
+                                        gap_min_identity=args.gap_min_identity,
+                                        gap_min_alnlen=args.gap_min_alnlen,
+                                        gap_max_hits=args.gap_max_hits
                                     )
                             except Exception as ann_err:
                                 print(f"[{genome_name}] Exon annotation failed for {parent_id}: {ann_err}", flush=True)
@@ -1001,9 +1037,33 @@ def main():
     parser.add_argument("--evalue", type=float, default=1e-5)
     parser.add_argument("--min_identity", type=float, default=40.0)
     parser.add_argument("--min_length", type=int, default=50)
+    parser.add_argument("--max_intron", type=int, default=20000)
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
     parser.add_argument("--cluster_dist", type=int, default=-1, help="Auto-detect if -1")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
+    parser.add_argument("--min_gene_identity", type=float, default=25.0, help="Minimum identity for RBH validation")
+    parser.add_argument("--region_padding", type=int, default=100000, help="Default padding around synteny block")
+    parser.add_argument("--padding_min", type=int, default=50000, help="Minimum adaptive padding")
+    parser.add_argument("--padding_max", type=int, default=200000, help="Maximum adaptive padding")
+    parser.add_argument("--enable_smith_waterman", type=str2bool, default=True, help="Enable Smith-Waterman search")
+    parser.add_argument("--sw_method", type=str, default="auto", help="Smith-Waterman backend (auto, parasail, ssearch36)")
+    parser.add_argument("--sw_min_score", type=float, default=50.0)
+    parser.add_argument("--sw_min_identity", type=float, default=20.0)
+    parser.add_argument("--sw_timeout_seconds", type=int, default=300)
+    parser.add_argument("--aug_relaxed_evalue_mult", type=float, default=1000.0)
+    parser.add_argument("--aug_relaxed_evalue_cap", type=float, default=10.0)
+    parser.add_argument("--aug_relaxed_parse_evalue_mult", type=float, default=10.0)
+    parser.add_argument("--aug_relaxed_identity_factor", type=float, default=0.6)
+    parser.add_argument("--aug_relaxed_identity_min", type=float, default=25.0)
+    parser.add_argument("--aug_relaxed_length_div", type=float, default=2.0)
+    parser.add_argument("--aug_relaxed_length_min", type=int, default=15)
+    parser.add_argument("--aug_dedup_bin_bp", type=int, default=100)
+    parser.add_argument("--gap_search_window", type=int, default=50000)
+    parser.add_argument("--gap_min_size", type=int, default=10)
+    parser.add_argument("--gap_evalue", type=float, default=10.0)
+    parser.add_argument("--gap_min_identity", type=float, default=25.0)
+    parser.add_argument("--gap_min_alnlen", type=int, default=10)
+    parser.add_argument("--gap_max_hits", type=int, default=5)
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
     
@@ -1043,6 +1103,24 @@ def main():
     
     if args.mmseqs_sens < 1 or args.mmseqs_sens > 9:
         logger.warning(f"MMseqs sensitivity {args.mmseqs_sens} outside typical range (1-9)")
+    if args.padding_min < 0 or args.padding_max < 0 or args.region_padding < 0:
+        logger.error("Padding values must be non-negative")
+        sys.exit(1)
+    if args.padding_max < args.padding_min:
+        logger.error("padding_max must be >= padding_min")
+        sys.exit(1)
+    if args.max_intron < 0:
+        logger.error("max_intron must be >= 0")
+        sys.exit(1)
+    if args.gap_min_size < 1:
+        logger.error("gap_min_size must be >= 1")
+        sys.exit(1)
+    if args.gap_max_hits < 1:
+        logger.error("gap_max_hits must be >= 1")
+        sys.exit(1)
+    if args.aug_relaxed_length_div <= 0:
+        logger.error("aug_relaxed_length_div must be > 0")
+        sys.exit(1)
     
     logger.info(f"Starting iterative search with {args.threads} threads")
     logger.info(f"Parameters: identity>={args.min_identity}%, length>={args.min_length}, evalue<={args.evalue}")

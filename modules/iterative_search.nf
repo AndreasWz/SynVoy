@@ -29,6 +29,34 @@ process ITERATIVE_SEARCH {
         --output_dir iterative_results \\
         --threads ${task.cpus} \\
         --mmseqs_sens ${sensitivity} \\
+        --evalue ${params.search_evalue} \\
+        --min_identity ${params.min_hit_identity} \\
+        --min_length ${params.min_hit_length} \\
+        --max_intron ${params.max_intron} \\
+        --cluster_dist ${params.cluster_distance} \\
+        --min_gene_identity ${params.min_gene_identity} \\
+        --region_padding ${params.region_padding} \\
+        --padding_min ${params.padding_min} \\
+        --padding_max ${params.padding_max} \\
+        --enable_smith_waterman ${params.enable_smith_waterman} \\
+        --sw_method ${params.sw_method} \\
+        --sw_min_score ${params.sw_min_score} \\
+        --sw_min_identity ${params.sw_min_identity} \\
+        --sw_timeout_seconds ${params.sw_timeout_seconds} \\
+        --aug_relaxed_evalue_mult ${params.aug_relaxed_evalue_mult} \\
+        --aug_relaxed_evalue_cap ${params.aug_relaxed_evalue_cap} \\
+        --aug_relaxed_parse_evalue_mult ${params.aug_relaxed_parse_evalue_mult} \\
+        --aug_relaxed_identity_factor ${params.aug_relaxed_identity_factor} \\
+        --aug_relaxed_identity_min ${params.aug_relaxed_identity_min} \\
+        --aug_relaxed_length_div ${params.aug_relaxed_length_div} \\
+        --aug_relaxed_length_min ${params.aug_relaxed_length_min} \\
+        --aug_dedup_bin_bp ${params.aug_dedup_bin_bp} \\
+        --gap_search_window ${params.gap_search_window} \\
+        --gap_min_size ${params.gap_min_size} \\
+        --gap_evalue ${params.gap_evalue} \\
+        --gap_min_identity ${params.gap_min_identity} \\
+        --gap_min_alnlen ${params.gap_min_alnlen} \\
+        --gap_max_hits ${params.gap_max_hits} \\
         --prefix ${locus_id}
     """
 }

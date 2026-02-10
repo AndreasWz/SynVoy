@@ -253,7 +253,7 @@ workflow {
     if (has_targets) {
         // Prepare Home Proteome (Run once, used for RBH + borrowing)
         log.info "${c_cyan}[PREPARE] Preparing home proteome database...${c_reset}"
-        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch)
+        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first())
         home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
         
         // Always borrow annotations - valuable when home genome lacks GFF

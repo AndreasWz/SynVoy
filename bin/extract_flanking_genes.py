@@ -122,6 +122,10 @@ def main():
     parser.add_argument("--prefer_large", type=str, default="true", help="Prefer large genes")
     parser.add_argument("--exon_mode", type=str, default="false", 
                         help="If true, output individual exon CDS sequences instead of full protein")
+    parser.add_argument("--pred_flank_window", type=int, default=50000,
+                        help="Flanking window around GOI hits for Prodigal prediction")
+    parser.add_argument("--pred_keep_pct", type=float, default=0.10,
+                        help="Fraction of longest Prodigal predictions to keep")
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
@@ -159,7 +163,7 @@ def main():
         print("No GFF provided. Running gene prediction on flanking regions...")
         
         # For each target region, extract a window (e.g. +/- 50kb)
-        FLANK_WINDOW = 50000 
+        FLANK_WINDOW = max(0, int(args.pred_flank_window))
         
         for region in target_regions:
             chrom = region['chrom']
@@ -227,7 +231,10 @@ def main():
         if extracted_genes:
             original_count = len(extracted_genes)
             extracted_genes.sort(key=lambda g: g['end'] - g['start'], reverse=True)
-            keep_count = max(args.n_flank * 2 + 1, int(len(extracted_genes) * 0.10))
+            keep_fraction = args.pred_keep_pct
+            if keep_fraction <= 0 or keep_fraction > 1:
+                keep_fraction = 0.10
+            keep_count = max(args.n_flank * 2 + 1, int(len(extracted_genes) * keep_fraction))
             kept_genes = set()
             for g in extracted_genes[:keep_count]:
                 kept_genes.add((g['chrom'], g['start'], g['end']))

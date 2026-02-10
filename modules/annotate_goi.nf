@@ -29,6 +29,13 @@ process ANNOTATE_GOI {
         ${blast_arg} \\
         ${mmseqs_arg} \\
         ${qid_arg} \\
+        --gff_search_window ${params.gff_search_window} \\
+        --gap_search_window ${params.gap_search_window} \\
+        --gap_min_size ${params.gap_min_size} \\
+        --gap_evalue ${params.gap_evalue} \\
+        --gap_min_identity ${params.gap_min_identity} \\
+        --gap_min_alnlen ${params.gap_min_alnlen} \\
+        --gap_max_hits ${params.gap_max_hits} \\
         --output_exons goi_exons.faa \\
         --output_bed goi_annotation.bed \\
         --output_info goi_info.json

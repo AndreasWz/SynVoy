@@ -34,7 +34,7 @@ process LOCATE_GENE {
     mmseqs easy-search $gene $home_genome hits_mmseqs.m8 tmp \\
         --search-type \$SEARCH_TYPE \\
         --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits" \\
-        -s 7.5 || echo "MMSeqs search failed or found no hits"
+        -s ${params.mmseqs_sensitivity} || echo "MMSeqs search failed or found no hits"
 
     # 2. BLAST Search
     makeblastdb -in $home_genome -dbtype nucl

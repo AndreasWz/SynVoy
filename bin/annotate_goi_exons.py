@@ -97,7 +97,8 @@ def fetch_uniprot_names(query_id):
 # GFF-BASED GOI MATCHING (Scenario B)
 # =============================================================================
 
-def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mmseqs_hits):
+def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mmseqs_hits,
+                     gff_search_window):
     """
     Try to match the GOI to an annotated gene in the GFF.
 
@@ -156,7 +157,7 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
     if hit_regions:
         print(f"[GFF Match] Name not found. Searching proteins in {len(hit_regions)} hit region(s)...")
         match = _search_gff_by_region_and_sequence(
-            gff_file, genome_file, query_seq, hit_regions
+            gff_file, genome_file, query_seq, hit_regions, gff_search_window
         )
         if match:
             print(f"[GFF Match] Found by regional sequence search: {match['gene_id']}")
@@ -359,7 +360,8 @@ def _parse_hit_regions(blast_hits_file, mmseqs_hits_file):
     return regions
 
 
-def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_regions):
+def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_regions,
+                                       gff_search_window):
     """
     Search GFF genes near hit regions and compare protein sequences.
 
@@ -368,7 +370,7 @@ def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_reg
     2. Extract their protein sequences
     3. Compare to GOI protein
     """
-    SEARCH_WINDOW = 100000  # 100kb around each hit
+    SEARCH_WINDOW = max(0, int(gff_search_window))
 
     # Build search windows
     search_windows = []
@@ -769,7 +771,13 @@ def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
 # =============================================================================
 
 def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
-                                  search_missing=True):
+                                  search_missing=True,
+                                  gap_min_size=10,
+                                  gap_search_window=50000,
+                                  gap_evalue=10.0,
+                                  gap_min_identity=25.0,
+                                  gap_min_alnlen=10,
+                                  gap_max_hits=5):
     """
     Core exon annotation from pre-parsed hit dicts.
 
@@ -844,12 +852,17 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
 
     # Search for missing exons if requested
     if search_missing:
-        missing_regions = _find_gaps(covered, min_gap_size=10)
+        missing_regions = _find_gaps(covered, min_gap_size=gap_min_size)
         if missing_regions:
             print(f"[Exon Annotate] {len(missing_regions)} gap(s), searching nearby...")
             new_exons = _search_missing_exons(
                 query_seq, missing_regions, annotated_exons,
-                None, chrom_name, chrom_seq, consensus_strand
+                None, chrom_name, chrom_seq, consensus_strand,
+                gap_search_window=gap_search_window,
+                gap_evalue=gap_evalue,
+                gap_min_identity=gap_min_identity,
+                gap_min_alnlen=gap_min_alnlen,
+                gap_max_hits=gap_max_hits
             )
             annotated_exons.extend(new_exons)
             annotated_exons.sort(key=lambda e: e.get('qstart', 0))
@@ -857,7 +870,13 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
     return annotated_exons, query_seq
 
 
-def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hits_file):
+def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hits_file,
+                             gap_min_size=10,
+                             gap_search_window=50000,
+                             gap_evalue=10.0,
+                             gap_min_identity=25.0,
+                             gap_min_alnlen=10,
+                             gap_max_hits=5):
     """
     Use tblastn/MMseqs2 hit files to annotate individual exons of the GOI.
 
@@ -907,8 +926,17 @@ def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hit
         return copies, query_seq
 
     return annotate_exons_from_hit_list(
-        hits_by_chrom[best_chrom], query_seq, chrom_seq, best_chrom,
-        search_missing=True
+        hits_by_chrom[best_chrom],
+        query_seq,
+        chrom_seq,
+        best_chrom,
+        search_missing=True,
+        gap_min_size=gap_min_size,
+        gap_search_window=gap_search_window,
+        gap_evalue=gap_evalue,
+        gap_min_identity=gap_min_identity,
+        gap_min_alnlen=gap_min_alnlen,
+        gap_max_hits=gap_max_hits
     )
 
 
@@ -1185,7 +1213,12 @@ def _find_gaps(covered, min_gap_size=10):
 
 
 def _search_missing_exons(query_seq, missing_regions, existing_exons,
-                          genome_file, chrom, chrom_seq, strand):
+                          genome_file, chrom, chrom_seq, strand,
+                          gap_search_window=50000,
+                          gap_evalue=10.0,
+                          gap_min_identity=25.0,
+                          gap_min_alnlen=10,
+                          gap_max_hits=5):
     """
     Search for missing parts of the GOI near existing exon hits.
 
@@ -1205,14 +1238,14 @@ def _search_missing_exons(query_seq, missing_regions, existing_exons,
     # Define search region: around existing exons
     all_gstarts = [e['gstart'] for e in existing_exons]
     all_gends = [e['gend'] for e in existing_exons]
-    region_start = max(0, min(all_gstarts) - 50000)
-    region_end = min(len(chrom_seq), max(all_gends) + 50000)
+    region_start = max(0, min(all_gstarts) - gap_search_window)
+    region_end = min(len(chrom_seq), max(all_gends) + gap_search_window)
 
     next_exon_num = max(e['exon_num'] for e in existing_exons) + 1
 
     for gap_start, gap_end in missing_regions:
         gap_protein = query_seq[gap_start:gap_end]
-        if len(gap_protein) < 10:
+        if len(gap_protein) < gap_min_alnlen:
             continue
 
         print(f"[Missing Exon] Searching for query positions {gap_start + 1}-{gap_end} "
@@ -1237,9 +1270,9 @@ def _search_missing_exons(query_seq, missing_regions, existing_exons,
                 "-subject", gap_target_file,
                 "-out", gap_hits_file,
                 "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
-                "-evalue", "10",  # Relaxed for short fragments
+                "-evalue", str(gap_evalue),  # Relaxed for short fragments
                 "-seg", "no",  # Don't mask low complexity (short queries)
-                "-max_target_seqs", "5"
+                "-max_target_seqs", str(gap_max_hits)
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -1248,7 +1281,7 @@ def _search_missing_exons(query_seq, missing_regions, existing_exons,
                 gap_hits = _parse_format6_hits(gap_hits_file, None)
 
                 for hit in gap_hits:
-                    if hit['pident'] < 25 or hit['alnlen'] < 10:
+                    if hit['pident'] < gap_min_identity or hit['alnlen'] < gap_min_alnlen:
                         continue
 
                     # Convert coordinates back to global
@@ -1344,6 +1377,20 @@ def main():
                         help="Raw MMseqs2 hits from LOCATE_GENE (format 6)")
     parser.add_argument("--query_id", default="",
                         help="Query ID (UniProt accession or gene name)")
+    parser.add_argument("--gff_search_window", type=int, default=100000,
+                        help="Window around hits for GFF-based search")
+    parser.add_argument("--gap_search_window", type=int, default=50000,
+                        help="Window around existing exons for gap search")
+    parser.add_argument("--gap_min_size", type=int, default=10,
+                        help="Minimum gap size (aa) to search")
+    parser.add_argument("--gap_evalue", type=float, default=10.0,
+                        help="E-value threshold for gap search")
+    parser.add_argument("--gap_min_identity", type=float, default=25.0,
+                        help="Minimum identity for gap hits")
+    parser.add_argument("--gap_min_alnlen", type=int, default=10,
+                        help="Minimum alignment length for gap hits")
+    parser.add_argument("--gap_max_hits", type=int, default=5,
+                        help="Maximum hits to consider per gap search")
     parser.add_argument("--output_exons", required=True,
                         help="Output: exon protein FASTA")
     parser.add_argument("--output_bed", required=True,
@@ -1377,8 +1424,13 @@ def main():
         print(f"[annotate_goi_exons] GFF available, trying annotation-based approach...")
 
         match = match_goi_in_gff(
-            query_id, query_seq, args.gff, args.genome,
-            args.blast_hits, args.mmseqs_hits
+            query_id,
+            query_seq,
+            args.gff,
+            args.genome,
+            args.blast_hits,
+            args.mmseqs_hits,
+            args.gff_search_window
         )
 
         if match:
@@ -1394,7 +1446,16 @@ def main():
 
         if args.blast_hits or args.mmseqs_hits:
             exons, full_protein = annotate_exons_from_hits(
-                query_seq, args.genome, args.blast_hits, args.mmseqs_hits
+                query_seq,
+                args.genome,
+                args.blast_hits,
+                args.mmseqs_hits,
+                gap_min_size=args.gap_min_size,
+                gap_search_window=args.gap_search_window,
+                gap_evalue=args.gap_evalue,
+                gap_min_identity=args.gap_min_identity,
+                gap_min_alnlen=args.gap_min_alnlen,
+                gap_max_hits=args.gap_max_hits
             )
             # Detect if tandem duplication was found (copies have id "GOI_copy_N")
             if exons and any(e['id'].startswith('GOI_copy_') for e in exons):

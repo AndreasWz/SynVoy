@@ -8,11 +8,6 @@ from collections import defaultdict
 
 # No BioPython needed - we parse FASTA manually for genome length
 
-# Constants
-BASE_QUALITY_WEIGHT = 0.4
-CONSISTENCY_WEIGHT = 0.3
-STRAND_WEIGHT = 0.3
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Cluster and Score Synteny Regions (Prioritizer Mode)")
     parser.add_argument("--hits", required=True, help="Input MMseqs hits (m8)")
@@ -22,6 +17,9 @@ def parse_args():
     parser.add_argument("--flanking_count", type=int, default=10, help="Expected number of flanking genes (fallback)")
     parser.add_argument("--cluster_dist", type=int, default=50000, help="Max distance to cluster hits (bp)")
     parser.add_argument("--min_score", type=float, default=0.5, help="Score threshold for High Confidence")
+    parser.add_argument("--weight_base", type=float, default=0.4, help="Base weight for coverage")
+    parser.add_argument("--weight_consistency", type=float, default=0.3, help="Weight for order consistency")
+    parser.add_argument("--weight_strand", type=float, default=0.3, help="Weight for strand consistency")
     return parser.parse_args()
 
 def load_synteny_map(bed_file):
@@ -280,9 +278,9 @@ def main():
         else:
             coverage_score = 0
         
-        quality_mult = (BASE_QUALITY_WEIGHT + 
-                        CONSISTENCY_WEIGHT * consistency + 
-                        STRAND_WEIGHT * strand_cons) 
+        quality_mult = (args.weight_base +
+                        args.weight_consistency * consistency +
+                        args.weight_strand * strand_cons)
         
         final_score = coverage_score * quality_mult
         

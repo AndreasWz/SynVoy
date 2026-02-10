@@ -27,7 +27,11 @@ process CLUSTER_REGIONS {
         --flanking_count $flanking_count \\
         --genome "\$target_genome" \\
         --output regions/${genome_name}.regions.bed \\
-        --min_score $min_score
+        --min_score $min_score \\
+        --cluster_dist ${params.cluster_distance} \\
+        --weight_base ${params.synteny_weight_base} \\
+        --weight_consistency ${params.synteny_weight_consistency} \\
+        --weight_strand ${params.synteny_weight_strand}
         
     # Create simple scores output from BED regions
     # BED lines start with chrom, extract all non-empty lines as scores
