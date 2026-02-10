@@ -57,6 +57,8 @@ process ITERATIVE_SEARCH {
         --gap_min_identity ${params.gap_min_identity} \\
         --gap_min_alnlen ${params.gap_min_alnlen} \\
         --gap_max_hits ${params.gap_max_hits} \\
+        --min_exon_query_cov ${params.min_exon_query_cov} \\
+        --min_exon_alnlen ${params.min_exon_alnlen} \\
         --prefix ${locus_id}
     """
 }

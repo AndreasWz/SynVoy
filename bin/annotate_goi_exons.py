@@ -770,6 +770,29 @@ def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
 # HIT-BASED EXON ANNOTATION (Scenario A - No GFF)
 # =============================================================================
 
+def _filter_exon_hits(hits, query_len, min_query_cov, min_alnlen):
+    """Filter exon hits by query coverage and alignment length."""
+    if not hits:
+        return hits
+    if query_len <= 0:
+        return hits
+    kept = []
+    for h in hits:
+        qstart = h.get('qstart')
+        qend = h.get('qend')
+        if not qstart or not qend:
+            continue
+        qspan = abs(qend - qstart) + 1
+        alnlen = h.get('alnlen', qspan)
+        qcov = qspan / query_len if query_len > 0 else 0
+        if min_alnlen and alnlen < min_alnlen:
+            continue
+        if min_query_cov and qcov < min_query_cov:
+            continue
+        kept.append(h)
+    return kept
+
+
 def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
                                   search_missing=True,
                                   gap_min_size=10,
@@ -777,7 +800,10 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
                                   gap_evalue=10.0,
                                   gap_min_identity=25.0,
                                   gap_min_alnlen=10,
-                                  gap_max_hits=5):
+                                  gap_max_hits=5,
+                                  exon_query_mode=False,
+                                  min_exon_query_cov=0.25,
+                                  min_exon_alnlen=30):
     """
     Core exon annotation from pre-parsed hit dicts.
 
@@ -809,15 +835,21 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
     # Sort by e-value (best first)
     hits = sorted(hits, key=lambda h: h.get('evalue', 999))
 
+    query_len = len(query_seq)
+
     # Deduplicate overlapping hits
     hits = _deduplicate_hits(hits)
+
+    # Optional: apply stricter filters when the query itself is an exon.
+    if exon_query_mode and hits:
+        hits = _filter_exon_hits(hits, query_len, min_exon_query_cov, min_exon_alnlen)
+        if not hits:
+            return [], query_seq
 
     if not hits:
         return [], query_seq
 
     print(f"[Exon Annotate] Working with {len(hits)} unique hits")
-
-    query_len = len(query_seq)
 
     # Determine strand consensus
     strand_votes = {'+': 0, '-': 0}
@@ -876,7 +908,9 @@ def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hit
                              gap_evalue=10.0,
                              gap_min_identity=25.0,
                              gap_min_alnlen=10,
-                             gap_max_hits=5):
+                             gap_max_hits=5,
+                             min_exon_query_cov=0.25,
+                             min_exon_alnlen=30):
     """
     Use tblastn/MMseqs2 hit files to annotate individual exons of the GOI.
 
@@ -936,7 +970,10 @@ def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hit
         gap_evalue=gap_evalue,
         gap_min_identity=gap_min_identity,
         gap_min_alnlen=gap_min_alnlen,
-        gap_max_hits=gap_max_hits
+        gap_max_hits=gap_max_hits,
+        exon_query_mode=True,
+        min_exon_query_cov=min_exon_query_cov,
+        min_exon_alnlen=min_exon_alnlen
     )
 
 
@@ -1391,6 +1428,10 @@ def main():
                         help="Minimum alignment length for gap hits")
     parser.add_argument("--gap_max_hits", type=int, default=5,
                         help="Maximum hits to consider per gap search")
+    parser.add_argument("--min_exon_query_cov", type=float, default=0.25,
+                        help="Minimum query coverage for exon hits")
+    parser.add_argument("--min_exon_alnlen", type=int, default=30,
+                        help="Minimum alignment length for exon hits")
     parser.add_argument("--output_exons", required=True,
                         help="Output: exon protein FASTA")
     parser.add_argument("--output_bed", required=True,
@@ -1455,7 +1496,9 @@ def main():
                 gap_evalue=args.gap_evalue,
                 gap_min_identity=args.gap_min_identity,
                 gap_min_alnlen=args.gap_min_alnlen,
-                gap_max_hits=args.gap_max_hits
+                gap_max_hits=args.gap_max_hits,
+                min_exon_query_cov=args.min_exon_query_cov,
+                min_exon_alnlen=args.min_exon_alnlen
             )
             # Detect if tandem duplication was found (copies have id "GOI_copy_N")
             if exons and any(e['id'].startswith('GOI_copy_') for e in exons):

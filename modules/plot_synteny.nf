@@ -15,6 +15,7 @@ process PLOT_SYNTENY {
     output:
     path "*_synteny_plot.html", emit: plot
     path "*_tree.html", emit: tree, optional: true
+    path "plot_inputs_*", emit: inputs, optional: true
 
     script:
     // Handle empty collections gracefully
@@ -31,6 +32,29 @@ process PLOT_SYNTENY {
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     
     """
+    inputs_dir="plot_inputs_${home_bed.baseName}"
+    mkdir -p "\$inputs_dir"
+    cp $home_bed "\$inputs_dir/" || true
+    cp $query_bed "\$inputs_dir/" || true
+    if [ "$home_gff" != "NO_GFF" ]; then
+        cp $home_gff "\$inputs_dir/" || true
+    fi
+    if [ -n "${gffs_str}" ]; then
+        cp ${gffs_str} "\$inputs_dir/" || true
+    fi
+    if [ -n "${cands_str}" ]; then
+        cp ${cands_str} "\$inputs_dir/" || true
+    fi
+    if [ -n "${homo_str}" ]; then
+        cp ${homo_str} "\$inputs_dir/" || true
+    fi
+    if [ "$tree" != "NO_TREE" ]; then
+        cp $tree "\$inputs_dir/" || true
+    fi
+    if [ "$species_map" != "NO_SPECIES_MAP" ]; then
+        cp $species_map "\$inputs_dir/" || true
+    fi
+
     plot_synteny.py \\
         --query_bed $query_bed \\
         --home_bed $home_bed \\

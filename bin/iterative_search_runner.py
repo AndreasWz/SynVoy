@@ -62,6 +62,27 @@ def run_command(cmd):
 def normalize_coordinates(start: int, end: int) -> Tuple[int, int]:
     return min(start, end), max(start, end)
 
+def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int,
+                     min_query_cov: float, min_alnlen: int) -> List[Dict[str, Any]]:
+    """Filter exon hits by query coverage and alignment length."""
+    if not hits or query_len <= 0:
+        return hits
+    kept = []
+    for h in hits:
+        qstart = h.get('qstart')
+        qend = h.get('qend')
+        if not qstart or not qend:
+            continue
+        qspan = abs(qend - qstart) + 1
+        alnlen = h.get('alnlen', qspan)
+        qcov = qspan / query_len if query_len > 0 else 0
+        if min_alnlen and alnlen < min_alnlen:
+            continue
+        if min_query_cov and qcov < min_query_cov:
+            continue
+        kept.append(h)
+    return kept
+
 def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thresh: float) -> List[Dict[str, Any]]:
     """
     Parse MMseqs2 hits and return a list of hit dictionaries.
@@ -797,6 +818,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 'chrom': chrom
                             })
                         
+                        # Identify parent genes that were searched with exon queries
+                        exon_parents = set()
+                        for q in found_queries:
+                            qid = q.get('id', '')
+                            if '|exon_' in qid:
+                                exon_parents.add(extract_base_gene_id(qid))
+
                         # 5b. Exon-aware annotation for each gene
                         for parent_id, gene_hits in hits_by_gene.items():
                             # Find query protein for this gene
@@ -812,6 +840,17 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                         break
                             if not parent_query_seq:
                                 continue
+
+                            # If this gene was searched via exon queries, enforce exon-length/coverage filters
+                            if parent_id in exon_parents:
+                                gene_hits = filter_exon_hits(
+                                    gene_hits,
+                                    len(parent_query_seq),
+                                    args.min_exon_query_cov,
+                                    args.min_exon_alnlen
+                                )
+                                if not gene_hits:
+                                    continue
                             
                             # Run exon-aware annotation (same logic as annotate_goi_exons)
                             try:
@@ -839,7 +878,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                         gap_evalue=args.gap_evalue,
                                         gap_min_identity=args.gap_min_identity,
                                         gap_min_alnlen=args.gap_min_alnlen,
-                                        gap_max_hits=args.gap_max_hits
+                                        gap_max_hits=args.gap_max_hits,
+                                        exon_query_mode=(parent_id in exon_parents),
+                                        min_exon_query_cov=args.min_exon_query_cov,
+                                        min_exon_alnlen=args.min_exon_alnlen
                                     )
                             except Exception as ann_err:
                                 print(f"[{genome_name}] Exon annotation failed for {parent_id}: {ann_err}", flush=True)
@@ -1064,6 +1106,10 @@ def main():
     parser.add_argument("--gap_min_identity", type=float, default=25.0)
     parser.add_argument("--gap_min_alnlen", type=int, default=10)
     parser.add_argument("--gap_max_hits", type=int, default=5)
+    parser.add_argument("--min_exon_query_cov", type=float, default=0.25,
+                        help="Minimum query coverage for exon hits")
+    parser.add_argument("--min_exon_alnlen", type=int, default=30,
+                        help="Minimum alignment length for exon hits")
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
     
@@ -1117,6 +1163,12 @@ def main():
         sys.exit(1)
     if args.gap_max_hits < 1:
         logger.error("gap_max_hits must be >= 1")
+        sys.exit(1)
+    if args.min_exon_query_cov < 0 or args.min_exon_query_cov > 1:
+        logger.error("min_exon_query_cov must be between 0 and 1")
+        sys.exit(1)
+    if args.min_exon_alnlen < 1:
+        logger.error("min_exon_alnlen must be >= 1")
         sys.exit(1)
     if args.aug_relaxed_length_div <= 0:
         logger.error("aug_relaxed_length_div must be > 0")

@@ -288,10 +288,29 @@ def identify_goi_names(home_genes, query_intervals):
     # Query span
     q_span = sum(q["end"] - q["start"] for q in query_intervals)
     max_goi_size = max(q_span * 20, 5000)  # generous but bounded
+    best_overlap = 0
+    best_genes = []
     for gene in home_genes:
         gsize = gene["end"] - gene["start"]
-        if gsize <= max_goi_size and _overlaps_any(gene, query_intervals):
-            _GOI_NAMES.add(gene["name"])
+        if gsize > max_goi_size:
+            continue
+        overlap = 0
+        for q in query_intervals:
+            if gene["chrom"] != q["chrom"]:
+                continue
+            ov = min(gene["end"], q["end"]) - max(gene["start"], q["start"])
+            if ov > 0:
+                overlap += ov
+        if overlap <= 0:
+            continue
+        # TODO: Review GOI selection logic for multi-locus runs (audit if this is too strict)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_genes = [gene]
+        elif overlap == best_overlap:
+            best_genes.append(gene)
+    for gene in best_genes:
+        _GOI_NAMES.add(gene["name"])
     # Always include GOI_ prefixed names
     for gene in home_genes:
         if gene["name"].startswith("GOI_"):
