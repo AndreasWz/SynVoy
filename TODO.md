@@ -9,7 +9,7 @@
 - [ ] Pipeline phase banners print multiple times in terminal output due to Nextflow's ANSI refresh — cosmetic but confusing
 
 ## Medium Priority — Improvements
-- [ ] Show multiple loci in the plot — currently only the best locus (by e-value) is visualized; user might want to see all loci or pick one
+- [x] Show multiple loci in the plot — currently only the best locus (by e-value) is visualized; user might want to see all loci or pick one
 - [ ] Better gene names for unannotated genomes — Prodigal names like `pred_OV788327.1_22401957` are not informative; could add functional annotation via InterProScan, eggNOG-mapper, or at least BLAST best-hit descriptions
 - [ ] Gene inversions in synteny plot — currently genes on opposite strands are shown but inversions of syntenic blocks are not explicitly highlighted
 - [ ] Support user-provided local target genomes — allow `--target_genomes /path/to/genome.fna` in addition to species names

@@ -439,94 +439,85 @@ workflow {
         }
         
         // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
+        // Collect Data for Plotting (ALL loci)
         miniprot_gffs_ch = ITERATIVE_SEARCH.out.gff
             .transpose()
-            .map { locus_id, gff ->
-                def gname = gff.name.replace(".gff", "")
-                def unique_id = "${gname}_${locus_id}"
-                tuple(unique_id, gff)
-            }
+            .map { locus_id, gff -> tuple(locus_id, gff) }
 
         miniprot_tsvs_ch = ITERATIVE_SEARCH.out.homology
             .transpose()
-            .map { locus_id, tsv ->
-                def gname = tsv.name.replace(".homology.tsv", "")
-                def unique_id = "${gname}_${locus_id}"
-                tuple(unique_id, tsv)
+            .map { locus_id, tsv -> tuple(locus_id, tsv) }
+
+        gffs_by_locus_map_ch = miniprot_gffs_ch
+            .groupTuple()
+            .collect()
+            .map { items ->
+                def m = [:]
+                items.each { entry ->
+                    def locus_id = entry[0]
+                    def gffs = entry[1]
+                    m[locus_id] = gffs
+                }
+                m
             }
 
-        // Collect Data for Plotting
-        // Select best locus FIRST: pick the one with the best (lowest) e-value
-        // from LOCATE_GENE hits. This ensures we use the true GOI locus,
-        // not a spurious cross-hit on another chromosome.
-        best_locus_id_ch = SPLIT_LOCI.out.beds.flatten()
-            .map { bed_file ->
-                def locus_id = bed_file.baseName
-                // Read BED file and find best e-value (column 5)
-                def best_eval = Double.MAX_VALUE
-                bed_file.eachLine { line ->
-                    def parts = line.split('\t')
-                    if (parts.size() >= 5) {
-                        try {
-                            def eval = Double.parseDouble(parts[4])
-                            if (eval < best_eval) best_eval = eval
-                        } catch (Exception e) {}
-                    }
+        tsvs_by_locus_map_ch = miniprot_tsvs_ch
+            .groupTuple()
+            .collect()
+            .map { items ->
+                def m = [:]
+                items.each { entry ->
+                    def locus_id = entry[0]
+                    def tsvs = entry[1]
+                    m[locus_id] = tsvs
                 }
-                tuple(locus_id, best_eval)
+                m
             }
-            .toSortedList { a, b -> a[1] <=> b[1] }
-            .map { sorted -> sorted[0][0] }  // Best locus ID
-        
-        best_locus_marker = best_locus_id_ch
-            .map { id -> tuple(id, true) }
-        
-        // Filter ALL channels to only the best locus before plotting
-        // Use CLUSTER_REGIONS output for candidate beds (the discovered syntenic regions)
-        
-        // Filter cluster results to best locus — collect tuples of [genome_name, bed]
-        def best_cluster_collected = CLUSTER_REGIONS.out.bed
-            .combine(best_locus_id_ch)
-            .filter { genome_name, payload, locus_id, bed, best_id -> locus_id == best_id }
-            .map { genome_name, payload, locus_id, bed, best_id -> tuple(genome_name, bed) }
-            .toList()  // value channel: list of [name, bed] tuples
-        
-        all_beds = best_cluster_collected.map { tuples -> tuples.collect { it[1] } }.ifEmpty([])
-        all_names = best_cluster_collected.map { tuples -> tuples.collect { it[0] } }.ifEmpty([])
-        
-        all_gffs = miniprot_gffs_ch
-            .combine(best_locus_id_ch)
-            .filter { unique_id, gff, best_id -> unique_id.endsWith("_${best_id}") }
-            .map { unique_id, gff, best_id -> gff }
-            .collect()
-            .ifEmpty([])
-        all_tsvs = miniprot_tsvs_ch
-            .combine(best_locus_id_ch)
-            .filter { unique_id, tsv, best_id -> unique_id.endsWith("_${best_id}") }
-            .map { unique_id, tsv, best_id -> tsv }
-            .collect()
-            .ifEmpty([])
-        
-        home_bed_ch = EXTRACT_FLANKING.out.bed  // [locus_id, bed]
-            .join(best_locus_marker)
-            .map { locus_id, bed, marker -> bed }
-        
-        tree_ch = COMPUTE_TREE.out.tree  // [locus_id, tree]
-            .join(best_locus_marker)
-            .map { locus_id, tree, marker -> tree }
-        
+
+        cluster_by_locus_ch = CLUSTER_REGIONS.out.bed
+            .map { genome_name, payload, locus_id, bed -> tuple(locus_id, genome_name, bed) }
+            .groupTuple()
+            .map { locus_id, items ->
+                def names = items.collect { it[0] }
+                def beds = items.collect { it[1] }
+                tuple(locus_id, names, beds)
+            }
+
+        home_bed_by_locus_ch = EXTRACT_FLANKING.out.bed  // [locus_id, bed]
+        tree_by_locus_ch = COMPUTE_TREE.out.tree         // [locus_id, tree]
+
+        plot_inputs = home_bed_by_locus_ch
+            .join(cluster_by_locus_ch)   // [locus_id, home_bed, names, beds]
+            .join(tree_by_locus_ch)      // [locus_id, home_bed, names, beds, tree]
+            .combine(gffs_by_locus_map_ch)
+            .combine(tsvs_by_locus_map_ch)
+            .map { locus_id, home_bed, names, beds, tree, gff_map, tsv_map ->
+                def gffs = gff_map.get(locus_id, [])
+                def tsvs = tsv_map.get(locus_id, [])
+                tuple(home_bed, names, beds, gffs, tsvs, tree)
+            }
+
+        plot_inputs.multiMap { item ->
+            home_bed: item[0]
+            target_names: item[1]
+            candidate_beds: item[2]
+            target_gffs: item[3]
+            homology_tsvs: item[4]
+            tree: item[5]
+        }.set { plot_inputs_split }
+
         log.info "${c_cyan}[PLOT] Generating synteny visualizations...${c_reset}"
             
         PLOT_SYNTENY(
-            home_bed_ch,                     // home_bed
-            LOCATE_GENE.out.bed.first(),     // query_bed
-            effective_home_gff_ch,           // home_gff (user-provided or Prodigal-predicted)
-            all_gffs,                        // target_gffs
-            all_names,                       // target_names
-            all_beds,                        // candidate_beds
-            all_tsvs,                        // homology_tsvs
-            tree_ch,                         // tree
-            species_map_ch                   // species_mapping.tsv
+            plot_inputs_split.home_bed,   // home_bed
+            LOCATE_GENE.out.bed.first(),  // query_bed
+            effective_home_gff_ch,        // home_gff (user-provided or Prodigal-predicted)
+            plot_inputs_split.target_gffs,    // target_gffs
+            plot_inputs_split.target_names,   // target_names
+            plot_inputs_split.candidate_beds, // candidate_beds
+            plot_inputs_split.homology_tsvs,  // homology_tsvs
+            plot_inputs_split.tree,           // tree
+            species_map_ch                    // species_mapping.tsv
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->

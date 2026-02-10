@@ -74,7 +74,7 @@ If you want these activated, ask for a wiring pass.
 
 **Outputs**
 Primary outputs in `--outdir`:
-- `*_synteny_plot.html` interactive visualization
+- `*_synteny_plot.html` interactive visualization (one per locus if multiple loci are found)
 - `*_tree.html` (optional) and `*.nwk` GOI phylogeny
 - `synterra_report.json` summary report
 - `qc/genome_qc_summary.json` assembly QC summary
@@ -99,4 +99,3 @@ The Nextflow `work/` directory is still used for execution and caching.
 **Performance tips**
 - Use `-profile docker` or `-profile singularity` for reproducible toolchains.
 - For HPC, use the provided `slurm_submit.sh` template or the `hpc_*` profiles.
-

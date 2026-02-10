@@ -54,6 +54,7 @@ nextflow run main.nf \
 
 **Notes**
 - If you provide a nucleotide query, SynTerra will translate it to protein and use the longest ORF across six frames.
+- If multiple loci are detected, SynTerra will generate one synteny plot per locus.
 - Phylogenetic sorting uses NCBI taxonomy. Set `TAXDB` to a local taxdump directory for best results.
 
 **Docs**
