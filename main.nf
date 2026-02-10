@@ -246,14 +246,58 @@ workflow {
     }
     
     distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
-        .map { file -> tuple(file.name, file) }
+        .map { file -> tuple(file.baseName, file) }
     
+    // Prepare effective home GFF (borrowed annotations + predictions) when targets exist
+    def has_targets = params.target_genomes || params.mode == 'easy'
+    if (has_targets) {
+        // Prepare Home Proteome (Run once, used for RBH + borrowing)
+        log.info "${c_cyan}[PREPARE] Preparing home proteome database...${c_reset}"
+        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch)
+        home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
+        
+        // Always borrow annotations - valuable when home genome lacks GFF
+        log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
+        BORROW_ANNOTATIONS(
+            home_genome_ch,
+            PREPARE_HOME_PROTEOME.out.faa,
+            genomes_dir_ch,
+            LOCATE_GENE.out.bed.first(),
+            params.n_flanking_genes
+        )
+        BORROW_ANNOTATIONS.out.gff.view { gff ->
+            "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
+        }
+
+        // Build effective GFF from all available sources:
+        // 1. User-provided / NCBI GFF (if present and real)
+        // 2. Prodigal-predicted GFF (when no annotation was available)
+        // 3. Borrowed annotations from annotated target genomes
+        home_gff_ch.branch { gff ->
+            real: gff.name != 'NO_GFF'
+            missing: true
+        }.set { gff_status }
+        
+        fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
+            .mix(BORROW_ANNOTATIONS.out.gff)
+            .collectFile(name: 'merged_home_annotations.gff')
+            .ifEmpty(file("NO_GFF"))
+        
+        effective_home_gff_ch = gff_status.real
+            .concat(
+                gff_status.missing.combine(fallback_gff_ch).map { it[1] }
+            )
+            .first()
+    } else {
+        effective_home_gff_ch = home_gff_ch
+    }
+
     // 6. Extract Flanking Genes
     log.info "${c_cyan}Extracting flanking genes (n=${params.n_flanking_genes})...${c_reset}"
     
     EXTRACT_FLANKING(
         distinct_loci_ch, 
-        home_gff_ch, 
+        effective_home_gff_ch, 
         home_genome_ch,
         params.n_flanking_genes,
         params.min_flanking_size,
@@ -305,57 +349,6 @@ workflow {
         
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
-
-        // Prepare Home Proteome (Run once)
-        log.info "${c_cyan}[PREPARE] Preparing home proteome database...${c_reset}"
-        
-        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch)
-        home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
-        
-        // Use predicted GFF if no user GFF was provided
-        // If user provided GFF, use that; otherwise use Prodigal-generated GFF
-        // For easy mode: GFF availability determined at runtime (some NCBI genomes lack GFF)
-        // Strategy: Always attempt to borrow annotations from annotated targets;
-        //           build effective GFF from all available sources
-
-        // Always borrow annotations - valuable when home genome lacks GFF
-        log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
-        
-        BORROW_ANNOTATIONS(
-            home_genome_ch,
-            PREPARE_HOME_PROTEOME.out.faa,
-            genomes_dir_ch,
-            LOCATE_GENE.out.bed.first(),
-            params.n_flanking_genes
-        )
-        
-        BORROW_ANNOTATIONS.out.gff.view { gff ->
-            "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
-        }
-        
-        // Build effective GFF from all available sources:
-        // 1. User-provided / NCBI GFF (if present and real)
-        // 2. Prodigal-predicted GFF (when no annotation was available)
-        // 3. Borrowed annotations from annotated target genomes
-        // Branch to check if home_gff is a real file or the NO_GFF placeholder
-        home_gff_ch.branch { gff ->
-            real: gff.name != 'NO_GFF'
-            missing: true
-        }.set { gff_status }
-        
-        // Fallback: merge Prodigal predictions + borrowed annotations
-        fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
-            .mix(BORROW_ANNOTATIONS.out.gff)
-            .collectFile(name: 'merged_home_annotations.gff')
-            .ifEmpty(file("NO_GFF"))
-        
-        // Use real GFF if available, otherwise merged fallback
-        // concat ensures ordering: real GFF tried first, fallback second
-        effective_home_gff_ch = gff_status.real
-            .concat(
-                gff_status.missing.combine(fallback_gff_ch).map { it[1] }
-            )
-            .first()
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
@@ -468,7 +461,7 @@ workflow {
         // not a spurious cross-hit on another chromosome.
         best_locus_id_ch = SPLIT_LOCI.out.beds.flatten()
             .map { bed_file ->
-                def locus_id = bed_file.name
+                def locus_id = bed_file.baseName
                 // Read BED file and find best e-value (column 5)
                 def best_eval = Double.MAX_VALUE
                 bed_file.eachLine { line ->
@@ -484,7 +477,6 @@ workflow {
             }
             .toSortedList { a, b -> a[1] <=> b[1] }
             .map { sorted -> sorted[0][0] }  // Best locus ID
-            .first()  // Convert to value channel — reusable across multiple combine() calls
         
         best_locus_marker = best_locus_id_ch
             .map { id -> tuple(id, true) }

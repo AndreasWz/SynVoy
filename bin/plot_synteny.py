@@ -90,7 +90,7 @@ def parse_target_gff(gff_file):
     """
     Parse a SynTerra target-genome GFF.
 
-    Extracts **mRNA** features only (avoids CDS double-counting).
+    Extracts mRNA plus gene-level features for tandem copies.
     Returns list of gene dicts with 'home_gene_id' from SynTerra_Parent.
     """
     genes = []
@@ -102,7 +102,10 @@ def parse_target_gff(gff_file):
             if not line or line.startswith("#"):
                 continue
             p = line.split("\t")
-            if len(p) < 9 or p[2] != "mRNA":
+            if len(p) < 9:
+                continue
+            ftype = p[2]
+            if ftype not in ("mRNA", "gene", "tandem_copy"):
                 continue
             attrs = {}
             for kv in p[8].split(";"):
@@ -116,7 +119,7 @@ def parse_target_gff(gff_file):
                 "name":         attrs.get("Name", attrs.get("ID", "")),
                 "strand":       p[6],
                 "identity":     float(attrs.get("Identity", "0")),
-                "home_gene_id": attrs.get("SynTerra_Parent", ""),
+                "home_gene_id": attrs.get("SynTerra_Parent", attrs.get("Parent", "")),
                 "n_exons":      int(attrs.get("Exons", "1")),
             })
     return genes

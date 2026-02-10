@@ -301,9 +301,37 @@ def main():
             start_idx = max(0, center_idx - args.n_flank)
             end_idx = min(len(chrom_genes), center_idx + args.n_flank + 1)
             
-            # Add genes
-            for i in range(start_idx, end_idx):
-                extracted_genes.append(chrom_genes[i])
+            # Add genes from window
+            window_genes = chrom_genes[start_idx:end_idx]
+            extracted_genes.extend(window_genes)
+            
+            # Ensure genes overlapping the target region are included
+            overlap_genes = [
+                g for g in chrom_genes
+                if g['start'] < region['end'] and g['end'] > region['start']
+            ]
+            for g in overlap_genes:
+                if g not in extracted_genes:
+                    extracted_genes.append(g)
+            
+            # If no overlap genes found, inject a GOI pseudo-gene from the region
+            if not overlap_genes and region['chrom'] in genome_seqs:
+                goi_start = region['start']
+                goi_end = region['end']
+                goi_dna = genome_seqs[region['chrom']][goi_start:goi_end]
+                goi_prot = translate(goi_dna)
+                if '*' in goi_prot:
+                    goi_prot = goi_prot.split('*')[0]
+                goi_id = f"GOI_{region['chrom']}_{goi_start}"
+                extracted_genes.append({
+                    'chrom': region['chrom'],
+                    'start': goi_start,
+                    'end': goi_end,
+                    'strand': '+',
+                    'attrs': {'ID': goi_id},
+                    'seq': goi_prot
+                })
+                print(f"Injected GOI pseudo-gene at {region['chrom']}:{goi_start}-{goi_end}")
 
     # Write Outputs
     all_fasta_records = []  # Collect all FASTA records
