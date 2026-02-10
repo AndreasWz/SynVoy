@@ -1,5 +1,6 @@
 process SPLIT_LOCI {
     tag "split"
+    publishDir "${params.outdir}/intermediate/split_loci", mode: 'copy'
     
     input:
     path bed

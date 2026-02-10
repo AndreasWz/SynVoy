@@ -1097,6 +1097,18 @@ def main():
         sys.exit(1)
             
     logger.info(f"Loaded {len(genome_entries)} genomes.")
+
+    # Normalize phylogenetic distances if they are not in [0,1]
+    finite_dists = [g['dist'] for g in genome_entries if g.get('dist') not in [None, float('inf')]]
+    if finite_dists:
+        max_dist = max(finite_dists)
+        if max_dist > 1.0:
+            for g in genome_entries:
+                if g['dist'] == float('inf'):
+                    g['dist'] = 1.0
+                else:
+                    g['dist'] = g['dist'] / max_dist
+            logger.info(f"Normalized phylogenetic distances by max {max_dist:.3f}")
     
     # Define Waves
     waves = []

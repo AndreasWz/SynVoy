@@ -1,6 +1,7 @@
 process EXTRACT_FLANKING {
     tag "$bed"
     label 'process_medium'
+    publishDir "${params.outdir}/intermediate/flanking", mode: 'copy'
 
     input:
     tuple val(locus_id), path(bed)
@@ -11,8 +12,8 @@ process EXTRACT_FLANKING {
     val prefer_large
 
     output:
-    tuple val(locus_id), path("synteny_block.bed"), emit: bed
-    tuple val(locus_id), path("flanking_proteins.faa"), emit: faa
+    tuple val(locus_id), path("synteny_block_${locus_id}.bed"), emit: bed
+    tuple val(locus_id), path("flanking_proteins_${locus_id}.faa"), emit: faa
 
     script:
     """
@@ -25,7 +26,7 @@ process EXTRACT_FLANKING {
         --min_size $min_size \\
         --prefer_large $prefer_large \\
         --exon_mode true \\
-        --out_bed synteny_block.bed \\
-        --out_faa flanking_proteins.faa
+        --out_bed synteny_block_${locus_id}.bed \\
+        --out_faa flanking_proteins_${locus_id}.faa
     """
 }

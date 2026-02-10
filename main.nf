@@ -23,6 +23,7 @@ include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
+include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 
 // ==============================================================================
 // ANSI Color Codes (Script-level variables)
@@ -130,7 +131,11 @@ workflow {
         raw_gene_ch = FETCH_QUERY_FROM_ID.out.fasta
     }
     
-    raw_gene_ch.multiMap { it ->
+    // Normalize query: translate nucleotide queries to protein
+    NORMALIZE_QUERY(raw_gene_ch)
+    normalized_gene_ch = NORMALIZE_QUERY.out.fasta
+    
+    normalized_gene_ch.multiMap { it ->
         loc: it
         aug: it
     }.set { gene_inputs }
@@ -270,15 +275,16 @@ workflow {
         log.info "${c_white}PHASE 2: Phylogenetic Ordering & Iterative Search${c_reset}"
         log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
         
-        EXTRACT_FLANKING.out.faa
-            .combine(genomes_dir_ch)
-            .set { phylo_sort_inputs } // [locus, faa, genomes_dir]
+        EXTRACT_FLANKING.out.bed
+            .map { locus_id, bed -> locus_id }
+            .combine(home_genome_ch)
+            .set { phylo_sort_inputs } // [locus_id, home_genome]
 
         log.info "${c_cyan}[PHYLO] Sorting genomes by phylogenetic distance...${c_reset}"
         
         PHYLO_SORT(
-            phylo_sort_inputs.map { tuple(it[0], it[1]) },
-            phylo_sort_inputs.map { it[2] }  // genomes_dir
+            phylo_sort_inputs,
+            genomes_dir_ch
         )
         
         PHYLO_SORT.out.sorted_list.view { locus, sorted ->
@@ -589,4 +595,3 @@ workflow.onComplete {
         log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}\n"
     }
 }
-

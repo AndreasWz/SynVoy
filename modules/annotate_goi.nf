@@ -1,6 +1,7 @@
 process ANNOTATE_GOI {
     tag "annotate_goi"
     label 'process_medium'
+    publishDir "${params.outdir}/intermediate/annotate_goi", mode: 'copy'
     
     input:
     path query_gene

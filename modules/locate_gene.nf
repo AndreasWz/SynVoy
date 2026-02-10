@@ -1,6 +1,7 @@
 process LOCATE_GENE {
     tag "$home_genome"
     label 'process_medium'
+    publishDir "${params.outdir}/intermediate/locate_gene", mode: 'copy'
 
     input:
     path gene

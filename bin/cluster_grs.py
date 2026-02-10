@@ -68,7 +68,7 @@ def get_genome_length(genome_file):
                     total_len += int(parts[1])
         else:
             # Parse FASTA (could be slow for huge genomes, but usually okay)
-             with open(genome_file) as f:
+            with open(genome_file) as f:
                 for line in f:
                     if not line.startswith('>'):
                         total_len += len(line.strip())

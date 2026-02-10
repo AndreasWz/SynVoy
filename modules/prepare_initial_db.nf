@@ -1,6 +1,7 @@
 process PREPARE_INITIAL_DB {
     tag "prepare_db_${locus_id}"
     label 'process_low'
+    publishDir "${params.outdir}/intermediate/initial_db", mode: 'copy'
 
     input:
     tuple val(locus_id), path(flanking_faa)
