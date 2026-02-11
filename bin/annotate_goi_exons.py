@@ -793,6 +793,286 @@ def _filter_exon_hits(hits, query_len, min_query_cov, min_alnlen):
     return kept
 
 
+
+# =============================================================================
+# MINIPROT-BASED GENE MODELING
+# =============================================================================
+
+def _check_miniprot():
+    """Check if miniprot is available."""
+    try:
+        result = subprocess.run(["miniprot", "--version"],
+                                capture_output=True, text=True, timeout=5)
+        return result.returncode == 0 or result.stderr.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+MINIPROT_AVAILABLE = _check_miniprot()
+
+
+def _parse_miniprot_gff(gff_text, region_offset=0):
+    """
+    Parse miniprot GFF3 output to extract gene models.
+    
+    Returns list of gene models, each with:
+      - rank, identity, score
+      - list of CDS features with (start, end, strand, phase, target_info)
+    """
+    models = {}  # ID -> model dict
+    
+    for line in gff_text.strip().split('\n'):
+        if line.startswith('#') or not line.strip():
+            continue
+        parts = line.split('\t')
+        if len(parts) < 9:
+            continue
+        
+        seqid, source, ftype, start, end, score, strand, phase, attrs = parts
+        
+        # Parse attributes
+        attr_dict = {}
+        for kv in attrs.split(';'):
+            if '=' in kv:
+                k, v = kv.split('=', 1)
+                attr_dict[k] = v
+        
+        if ftype == 'mRNA':
+            model_id = attr_dict.get('ID', '')
+            rank = int(attr_dict.get('Rank', 1))
+            identity = float(attr_dict.get('Identity', 0))
+            score_val = float(score) if score != '.' else 0
+            models[model_id] = {
+                'id': model_id,
+                'rank': rank,
+                'identity': identity,
+                'score': score_val,
+                'strand': strand,
+                'cds_list': []
+            }
+        elif ftype == 'CDS':
+            parent = attr_dict.get('Parent', '')
+            if parent in models:
+                cds_start = int(start) - 1 + region_offset  # GFF 1-based -> 0-based
+                cds_end = int(end) + region_offset            # GFF end is inclusive -> exclusive
+                cds_phase = int(phase) if phase.isdigit() else 0
+                
+                # Parse Target attribute (query protein coords)
+                target = attr_dict.get('Target', '')
+                qstart, qend = 0, 0
+                if target:
+                    target_parts = target.split()
+                    if len(target_parts) >= 3:
+                        qstart = int(target_parts[1])
+                        qend = int(target_parts[2])
+                
+                models[parent]['cds_list'].append({
+                    'gstart': cds_start,
+                    'gend': cds_end,
+                    'strand': strand,
+                    'phase': cds_phase,
+                    'qstart': qstart,
+                    'qend': qend
+                })
+    
+    # Sort models by rank (best first), then by score descending
+    result = sorted(models.values(), key=lambda m: (m['rank'], -m['score']))
+    # Sort CDS within each model by genomic position
+    for model in result:
+        model['cds_list'].sort(key=lambda c: c['gstart'])
+    
+    return result
+
+
+def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
+                             strand=None, max_intron=200000,
+                             sensitive=False, region_offset=0):
+    """
+    Use miniprot to align query protein to genomic region.
+    
+    Args:
+        query_seq: Query protein sequence (string)
+        chrom_seq: Target genomic DNA sequence (string)
+        chrom_name: Chromosome/scaffold name
+        strand: Unused (miniprot searches both strands)
+        max_intron: Max intron size (-G flag)
+        sensitive: If True, use ultra-sensitive params (for GOI)
+        region_offset: Offset to add to coordinates (if chrom_seq is a sub-region)
+    
+    Returns:
+        (exon_list, full_protein) matching the old function signature.
+        exon_list: list of dicts with keys:
+            id, seq, exon_num, qstart, qend, gstart, gend, strand,
+            chrom, pident, has_start_codon, has_stop_codon,
+            splice_donor, splice_acceptor
+        full_protein: concatenated translated CDS
+    """
+    if not query_seq or not chrom_seq:
+        return [], query_seq or ''
+    
+    if not MINIPROT_AVAILABLE:
+        print("[annotate_goi_exons] WARNING: miniprot not available, returning raw query",
+              file=sys.stderr)
+        return [], query_seq
+    
+    pid = os.getpid()
+    query_file = f"/tmp/synterra_mp_query_{pid}.faa"
+    target_file = f"/tmp/synterra_mp_target_{pid}.fna"
+    
+    try:
+        # Write temp files
+        write_fasta([("query", query_seq)], query_file)
+        write_fasta([(chrom_name, chrom_seq)], target_file)
+        
+        # Build miniprot command
+        cmd = [
+            "miniprot",
+            "--gff",                    # GFF3 output
+            "--trans",                  # Also output translated protein
+            "-G", str(max_intron),      # Max intron size
+            "-t", "1",                  # Single thread (called per gene)
+            "--outc=0.1",               # Min 10% query coverage for output
+        ]
+        
+        query_len = len(query_seq)
+        
+        if sensitive:
+            # Ultra-sensitive for GOI and divergent sequences
+            cmd.extend([
+                "-n", "2",              # Lower min syncmers for seeding
+                "-p", "0.3",            # Lower secondary threshold
+                "-N", "50",             # More secondary alignments
+                "--outs=0.3",           # Output if >= 30% of best score
+            ])
+        
+        if query_len < 60:
+            # Short peptide mode (e.g., toxins)
+            cmd.extend([
+                "-L", "10",             # Min ORF length 10aa (default 30)
+            ])
+            if query_len < 30:
+                cmd.extend([
+                    "-S",               # No splicing for very short peptides
+                    "-G", "2000",       # Override max intron to small value
+                ])
+        
+        cmd.extend([target_file, query_file])
+        
+        # Run miniprot
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if result.returncode != 0:
+            print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
+                  f"{result.stderr[:200]}", file=sys.stderr)
+            return [], query_seq
+        
+        # Parse GFF output
+        gff_output = result.stdout
+        if not gff_output.strip():
+            print("[miniprot] No alignments found", file=sys.stderr)
+            return [], query_seq
+        
+        models = _parse_miniprot_gff(gff_output, region_offset=region_offset)
+        
+        if not models:
+            print("[miniprot] No gene models parsed from GFF", file=sys.stderr)
+            return [], query_seq
+        
+        # Take the best model (rank 1)
+        best = models[0]
+        
+        if not best['cds_list']:
+            return [], query_seq
+        
+        # Extract CDS DNA and build exon list
+        exons = []
+        dna_fragments = []
+        model_strand = best['strand']
+        
+        cds_ordered = best['cds_list']
+        if model_strand == '-':
+            cds_ordered = list(reversed(cds_ordered))
+        
+        for i, cds in enumerate(cds_ordered, 1):
+            gs = cds['gstart']
+            ge = cds['gend']
+            
+            # Extract DNA
+            exon_dna = chrom_seq[gs:ge]
+            if model_strand == '-':
+                exon_dna = reverse_complement(exon_dna)
+            
+            # Handle phase (trim N bases from start if phase > 0)
+            phase = cds['phase']
+            if phase > 0 and i == 1:
+                exon_dna = exon_dna[phase:]
+            
+            dna_fragments.append(exon_dna)
+            
+            # Check splice sites
+            splice_donor = None
+            splice_acceptor = None
+            if gs >= 2:
+                if model_strand == '+':
+                    splice_acceptor = chrom_seq[gs-2:gs].upper()
+                else:
+                    splice_donor = reverse_complement(chrom_seq[gs-2:gs]).upper()
+            if ge + 2 <= len(chrom_seq):
+                if model_strand == '+':
+                    splice_donor = chrom_seq[ge:ge+2].upper()
+                else:
+                    splice_acceptor = reverse_complement(chrom_seq[ge:ge+2]).upper()
+            
+            exon_prot = translate(exon_dna)
+            
+            exons.append({
+                'id': f'exon_{i}',
+                'seq': exon_prot.rstrip('*'),
+                'exon_num': i,
+                'qstart': cds['qstart'],
+                'qend': cds['qend'],
+                'gstart': gs + region_offset,
+                'gend': ge + region_offset,
+                'strand': model_strand,
+                'chrom': chrom_name,
+                'pident': best['identity'] * 100,  # miniprot reports 0-1
+                'has_start_codon': (i == 1 and exon_prot.startswith('M')),
+                'has_stop_codon': (i == len(cds_ordered) and
+                                   exon_dna[-3:].upper() in ('TAA', 'TAG', 'TGA')),
+                'splice_donor': splice_donor,
+                'splice_acceptor': splice_acceptor,
+                'method': 'miniprot'
+            })
+        
+        # Assemble full protein from DNA
+        full_cds = ''.join(dna_fragments)
+        # Trim to codon boundary
+        full_cds = full_cds[:len(full_cds) - len(full_cds) % 3]
+        full_protein = translate(full_cds).rstrip('*')
+        
+        if not full_protein:
+            full_protein = query_seq
+        
+        # Parse --trans output for verification (appears as PAF comments)
+        # The GFF-based extraction above is authoritative
+        
+        print(f"[miniprot] Best model: {len(exons)} exon(s), "
+              f"{len(full_protein)} aa, identity={best['identity']:.2f}, "
+              f"score={best['score']:.0f}", file=sys.stderr)
+        
+        return exons, full_protein
+        
+    except subprocess.TimeoutExpired:
+        print("[miniprot] Timed out after 120s", file=sys.stderr)
+        return [], query_seq
+    except Exception as e:
+        print(f"[miniprot] Error: {e}", file=sys.stderr)
+        return [], query_seq
+    finally:
+        for f in [query_file, target_file]:
+            if os.path.exists(f):
+                os.remove(f)
+
+
 def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
                                   search_missing=True,
                                   gap_min_size=10,
@@ -805,593 +1085,50 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
                                   min_exon_query_cov=0.25,
                                   min_exon_alnlen=30):
     """
-    Core exon annotation from pre-parsed hit dicts.
-
-    Reusable entry point for both home-genome (annotate_goi_exons.py) and
-    target-genome (iterative_search_runner.py) annotation.
-
-    Each hit dict should have at minimum:
-        qstart, qend:  query protein positions (1-based)
-        gstart, gend:  genomic positions within chrom_seq (0-based)
-        evalue:        e-value
-        pident:        percent identity
-    Optional hit fields:
-        alnlen, strand, chrom, bitscore
-
-    Args:
-        hits:           list of hit dicts
-        query_seq:      full query protein sequence
-        chrom_seq:      DNA sequence of the chromosome/region
-        chrom_name:     chromosome/region name (for output IDs)
-        search_missing: if True, run tblastn to search for missing exons
-
-    Returns:
-        (annotated_exons, full_protein) where annotated_exons is a list of
-        exon dicts and full_protein is the original query sequence
+    Entry point for exon annotation - uses miniprot for gene modeling.
+    
+    Kept for backward compatibility with iterative_search_runner.py.
+    The 'hits' parameter is used to determine the region and strand,
+    then miniprot does the actual gene modeling.
     """
     if not hits or not query_seq or not chrom_seq:
         return [], query_seq or ''
 
-    # Sort by e-value (best first)
-    hits = sorted(hits, key=lambda h: h.get('evalue', 999))
-
-    query_len = len(query_seq)
-
-    # Deduplicate overlapping hits
-    hits = _deduplicate_hits(hits)
-
-    # Optional: apply stricter filters when the query itself is an exon.
-    if exon_query_mode and hits:
-        hits = _filter_exon_hits(hits, query_len, min_exon_query_cov, min_exon_alnlen)
-        if not hits:
-            return [], query_seq
-
-    if not hits:
-        return [], query_seq
-
-    print(f"[Exon Annotate] Working with {len(hits)} unique hits")
-
-    # Determine strand consensus
+    # Determine strand consensus from hits (informational only)
     strand_votes = {'+': 0, '-': 0}
     for h in hits:
         strand_votes[h.get('strand', '+')] += 1
     consensus_strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
-
-    # Sort by query position (tells us exon order)
-    hits.sort(key=lambda h: h.get('qstart', 0))
-
-    # Annotate each hit as a candidate exon
-    annotated_exons = []
-    for i, hit in enumerate(hits, start=1):
-        exon = _annotate_single_exon(
-            hit, chrom_seq, query_seq, consensus_strand,
-            i, len(hits), chrom_name
-        )
-        if exon:
-            annotated_exons.append(exon)
-
-    if not annotated_exons:
+    
+    # Determine search region from hits
+    hit_starts = [h.get('gstart', h.get('start', 0)) for h in hits]
+    hit_ends = [h.get('gend', h.get('end', 0)) for h in hits]
+    
+    if not hit_starts or not hit_ends:
         return [], query_seq
-
-    # Check query coverage
-    covered = [False] * query_len
-    for exon in annotated_exons:
-        for j in range(exon['qstart'] - 1, min(exon['qend'], query_len)):
-            covered[j] = True
-
-    coverage = sum(covered) / query_len * 100 if query_len > 0 else 0
-    print(f"[Exon Annotate] Query coverage: {coverage:.1f}%")
-
-    # Search for missing exons if requested
-    if search_missing:
-        missing_regions = _find_gaps(covered, min_gap_size=gap_min_size)
-        if missing_regions:
-            print(f"[Exon Annotate] {len(missing_regions)} gap(s), searching nearby...")
-            new_exons = _search_missing_exons(
-                query_seq, missing_regions, annotated_exons,
-                None, chrom_name, chrom_seq, consensus_strand,
-                gap_search_window=gap_search_window,
-                gap_evalue=gap_evalue,
-                gap_min_identity=gap_min_identity,
-                gap_min_alnlen=gap_min_alnlen,
-                gap_max_hits=gap_max_hits
-            )
-            annotated_exons.extend(new_exons)
-            annotated_exons.sort(key=lambda e: e.get('qstart', 0))
-
-    return annotated_exons, query_seq
-
-
-def annotate_exons_from_hits(query_seq, genome_file, blast_hits_file, mmseqs_hits_file,
-                             gap_min_size=10,
-                             gap_search_window=50000,
-                             gap_evalue=10.0,
-                             gap_min_identity=25.0,
-                             gap_min_alnlen=10,
-                             gap_max_hits=5,
-                             min_exon_query_cov=0.25,
-                             min_exon_alnlen=30):
-    """
-    Use tblastn/MMseqs2 hit files to annotate individual exons of the GOI.
-
-    Parses format-6 hit files, picks the best chromosome, then delegates
-    to annotate_exons_from_hit_list() for the core annotation logic.
-
-    Returns:
-        list of exon dicts, full_protein string
-    """
-    print("[Hit Annotate] Annotating exons from protein→DNA hits...")
-
-    all_hits = _parse_format6_hits(blast_hits_file, mmseqs_hits_file)
-    if not all_hits:
-        print("[Hit Annotate] No hits found!")
-        return [], query_seq
-
-    # Load genome
-    genome_seqs = load_genome(genome_file)
-
-    # Group hits by chromosome
-    hits_by_chrom = {}
-    for h in all_hits:
-        chrom = h['chrom']
-        if chrom not in hits_by_chrom:
-            hits_by_chrom[chrom] = []
-        hits_by_chrom[chrom].append(h)
-
-    # Pick the chromosome with the most/best hits
-    best_chrom = max(hits_by_chrom.keys(),
-                     key=lambda c: (len(hits_by_chrom[c]),
-                                    -min(h['evalue'] for h in hits_by_chrom[c])))
-
-    chrom_seq = genome_seqs.get(best_chrom)
-    if not chrom_seq:
-        print(f"[Hit Annotate] Chromosome {best_chrom} not found!")
-        return [], query_seq
-
-    print(f"[Hit Annotate] Best chromosome: {best_chrom} with {len(hits_by_chrom[best_chrom])} hits")
-
-    # Check for tandem duplications BEFORE exon annotation
-    is_tandem, copies = detect_tandem_duplications(
-        hits_by_chrom[best_chrom], query_seq, chrom_seq, best_chrom
+    
+    region_start = max(0, min(hit_starts) - gap_search_window)
+    region_end = min(len(chrom_seq), max(hit_ends) + gap_search_window)
+    
+    # Extract sub-region for miniprot
+    sub_seq = chrom_seq[region_start:region_end]
+    
+    # Detect if this is likely a GOI query (use sensitive mode)
+    is_goi = any('GOI' in str(h.get('query', '')) for h in hits)
+    
+    # Calculate max intron from hit spread
+    max_intron = max(20000, region_end - region_start)
+    
+    # Run miniprot
+    exons, full_protein = annotate_using_miniprot(
+        query_seq, sub_seq, chrom_name,
+        strand=consensus_strand,
+        max_intron=max_intron,
+        sensitive=is_goi,
+        region_offset=region_start
     )
     
-    if is_tandem:
-        print(f"[Hit Annotate] TANDEM DUPLICATION detected: {len(copies)} copies")
-        return copies, query_seq
-
-    return annotate_exons_from_hit_list(
-        hits_by_chrom[best_chrom],
-        query_seq,
-        chrom_seq,
-        best_chrom,
-        search_missing=True,
-        gap_min_size=gap_min_size,
-        gap_search_window=gap_search_window,
-        gap_evalue=gap_evalue,
-        gap_min_identity=gap_min_identity,
-        gap_min_alnlen=gap_min_alnlen,
-        gap_max_hits=gap_max_hits,
-        exon_query_mode=True,
-        min_exon_query_cov=min_exon_query_cov,
-        min_exon_alnlen=min_exon_alnlen
-    )
-
-
-def _parse_format6_hits(blast_file, mmseqs_file):
-    """Parse BLAST/MMseqs format 6 output files."""
-    hits = []
-
-    for hits_file in [blast_file, mmseqs_file]:
-        if not hits_file or not os.path.exists(hits_file) or os.path.getsize(hits_file) == 0:
-            continue
-        try:
-            with open(hits_file) as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) < 12:
-                        continue
-                    try:
-                        qstart = int(parts[6])
-                        qend = int(parts[7])
-                        tstart = int(parts[8])
-                        tend = int(parts[9])
-                        evalue = float(parts[10])
-                        pident = float(parts[2])
-                        alnlen = int(parts[3])
-
-                        strand = '+' if tstart < tend else '-'
-                        # Convert 1-based BLAST/mmseqs coords to 0-based half-open
-                        gstart = min(tstart, tend) - 1  # 0-based start
-                        gend = max(tstart, tend)         # exclusive end
-
-                        hits.append({
-                            'query': parts[0],
-                            'chrom': parts[1],
-                            'pident': pident,
-                            'alnlen': alnlen,
-                            'qstart': min(qstart, qend),
-                            'qend': max(qstart, qend),
-                            'gstart': gstart,
-                            'gend': gend,
-                            'strand': strand,
-                            'evalue': evalue,
-                            'bitscore': float(parts[11]),
-                            'source': os.path.basename(hits_file)
-                        })
-                    except (ValueError, IndexError):
-                        continue
-        except Exception:
-            continue
-
-    return hits
-
-
-def _deduplicate_hits(hits, overlap_threshold=0.5):
-    """Remove overlapping hits, keeping the one with best e-value.
-    
-    Two-pass deduplication:
-    1. Remove hits redundant in BOTH query AND genomic space
-    2. Merge hits that overlap significantly in GENOMIC space only
-       (from fragment-based search producing many overlapping hits)
-    """
-    if len(hits) <= 1:
-        return hits
-
-    # Sort by e-value
-    hits.sort(key=lambda h: h['evalue'])
-
-    # Pass 1: Remove hits redundant in both query AND genomic space
-    kept = []
-    for hit in hits:
-        is_redundant = False
-        for existing in kept:
-            # Check query overlap
-            q_overlap = _calc_overlap(
-                hit['qstart'], hit['qend'],
-                existing['qstart'], existing['qend']
-            )
-            q_span = hit['qend'] - hit['qstart'] + 1
-
-            if q_span > 0 and q_overlap / q_span > overlap_threshold:
-                # Also check genomic overlap
-                g_overlap = _calc_overlap(
-                    hit['gstart'], hit['gend'],
-                    existing['gstart'], existing['gend']
-                )
-                g_span = hit['gend'] - hit['gstart'] + 1
-
-                if g_span > 0 and g_overlap / g_span > overlap_threshold:
-                    is_redundant = True
-                    break
-
-        if not is_redundant:
-            kept.append(hit)
-
-    # Pass 2: Merge hits that overlap significantly in GENOMIC space
-    # This handles fragment-based search producing many hits covering
-    # different query ranges but the same genomic region
-    if len(kept) > 1:
-        kept.sort(key=lambda h: h['evalue'])
-        merged = []
-        for hit in kept:
-            is_genomic_dup = False
-            for existing in merged:
-                g_overlap = _calc_overlap(
-                    hit['gstart'], hit['gend'],
-                    existing['gstart'], existing['gend']
-                )
-                smaller_span = min(
-                    hit['gend'] - hit['gstart'] + 1,
-                    existing['gend'] - existing['gstart'] + 1
-                )
-                if smaller_span > 0 and g_overlap / smaller_span > 0.6:
-                    # Merge: expand the existing hit to cover both ranges
-                    existing['gstart'] = min(existing['gstart'], hit['gstart'])
-                    existing['gend'] = max(existing['gend'], hit['gend'])
-                    existing['qstart'] = min(existing['qstart'], hit['qstart'])
-                    existing['qend'] = max(existing['qend'], hit['qend'])
-                    is_genomic_dup = True
-                    break
-            if not is_genomic_dup:
-                merged.append(hit)
-        kept = merged
-
-    return kept
-
-
-def _calc_overlap(s1, e1, s2, e2):
-    """Calculate overlap between two intervals."""
-    return max(0, min(e1, e2) - max(s1, s2))
-
-
-def _annotate_single_exon(hit, chrom_seq, query_seq, strand, exon_num, total_hits, chrom):
-    """
-    Annotate a single exon from a tblastn/MMseqs hit.
-
-    Checks:
-    - Splice sites (GT-AG at intron boundaries)
-    - Start codon (first exon)
-    - Stop codon (last exon)
-    - Reading frame consistency
-    """
-    gstart = hit['gstart']
-    gend = hit['gend']
-
-    # Expand slightly to capture full codons at boundaries
-    # tblastn coordinates are nucleotide positions
-    # Add a small buffer for splice site checking
-    buffer = 10
-    check_start = max(0, gstart - buffer)
-    check_end = min(len(chrom_seq), gend + buffer)
-
-    region = chrom_seq[check_start:check_end]
-
-    # Check splice sites
-    splice_info = _check_splice_sites(chrom_seq, gstart, gend, strand)
-
-    # Extract the hit region DNA
-    exon_dna = chrom_seq[gstart:gend]
-    if strand == '-':
-        exon_dna = reverse_complement(exon_dna)
-
-    # Translate
-    exon_dna_trimmed = exon_dna[:len(exon_dna) - len(exon_dna) % 3]
-    if len(exon_dna_trimmed) < 9:
-        return None
-
-    exon_prot = translate(exon_dna_trimmed).replace('*', '')
-    if len(exon_prot) < 3:
-        return None
-
-    # Check start codon (first exon should have ATG)
-    has_start = False
-    if exon_num == 1:
-        if strand == '+':
-            first_codon = chrom_seq[gstart:gstart + 3].upper()
-        else:
-            first_codon = reverse_complement(chrom_seq[gend - 3:gend]).upper()
-        has_start = first_codon == 'ATG'
-
-    # Check stop codon (last exon should end with stop)
-    has_stop = False
-    if exon_num == total_hits:
-        if strand == '+':
-            last_codon = chrom_seq[gend:gend + 3].upper()
-        else:
-            last_codon = reverse_complement(chrom_seq[gstart - 3:gstart]).upper()
-        has_stop = last_codon in ['TAA', 'TAG', 'TGA']
-
-    return {
-        'id': f"GOI_hit|exon_{exon_num}",
-        'seq': exon_prot,
-        'exon_num': exon_num,
-        'total_exons': total_hits,
-        'chrom': chrom,
-        'gstart': gstart,
-        'gend': gend,
-        'strand': strand,
-        'qstart': hit['qstart'],
-        'qend': hit['qend'],
-        'pident': hit['pident'],
-        'evalue': hit['evalue'],
-        'has_start_codon': has_start,
-        'has_stop_codon': has_stop,
-        'splice_donor': splice_info.get('donor', None),
-        'splice_acceptor': splice_info.get('acceptor', None),
-        'coords': (gstart, gend)
-    }
-
-
-def _check_splice_sites(chrom_seq, gstart, gend, strand):
-    """
-    Check for canonical splice sites flanking the exon.
-
-    Eukaryotic introns:
-    - Donor (5' end of intron): GT (>98% of cases)
-    - Acceptor (3' end of intron): AG (>98% of cases)
-
-    For + strand exon at [gstart, gend]:
-    - Splice acceptor: 2bp before gstart (should be AG)
-    - Splice donor: 2bp after gend (should be GT)
-
-    For - strand, it's reversed.
-    """
-    result = {}
-
-    if strand == '+':
-        # Check acceptor site (AG before exon start)
-        if gstart >= 2:
-            acceptor = chrom_seq[gstart - 2:gstart].upper()
-            result['acceptor'] = acceptor
-            result['acceptor_canonical'] = acceptor == 'AG'
-
-        # Check donor site (GT after exon end)
-        if gend + 2 <= len(chrom_seq):
-            donor = chrom_seq[gend:gend + 2].upper()
-            result['donor'] = donor
-            result['donor_canonical'] = donor == 'GT'
-    else:
-        # Minus strand: complement everything
-        # Acceptor (AG) appears as CT on + strand, after the exon end
-        if gend + 2 <= len(chrom_seq):
-            acceptor_raw = chrom_seq[gend:gend + 2].upper()
-            result['acceptor'] = reverse_complement(acceptor_raw).upper()
-            result['acceptor_canonical'] = result['acceptor'] == 'AG'
-
-        # Donor (GT) appears as AC on + strand, before the exon start
-        if gstart >= 2:
-            donor_raw = chrom_seq[gstart - 2:gstart].upper()
-            result['donor'] = reverse_complement(donor_raw).upper()
-            result['donor_canonical'] = result['donor'] == 'GT'
-
-    return result
-
-
-def _find_gaps(covered, min_gap_size=10):
-    """Find gaps in coverage array."""
-    gaps = []
-    in_gap = False
-    gap_start = 0
-
-    for i, c in enumerate(covered):
-        if not c and not in_gap:
-            in_gap = True
-            gap_start = i
-        elif c and in_gap:
-            in_gap = False
-            if i - gap_start >= min_gap_size:
-                gaps.append((gap_start, i))
-
-    # Final gap
-    if in_gap and len(covered) - gap_start >= min_gap_size:
-        gaps.append((gap_start, len(covered)))
-
-    return gaps
-
-
-def _search_missing_exons(query_seq, missing_regions, existing_exons,
-                          genome_file, chrom, chrom_seq, strand,
-                          gap_search_window=50000,
-                          gap_evalue=10.0,
-                          gap_min_identity=25.0,
-                          gap_min_alnlen=10,
-                          gap_max_hits=5):
-    """
-    Search for missing parts of the GOI near existing exon hits.
-
-    For each gap in query coverage:
-    1. Extract the missing protein subsequence
-    2. Search nearby genomic regions (within 50kb of existing exons)
-    3. Use tblastn (protein → DNA)
-    4. Annotate any new hits
-
-    Always uses protein → DNA search!
-    """
-    new_exons = []
-
-    if not existing_exons:
-        return new_exons
-
-    # Define search region: around existing exons
-    all_gstarts = [e['gstart'] for e in existing_exons]
-    all_gends = [e['gend'] for e in existing_exons]
-    region_start = max(0, min(all_gstarts) - gap_search_window)
-    region_end = min(len(chrom_seq), max(all_gends) + gap_search_window)
-
-    next_exon_num = max(e['exon_num'] for e in existing_exons) + 1
-
-    for gap_start, gap_end in missing_regions:
-        gap_protein = query_seq[gap_start:gap_end]
-        if len(gap_protein) < gap_min_alnlen:
-            continue
-
-        print(f"[Missing Exon] Searching for query positions {gap_start + 1}-{gap_end} "
-              f"({len(gap_protein)} aa) near existing exons...")
-
-        # Write gap protein to temp file
-        gap_query_file = f"/tmp/synterra_gap_query_{os.getpid()}.faa"
-        gap_target_file = f"/tmp/synterra_gap_target_{os.getpid()}.fna"
-        gap_hits_file = f"/tmp/synterra_gap_hits_{os.getpid()}.txt"
-
-        try:
-            write_fasta([("gap_query", gap_protein)], gap_query_file)
-
-            # Extract nearby genomic region
-            search_region = chrom_seq[region_start:region_end]
-            write_fasta([(f"{chrom}_{region_start}_{region_end}", search_region)], gap_target_file)
-
-            # Run tblastn (protein → DNA search!)
-            cmd = [
-                "tblastn",
-                "-query", gap_query_file,
-                "-subject", gap_target_file,
-                "-out", gap_hits_file,
-                "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
-                "-evalue", str(gap_evalue),  # Relaxed for short fragments
-                "-seg", "no",  # Don't mask low complexity (short queries)
-                "-max_target_seqs", str(gap_max_hits)
-            ]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-
-            if result.returncode == 0 and os.path.exists(gap_hits_file):
-                gap_hits = _parse_format6_hits(gap_hits_file, None)
-
-                for hit in gap_hits:
-                    if hit['pident'] < gap_min_identity or hit['alnlen'] < gap_min_alnlen:
-                        continue
-
-                    # Convert coordinates back to global
-                    actual_gstart = region_start + hit['gstart']
-                    actual_gend = region_start + hit['gend']
-
-                    # Check if this overlaps with existing exons
-                    overlaps = False
-                    for existing in existing_exons:
-                        if (_calc_overlap(actual_gstart, actual_gend,
-                                          existing['gstart'], existing['gend']) > 10):
-                            overlaps = True
-                            break
-
-                    if overlaps:
-                        continue
-
-                    # Extract and annotate
-                    exon_dna = chrom_seq[actual_gstart:actual_gend]
-                    if strand == '-':
-                        exon_dna = reverse_complement(exon_dna)
-
-                    exon_dna = exon_dna[:len(exon_dna) - len(exon_dna) % 3]
-                    if len(exon_dna) < 9:
-                        continue
-
-                    exon_prot = translate(exon_dna).replace('*', '')
-                    if len(exon_prot) < 3:
-                        continue
-
-                    # Check splice sites
-                    splice_info = _check_splice_sites(
-                        chrom_seq, actual_gstart, actual_gend, strand
-                    )
-
-                    new_exons.append({
-                        'id': f"GOI_hit|exon_{next_exon_num}",
-                        'seq': exon_prot,
-                        'exon_num': next_exon_num,
-                        'total_exons': -1,  # Unknown
-                        'chrom': chrom,
-                        'gstart': actual_gstart,
-                        'gend': actual_gend,
-                        'strand': strand,
-                        'qstart': gap_start + hit['qstart'],
-                        'qend': gap_start + hit['qend'],
-                        'pident': hit['pident'],
-                        'evalue': hit['evalue'],
-                        'has_start_codon': False,
-                        'has_stop_codon': False,
-                        'splice_donor': splice_info.get('donor', None),
-                        'splice_acceptor': splice_info.get('acceptor', None),
-                        'coords': (actual_gstart, actual_gend),
-                        'method': 'gap_search'
-                    })
-
-                    print(f"[Missing Exon] Found new exon at {chrom}:{actual_gstart}-{actual_gend} "
-                          f"({hit['pident']:.1f}% identity)")
-                    next_exon_num += 1
-                    break  # Take first good hit per gap
-
-        except subprocess.TimeoutExpired:
-            print(f"[Missing Exon] tblastn timed out for gap query")
-        except FileNotFoundError:
-            print(f"[Missing Exon] tblastn not found, skipping gap search")
-        except Exception as e:
-            print(f"[Missing Exon] Gap search failed: {e}")
-        finally:
-            for f in [gap_query_file, gap_target_file, gap_hits_file]:
-                if os.path.exists(f):
-                    os.remove(f)
-
-    return new_exons
+    return exons, full_protein
 
 
 # =============================================================================
@@ -1486,20 +1223,39 @@ def main():
         print(f"[annotate_goi_exons] Using hit-based exon annotation...")
 
         if args.blast_hits or args.mmseqs_hits:
-            exons, full_protein = annotate_exons_from_hits(
-                query_seq,
-                args.genome,
-                args.blast_hits,
-                args.mmseqs_hits,
-                gap_min_size=args.gap_min_size,
-                gap_search_window=args.gap_search_window,
-                gap_evalue=args.gap_evalue,
-                gap_min_identity=args.gap_min_identity,
-                gap_min_alnlen=args.gap_min_alnlen,
-                gap_max_hits=args.gap_max_hits,
-                min_exon_query_cov=args.min_exon_query_cov,
-                min_exon_alnlen=args.min_exon_alnlen
-            )
+            # Parse hit regions to determine where to search
+            hit_regions = _parse_hit_regions(args.blast_hits, args.mmseqs_hits)
+            if hit_regions:
+                # Load target genome
+                genome_data = load_genome(args.genome)
+                
+                # Group hits by chromosome
+                chroms = {}
+                for hr in hit_regions:
+                    c = hr['chrom']
+                    if c not in chroms:
+                        chroms[c] = []
+                    chroms[c].append(hr)
+                
+                # For each chromosome with hits, run miniprot
+                for chrom, chrom_hits in chroms.items():
+                    if chrom not in genome_data:
+                        continue
+                    chrom_seq = genome_data[chrom]
+                    
+                    # Determine region
+                    region_start = max(0, min(h['start'] for h in chrom_hits) - args.gap_search_window)
+                    region_end = min(len(chrom_seq), max(h['end'] for h in chrom_hits) + args.gap_search_window)
+                    sub_seq = chrom_seq[region_start:region_end]
+                    
+                    exons, full_protein = annotate_using_miniprot(
+                        query_seq, sub_seq, chrom,
+                        max_intron=max(20000, region_end - region_start),
+                        sensitive=True,  # GOI always gets sensitive
+                        region_offset=region_start
+                    )
+                    if exons:
+                        break  # Take first chromosome with results
             # Detect if tandem duplication was found (copies have id "GOI_copy_N")
             if exons and any(e['id'].startswith('GOI_copy_') for e in exons):
                 method_used = "tandem_duplication"

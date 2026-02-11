@@ -1002,25 +1002,81 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         
                         print(f"[{genome_name}] Exon-aware annotation: {len(annotated_records_raw)} genes.", flush=True)
                     
-                    # 6. Deduplicate: remove entries with identical coordinates
-                    # (e.g., GOI_P01501 and GOI_Melt often annotate the same locus)
-                    seen_coords = {}
+                    # 6. Deduplicate: remove entries with overlapping coordinates
+                    # Multiple query proteins (e.g., GOI_copy_2, GOI_LOC117228641)
+                    # often annotate the same genomic region. Keep the best (highest
+                    # identity) annotation for each region.
+                    
+                    def _parse_coords(desc):
+                        """Extract (start, end) from description string."""
+                        if 'coords:' in desc:
+                            c = desc.split('coords:')[1].split(' ')[0]
+                            parts = c.split('-')
+                            if len(parts) == 2:
+                                try:
+                                    return int(parts[0]), int(parts[1])
+                                except ValueError:
+                                    pass
+                        return None, None
+                    
+                    def _overlap_frac(s1, e1, s2, e2):
+                        """Reciprocal overlap fraction (min of both directions)."""
+                        ov = max(0, min(e1, e2) - max(s1, s2))
+                        if ov == 0:
+                            return 0.0
+                        len1 = max(1, e1 - s1)
+                        len2 = max(1, e2 - s2)
+                        return min(ov / len1, ov / len2)
+                    
+                    def _parse_identity(desc):
+                        """Extract identity from description string."""
+                        if 'identity:' in desc:
+                            try:
+                                return float(desc.split('identity:')[1].split()[0])
+                            except (ValueError, IndexError):
+                                pass
+                        return 0.0
+                    
+                    # Sort by identity descending so best annotations win
+                    annotated_records_raw.sort(
+                        key=lambda r: _parse_identity(r.get('description', '')),
+                        reverse=True
+                    )
+                    
+                    kept = []  # list of (start, end, rec)
                     deduped_records = []
-                    deduped_gff = []
+                    removed_ids = set()
+                    
                     for rec in annotated_records_raw:
                         desc = rec.get('description', '')
-                        coords_key = None
-                        if 'coords:' in desc:
-                            coords_key = desc.split('coords:')[1].split(' ')[0]
-                        if coords_key and coords_key in seen_coords:
-                            print(f"[{genome_name}] Removing duplicate: {rec['id']} (same coords as {seen_coords[coords_key]})", flush=True)
-                            # Remove corresponding GFF lines
-                            rid = rec['id']
-                            valid_gff_lines = [g for g in valid_gff_lines if f"ID={rid}" not in g and f"Parent={rid}" not in g]
+                        s, e = _parse_coords(desc)
+                        if s is None:
+                            deduped_records.append(rec)
                             continue
-                        if coords_key:
-                            seen_coords[coords_key] = rec['id']
-                        deduped_records.append(rec)
+                        
+                        # Check overlap with already-kept entries
+                        is_dup = False
+                        for ks, ke, krec in kept:
+                            if _overlap_frac(s, e, ks, ke) >= 0.50:
+                                is_dup = True
+                                print(f"[{genome_name}] Dedup: removing {rec['id']} "
+                                      f"(overlaps {krec['id']}, keeping higher identity)",
+                                      flush=True)
+                                removed_ids.add(rec['id'])
+                                break
+                        
+                        if not is_dup:
+                            kept.append((s, e, rec))
+                            deduped_records.append(rec)
+                    
+                    # Remove GFF lines for deduplicated records
+                    if removed_ids:
+                        valid_gff_lines = [
+                            g for g in valid_gff_lines
+                            if not any(f"ID={rid}" in g or f"Parent={rid}" in g
+                                       for rid in removed_ids)
+                        ]
+                    
                     annotated_records_raw = deduped_records
                     
                     new_genes = annotated_records_raw

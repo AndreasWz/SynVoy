@@ -4,6 +4,7 @@ import argparse
 import subprocess
 import os
 import sys
+import shutil
 
 # No BioPython needed - we count FASTA headers directly
 
@@ -15,17 +16,44 @@ def run_mafft(input_fasta, output_aln, threads=1):
     with open(output_aln, "w") as out_f:
         subprocess.run(cmd, stdout=out_f, check=True)
 
-def run_fasttree(input_aln, output_nwk):
+def run_iqtree(input_aln, output_nwk, threads=1):
     """
-    Run FastTree to infer phylogeny.
-    """
-    cmd = ["FastTree", "-lg", "-gamma"] # standard protein model
-    # FastTree reads from stdin or file, prints to stdout
+    Run IQ-TREE with automatic model selection and ultrafast bootstrap.
     
-    with open(output_nwk, "w") as out_f:
-        # Pass input_aln as argument or redirect? FastTree accepts filename.
-        # fasttree alignment.fasta > tree.nwk
-        subprocess.run(cmd + [input_aln], stdout=out_f, check=True)
+    Uses ModelFinder Plus (-m MFP) for automatic substitution model selection
+    and ultrafast bootstrap (-B 1000) for branch support values.
+    This is vastly superior to FastTree's fixed LG+Gamma model.
+    """
+    prefix = output_nwk.replace('.nwk', '')
+    cmd = [
+        "iqtree2",
+        "-s", input_aln,
+        "--prefix", prefix,
+        "-m", "MFP",        # ModelFinder Plus (auto model selection)
+        "-B", "1000",        # Ultrafast bootstrap
+        "-T", str(threads),
+        "--quiet",
+        "--redo"             # Overwrite previous runs
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        # Try 'iqtree' (v1) if 'iqtree2' not found
+        cmd[0] = "iqtree"
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    
+    # IQ-TREE writes to {prefix}.treefile, rename to expected output
+    treefile = prefix + ".treefile"
+    if os.path.exists(treefile):
+        shutil.move(treefile, output_nwk)
+    
+    # Cleanup IQ-TREE auxiliary files
+    for ext in ['.iqtree', '.log', '.mldist', '.model.gz', '.bionj',
+                '.ckp.gz', '.contree', '.splits.nex', '.uniqueseq.phy']:
+        aux = prefix + ext
+        if os.path.exists(aux):
+            os.remove(aux)
 
 def main():
     parser = argparse.ArgumentParser(description="Compute Phylogenetic Tree from Fasta")
@@ -62,14 +90,15 @@ def main():
         sys.exit(1)
         
     # 2. Tree
-    print("Inferring Tree with FastTree...")
+    print("Inferring tree with IQ-TREE (auto model selection + ultrafast bootstrap)...")
     try:
-        run_fasttree(aln_file, args.output)
+        run_iqtree(aln_file, args.output, args.threads)
     except Exception as e:
-        print(f"FastTree failed: {e}")
+        print(f"IQ-TREE failed: {e}")
         sys.exit(1)
         
     print(f"Tree written to {args.output}")
 
 if __name__ == "__main__":
     main()
+

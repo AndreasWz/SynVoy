@@ -440,60 +440,37 @@ workflow {
         
         // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
         // Collect Data for Plotting (ALL loci)
-        miniprot_gffs_ch = ITERATIVE_SEARCH.out.gff
+        // Group GFFs and TSVs by locus_id using direct join (not collect+combine)
+        gffs_by_locus_ch = ITERATIVE_SEARCH.out.gff
             .transpose()
             .map { locus_id, gff -> tuple(locus_id, gff) }
+            .groupTuple()  // [locus_id, [gff1, gff2, ...]]
 
-        miniprot_tsvs_ch = ITERATIVE_SEARCH.out.homology
+        tsvs_by_locus_ch = ITERATIVE_SEARCH.out.homology
             .transpose()
             .map { locus_id, tsv -> tuple(locus_id, tsv) }
-
-        gffs_by_locus_map_ch = miniprot_gffs_ch
-            .groupTuple()
-            .collect()
-            .map { items ->
-                def m = [:]
-                items.each { entry ->
-                    def locus_id = entry[0]
-                    def gffs = entry[1]
-                    m[locus_id] = gffs
-                }
-                m
-            }
-
-        tsvs_by_locus_map_ch = miniprot_tsvs_ch
-            .groupTuple()
-            .collect()
-            .map { items ->
-                def m = [:]
-                items.each { entry ->
-                    def locus_id = entry[0]
-                    def tsvs = entry[1]
-                    m[locus_id] = tsvs
-                }
-                m
-            }
+            .groupTuple()  // [locus_id, [tsv1, tsv2, ...]]
 
         cluster_by_locus_ch = CLUSTER_REGIONS.out.bed
             .map { genome_name, payload, locus_id, bed -> tuple(locus_id, genome_name, bed) }
-            .groupTuple()
-            .map { locus_id, items ->
-                def names = items.collect { it[0] }
-                def beds = items.collect { it[1] }
-                tuple(locus_id, names, beds)
-            }
+            .groupTuple()  // produces [locus_id, [names], [beds]]
 
         home_bed_by_locus_ch = EXTRACT_FLANKING.out.bed  // [locus_id, bed]
         tree_by_locus_ch = COMPUTE_TREE.out.tree         // [locus_id, tree]
 
         plot_inputs = home_bed_by_locus_ch
-            .join(cluster_by_locus_ch)   // [locus_id, home_bed, names, beds]
-            .join(tree_by_locus_ch)      // [locus_id, home_bed, names, beds, tree]
-            .combine(gffs_by_locus_map_ch)
-            .combine(tsvs_by_locus_map_ch)
-            .map { locus_id, home_bed, names, beds, tree, gff_map, tsv_map ->
-                def gffs = gff_map.get(locus_id, [])
-                def tsvs = tsv_map.get(locus_id, [])
+            .join(cluster_by_locus_ch)                    // [locus_id, home_bed, names, beds]
+            .join(tree_by_locus_ch)                       // [locus_id, home_bed, names, beds, tree]
+            .join(gffs_by_locus_ch, remainder: true)      // [locus_id, home_bed, names, beds, tree, gffs_or_null]
+            .join(tsvs_by_locus_ch, remainder: true)      // [locus_id, home_bed, names, beds, tree, gffs_or_null, tsvs_or_null]
+            .map { entry ->
+                def locus_id = entry[0]
+                def home_bed = entry[1]
+                def names = entry[2]
+                def beds = entry[3]
+                def tree = entry[4]
+                def gffs = entry[5] ?: []
+                def tsvs = entry[6] ?: []
                 tuple(home_bed, names, beds, gffs, tsvs, tree)
             }
 

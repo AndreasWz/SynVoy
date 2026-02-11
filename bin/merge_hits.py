@@ -8,6 +8,8 @@ def main():
     parser.add_argument("--mmseqs", help="MMseqs2 m8 output (converted to bed-like)")
     parser.add_argument("--blast", help="BLAST output (converted to bed-like)")
     parser.add_argument("--output", required=True, help="Output BED file")
+    parser.add_argument("--max_evalue", type=float, default=1e-3,
+                        help="Maximum e-value to keep a hit (default: 1e-3)")
     
     args = parser.parse_args()
     
@@ -50,6 +52,17 @@ def main():
             pass
 
     if not hits:
+        open(args.output, 'w').close()
+        return
+
+    # Filter by e-value threshold
+    before = len(hits)
+    hits = [h for h in hits if h['score'] <= args.max_evalue]
+    if before != len(hits):
+        print(f"E-value filter ({args.max_evalue}): kept {len(hits)}/{before} hits")
+
+    if not hits:
+        print("No hits passed e-value filter.")
         open(args.output, 'w').close()
         return
 

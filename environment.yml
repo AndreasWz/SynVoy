@@ -15,7 +15,7 @@ dependencies:
   - augustus >=3.5.0
   - mafft >=7.505
   - miniprot
-  - fasttree
+  - iqtree >=2.2.0
   - ncbi-datasets-cli  # For easy mode genome downloading
   
   # Python packages

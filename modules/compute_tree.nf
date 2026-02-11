@@ -14,31 +14,57 @@ process COMPUTE_TREE {
     # Concatenate all fasta files
     cat ${fasta_files} > all_sequences.faa
     
-    # CRITICAL: Filter to only GOI sequences for phylogenetic tree
-    # This excludes flanking genes - tree should only show GOI homologs
-    # Match headers containing "GOI_" or the query ID pattern
+    # CRITICAL: Filter to only GOI sequences, then deduplicate by sequence content
+    # Identical sequences from different query proteins should be collapsed
     python3 -c "
 import sys
-keep = False
-seen_names = {}
+from collections import OrderedDict
+
+# Pass 1: collect all GOI sequences
+entries = []  # list of (name, seq)
+current_name = None
+current_seq = []
+
 for line in open('all_sequences.faa'):
     if line.startswith('>'):
-        name = line.strip()[1:]
-        is_goi = 'GOI_' in name or 'GOI|' in name
-        if is_goi:
-            if name in seen_names:
-                seen_names[name] += 1
-                unique = name + '_dup' + str(seen_names[name])
-            else:
-                seen_names[name] = 1
-                unique = name
-            sys.stdout.write('>' + unique + chr(10))
-            keep = True
-        else:
-            keep = False
-    elif keep:
-        sys.stdout.write(line)
-" > goi_only.faa
+        if current_name and current_seq:
+            entries.append((current_name, ''.join(current_seq)))
+        current_name = line.strip()[1:]
+        current_seq = []
+    else:
+        current_seq.append(line.strip())
+if current_name and current_seq:
+    entries.append((current_name, ''.join(current_seq)))
+
+# Filter to GOI only
+goi_entries = [(n, s) for n, s in entries if 'GOI_' in n or 'GOI|' in n]
+
+# Pass 2: deduplicate by sequence content
+# For identical sequences, keep one representative name
+seq_to_name = OrderedDict()  # seq -> first name seen
+name_counts = {}  # handle name collisions
+
+for name, seq in goi_entries:
+    if seq in seq_to_name:
+        continue  # skip identical sequence
+    # Handle name collisions (same name, different sequence)
+    if name in name_counts:
+        name_counts[name] += 1
+        unique_name = name + '_var' + str(name_counts[name])
+    else:
+        name_counts[name] = 1
+        unique_name = name
+    seq_to_name[seq] = unique_name
+
+# Write deduplicated output
+for seq, name in seq_to_name.items():
+    sys.stdout.write('>' + name + chr(10))
+    # Write sequence in 80-char lines
+    for i in range(0, len(seq), 80):
+        sys.stdout.write(seq[i:i+80] + chr(10))
+
+print(f'Deduplicated: {len(goi_entries)} GOI entries -> {len(seq_to_name)} unique sequences', file=sys.stderr)
+" > goi_only.faa 2>&1 | head -5
     
     # Check if we have sequences
     count=\$(grep -c '^>' goi_only.faa 2>/dev/null || echo 0)

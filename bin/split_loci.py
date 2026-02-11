@@ -20,10 +20,12 @@ def main():
                 parts = line.strip().split('\t')
                 if len(parts) < 3: continue
                 
+                evalue = float(parts[4]) if len(parts) > 4 else 0.0
                 entries.append({
                     'chrom': parts[0],
                     'start': int(parts[1]),
                     'end': int(parts[2]),
+                    'evalue': evalue,
                     'line': line.strip()
                 })
     except FileNotFoundError:
@@ -64,6 +66,33 @@ def main():
         
     if current_cluster:
         clusters.append(current_cluster)
+    
+    # Rank clusters by significance (best e-value in cluster)
+    for cl in clusters:
+        cl_evalues = [e['evalue'] for e in cl]
+        cl.sort(key=lambda x: x['evalue'])  # sort within cluster for reference
+    
+    clusters.sort(key=lambda cl: min(e['evalue'] for e in cl))
+    
+    # Filter: keep only clusters with sufficient evidence
+    # Primary locus = best cluster; secondary loci must have meaningful hits
+    if len(clusters) > 1:
+        primary_best = min(e['evalue'] for e in clusters[0])
+        filtered = [clusters[0]]
+        for cl in clusters[1:]:
+            best_ev = min(e['evalue'] for e in cl)
+            n_hits = len(cl)
+            # Keep secondary locus if:
+            # 1. It has at least 2 significant hits, OR
+            # 2. It has 1 hit with e-value within 1e6 of primary (likely real homolog)
+            if n_hits >= 2:
+                filtered.append(cl)
+            elif best_ev <= 1e-10 and (primary_best == 0 or best_ev / max(primary_best, 1e-200) < 1e6):
+                filtered.append(cl)
+            else:
+                print(f"Filtered out weak locus on {cl[0]['chrom']}: "
+                      f"{n_hits} hit(s), best e-value={best_ev:.2e}")
+        clusters = filtered
         
     print(f"Found {len(clusters)} distinct loci.")
     
@@ -74,7 +103,8 @@ def main():
         with open(out_name, 'w') as f_out:
             for entry in cl:
                 f_out.write(entry['line'] + "\n")
-        print(f"Wrote locus {i+1} to {out_name} ({len(cl)} hits)")
+        best_ev = min(e['evalue'] for e in cl)
+        print(f"Wrote locus {i+1} to {out_name} ({len(cl)} hits, best e-value={best_ev:.2e})")
 
 if __name__ == "__main__":
     main()

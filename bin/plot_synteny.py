@@ -92,6 +92,7 @@ def parse_target_gff(gff_file):
 
     Extracts mRNA plus gene-level features for tandem copies.
     Returns list of gene dicts with 'home_gene_id' from SynTerra_Parent.
+    Deduplicates overlapping entries (same region annotated by different queries).
     """
     genes = []
     if not gff_file or not os.path.exists(gff_file):
@@ -122,6 +123,26 @@ def parse_target_gff(gff_file):
                 "home_gene_id": attrs.get("SynTerra_Parent", attrs.get("Parent", "")),
                 "n_exons":      int(attrs.get("Exons", "1")),
             })
+
+    # Deduplicate overlapping entries (same genomic region from different queries)
+    if len(genes) > 1:
+        genes.sort(key=lambda g: -g["identity"])  # best identity first
+        kept = []
+        for g in genes:
+            is_dup = False
+            for k in kept:
+                if g["chrom"] != k["chrom"]:
+                    continue
+                ov = max(0, min(g["end"], k["end"]) - max(g["start"], k["start"]))
+                len_g = max(1, g["end"] - g["start"])
+                len_k = max(1, k["end"] - k["start"])
+                if min(ov / len_g, ov / len_k) >= 0.50:
+                    is_dup = True
+                    break
+            if not is_dup:
+                kept.append(g)
+        genes = kept
+
     return genes
 
 
