@@ -64,7 +64,8 @@ for seq, name in seq_to_name.items():
         sys.stdout.write(seq[i:i+80] + chr(10))
 
 print(f'Deduplicated: {len(goi_entries)} GOI entries -> {len(seq_to_name)} unique sequences', file=sys.stderr)
-" > goi_only.faa 2>&1 | head -5
+" > goi_only.faa 2> goi_dedup.log
+    head -5 goi_dedup.log || true
     
     # Check if we have sequences
     count=\$(grep -c '^>' goi_only.faa 2>/dev/null || echo 0)

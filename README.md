@@ -1,65 +1,156 @@
 # SynTerra
 
-**Phylogenetically informed syntenic ortholog discovery**
+SynTerra is a Nextflow pipeline for synteny-guided ortholog discovery in related genomes.
+It is designed to work when target genomes are:
+- well annotated,
+- partially annotated,
+- custom annotated,
+- or completely unannotated.
 
-SynTerra is a Nextflow pipeline that finds orthologs of a Gene of Interest (GOI) across related genomes. It is designed to work even when target genomes are unannotated by combining synteny (gene order conservation), iterative search, and exon-aware annotation.
+## What SynTerra Does
 
-**What it does**
-- Locates the GOI in a home genome using MMseqs2 and BLAST.
-- Annotates GOI exons (from GFF if available, otherwise from hits and splice-site logic).
-- Extracts flanking genes around the GOI to define a synteny block.
-- Orders target genomes by phylogenetic distance and searches them iteratively.
-- Clusters syntenic regions, builds a GOI phylogeny, and generates an interactive synteny plot.
+1. Resolves your GOI query (UniProt/NCBI ID or FASTA).
+2. Locates GOI loci in a home genome (MMseqs + BLAST).
+3. Annotates GOI exon structure (from GFF when available, otherwise from protein-to-genome evidence).
+4. Extracts flanking genes around each home locus.
+5. Iteratively searches phylogenetically ordered target genomes.
+6. Annotates GOI and flanking models in target regions.
+7. Produces synteny plots, trees, and summary outputs.
 
-**How it works (high level)**
-1. Validate inputs and normalize the query. Nucleotide queries are translated to protein.
-2. Locate the GOI in the home genome and annotate its exon structure.
-3. Extract flanking genes around each candidate locus.
-4. Sort target genomes by taxonomy and run iterative search (MMseqs2 + optional Smith-Waterman).
-5. Cluster regions by synteny, infer a GOI tree, and render the plot and report.
+## Key Logic Choices
 
-**Requirements**
-- Nextflow >= 22.10.1
-- Conda, Docker, or Singularity
-- External tools (via `environment.yml`): mmseqs2, BLAST, prodigal, mafft, fasttree, ete3
-- Easy mode only: `ncbi-datasets-cli` and Entrez Direct (`esearch`, `efetch`, `xtract`)
+- Search operates in protein space against genomic DNA (translated search), then refines exon/intron structures.
+- GOI and flanking handling are separate by design.
+- Flanking model collapsing is per-locus, not global:
+  - one best model per parent ID per genomic locus,
+  - multiple loci for the same parent ID are kept if they are distinct loci.
+- Iterative DB expansion uses GOI-derived models; flanking models are kept for context/annotation and plotting.
+- Parent IDs are handled generically (not tied to `XP_` accessions).
 
-**Quickstart**
+## Input Robustness
 
-Easy mode (fetches genomes from NCBI):
+SynTerra is built to handle:
+- NCBI GFF/GFF3,
+- Ensembl-like GFF/GTF attribute styles,
+- custom GFFs,
+- missing GFF (`NO_GFF` fallback path with Prodigal + borrowed annotations).
+
+## Setup (Choose One Backend)
+
+You can run SynTerra with Conda (recommended), Docker, or Singularity/Apptainer.
+
+### Option A: Conda/Mamba (recommended for most users)
+
+1. Install Miniconda or Mambaforge.
+2. Create and activate the environment.
+3. Run SynTerra.
+
 ```bash
-nextflow run main.nf \
-  --query_id P01501 \
-  --home_species "Apis mellifera" \
-  --outdir results/melittin
+cd /path/to/SynTerra
+conda env create -f environment.yml
+conda activate syntenyfinder
+nextflow -version
 ```
 
-Pro mode (use your own files):
+If `nextflow` is not on your `PATH`, use the bundled launcher in this repo:
+
 ```bash
-nextflow run main.nf \
-  --gene my_gene.fasta \
-  --home_genome home.fna \
-  --target_genomes "targets/*.fna" \
+./nextflow -version
+```
+
+Use the modern live terminal UI launcher:
+
+```bash
+./synterra --help
+```
+
+### Option B: Docker
+
+Prerequisites:
+- Docker installed and running.
+- Nextflow installed on host.
+
+Run with Docker profile:
+
+```bash
+nextflow run main.nf -profile docker --gene P01501 --mode easy --outdir results
+```
+
+### Option C: Singularity/Apptainer
+
+Prerequisites:
+- Singularity or Apptainer installed.
+- Nextflow installed on host.
+
+Recommended cache setup:
+
+```bash
+mkdir -p "$HOME/.singularity/cache"
+export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
+```
+
+Run with Singularity profile:
+
+```bash
+nextflow run main.nf -profile singularity --gene P01501 --mode easy --outdir results
+```
+
+Optional quick smoke test (bundled test data):
+
+```bash
+nextflow run main.nf -profile test
+```
+
+## Quick Start
+
+Easy mode (ID-based, automatic genome retrieval):
+
+```bash
+./synterra \
+  --gene P01501 \
+  --mode easy \
+  --outdir results
+```
+
+Note: easy mode requires internet access to fetch genomes/metadata.
+Assembly selection prefers reference/representative genomes, then ranks fallback assemblies by quality.  
+If only low-quality assemblies exist, default policy is `--bad_quality_policy ask` with `--bad_quality_timeout 300` seconds (auto-NO on timeout).
+
+Pro mode (user-provided files):
+
+```bash
+./synterra \
   --mode pro \
-  --outdir results/my_run
+  --gene input/query.fasta \
+  --home_genome input/home.fna \
+  --home_gff input/home.gff \
+  --target_genomes "input/targets/*.fna" \
+  --outdir results
 ```
 
-**Key outputs (in `--outdir`)**
-- `*_synteny_plot.html` interactive synteny visualization
-- `*_tree.html` (optional) and `*.nwk` GOI phylogeny
-- `synterra_report.json` summary report
-- `qc/genome_qc_summary.json` assembly quality summary
-- `regions/*.regions.bed` synteny region calls
-- `intermediate/` exported intermediate artifacts (loci, flanking blocks, etc.)
+Resume an interrupted run (same command and same `--outdir`):
 
-**Notes**
-- If you provide a nucleotide query, SynTerra will translate it to protein and use the longest ORF across six frames.
-- If multiple loci are detected, SynTerra will generate one synteny plot per locus.
-- Phylogenetic sorting uses NCBI taxonomy. Set `TAXDB` to a local taxdump directory for best results.
+```bash
+./synterra --gene P01501 --mode easy --outdir results -resume
+```
 
-**Docs**
-- Full usage and parameter reference: `USAGE.md`
-- Example configs: `conf/`
-- Tests: `tests/`
+Modern single-screen terminal UI is provided by `./synterra` and hides repetitive `executor` table reprints.
+If you want classic Nextflow console output instead:
 
-If you want help or changes, open an issue or ask for a targeted tweak.
+```bash
+nextflow run main.nf --gene P01501 --mode easy --outdir results -resume
+```
+
+## Main Outputs
+
+Under `--outdir`:
+- `*_synteny_plot.html`: interactive synteny plots
+- `*_tree.nwk`: GOI tree per locus
+- `synterra_report.json`: run summary
+- `regions/*.regions.bed`: clustered candidate regions
+- `intermediate/`: phase-level intermediate artifacts
+
+## Documentation
+
+- Detailed setup, runtime profiles, and parameters: `USAGE.md`
+- Detailed algorithm and data flow: `PIPELINE_DETAILED.md`

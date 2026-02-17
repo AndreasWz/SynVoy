@@ -18,6 +18,7 @@ include { ANNOTATE_GOI } from './modules/annotate_goi.nf'
 include { STAGE_GENOMES } from './modules/stage_genomes.nf'
 include { ASSESS_GENOME_QUALITY } from './modules/assess_quality.nf'
 include { FETCH_QUERY_FROM_ID } from './modules/fetch_query.nf'
+include { RESOLVE_GENE_INPUT } from './modules/resolve_query.nf'
 include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
@@ -42,16 +43,51 @@ c_cyan = "\033[0;36m"
 c_white = "\033[0;37m"
 
 // ==============================================================================
-// ASCII Banner & Pipeline Info
+// Console UI helpers
 // ==============================================================================
 
+def uiRule() {
+    return "${c_blue}${'═' * 63}${c_reset}"
+}
+
+def uiStatus(String level, String task, String detail = '') {
+    def levelColors = [
+        'RUN ': c_blue,
+        'OK  ': c_green,
+        'INFO': c_cyan,
+        'WARN': c_yellow,
+        'SKIP': c_dim,
+        'FAIL': c_red
+    ]
+    def key = (level ?: 'INFO').padRight(4).substring(0, 4)
+    def levelColor = levelColors.get(key, c_white)
+    def taskCol = task ? "${c_white}${task.padRight(24)}${c_reset}" : ''
+    def detailCol = detail ?: ''
+    def prefix = "${levelColor}[${key}]${c_reset}"
+    if (taskCol && detailCol) {
+        log.info "${prefix} ${taskCol} ${detailCol}"
+    } else if (taskCol) {
+        log.info "${prefix} ${taskCol}"
+    } else if (detailCol) {
+        log.info "${prefix} ${detailCol}"
+    } else {
+        log.info prefix
+    }
+}
+
+def uiPhase(int idx, String title) {
+    log.info ""
+    log.info uiRule()
+    log.info "${c_white}Phase ${idx}${c_reset} ${c_dim}|${c_reset} ${c_cyan}${title}${c_reset}"
+    log.info uiRule()
+}
+
 def printHeader() {
-    log.info """
-    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
-    ${c_cyan}S Y N T E R R A${c_reset}   ${c_dim}v2.0${c_reset}
-    ${c_dim}Phylogenetically-informed syntenic ortholog discovery${c_reset}
-    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
-    """.stripIndent()
+    log.info ""
+    log.info uiRule()
+    log.info "${c_cyan}${c_bold}SynTerra${c_reset} ${c_dim}v2.0${c_reset}"
+    log.info "${c_dim}Phylogenetically-informed syntenic ortholog discovery${c_reset}"
+    log.info uiRule()
 }
 
 def printParams() {
@@ -59,19 +95,21 @@ def printParams() {
     def home_display = params.mode == 'easy' ? params.home_species : (params.home_genome ? new File(params.home_genome).name : 'N/A')
     def target_display = params.target_species ?: 'auto (taxonomic search)'
     
-    log.info """
-    ${c_blue}═══════════════════════════════════════════════════════════════
-    ${c_white}RUN CONFIGURATION${c_reset}
-    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
-    ${c_dim}Query Gene      :${c_reset} ${c_green}${query_display}${c_reset}
-    ${c_dim}Home Genome     :${c_reset} ${c_green}${home_display}${c_reset}
-    ${c_dim}Mode            :${c_reset} ${c_yellow}${params.mode}${c_reset}
-    ${c_dim}Target Species  :${c_reset} ${c_cyan}${target_display}${c_reset}
-    ${c_dim}Flanking Genes  :${c_reset} ${params.n_flanking_genes}
-    ${c_dim}MMseqs Sens.    :${c_reset} ${params.mmseqs_sensitivity}
-    ${c_dim}Output Dir      :${c_reset} ${params.outdir}
-    ${c_blue}═══════════════════════════════════════════════════════════════${c_reset}
-    """.stripIndent()
+    log.info uiRule()
+    log.info "${c_white}Run Configuration${c_reset}"
+    log.info uiRule()
+    log.info "${c_dim}Query Gene     ${c_reset} ${c_green}${query_display}${c_reset}"
+    log.info "${c_dim}Home Genome    ${c_reset} ${c_green}${home_display}${c_reset}"
+    log.info "${c_dim}Mode           ${c_reset} ${c_yellow}${params.mode}${c_reset}"
+    log.info "${c_dim}Target Species ${c_reset} ${c_cyan}${target_display}${c_reset}"
+    log.info "${c_dim}Flanking Genes ${c_reset} ${params.n_flanking_genes}"
+    log.info "${c_dim}MMseqs Sens.   ${c_reset} ${params.mmseqs_sensitivity}"
+    if (params.mode == 'easy') {
+        log.info "${c_dim}Asm Ranking    ${c_reset} ${params.assembly_ranking}"
+        log.info "${c_dim}LowQ Policy    ${c_reset} ${params.bad_quality_policy} (timeout=${params.bad_quality_timeout}s)"
+    }
+    log.info "${c_dim}Output Dir     ${c_reset} ${params.outdir}"
+    log.info uiRule()
 }
 
 printHeader()
@@ -84,100 +122,91 @@ workflow {
     
     // Check if we have EITHER gene file OR query_id
     if (!params.gene && !params.query_id) { 
-        log.error """
-        ${c_red}╔════════════════════════════════════════╗
-        ║  ERROR: No query provided!         ║
-        ╚════════════════════════════════════════╝${c_reset}
-        Please provide either --gene or --query_id
-        """
+        log.error "${c_red}No query provided. Please provide either --gene or --query_id${c_reset}"
         exit 1
     }
     
     if (params.gene && params.query_id) {
-        log.warn "${c_yellow}WARNING: Both --gene and --query_id provided. Using --gene${c_reset}"
+        uiStatus('WARN', 'INPUT', 'Both --gene and --query_id provided; using --gene')
     }
     
-    // Easy mode: require home_species, Pro mode: require home_genome
+    // Easy mode: home_species is now optional (auto-detected from UniProt/NCBI ID)
+    // Only required when --gene is a FASTA file
     if (params.mode == 'easy') {
-        if (!params.home_species) {
-            log.error "${c_red}ERROR: Easy mode requires --home_species parameter!${c_reset}"
-            log.error "${c_red}Example: --home_species 'Apis mellifera'${c_reset}"
-            exit 1
-        }
+        // Validation deferred — species can be auto-detected from ID
     } else {
         if (!params.home_genome) { 
-            log.error "${c_red}ERROR: Pro mode requires --home_genome parameter!${c_reset}"
+            log.error "${c_red}Pro mode requires --home_genome${c_reset}"
             exit 1
         }
         
         if (!file(params.home_genome).exists()) {
-            log.error "${c_red}ERROR: Home genome not found: ${params.home_genome}${c_reset}"
+            log.error "${c_red}Home genome not found: ${params.home_genome}${c_reset}"
             exit 1
         }
     }
     
-    if (params.gene && !file(params.gene).exists()) {
-        log.error "${c_red}ERROR: Gene file not found: ${params.gene}${c_reset}"
+    // Only check file existence if --gene looks like a file path (not a UniProt/NCBI ID)
+    if (params.gene && !params.gene.matches('^[A-Za-z]{1,3}[_P]?[0-9].*') && !file(params.gene).exists()) {
+        log.error "${c_red}Gene file not found: ${params.gene}${c_reset}"
         exit 1
     }
     
-    log.info "${c_green}Input validation passed${c_reset}"
+    uiStatus('OK', 'INPUT', 'Validation passed')
     
-    // Channel setup
-    if (params.gene) {
-        raw_gene_ch = Channel.fromPath(params.gene)
-    } else {
-        FETCH_QUERY_FROM_ID(params.query_id)
-        raw_gene_ch = FETCH_QUERY_FROM_ID.out.fasta
-    }
-    
-    // Normalize query: translate nucleotide queries to protein
-    NORMALIZE_QUERY(raw_gene_ch)
-    normalized_gene_ch = NORMALIZE_QUERY.out.fasta
-    
-    normalized_gene_ch.multiMap { it ->
-        loc: it
-        aug: it
-    }.set { gene_inputs }
-    
-    query_gene_source_ch = gene_inputs.loc
-    aug_query_gene_ch = gene_inputs.aug.first()
-
-    // Handle Easy vs Pro mode for home genome and targets
+    // Channel setup — depends on mode
     if (params.mode == 'easy') {
-        if (!params.home_species) {
-            log.error "${c_red}ERROR: Easy mode requires --home_species parameter!${c_reset}"
-            log.error "${c_red}Example: --home_species 'Apis mellifera'${c_reset}"
-            exit 1
+        // --- Easy mode: Resolve gene input (ID → FASTA + species) ---
+        def gene_input = params.gene ?: params.query_id
+        def species_override = params.home_species ?: ''
+        
+        uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query input')
+        RESOLVE_GENE_INPUT(gene_input, species_override)
+        
+        // Use resolved FASTA as query
+        raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
+        
+        // Get resolved species (auto-detected from ID, or user-provided)
+        resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
+        
+        // Determine home species: user-provided takes priority, else auto-detected
+        home_species_ch = resolved_species_ch.map { resolved ->
+            def species = params.home_species ?: resolved
+            if (!species) {
+                log.error "${c_red}Could not detect species. Please provide --home_species${c_reset}"
+                exit 1
+            }
+            return species
         }
         
-        log.info "${c_cyan}Easy mode: Fetching genomes for ${c_white}${params.home_species}${c_reset}"
-        
-        // Fetch home genome from NCBI
-        log.info "${c_cyan}  - Downloading reference genome...${c_reset}"
-        FETCH_HOME_GENOME(params.home_species)
+        // Fetch home genome automatically for easy mode
+        FETCH_HOME_GENOME(home_species_ch)
         home_genome_ch = FETCH_HOME_GENOME.out.genome
+        // Use GFF if available, otherwise mark as missing
         home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(file("NO_GFF"))
         
-        // Fetch related genomes
-        log.info "${c_cyan}  - Downloading related genomes...${c_reset}"
-        def target_species_val = params.target_species ?: ''
-        FETCH_RELATED_GENOMES(params.home_species, params.max_genomes, target_species_val)
+        // Fetch related genomes for easy mode
+        def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
+        def target_species = params.target_species ?: ''
+        FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
         species_map_ch = FETCH_RELATED_GENOMES.out.species_map
         
-        // Count genomes found
-        genomes_dir_ch.view { dir ->
-            def genome_count = new File(dir.toString()).listFiles().findAll { 
-                it.name.endsWith('.fna') || it.name.endsWith('.fasta') || it.name.endsWith('.fa')
-            }.size()
-            "${c_green}Downloaded ${genome_count} related genome(s)${c_reset}"
+    } else {
+        // --- Pro mode: User provides files directly ---
+        
+        // 1. Query Setup
+        if (params.gene) {
+            raw_gene_ch = Channel.fromPath(params.gene)
+        } else {
+            def pro_species_override = params.home_species ?: ''
+            RESOLVE_GENE_INPUT(params.query_id, pro_species_override)
+            raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
         }
         
-    } else {
-        // Pro mode - user provides files
+        // 2. Home Genome Setup
         if (!params.home_genome) {
-            log.error "${c_red}ERROR: Pro mode requires --home_genome parameter!${c_reset}"
+            log.error "${c_red}Pro mode requires --home_genome${c_reset}"
             exit 1
         }
         
@@ -189,13 +218,14 @@ workflow {
             home_gff_ch = Channel.value(file("NO_GFF"))
         }
         
+        // 3. Target Genomes Setup
         if (params.target_genomes) {
-            log.info "${c_cyan}Loading target genomes list...${c_reset}"
+            uiStatus('RUN ', 'STAGE_GENOMES', 'Loading target genomes list')
             target_genomes_list = Channel.fromPath(params.target_genomes).collect()
             
             // Show count
             target_genomes_list.view { genomes ->
-                "${c_green}[STAGE] Staged ${genomes.size()} target genomes${c_reset}"
+                "${c_green}[OK  ]${c_reset} ${c_white}${'STAGE_GENOMES'.padRight(24)}${c_reset} staged ${genomes.size()} target genomes"
             }
             
             STAGE_GENOMES(target_genomes_list)
@@ -203,30 +233,34 @@ workflow {
             species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
             
         } else {
-            log.warn "${c_yellow}WARNING: No target genomes provided - running home genome analysis only${c_reset}"
+            uiStatus('WARN', 'STAGE_GENOMES', 'No target genomes provided; running home-genome-only analysis')
             genomes_dir_ch = Channel.empty()
             species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
         }
     }
 
+    // Normalize query to protein space (DNA queries are translated to best ORF)
+    // to keep downstream search/annotation behavior consistent.
+    NORMALIZE_QUERY(raw_gene_ch)
+    normalized_gene_ch = NORMALIZE_QUERY.out.fasta
+
     // PHASE 1: Core Localization
-    log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
-    log.info "${c_white}PHASE 1: Gene Localization in Home Genome${c_reset}"
-    log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+    uiPhase(1, 'Gene Localization in Home Genome')
     
-    LOCATE_GENE(query_gene_source_ch, home_genome_ch)
+    uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
+    LOCATE_GENE(normalized_gene_ch, home_genome_ch)
     
     // 4b. ANNOTATE GOI EXONS
     // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
     // If GFF available: matches GOI to annotated gene and extracts CDS/exons
     // If no GFF: uses tblastn hits to detect exon boundaries (splice sites, start/stop codons)
-    log.info "${c_cyan}Annotating GOI exons...${c_reset}"
+    uiStatus('RUN ', 'ANNOTATE_GOI', 'Annotating GOI exons')
     
     // Determine query_id for name-based GFF matching
     def effective_query_id = params.query_id ?: ''
     
     ANNOTATE_GOI(
-        query_gene_source_ch.first(),
+        normalized_gene_ch.first(),
         home_genome_ch,
         home_gff_ch,
         LOCATE_GENE.out.blast_hits,
@@ -235,14 +269,14 @@ workflow {
     )
     
     ANNOTATE_GOI.out.info.view { info ->
-        "${c_green}GOI exon annotation complete${c_reset}"
+        "${c_green}[OK  ]${c_reset} ${c_white}${'ANNOTATE_GOI'.padRight(24)}${c_reset} GOI exon annotation complete"
     }
     
     // 5. SPLIT LOCI
     SPLIT_LOCI(LOCATE_GENE.out.bed)
     
     SPLIT_LOCI.out.beds.flatten().count().view { count ->
-        "${c_green}Identified ${count} distinct locus/loci${c_reset}"
+        "${c_green}[OK  ]${c_reset} ${c_white}${'SPLIT_LOCI'.padRight(24)}${c_reset} identified ${count} locus/loci"
     }
     
     distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
@@ -251,33 +285,40 @@ workflow {
     // Prepare effective home GFF (borrowed annotations + predictions) when targets exist
     def has_targets = params.target_genomes || params.mode == 'easy'
     if (has_targets) {
+        home_gff_ch.branch { gff ->
+            real: gff.name != 'NO_GFF'
+            missing: true
+        }.set { gff_status }
+
         // Prepare Home Proteome (Run once, used for RBH + borrowing)
-        log.info "${c_cyan}[PREPARE] Preparing home proteome database...${c_reset}"
+        uiStatus('RUN ', 'PREPARE_HOME', 'Preparing home proteome database')
         PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first())
         home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
-        
-        // Always borrow annotations - valuable when home genome lacks GFF
-        log.info "${c_cyan}[BORROW] Checking for annotated target genomes to borrow gene models...${c_reset}"
+        PREPARE_HOME_PROTEOME.out.db.view { db ->
+            "${c_green}[OK  ]${c_reset} ${c_white}${'PREPARE_HOME'.padRight(24)}${c_reset} home proteome ready"
+        }
+
+        // Borrow only when home genome has no usable GFF.
+        gff_status.real.view { gff ->
+            "${c_dim}[SKIP]${c_reset} ${c_white}${'BORROW_ANNOT'.padRight(24)}${c_reset} home GFF found (${gff.name})"
+        }
+        uiStatus('RUN ', 'BORROW_ANNOT', 'Checking targets for annotation borrowing when home GFF is missing')
         BORROW_ANNOTATIONS(
             home_genome_ch,
             PREPARE_HOME_PROTEOME.out.faa,
             genomes_dir_ch,
             LOCATE_GENE.out.bed.first(),
-            params.n_flanking_genes
+            params.n_flanking_genes,
+            gff_status.missing.map { true }
         )
         BORROW_ANNOTATIONS.out.gff.view { gff ->
-            "${c_green}[BORROW] Borrowed annotations generated${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'BORROW_ANNOT'.padRight(24)}${c_reset} borrowed annotations generated"
         }
 
         // Build effective GFF from all available sources:
         // 1. User-provided / NCBI GFF (if present and real)
         // 2. Prodigal-predicted GFF (when no annotation was available)
         // 3. Borrowed annotations from annotated target genomes
-        home_gff_ch.branch { gff ->
-            real: gff.name != 'NO_GFF'
-            missing: true
-        }.set { gff_status }
-        
         fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
             .mix(BORROW_ANNOTATIONS.out.gff)
             .collectFile(name: 'merged_home_annotations.gff')
@@ -293,7 +334,7 @@ workflow {
     }
 
     // 6. Extract Flanking Genes
-    log.info "${c_cyan}Extracting flanking genes (n=${params.n_flanking_genes})...${c_reset}"
+    uiStatus('RUN ', 'EXTRACT_FLANKING', "Extracting flanking genes (n=${params.n_flanking_genes})")
     
     EXTRACT_FLANKING(
         distinct_loci_ch, 
@@ -306,7 +347,7 @@ workflow {
     
     // 6b. CRITICAL FIX: Prepare Initial Database with GOI included
     // Combine flanking genes with query gene for iterative search
-    log.info "${c_cyan}Preparing initial database with query gene...${c_reset}"
+    uiStatus('RUN ', 'PREPARE_DB', 'Preparing initial database with query gene')
     
     PREPARE_INITIAL_DB(
         EXTRACT_FLANKING.out.faa,
@@ -315,16 +356,14 @@ workflow {
         // Only run if we have targets
     if (params.target_genomes || params.mode == 'easy') {
         
-        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
-        log.info "${c_white}PHASE 2: Phylogenetic Ordering & Iterative Search${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+        uiPhase(2, 'Phylogenetic Ordering and Iterative Search')
         
         EXTRACT_FLANKING.out.bed
             .map { locus_id, bed -> locus_id }
             .combine(home_genome_ch)
             .set { phylo_sort_inputs } // [locus_id, home_genome]
 
-        log.info "${c_cyan}[PHYLO] Sorting genomes by phylogenetic distance...${c_reset}"
+        uiStatus('RUN ', 'PHYLO_SORT', 'Sorting genomes by phylogenetic distance')
         
         PHYLO_SORT(
             phylo_sort_inputs,
@@ -332,7 +371,7 @@ workflow {
         )
         
         PHYLO_SORT.out.sorted_list.view { locus, sorted ->
-            "${c_green}[PHYLO] Phylogenetic ordering complete for ${locus}${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'PHYLO_SORT'.padRight(24)}${c_reset} ordering complete for ${locus}"
         }
         
         // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
@@ -345,7 +384,7 @@ workflow {
             .set { iterative_search_inputs } // [locus_id, faa, sorted_list, genomes_dir]
 
         // QC
-        log.info "${c_cyan}[QC] Assessing genome quality...${c_reset}"
+        uiStatus('RUN ', 'GENOME_QC', 'Assessing target genome quality')
         
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
@@ -354,7 +393,7 @@ workflow {
             .combine(home_proteome_db_ch)
             .set { iterative_search_final_inputs } // [locus_id, faa, sorted_list, genomes_dir, home_db]
 
-        log.info "${c_cyan}[SEARCH] Running iterative phylogenetic search...${c_reset}"
+        uiStatus('RUN ', 'ITERATIVE_SEARCH', 'Running iterative phylogenetic search')
         
         ITERATIVE_SEARCH(
             iterative_search_final_inputs.map { tuple(it[0], it[1]) }, // [locus, faa]
@@ -367,15 +406,12 @@ workflow {
         )
         
         ITERATIVE_SEARCH.out.expanded_db.view { locus, db ->
-            "${c_green}[SEARCH] Iterative search complete: ${locus}${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'ITERATIVE_SEARCH'.padRight(24)}${c_reset} complete for ${locus}"
         }
 
         // PHASE 3: Region Identification & Augmented Search
-        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
-        log.info "${c_white}PHASE 3: Region Clustering & Augmented Search${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        
-        log.info "${c_cyan}[CLUSTER] Clustering genomic regions by synteny...${c_reset}"
+        uiPhase(3, 'Region Clustering')
+        uiStatus('RUN ', 'CLUSTER_REGIONS', 'Clustering genomic regions by synteny')
         
         ITERATIVE_SEARCH.out.hits
             .join(EXTRACT_FLANKING.out.faa)
@@ -405,17 +441,8 @@ workflow {
             params.n_flanking_genes,
             params.min_synteny_score
         )
-        
-        def clustered_regions_ch = CLUSTER_REGIONS.out.bed
-            .map { genome_name, payload_faa, locus_id, region_bed ->
-                def unique_id = "${genome_name}_${locus_id}"
-                tuple(unique_id, locus_id, region_bed, payload_faa, genome_name)
-            }
-            .combine(genomes_dir_ch) // [unique, locus, bed, faa, gname, genomes_dir]
-            .set { joined_ch }
-            
-        CLUSTER_REGIONS.out.bed.view { genome, payload, locus, bed ->
-            "${c_green}[CLUSTER] Clustered regions for ${locus} in ${genome}${c_reset}"
+        CLUSTER_REGIONS.out.bed.count().view { count ->
+            "${c_green}[OK  ]${c_reset} ${c_white}${'CLUSTER_REGIONS'.padRight(24)}${c_reset} generated ${count} clustered region set(s)"
         }
 
         // --- PHYLOGENY & PLOTTING ---
@@ -424,18 +451,15 @@ workflow {
         // expanded_db contains everything found so far.
         // Let's use expanded_db per locus.
         
-        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
-        log.info "${c_white}PHASE 4: Phylogenetics & Visualization${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        
-        log.info "${c_cyan}[TREE] Computing phylogenetic trees...${c_reset}"
+        uiPhase(4, 'Phylogenetics and Visualization')
+        uiStatus('RUN ', 'COMPUTE_TREE', 'Computing GOI phylogenetic trees')
         
         COMPUTE_TREE(
             ITERATIVE_SEARCH.out.expanded_db
         )
         
         COMPUTE_TREE.out.tree.view { locus, tree ->
-            "${c_green}[TREE] Phylogenetic tree computed: ${locus}${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'COMPUTE_TREE'.padRight(24)}${c_reset} tree computed for ${locus}"
         }
         
         // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
@@ -483,7 +507,7 @@ workflow {
             tree: item[5]
         }.set { plot_inputs_split }
 
-        log.info "${c_cyan}[PLOT] Generating synteny visualizations...${c_reset}"
+        uiStatus('RUN ', 'PLOT_SYNTENY', 'Generating synteny visualizations')
             
         PLOT_SYNTENY(
             plot_inputs_split.home_bed,   // home_bed
@@ -498,15 +522,12 @@ workflow {
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->
-            "${c_green}[PLOT] Synteny visualization complete${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'PLOT_SYNTENY'.padRight(24)}${c_reset} synteny visualization complete"
         }
         
         // Final Reporting
-        log.info "\n${c_blue}═══════════════════════════════════════════════════════════════"
-        log.info "${c_white}PHASE 5: Report Generation${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        
-        log.info "${c_cyan}[REPORT] Generating comprehensive report...${c_reset}"
+        uiPhase(5, 'Report Generation')
+        uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
         
         ITERATIVE_SEARCH.out.region_genes
             .map { it[1] } 
@@ -527,31 +548,31 @@ workflow {
         GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
         
         GENERATE_REPORT.out.report.view { report ->
-            "${c_green}[REPORT] Analysis report generated successfully${c_reset}"
+            "${c_green}[OK  ]${c_reset} ${c_white}${'GENERATE_REPORT'.padRight(24)}${c_reset} analysis report generated"
         }
     }
 }
 
 workflow.onComplete {
-    log.info "\n${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
+    log.info ""
+    log.info uiRule()
     if (workflow.success) {
-        log.info "${c_green}Pipeline completed successfully!${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        log.info "${c_white}  Results Directory:${c_reset} ${c_cyan}${params.outdir}${c_reset}"
-        log.info "${c_white}  Duration:${c_reset}          ${c_dim}${workflow.duration}${c_reset}"
-        log.info "${c_white}  Tasks Completed:${c_reset}   ${c_dim}${workflow.stats.succeedCount}${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        log.info "${c_dim}  Key outputs:${c_reset}"
-        log.info "${c_dim}    - synterra_report.json    (Analysis summary)${c_reset}"
-        log.info "${c_dim}    - synteny_plot.pdf        (Visualization)${c_reset}"
-        log.info "${c_dim}    - expanded_databases/     (Ortholog databases)${c_reset}"
-        log.info "${c_dim}    - augmented_regions/      (Identified regions)${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}\n"
+        uiStatus('OK  ', 'PIPELINE', 'Pipeline completed successfully')
+        log.info "${c_dim}Results Directory:${c_reset} ${c_cyan}${params.outdir}${c_reset}"
+        log.info "${c_dim}Duration:         ${c_reset} ${workflow.duration}"
+        log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
+        log.info uiRule()
+        log.info "${c_dim}Key outputs:${c_reset}"
+        log.info "${c_dim}- synterra_report.json          (analysis summary)${c_reset}"
+        log.info "${c_dim}- *_synteny_plot.html           (interactive visualization)${c_reset}"
+        log.info "${c_dim}- *_tree.nwk                    (GOI phylogeny)${c_reset}"
+        log.info "${c_dim}- regions/*.regions.bed         (candidate regions)${c_reset}"
+        log.info "${c_dim}- intermediate/                 (per-phase artifacts)${c_reset}"
+        log.info uiRule()
     } else {
-        log.info "${c_red}Pipeline execution failed${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}"
-        log.info "${c_white}  Duration:${c_reset}    ${c_dim}${workflow.duration}${c_reset}"
-        log.info "${c_white}  Error:${c_reset}       ${c_red}${workflow.errorMessage}${c_reset}"
-        log.info "${c_blue}═══════════════════════════════════════════════════════════════${c_reset}\n"
+        uiStatus('FAIL', 'PIPELINE', 'Pipeline execution failed')
+        log.info "${c_dim}Duration:${c_reset} ${workflow.duration}"
+        log.info "${c_dim}Error:   ${c_reset} ${c_red}${workflow.errorMessage}${c_reset}"
+        log.info uiRule()
     }
 }

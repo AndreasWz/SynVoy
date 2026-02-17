@@ -59,6 +59,9 @@ process ITERATIVE_SEARCH {
         --gap_max_hits ${params.gap_max_hits} \\
         --min_exon_query_cov ${params.min_exon_query_cov} \\
         --min_exon_alnlen ${params.min_exon_alnlen} \\
+        --max_blocks_per_genome ${params.max_blocks_per_genome} \\
+        --min_block_genes ${params.min_block_genes} \\
+        --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --prefix ${locus_id}
     """
 }

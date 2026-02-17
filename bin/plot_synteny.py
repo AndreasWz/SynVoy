@@ -17,7 +17,7 @@ Inputs
   --query_bed       BED file with query-gene location (GOI identification)
   --target_gffs     Target-genome GFFs (SynTerra exon_annotation format)
   --target_names    Display names (optional – derived from GFF filename if absent)
-  --candidate_beds  Cluster-region BED files (optional, not currently drawn)
+  --candidate_beds  Cluster-region BED files (used to filter target genes to candidate loci)
   --homology_tsvs   Homology TSV files (target -> home mapping, fallback)
   --tree            Newick tree for GOI clade colouring + target ordering
 
@@ -31,6 +31,7 @@ import colorsys
 import json
 import os
 import sys
+from collections import defaultdict
 
 import plotly.graph_objects as go
 
@@ -84,6 +85,69 @@ def parse_bed(bed_file):
                 "strand": p[5] if len(p) > 5 else "+",
             })
     return genes
+
+
+def parse_candidate_regions(candidate_beds):
+    """
+    Parse candidate region BEDs grouped by genome ID inferred from filename.
+    """
+    regions_by_genome = defaultdict(list)
+    for bed in candidate_beds or []:
+        if not bed or not os.path.exists(bed):
+            continue
+        genome_id = clean_genome_name(
+            os.path.basename(bed).replace(".regions.bed", "").replace(".bed", "")
+        )
+        with open(bed) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                p = line.split("\t")
+                if len(p) < 3:
+                    continue
+                try:
+                    chrom = p[0]
+                    start = int(p[1])
+                    end = int(p[2])
+                except ValueError:
+                    continue
+                if end > start:
+                    regions_by_genome[genome_id].append((chrom, start, end))
+    return regions_by_genome
+
+
+def _match_regions_for_genome(regions_by_genome, genome_id):
+    """
+    Resolve candidate regions for a target genome ID with tolerant matching.
+    """
+    if genome_id in regions_by_genome:
+        return regions_by_genome[genome_id]
+    for rid, regs in regions_by_genome.items():
+        if rid in genome_id or genome_id in rid:
+            return regs
+    return []
+
+
+def filter_genes_to_candidate_regions(genes, candidate_regions):
+    """
+    Keep only genes overlapping at least one candidate region.
+    Candidate BED is 0-based half-open; parsed GFF genes are treated 1-based.
+    """
+    if not candidate_regions:
+        return genes
+    kept = []
+    for g in genes:
+        g_start0 = max(0, int(g["start"]) - 1)
+        g_end0 = int(g["end"])
+        for chrom, rs, re in candidate_regions:
+            if g["chrom"] != chrom:
+                continue
+            ov = max(0, min(g_end0, re) - max(g_start0, rs))
+            if ov > 0:
+                kept.append(g)
+                break
+    return kept
 
 
 def parse_target_gff(gff_file):
@@ -389,6 +453,7 @@ def clean_gene_label(name):
 # Drawing primitives
 # ======================================================================
 
+
 def _arrow_xy(x0, x1, y_base, height, strand):
     """Pentagon vertices for a gene arrow."""
     w = x1 - x0
@@ -412,9 +477,14 @@ def _hex_to_rgba(hexc, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _get_coords(gene):
+    return gene.get("start_plot", gene["start"]), gene.get("end_plot", gene["end"])
+
+
 def add_gene(fig, gene, x_off, y_base, h, colour, border_clr, border_w,
              hover, show_legend, legend_group):
-    xs, ys = _arrow_xy(gene["start"] - x_off, gene["end"] - x_off, y_base, h, gene["strand"])
+    g_start, g_end = _get_coords(gene)
+    xs, ys = _arrow_xy(g_start - x_off, g_end - x_off, y_base, h, gene["strand"])
     fig.add_trace(go.Scatter(
         x=xs, y=ys,
         fill="toself",
@@ -430,10 +500,13 @@ def add_gene(fig, gene, x_off, y_base, h, colour, border_clr, border_w,
 
 
 def add_ribbon(fig, g_upper, g_lower, off_u, off_l, y_u_bot, y_l_top, colour, alpha=0.18):
-    u0 = g_upper["start"] - off_u
-    u1 = g_upper["end"]   - off_u
-    l0 = g_lower["start"] - off_l
-    l1 = g_lower["end"]   - off_l
+    u_start, u_end = _get_coords(g_upper)
+    l_start, l_end = _get_coords(g_lower)
+    
+    u0 = u_start - off_u
+    u1 = u_end   - off_u
+    l0 = l_start - off_l
+    l1 = l_end   - off_l
     fill = _hex_to_rgba(colour, alpha)
     edge = _hex_to_rgba(colour, alpha * 1.8)
     fig.add_trace(go.Scatter(
@@ -447,8 +520,9 @@ def add_ribbon(fig, g_upper, g_lower, off_u, off_l, y_u_bot, y_l_top, colour, al
 
 def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
               is_goi_flag=False):
-    xc = (gene["start"] + gene["end"]) / 2 - x_off
-    gw = gene["end"] - gene["start"]
+    g_start, g_end = _get_coords(gene)
+    xc = (g_start + g_end) / 2 - x_off
+    gw = g_end - g_start
     if is_goi_flag:
         text = "* " + text
         fcolour = GOI_BORDER
@@ -462,9 +536,106 @@ def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
     )
 
 
-# ======================================================================
-# Internal helpers
-# ======================================================================
+
+def draw_gap_break(fig, x_pos, y_pos, height, text):
+    """Draw a visual break mark (zigzag) and text label for a compressed gap."""
+    # Zigzag path
+    w = 200  # visual width of break (in genomic coordinates, scaled by Layout)
+    # Actually, x_pos is the center.
+    # We draw two parallel lines with a slash? Or distinct "break" symbol?
+    # Simple: Text annotation with a small vertical tick or " // "
+    
+    fig.add_annotation(
+        x=x_pos, y=y_pos + height/2,
+        text=f"<b>//</b><br>{text}",
+        showarrow=False,
+        font=dict(size=9, color="black"),
+        xanchor="center", yanchor="middle",
+        yshift=0
+    )
+
+
+def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
+    """
+    Compress large gaps between genes.
+    
+    Returns
+    -------
+    compressed_genes : list of dicts (with added 'start_plot', 'end_plot')
+    breaks           : list of dicts (x, gap_size, text)
+    """
+    if not genes:
+        return [], []
+    
+    # Sort by start position
+    # Note: genes might overlap, but generally are sequential.
+    sorted_genes = sorted(genes, key=lambda g: g["start"])
+    compressed = []
+    breaks = []
+    
+    current_shift = 0
+    
+    # Initialize first gene
+    # We preserve the absolute coordinate of the first gene *minus 0 shift* initially
+    # effectively keeping the first gene at its real coordinate relative to start of cluster?
+    # Yes, but we will shift everything by anchor later anyway.
+    
+    for i, g in enumerate(sorted_genes):
+        new_g = g.copy()
+        
+        # Check gap from previous gene
+        if i > 0:
+            prev = sorted_genes[i-1]
+            # Use raw coordinates for gap calculation
+            gap = g["start"] - prev["end"]
+            
+            if gap > threshold:
+                remove = gap - visual_gap
+                current_shift += remove
+                
+                # The visual center of the gap in PLOT coordinates
+                # prev_end_plot = prev['end'] - (current_shift - remove) 
+                #               = prev['end_plot']
+                # gap_start_plot = prev_end_plot
+                # gap_end_plot   = gap_start_plot + visual_gap
+                # center = gap_start_plot + visual_gap/2
+                
+                prev_end_plot = prev["end"] - (current_shift - remove) 
+                break_x = prev_end_plot + visual_gap / 2
+                
+                breaks.append({
+                    "x": break_x,
+                    "gap_size": gap,
+                    "text": f"{gap/1e6:.2f} Mb" if gap >= 1e6 else f"{gap/1e3:.0f} kb"
+                })
+
+        new_g["start_plot"] = g["start"] - current_shift
+        new_g["end_plot"]   = g["end"]   - current_shift
+        compressed.append(new_g)
+        
+    return compressed, breaks
+
+
+def get_anchor_center(genes):
+    """
+    Find the center coordinate (plot) of the GOI.
+    If multiple GOIs, average them. If none, usage center of the range.
+    """
+    goi_centers = []
+    for g in genes:
+        # Check 'name' and 'home_gene_id'
+        if is_goi(g.get("name")) or is_goi(g.get("home_gene_id")):
+            goi_centers.append((g["start_plot"] + g["end_plot"]) / 2)
+            
+    if goi_centers:
+        return sum(goi_centers) / len(goi_centers)
+        
+    # Fallback: center of the entire cluster
+    if not genes:
+        return 0
+    start = min(g["start_plot"] for g in genes)
+    end   = max(g["end_plot"]   for g in genes)
+    return (start + end) / 2
 
 def _goi_colour_for_genome(genome_id, goi_genome_colours):
     """Look up GOI colour for a specific genome, with fuzzy matching."""
@@ -648,8 +819,11 @@ def main():
     if args.species_map and os.path.exists(args.species_map):
         with open(args.species_map) as fh:
             for line in fh:
-                parts = line.strip().split('\t', 1)
-                if len(parts) == 2:
+                parts = line.strip().split('\t')
+                if len(parts) >= 2:
+                    # Format can be:
+                    # 2 columns: accession<TAB>species
+                    # 3 columns: accession<TAB>species<TAB>tax_level
                     species_map[parts[0]] = parts[1]
         print(f"[plot] Loaded species mapping for {len(species_map)} genomes")
 
@@ -657,9 +831,22 @@ def main():
 
     home_genes = parse_bed(args.home_bed)
     if not home_genes:
-        print("ERROR: empty home BED", file=sys.stderr)
-        go.Figure().write_html(args.output)
-        return
+        msg = f"ERROR: empty home BED: {args.home_bed}"
+        print(msg, file=sys.stderr)
+        fig = go.Figure()
+        fig.add_annotation(
+            text=msg,
+            x=0.5, y=0.5, xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(size=14, color="crimson"),
+        )
+        fig.update_layout(
+            title="SynTerra Synteny Plot (Failed: empty home BED)",
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+        )
+        fig.write_html(args.output)
+        sys.exit(2)
     home_genes.sort(key=lambda g: g["start"])
 
     query_intervals = []
@@ -677,12 +864,17 @@ def main():
     goi_genome_colours, tree_target_order = parse_tree_clade_colours(args.tree)
 
     # -- 2. Build target tracks (matched by filename, not positional index)
+    candidate_regions_by_genome = parse_candidate_regions(args.candidate_beds)
 
     target_tracks = []
     for gff_file in args.target_gffs:
         genome_id = clean_genome_name(
             os.path.basename(gff_file).replace(".gff", ""))
         genes = parse_target_gff(gff_file)
+        genes = filter_genes_to_candidate_regions(
+            genes,
+            _match_regions_for_genome(candidate_regions_by_genome, genome_id),
+        )
         if not genes:
             continue
         genes.sort(key=lambda g: g["start"])
@@ -715,27 +907,39 @@ def main():
 
     gene_colours = assign_gene_colours(home_genes, query_intervals)
 
-    # -- 4. Assemble track list ------------------------------------------
+    # -- 4. Assemble track list & Compress -------------------------------
 
-    home_chrom  = home_genes[0]["chrom"]
-    home_offset = min(g["start"] for g in home_genes) - 2000
-
-    all_tracks = [{
+    home_chrom = home_genes[0]["chrom"]
+    
+    # Initial list with raw genes
+    raw_tracks = [{
         "label":     f"Home genome ({home_chrom})",
         "genes":     home_genes,
-        "offset":    home_offset,
         "is_home":   True,
         "genome_id": "home",
+        "chrom":     home_chrom
     }]
     for tt in target_tracks:
-        off = min(g["start"] for g in tt["genes"]) - 2000
-        all_tracks.append({
+        raw_tracks.append({
             "label":     f"{tt['display_name']} ({tt['chrom']})",
             "genes":     tt["genes"],
-            "offset":    off,
             "is_home":   False,
             "genome_id": tt["genome_id"],
+            "chrom":     tt["chrom"]
         })
+
+    all_tracks = []
+    for track in raw_tracks:
+        # 1. Compress
+        c_genes, breaks = compress_track_coordinates(track["genes"], threshold=50000, visual_gap=3000)
+        track["genes"]  = c_genes
+        track["breaks"] = breaks
+        
+        # 2. Find Anchor (GOI center) to align at x=0
+        anchor = get_anchor_center(c_genes)
+        track["offset"] = anchor  # This effectively centers the plot on the GOI
+        
+        all_tracks.append(track)
 
     n_tracks = len(all_tracks)
 
@@ -751,8 +955,11 @@ def main():
     for ti, track in enumerate(all_tracks):
         yb    = (n_tracks - 1 - ti) * TRACK_SPACE
         x_off = track["offset"]
-        x_min = min(g["start"] for g in track["genes"]) - x_off - 1000
-        x_max = max(g["end"]   for g in track["genes"]) - x_off + 1000
+        if not track["genes"]:
+            continue
+        # Use plotted coordinates for background extent
+        x_min = min(g["start_plot"] for g in track["genes"]) - x_off - 1000
+        x_max = max(g["end_plot"]   for g in track["genes"]) - x_off + 1000
         fig.add_shape(
             type="rect",
             x0=x_min, x1=x_max, y0=yb - 0.02, y1=yb + GENE_H + 0.02,
@@ -799,8 +1006,9 @@ def main():
         x_off = track["offset"]
 
         # Draw large genes first so small genes render on top
+        # Use plot coordinates for size sorting? Yes.
         sorted_genes = sorted(track["genes"],
-                               key=lambda g: g["end"] - g["start"],
+                               key=lambda g: g["end_plot"] - g["start_plot"],
                                reverse=True)
 
         for gene in sorted_genes:
@@ -830,6 +1038,7 @@ def main():
                 hover = f"<b>{cn}</b>"
                 if product:
                     hover += f"<br><i>{product}</i>"
+                # Use raw coords for hover
                 hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
                           f"<br>Strand: {gene['strand']}")
                 if goi_f:
@@ -882,29 +1091,49 @@ def main():
             xanchor="right", yanchor="middle",
         )
 
+    # -- 5f. Gap breaks --------------------------------------------------
+    for ti, track in enumerate(all_tracks):
+        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        x_off = track["offset"]
+        for brk in track.get("breaks", []):
+            draw_gap_break(fig, brk["x"] - x_off, yb, GENE_H, brk["text"])
+
     # -- 6. Figure styling -----------------------------------------------
 
-    # Compute sensible x range across all tracks
-    all_x_max = max(
-        g["end"] - track["offset"]
-        for track in all_tracks for g in track["genes"]
-    )
+    # Compute plotted range
+    # Collect all plotted X coordinates
+    all_x = []
+    for track in all_tracks:
+        x_off = track["offset"]
+        for g in track["genes"]:
+            all_x.append(g["start_plot"] - x_off)
+            all_x.append(g["end_plot"]   - x_off)
+
+    if not all_x:
+        x_min, x_max = -1000, 1000
+    else:
+        x_min, x_max = min(all_x), max(all_x)
+        
+    pad = (x_max - x_min) * 0.05 + 5000
+    x_range = [x_min - pad, x_max + pad]
+
     fig_height = max(500, n_tracks * 200 + 80)
 
     fig.update_layout(
         title=dict(
             text=("<b>SynTerra Synteny Plot</b>"
                   "<br><sup>Genes coloured by homology group | "
-                  "* = Gene of Interest | Ribbons connect orthologs</sup>"),
+                  "* = Gene of Interest | Ribbons connect orthologs | // = Compressed Gaps</sup>"),
             x=0.5, font=dict(size=15),
         ),
         height=fig_height,
         width=1500,
         xaxis=dict(
-            title="Position (bp, relative to region start)",
-            showgrid=True, gridcolor="rgba(200,200,200,0.3)",
+            title="", # No title since numbers are relative/discontinuous
+            showgrid=False, 
             zeroline=False,
-            range=[-all_x_max * 0.01, all_x_max * 1.04],
+            showticklabels=False, # Hide ticks as they are discontinuous
+            range=x_range,
         ),
         yaxis=dict(
             showticklabels=False, showgrid=False, zeroline=False,
@@ -913,7 +1142,7 @@ def main():
         ),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=220, r=60, t=85, b=55),
+        margin=dict(l=260, r=60, t=85, b=55), # Increased left margin
         legend=dict(
             title="<b>Gene (home ID)</b>",
             orientation="v", x=1.01, y=1.0,
@@ -922,13 +1151,32 @@ def main():
         ),
         hovermode="closest",
     )
+    
+    # Add Scale Bar (10 kb)
+    # Place it in bottom right? Or top left?
+    # Let's put it at bottom right
+    scale_len = 10000
+    sb_x1 = x_max
+    sb_x0 = x_max - scale_len
+    sb_y  = -0.4
+    
+    fig.add_shape(
+        type="line",
+        x0=sb_x0, x1=sb_x1, y0=sb_y, y1=sb_y,
+        line=dict(color="black", width=3),
+    )
+    fig.add_annotation(
+        x=(sb_x0 + sb_x1)/2, y=sb_y - 0.1,
+        text="<b>10 kb</b>",
+        showarrow=False,
+        font=dict(size=10, color="black"),
+        yanchor="top"
+    )
 
     fig.write_html(args.output)
     print(f"Synteny plot saved to {args.output}")
     print(f"  Tracks: {n_tracks} (1 home + {len(target_tracks)} targets)")
-    print(f"  Home genes: {len(home_genes)}")
-    for tt in target_tracks:
-        print(f"  {tt['display_name']}: {len(tt['genes'])} genes")
+    print(f"  Gap compression: active (>50kb -> 3kb visual)")
 
     # -- 7. Tree plot (separate HTML) ------------------------------------
     tree_output = args.output.replace("_synteny_plot.html", "_tree.html")

@@ -12,7 +12,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Cluster and Score Synteny Regions (Prioritizer Mode)")
     parser.add_argument("--hits", required=True, help="Input MMseqs hits (m8)")
     parser.add_argument("--synteny_bed", required=True, help="BED file defining the expected synteny block (genes in order)")
-    parser.add_argument("--genome", required=True, help="Target Genome FASTA (for length)")
+    parser.add_argument("--genome", required=False, default=None,
+                        help="Target Genome FASTA (optional; used for approximate p-value context)")
     parser.add_argument("--output", required=True, help="Output Region BED")
     parser.add_argument("--flanking_count", type=int, default=10, help="Expected number of flanking genes (fallback)")
     parser.add_argument("--cluster_dist", type=int, default=50000, help="Max distance to cluster hits (bp)")
@@ -266,7 +267,7 @@ def main():
     # Cluster
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_dist)
     
-    genome_len = get_genome_length(args.genome)
+    genome_len = get_genome_length(args.genome) if args.genome else 1
     
     scored_clusters = []
     for cl in clusters:
@@ -330,6 +331,13 @@ def main():
                 name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
                 
                 f_out.write(f"{best['chrom']}\t{best['start']}\t{best['end']}\t{name}\t{best['score']:.2f}\t{region_strand}\n")
+
+                # Emit compact summary to stdout for testability and quick diagnostics.
+                print(
+                    f"Score: {best['score']:.2f} | "
+                    f"Consistency: {best['consistency']:.2f} | "
+                    f"Strand: {best['strand_cons']:.2f}"
+                )
                 
                 # Log Low Confidence
                 if confidence == "LOW":

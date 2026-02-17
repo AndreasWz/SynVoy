@@ -17,9 +17,10 @@ from iterative_search_runner import (
     normalize_coordinates,
     extract_base_gene_id,
     parse_hits,
-    identify_best_synteny_block
+    identify_best_synteny_block,
+    merge_synteny_blocks
 )
-from sequence_utils import parse_fasta, write_fasta, reverse_complement, translate
+from sequence_utils import parse_fasta, write_fasta, reverse_complement, translate, extract_id
 
 
 class TestCoordinateNormalization(unittest.TestCase):
@@ -121,6 +122,15 @@ class TestFastaIO(unittest.TestCase):
         # parse_fasta returns (raw_header, clean_id, sequence)
         self.assertEqual(seqs[0][2], "ATCGATCGATCGATCGATCGATCG")  # sequence
         self.assertEqual(seqs[1][2], "GCTA")
+
+    def test_extract_id_preserves_long_loc_gene_ids(self):
+        """Ensure long LOC-style IDs are not truncated by GenBank accession regex."""
+        self.assertEqual(extract_id("LOC143834063"), "LOC143834063")
+        self.assertEqual(extract_id("LOC143834063 some description"), "LOC143834063")
+
+    def test_extract_id_keeps_genbank_accession_behavior(self):
+        """Ensure canonical GenBank protein accessions are still extracted."""
+        self.assertEqual(extract_id("AAA12345.1 hypothetical protein"), "AAA12345.1")
 
 
 class TestSequenceOperations(unittest.TestCase):
@@ -283,3 +293,57 @@ def run_tests():
 if __name__ == '__main__':
     result = run_tests()
     sys.exit(0 if result.wasSuccessful() else 1)
+
+class TestRegionMerging(unittest.TestCase):
+    """Test merging of overlapping synteny blocks."""
+    
+    def test_merge_overlapping_blocks(self):
+        """Test merging of two blocks with overlapping search windows."""
+        blocks = [
+            {'chrom': 'chr1', 'start': 1000, 'end': 2000, 'score': 50, 'genes_count': 2},
+            # Start 2100. Padding 200.
+            # Block1 Search End = 2000 + 200 = 2200
+            # Block2 Search Start = 2100 - 200 = 1900
+            # 1900 <= 2200 -> Merge
+            {'chrom': 'chr1', 'start': 2100, 'end': 3000, 'score': 60, 'genes_count': 3},
+        ]
+        merged = merge_synteny_blocks(blocks, padding=200)
+        
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]['start'], 1000)
+        self.assertEqual(merged[0]['end'], 3000)
+        self.assertEqual(merged[0]['score'], 60) # Max score
+        self.assertEqual(merged[0]['genes_count'], 5) # Sum counts
+
+    def test_disjoint_blocks(self):
+        """Test blocks that are too far apart to merge."""
+        blocks = [
+            {'chrom': 'chr1', 'start': 1000, 'end': 2000},
+            # Start 3000. Padding 100.
+            # B1 End = 2100
+            # B2 Start = 2900
+            # 2900 > 2100 -> distinct
+            {'chrom': 'chr1', 'start': 3000, 'end': 4000},
+        ]
+        merged = merge_synteny_blocks(blocks, padding=100)
+        self.assertEqual(len(merged), 2)
+
+    def test_different_chromosomes(self):
+        """Test blocks on different chromosomes never merge."""
+        blocks = [
+            {'chrom': 'chr1', 'start': 1000, 'end': 5000},
+            {'chrom': 'chr2', 'start': 1000, 'end': 5000},
+        ]
+        merged = merge_synteny_blocks(blocks, padding=10000)
+        self.assertEqual(len(merged), 2)
+
+    def test_contained_block(self):
+        """Test that a block fully contained in another search region is merged."""
+        blocks = [
+            {'chrom': 'chr1', 'start': 1000, 'end': 5000},
+            {'chrom': 'chr1', 'start': 2000, 'end': 3000},
+        ]
+        merged = merge_synteny_blocks(blocks, padding=100)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]['start'], 1000)
+        self.assertEqual(merged[0]['end'], 5000)

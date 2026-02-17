@@ -52,3 +52,19 @@ Optional auch GenBank-Daten einbezieht, falls die RefSeq-Suche nicht ausreicht.
 Wichtig: Da die Pipeline bereits läuft und der Download-Schritt abgeschlossen ist, würde diese Änderung den aktuellen Lauf nicht mehr beeinflussen. Du müsstest die Pipeline abbrechen und neu starten (mit -resume), um mehr Genome einzubeziehen.
 
 Soll ich die Skript-Korrektur trotzdem durchführen, damit es für zukünftige Versuche besser funktioniert?
+
+
+
+run on : https://www.uniprot.org/uniprotkb/P04637
+
+For a Nature-style figure, you are looking for:
+
+Clear Separation: Distinct clusters for p53 vs. its ancient paralogs p63 and p73.
+
+Synteny Ribbons: Colored bands connecting the flanking genes of p53 across species, proving that even if the p53 sequence itself varies wildly (as it does between mammals and fish), the neighborhood is conserved.
+
+
+check against literature about tp53 evolution
+
+
+

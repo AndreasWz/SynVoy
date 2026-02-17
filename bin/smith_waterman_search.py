@@ -13,12 +13,13 @@ Usage:
 import argparse
 import sys
 import os
+from sequence_utils import parse_fasta, translate, reverse_complement
 
 try:
     import parasail
-    PARASAIL_AVAILABLE = True
+    HAS_PARASAIL = True
 except ImportError:
-    PARASAIL_AVAILABLE = False
+    HAS_PARASAIL = False
     print("WARNING: parasail not installed. Falling back to ssearch36.", file=sys.stderr)
 
 # Use our own sequence utilities
@@ -87,36 +88,324 @@ def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
 
 def smith_waterman_ssearch(query_faa, target_fna, output_tsv, threads=1):
     """
-    Fallback: Use FASTA package's ssearch36 for Smith-Waterman.
+    Perform iterative Smith-Waterman search using Parasail (if available) or ssearch36.
     
-    ssearch36 performs rigorous Smith-Waterman with no heuristics.
+    If Parasail is available:
+        - Translates target DNA in 6 frames.
+        - Runs striped SW (protein-protein).
+        - Iteratively masks hits to find secondary alignments (tandem dupes).
+        - Maps coordinates back to genomic DNA.
+        
+    If Parasail is missing:
+        - Falls back to ssearch36 (external binary) with iterative masking loop.
     """
     import subprocess
+    import shutil
     
+    if HAS_PARASAIL:
+        run_parasail_sw(query_faa, target_fna, output_tsv)
+        return
+
     # Check if ssearch36 is available
     try:
-        subprocess.run(['ssearch36', '-h'], stdout=subprocess.DEVNULL, 
-                      stderr=subprocess.DEVNULL, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("ERROR: ssearch36 not found. Install FASTA package:", file=sys.stderr)
+        subprocess.run(['ssearch36', '-h'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        print("ERROR: ssearch36 not found and parasail-python not installed.", file=sys.stderr)
+        print("  Please install one of them:", file=sys.stderr)
+        print("  pip install parasail", file=sys.stderr)
         print("  conda install -c bioconda fasta3", file=sys.stderr)
         sys.exit(1)
     
-    # Run ssearch36: protein query vs translated DNA target
-    cmd = [
-        'ssearch36',
-        '-m', '8',  # Tabular output (BLAST-like)
-        '-T', str(threads),
-        '-E', '10',  # Relaxed E-value
-        '-3',  # Query is protein, target is DNA (translate target)
-        query_faa,
-        target_fna
-    ]
+    # Read original target sequence
+    targets = list(parse_fasta(target_fna))
+    if not targets:
+        return
+        
+    # We assume one target sequence for simplicity in this context
+    # (Checking one region against one query set)
+    t_header, t_id, t_seq_orig = targets[0]
+    t_seq_mutable = list(t_seq_orig) # Mutable list of chars
     
+    all_hits_lines = []
+    
+    # Iteration loop
+    max_iter = 20
+    tmp_target = f"{output_tsv}.tmp.fna"
+    
+    for i in range(max_iter):
+        # Write current masked target
+        with open(tmp_target, 'w') as f:
+            f.write(f">{t_id}\n{''.join(t_seq_mutable)}\n")
+            
+        # Run ssearch36
+        cmd = [
+            'ssearch36',
+            '-m', '8',  # Tabular output
+            '-T', str(threads),
+            '-E', '20000',  # Relaxed E-value
+            '-3',  # Query is protein, target is DNA
+            query_faa,
+            tmp_target
+        ]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            output = result.stdout
+        except subprocess.CalledProcessError as e:
+            print(f"ssearch36 failed at iteration {i}: {e}", file=sys.stderr)
+            break
+            
+        if not output.strip():
+            break # No more hits
+            
+        # Parse hits from this iteration
+        new_hits_found = False
+        lines = output.strip().split('\n')
+        for line in lines:
+            if not line.strip() or line.startswith('#'): continue
+            parts = line.split('\t')
+            if len(parts) < 12: continue
+            
+            # Hit found!
+            new_hits_found = True
+            all_hits_lines.append(line)
+            
+            # Mask region
+            try:
+                ts = int(parts[8])
+                te = int(parts[9])
+                start = min(ts, te)
+                end = max(ts, te)
+                
+                # 1-based to 0-based
+                start_0 = max(0, start - 1)
+                end_0 = min(len(t_seq_mutable), end)
+                
+                # Mask with N
+                for k in range(start_0, end_0):
+                    t_seq_mutable[k] = 'N'
+                    
+            except ValueError:
+                continue
+        
+        if not new_hits_found:
+            break
+            
+    # Cleanup
+    if os.path.exists(tmp_target):
+        os.remove(tmp_target)
+        
+    # Write aggregated hits
     with open(output_tsv, 'w') as out:
-        subprocess.run(cmd, stdout=out, check=True)
+        for line in all_hits_lines:
+            out.write(line + '\n')
     
-    print(f"Smith-Waterman search complete: {output_tsv}", file=sys.stderr)
+    print(f"Smith-Waterman search complete (ssearch36): {output_tsv} ({len(all_hits_lines)} hits)", file=sys.stderr)
+
+
+def run_parasail_sw(query_faa, target_fna, output_tsv):
+    """
+    In-memory iterative Smith-Waterman using Parasail.
+    Uses 'Best Hit per Iteration' strategy:
+    1. Iterate searching all frames.
+    2. Pick BEST hit globally.
+    3. Mask that region in ALL frames.
+    4. Repeat.
+    """
+    # 1. Load Sequences
+    queries = list(parse_fasta(query_faa))
+    targets = list(parse_fasta(target_fna))
+    
+    if not queries or not targets:
+        return
+
+    # Assume single target region
+    t_header, t_id, t_seq_dna = targets[0]
+    
+    # 2. Translate Target (6 frames)
+    # Store: {'seq': mutable_list_aa, 'frame': int, 'strand': str, 'offset': int}
+    frames = []
+    
+    # Forward (+1, +2, +3)
+    for i in range(3):
+        seq_trans = list(translate(t_seq_dna[i:]))
+        frames.append({'seq': seq_trans, 'frame': i+1, 'strand': '+', 'offset': i})
+        
+    # Reverse (-1, -2, -3)
+    # RevComp DNA first
+    rc_dna = reverse_complement(t_seq_dna)
+    for i in range(3):
+        seq_trans = list(translate(rc_dna[i:]))
+        frames.append({'seq': seq_trans, 'frame': -(i+1), 'strand': '-', 'offset': i})
+        
+    all_hits = []
+    
+    # 3. For each query
+    for q_head, q_id, q_seq in queries:
+        try:
+            # Use 32-bit profile
+            profile = parasail.profile_create_32(q_seq, parasail.blosum62)
+        except Exception as e:
+            print(f"Parasail profile creation failed for {q_id}: {e}", file=sys.stderr)
+            continue
+            
+        # Iteration Loop (Find multiple non-overlapping hits)
+        for iteration in range(20): 
+            best_score = 0
+            best_result = None
+            best_frame_idx = -1
+            
+            # Search all frames
+            for f_idx, frame in enumerate(frames):
+                seq_str = "".join(frame['seq'])
+                # sw_trace_striped_profile_32
+                result = parasail.sw_trace_striped_profile_32(profile, seq_str, 11, 1)
+                
+                if result.score > best_score:
+                    best_score = result.score
+                    best_result = result
+                    best_frame_idx = f_idx
+            
+            # Check threshold
+            if best_score < 40: # Raw score threshold
+                break
+                
+            # Process Best Hit
+            result = best_result
+            frame = frames[best_frame_idx]
+            
+            # CIGAR Parsing for coordinates
+            try: 
+                cigar_decoded = result.cigar.decode.decode()
+            except:
+                break
+                
+            # Parse CIGAR to find start and alignment length
+            # We must handle leading 'D's which shift the logical start
+            cigar_ops = []
+            curr_num = ""
+            for char in cigar_decoded:
+                if char.isdigit():
+                    curr_num += char
+                else:
+                    n = int(curr_num) if curr_num else 1
+                    curr_num = ""
+                    cigar_ops.append((char, n))
+            
+            # Calculate total trace length
+            t_len_aln = 0
+            q_len_aln = 0
+            aln_len = 0
+            
+            for op, n in cigar_ops:
+                aln_len += n
+                if op in ['M', '=', 'X', 'D']:
+                    t_len_aln += n
+                if op in ['M', '=', 'X', 'I']:
+                    q_len_aln += n
+
+            t_end_aa = result.end_ref
+            q_end_aa = result.end_query
+            
+            t_start_aa = t_end_aa - t_len_aln + 1
+            q_start_aa = q_end_aa - q_len_aln + 1
+            
+            # Adjust start for leading gaps (D or I)
+            # Leading D means we skipped Ref bases -> t_start shifts forward
+            # Leading I means we skipped Query bases -> q_start shifts forward
+            
+            # Trim leading D (Deletion from Ref)
+            # Usually Parasail S-W trace starts with D if it skips beginning of ref?
+            # We iterate ops to adjust starts
+            for op, n in cigar_ops:
+                if op == 'D':
+                    t_start_aa += n # Advance match start on Ref
+                elif op == 'I':
+                    q_start_aa += n # Advance match start on Query
+                else:
+                    break # First match/sub stops the trimming
+
+            
+            # DEBUG
+            # print(f"DEBUG_HIT: Iter={iteration} Frame={frame['frame']} Score={result.score}")
+            # print(f"DEBUG_HIT: Cigar={cigar_decoded} T_Range=[{t_start_aa}, {t_end_aa}]")
+            
+            # DNA Coordinates of the Hit
+            if frame['strand'] == '+':
+                t_start_dna = t_start_aa * 3 + frame['offset']
+                t_end_dna = t_end_aa * 3 + frame['offset'] + 2
+                ts = t_start_dna + 1
+                te = t_end_dna + 1
+            else:
+                rc_start = t_start_aa * 3 + frame['offset']
+                rc_end = t_end_aa * 3 + frame['offset'] + 2
+                L = len(t_seq_dna)
+                te_fwd = L - rc_start
+                ts_fwd = L - rc_end
+                ts = ts_fwd
+                te = te_fwd
+                
+                # For masking, we need the internal "frame coordinates" for every frame.
+                # Simplest: Define Genomic Interval [min_dna, max_dna]
+                t_start_dna = min(ts, te) - 1
+                t_end_dna = max(ts, te) - 1 + 1 # exclusive upper bound?
+            
+            # print(f"DEBUG_DNA: [{t_start_dna}, {t_end_dna}]")
+
+            # Report
+            hit_line = f"{q_id}\t{t_id}\t99.9\t{aln_len}\t0\t0\t{q_start_aa+1}\t{q_end_aa+1}\t{ts}\t{te}\t1e-10\t{result.score}"
+            all_hits.append(hit_line)
+            
+            # MASKING: Mask this genomic region in ALL frames
+            # Genomic Interval: (ts-1) to (te) (0-based)
+            g_start = min(ts, te) - 1
+            g_end = max(ts, te)
+            
+            # print(f"DEBUG_MASKING: Interval [{g_start}, {g_end}]")
+            
+            for f_i, f in enumerate(frames):
+                # Map genomic [g_start, g_end] to frame AA coords
+                # Frame Fwd: AA_idx = (DNA_idx - offset) / 3
+                # We mask conservatively: any AA that overlaps the genomic region
+                
+                if f['strand'] == '+':
+                    start_i = int((g_start - f['offset'] - 2)/3)
+                    end_i = int((g_end - f['offset'])/3) + 1 # Exclusive
+                    
+                else:
+                    rc_g_start = len(t_seq_dna) - g_end
+                    rc_g_end = len(t_seq_dna) - g_start
+                    
+                    start_i = int((rc_g_start - f['offset'] - 2)/3)
+                    end_i = int((rc_g_end - f['offset'])/3) + 1
+                
+                # Clamp
+                start_i = max(0, start_i)
+                end_i = min(len(f['seq']), end_i)
+                
+                # DEBUG BEFORE
+                # if f_i == 1: # Check Frame 2 specifically
+                #     sample = "".join(f['seq'][30:40])
+                #     print(f"DEBUG_F2_BEFORE: ...{sample}...")
+
+                # Apply Mask
+                changed = False
+                for k in range(start_i, end_i):
+                    f['seq'][k] = 'X'
+                    changed = True
+                
+                # if f_i == 1:
+                #      sample = "".join(f['seq'][30:40])
+                #      print(f"DEBUG_F2_AFTER: ...{sample}... Changed={changed} Range=[{start_i}, {end_i}]")
+                     
+    # Write output
+                    
+    # Write output
+    with open(output_tsv, 'w') as f:
+        for line in all_hits:
+            f.write(line + "\n")
+    
+    print(f"Smith-Waterman search complete (Parasail): {output_tsv} ({len(all_hits)} hits)", file=sys.stderr)
 
 
 def main():
@@ -206,10 +495,10 @@ def main():
         # Write output
         with open(args.output, 'w') as f:
             for hit in hits:
-                f.write(f"{hit['query']}\\t{hit['target']}\\t{hit['pident']:.1f}\\t"
-                       f"{hit['alnlen']}\\t{hit['mismatch']}\\t{hit['gapopen']}\\t"
-                       f"{hit['qstart']}\\t{hit['qend']}\\t{hit['tstart']}\\t{hit['tend']}\\t"
-                       f"{hit['evalue']:.2e}\\t{hit['bits']:.1f}\\n")
+                f.write(f"{hit['query']}\t{hit['target']}\t{hit['pident']:.1f}\t"
+                       f"{hit['alnlen']}\t{hit['mismatch']}\t{hit['gapopen']}\t"
+                       f"{hit['qstart']}\t{hit['qend']}\t{hit['tstart']}\t{hit['tend']}\t"
+                       f"{hit['evalue']:.2e}\t{hit['bits']:.1f}\n")
         
         print(f"Found {len(hits)} Smith-Waterman alignments above threshold", file=sys.stderr)
 

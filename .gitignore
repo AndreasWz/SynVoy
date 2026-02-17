@@ -18,3 +18,10 @@ tmp/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+genomes/
+results_from_local_genomes/
+.synterra_logs/
+test_out/
+ref/
+archive/
+test_home_db/

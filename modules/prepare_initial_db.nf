@@ -24,17 +24,30 @@ process PREPARE_INITIAL_DB {
     
     sys.path.insert(0, "${projectDir}/bin")
     from sequence_utils import parse_fasta, write_fasta
+    from flanking_query_utils import collapse_flanking_query_records
     from fragment_query import generate_fragments
     
     output_faa = "initial_db_${locus_id}.faa"
     all_records = []
     
-    # 1. Add all flanking genes
+    # 1. Add flanking genes (collapse split exon/fragment records to one query per gene)
     print("Loading flanking genes from ${flanking_faa}...")
-    for header, clean_id, seq in parse_fasta("${flanking_faa}"):
+    flanking_raw = list(parse_fasta("${flanking_faa}"))
+    flanking_records, flanking_stats = collapse_flanking_query_records(flanking_raw)
+    for clean_id, seq in flanking_records:
         all_records.append((clean_id, seq))
     flanking_count = len(all_records)
-    print(f"  Loaded {flanking_count} flanking genes")
+    print(
+        "  Loaded {count} normalized flanking genes "
+        "(from {inp} records; exon_reconstructed={recon}, fragment_collapsed={frag}, dropped_empty={drop})"
+        .format(
+            count=flanking_count,
+            inp=flanking_stats.get("input_records", 0),
+            recon=flanking_stats.get("exon_reconstructed", 0),
+            frag=flanking_stats.get("fragment_collapsed", 0),
+            drop=flanking_stats.get("dropped_empty", 0),
+        )
+    )
     
     # 2. Add GOI sequences (full protein + individual exons from ANNOTATE_GOI)
     print("Loading GOI exon sequences from ${goi_exons}...")

@@ -33,6 +33,7 @@ def parse_gff_for_genes(gff_file):
     """
     genes = []
     cds_by_parent = {}
+    cds_orphans = []
     parent_map = {} # Transcript -> Gene
     
     with open(gff_file, 'r') as f:
@@ -73,17 +74,22 @@ def parse_gff_for_genes(gff_file):
                          pass
             
             elif feature_type == 'CDS':
+                cds_entry = {
+                    'chrom': parts[0],
+                    'start': int(parts[3]) - 1, # 0-based
+                    'end': int(parts[4]),
+                    'strand': parts[6],
+                    'phase': parts[7]
+                }
                 pid = attributes.get('Parent')
                 if pid:
                     if pid not in cds_by_parent:
                         cds_by_parent[pid] = []
-                    cds_by_parent[pid].append({
-                        'chrom': parts[0],
-                        'start': int(parts[3]) - 1, # 0-based
-                        'end': int(parts[4]),
-                        'strand': parts[6],
-                        'phase': parts[7]
-                    })
+                    cds_by_parent[pid].append(cds_entry)
+                else:
+                    # Prodigal-style CDS-only GFFs may have no Parent/gene features.
+                    # Keep these so we can build pseudo genes below.
+                    cds_orphans.append((attributes.get('ID', ''), cds_entry))
                     
     # Map Gene -> List of CDS
     processed_genes = []
@@ -107,6 +113,51 @@ def parse_gff_for_genes(gff_file):
                 gene['cds_parts'] = cds_by_parent[best_t]
         
         processed_genes.append(gene)
+
+    # Fallback for CDS-only annotation files (e.g., Prodigal output):
+    # synthesize gene-like records from CDS spans so downstream flanking logic
+    # can still select neighboring models around the GOI region.
+    if not processed_genes and (cds_by_parent or cds_orphans):
+        print("GFF contains no gene features; falling back to CDS-derived pseudo genes")
+
+        pseudo_genes = []
+
+        # Parent-grouped CDS blocks (e.g., transcript IDs).
+        for pid, parts_list in cds_by_parent.items():
+            parts_sorted = sorted(parts_list, key=lambda x: x['start'])
+            if not parts_sorted:
+                continue
+            chrom = parts_sorted[0]['chrom']
+            strand = parts_sorted[0]['strand']
+            start = min(p['start'] for p in parts_sorted)
+            end = max(p['end'] for p in parts_sorted)
+            gid = pid if pid else f"cds_group_{len(pseudo_genes)+1}"
+            pseudo_genes.append({
+                'chrom': chrom,
+                'start': start,
+                'end': end,
+                'strand': strand,
+                'type': 'CDS',
+                'attrs': {'ID': gid},
+                'id': gid,
+                'cds_parts': parts_sorted
+            })
+
+        # Orphan CDS entries (no Parent).
+        for idx, (oid, cds_entry) in enumerate(cds_orphans, start=1):
+            gid = oid if oid else f"cds_orphan_{idx}"
+            pseudo_genes.append({
+                'chrom': cds_entry['chrom'],
+                'start': cds_entry['start'],
+                'end': cds_entry['end'],
+                'strand': cds_entry['strand'],
+                'type': 'CDS',
+                'attrs': {'ID': gid},
+                'id': gid,
+                'cds_parts': [cds_entry]
+            })
+
+        processed_genes = pseudo_genes
 
     return sorted(processed_genes, key=lambda x: (x['chrom'], x['start']))
 

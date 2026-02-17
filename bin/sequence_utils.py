@@ -13,6 +13,7 @@ Handles:
 
 import re
 import hashlib
+import gzip
 from pathlib import Path
 from typing import Iterator, Dict, List, Tuple, Optional, Any
 
@@ -30,7 +31,9 @@ def parse_fasta(filepath: str) -> Iterator[Tuple[str, str, str]]:
     current_header = None
     current_seq = []
     
-    with open(filepath, 'r') as f:
+    _open = gzip.open if str(filepath).endswith('.gz') else open
+    
+    with _open(filepath, 'rt') as f:
         for line in f:
             line = line.rstrip('\n\r')
             if line.startswith('>'):
@@ -79,7 +82,8 @@ def write_fasta(records: List[Tuple[str, str]], filepath: str, wrap: int = 80):
 def count_sequences(filepath: str) -> int:
     """Count sequences in FASTA file efficiently."""
     count = 0
-    with open(filepath, 'r') as f:
+    _open = gzip.open if str(filepath).endswith('.gz') else open
+    with _open(filepath, 'rt') as f:
         for line in f:
             if line.startswith('>'):
                 count += 1
@@ -96,7 +100,9 @@ ID_PATTERNS = [
     (r'^([XNYWZ]P_\d+(?:\.\d+)?)', 'ncbi_refseq'),
     
     # NCBI GenBank proteins: AAA12345.1
-    (r'^([A-Z]{3}\d{5}(?:\.\d+)?)', 'ncbi_genbank'),
+    # Require token boundary after accession so long IDs like LOC143834063 are
+    # not incorrectly truncated to LOC14383.
+    (r'^([A-Z]{3}\d{5}(?:\.\d+)?)(?=$|[\s|])', 'ncbi_genbank'),
     
     # NCBI GI (legacy): gi|12345|
     (r'^gi\|(\d+)\|', 'ncbi_gi'),
@@ -291,7 +297,8 @@ def parse_gff(filepath: str, feature_types: Optional[List[str]] = None) -> Itera
     Yields:
         Dict with keys: seqid, source, type, start, end, score, strand, phase, attributes
     """
-    with open(filepath, 'r') as f:
+    _open = gzip.open if str(filepath).endswith('.gz') else open
+    with _open(filepath, 'rt') as f:
         for line_num, line in enumerate(f, 1):
             line = line.rstrip('\n\r')
             

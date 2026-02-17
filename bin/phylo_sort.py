@@ -26,7 +26,8 @@ def main():
         # List files in directory
         if os.path.isdir(args.targets_dir):
              for f in os.listdir(args.targets_dir):
-                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa"):
+                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa") or \
+                    f.endswith(args.img_ext + ".gz") or f.endswith(".fasta.gz") or f.endswith(".fa.gz"):
                      target_list.append(os.path.join(args.targets_dir, f))
     
     if not target_list:
@@ -194,7 +195,8 @@ def fallback_sort(args):
     elif args.targets_dir:
         if os.path.isdir(args.targets_dir):
              for f in os.listdir(args.targets_dir):
-                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa"):
+                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa") or \
+                    f.endswith(args.img_ext + ".gz") or f.endswith(".fasta.gz") or f.endswith(".fa.gz"):
                      target_list.append(os.path.basename(f)) # Use basename for safety
     
     with open(args.output, 'w') as out:

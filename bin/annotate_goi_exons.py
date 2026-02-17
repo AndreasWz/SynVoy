@@ -810,7 +810,7 @@ def _check_miniprot():
 MINIPROT_AVAILABLE = _check_miniprot()
 
 
-def _parse_miniprot_gff(gff_text, region_offset=0):
+def _parse_miniprot_gff(gff_text):
     """
     Parse miniprot GFF3 output to extract gene models.
     
@@ -836,7 +836,7 @@ def _parse_miniprot_gff(gff_text, region_offset=0):
                 k, v = kv.split('=', 1)
                 attr_dict[k] = v
         
-        if ftype == 'mRNA':
+        if ftype in ('mRNA', 'transcript'):
             model_id = attr_dict.get('ID', '')
             rank = int(attr_dict.get('Rank', 1))
             identity = float(attr_dict.get('Identity', 0))
@@ -852,8 +852,10 @@ def _parse_miniprot_gff(gff_text, region_offset=0):
         elif ftype == 'CDS':
             parent = attr_dict.get('Parent', '')
             if parent in models:
-                cds_start = int(start) - 1 + region_offset  # GFF 1-based -> 0-based
-                cds_end = int(end) + region_offset            # GFF end is inclusive -> exclusive
+                # Keep CDS coordinates local to the provided target sequence.
+                # The caller applies region offset exactly once when converting to global coords.
+                cds_start = int(start) - 1  # GFF 1-based -> 0-based
+                cds_end = int(end)          # inclusive -> exclusive
                 cds_phase = int(phase) if phase.isdigit() else 0
                 
                 # Parse Target attribute (query protein coords)
@@ -930,7 +932,7 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
             "--trans",                  # Also output translated protein
             "-G", str(max_intron),      # Max intron size
             "-t", "1",                  # Single thread (called per gene)
-            "--outc=0.1",               # Min 10% query coverage for output
+            "--outc=0.01",               # Min 1% query coverage for output
         ]
         
         query_len = len(query_seq)
@@ -971,7 +973,7 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
             print("[miniprot] No alignments found", file=sys.stderr)
             return [], query_seq
         
-        models = _parse_miniprot_gff(gff_output, region_offset=region_offset)
+        models = _parse_miniprot_gff(gff_output)
         
         if not models:
             print("[miniprot] No gene models parsed from GFF", file=sys.stderr)
@@ -1083,7 +1085,8 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
                                   gap_max_hits=5,
                                   exon_query_mode=False,
                                   min_exon_query_cov=0.25,
-                                  min_exon_alnlen=30):
+                                  min_exon_alnlen=30,
+                                  sensitive=False):
     """
     Entry point for exon annotation - uses miniprot for gene modeling.
     
@@ -1114,7 +1117,7 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
     sub_seq = chrom_seq[region_start:region_end]
     
     # Detect if this is likely a GOI query (use sensitive mode)
-    is_goi = any('GOI' in str(h.get('query', '')) for h in hits)
+    is_goi = sensitive or any('GOI' in str(h.get('query', '')) for h in hits)
     
     # Calculate max intron from hit spread
     max_intron = max(20000, region_end - region_start)

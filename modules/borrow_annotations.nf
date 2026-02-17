@@ -8,6 +8,7 @@ process BORROW_ANNOTATIONS {
     path genomes_dir    // Directory with target genomes + optional GFFs
     path goi_bed        // GOI location from LOCATE_GENE
     val n_flanking
+    val run_token       // Emits only when home GFF is missing
     
     output:
     path "borrowed_annotations.gff", emit: gff
