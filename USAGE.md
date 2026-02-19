@@ -1,143 +1,87 @@
 # SynTerra Usage
 
+This document reflects the current pipeline behavior in this repository.
+Use it as the primary runtime reference for setup, execution, parameters, outputs, and troubleshooting.
+
 ## 1) Requirements
 
-- Linux/macOS, or Windows with WSL2
-- Nextflow `>=22.10.1`
-- One runtime backend:
-  - Conda/Mamba (recommended for most users)
-  - Docker
-  - Singularity or Apptainer
-
-SynTerra profiles available in this repo:
-- `standard` (default local profile): local executor + Conda (`environment.yml`)
-- `conda`: explicit Conda profile
-- `docker`: run all processes in container
-- `singularity`: run all processes in Singularity/Apptainer container
-- `hpc_singularity`: Slurm + Singularity
-- `hpc_conda`: Slurm + Conda
+- Linux or macOS (Windows via WSL2 is fine).
+- Nextflow `>=22.10.1`.
+- One execution backend: Conda/Mamba (recommended), Docker, or Singularity/Apptainer.
+- Internet access for `--mode easy` (query resolution + genome downloads).
 
 ## 2) Setup
 
 ### Option A: Conda/Mamba (recommended)
 
-1. Create environment:
-
 ```bash
+cd /path/to/SynTerra
 conda env create -f environment.yml
-```
-
-2. Activate:
-
-```bash
 conda activate syntenyfinder
-```
-
-3. Verify:
-
-```bash
 nextflow -version
-python --version
-```
-
-If `nextflow` is not on your `PATH`, use the bundled launcher:
-
-```bash
-./nextflow -version
-```
-
-Optional helper script:
-
-```bash
-bash install.sh
-```
-
-Modern live logging launcher (recommended):
-
-```bash
 ./synterra --help
 ```
 
+If `nextflow` is not on your `PATH`, use `./nextflow`.
+
 ### Option B: Docker
 
-Prerequisites:
-- Docker installed and running
-- Nextflow installed on host
+```bash
+docker build -t synterra-local:latest .
+./synterra -profile docker --mode easy --gene P01501 --outdir results
+```
 
-Run with:
+Override image:
 
 ```bash
-nextflow run main.nf -profile docker --gene P01501 --mode easy --outdir results
+./synterra -profile docker --docker_container your/image:tag --mode easy --gene P01501 --outdir results
 ```
 
 ### Option C: Singularity/Apptainer
 
-Prerequisites:
-- Singularity or Apptainer installed
-- Nextflow installed on host
-
-Recommended cache setup:
-
 ```bash
 mkdir -p "$HOME/.singularity/cache"
 export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
+./synterra -profile singularity --mode easy --gene P01501 --outdir results
 ```
 
-Run with:
-
-```bash
-nextflow run main.nf -profile singularity --gene P01501 --mode easy --outdir results
-```
-
-### HPC profiles (Slurm)
-
-Conda-based Slurm:
-
-```bash
-nextflow run main.nf -profile hpc_conda --gene P01501 --mode easy --outdir results
-```
-
-Singularity-based Slurm:
-
-```bash
-nextflow run main.nf -profile hpc_singularity --gene P01501 --mode easy --outdir results
-```
-
-### Optional smoke test (bundled local test data)
+### Optional smoke test
 
 ```bash
 nextflow run main.nf -profile test
 ```
 
-## 3) Quick Run Modes
+## 3) How to Run
 
-### Easy Mode
+`./synterra` is the recommended launcher.
+It forwards pipeline arguments to Nextflow and adds a compact live UI.
 
-Use an ID or FASTA, and let SynTerra fetch home/related genomes.
+Examples:
+
+```bash
+./synterra --mode easy --gene P01501 --outdir results
+./synterra --raw --mode easy --gene P01501 --outdir results
+```
+
+- `--raw` prints raw Nextflow output.
+- Raw logs are written to `.synterra_logs/run_YYYYMMDD_HHMMSS.log`.
+
+## 4) Run Modes
+
+### Easy mode
+
+SynTerra resolves query input, fetches the home genome, and fetches target genomes.
 
 ```bash
 ./synterra \
-  --gene P01501 \
   --mode easy \
+  --gene P01501 \
   --outdir results
 ```
 
-Easy mode requires internet access for genome/metadata retrieval.
+### Pro mode
 
-Genome selection policy in easy mode:
-- Prefer RefSeq `reference genome` / `representative genome` if available.
-- Otherwise rank assemblies by quality (`--assembly-ranking`):
-  - `hybrid` (default): reference/assembly-level + contiguity + N50/N80
-  - `counts`: prioritize fewer chromosomes/scaffolds/contigs
-  - `nstats`: prioritize higher N50/N80
-- If only low-quality assemblies are available, policy is controlled by `--bad_quality_policy`:
-  - `ask` (default): prompt and wait up to `--bad_quality_timeout` seconds (default `300`), then default to NO
-  - `drop`: exclude low-quality assemblies
-  - `keep`: keep them anyway
-
-### Pro Mode
-
-Provide your own home genome and target genomes.
+You provide local home and target genomes.
 
 ```bash
 ./synterra \
@@ -151,149 +95,230 @@ Provide your own home genome and target genomes.
 
 ### Resume
 
-Use the same command and same `--outdir`, then add `-resume`. If you change parameters (or output folder), Nextflow may rerun download steps.
+Use the same command and same `--outdir`, then add `-resume`.
 
 ```bash
-./synterra --gene P01501 --mode easy --outdir results -resume
+./synterra --mode easy --gene P01501 --outdir results -resume
 ```
 
-### Cleaner terminal output
-
-Use `./synterra` for a controlled single-line live UI (spinner + in-place status updates, no repeated `executor > local` tables).
-If you want classic Nextflow console output:
-
-```bash
-nextflow run main.nf --gene P01501 --mode easy --outdir results -resume
-```
-
-## 4) Input Behavior
+## 5) Query Input Behavior
 
 `--gene` accepts:
-- UniProt ID
+
+- UniProt ID (for example `P60615`)
 - NCBI protein accession
-- local FASTA path
+- Local FASTA path
 
-`--query_id` is a legacy alternative (still supported).
+`--query_id` is legacy and still supported.
 
-If query is nucleotide FASTA, SynTerra normalizes to protein space before downstream steps.
+Rules:
 
-## 5) Home/Target Annotation Behavior
+- In easy mode, `--home_species` is optional when input is a resolvable protein ID.
+- In easy mode, if `--gene` is a local FASTA path, provide `--home_species`.
+- If a FASTA path is missing, input validation/resolution fails early.
+- DNA query FASTA is normalized to protein space before search/annotation.
 
-- If home GFF is present: use it.
-- If home GFF is missing: run regional Prodigal prediction.
-- Borrowed annotations from annotated targets are merged into fallback home annotations.
-- Target genomes do not need GFF.
-- Flanking annotations are retained for synteny context, but iterative DB expansion is GOI-driven.
+## 6) Easy-Mode Genome Selection
 
-## 6) Core Parameters
+Home genome selection:
+
+- Try reference/representative assembly first.
+- Fallback to quality-ranked assembly for the requested species.
+- Final fallback can use closest taxonomic relative if no species assembly exists.
+
+Target genome selection:
+
+- If `--target_species` is provided, SynTerra fetches those taxa directly.
+- If not provided, SynTerra auto-searches related taxa (genus/family/order/class) up to `--max_genomes`.
+
+Assembly ranking (`--assembly_ranking`):
+
+- `hybrid` (default): contiguity counts + N-stats + assembly level priority.
+- `counts`: prioritize fewer contigs/scaffolds/chromosomes.
+- `nstats`: prioritize higher N50/N80.
+
+Low-quality handling:
+
+- `--bad_quality_policy ask|drop|keep` (default `ask`).
+- `ask` waits up to `--bad_quality_timeout` seconds (default `300`) then defaults to NO.
+- Threshold knobs: `--bad_max_contigs`, `--bad_max_scaffolds`, `--bad_min_n50`.
+
+Quality report file:
+
+- `downloaded_genomes/easy_mode_genomes/assembly_quality.tsv`
+
+## 7) Annotation and Flanking Logic
+
+- If home GFF exists and is usable, SynTerra prioritizes annotation-based extraction.
+- Without usable home GFF, fallback paths predict genes locally.
+- Borrowed annotation support is available for weak/no-annotation home genomes.
+- Flanking genes are extracted per locus and retained for context.
+- Flanking records keep stable IDs and include display labels from annotation names when available.
+- Iterative region expansion remains GOI-driven.
+
+## 8) Desktop-Stable Docker Recipe (3-snake 3FTx)
+
+```bash
+conda activate syntenyfinder
+
+NXF_OPTS='-Xms512m -Xmx2g' ./synterra \
+  -profile docker \
+  --mode easy \
+  --gene P60615 \
+  --home_species "Naja naja" \
+  --target_species "Ophiophagus hannah,Bungarus multicinctus" \
+  --max_genomes 2 \
+  --n_flanking_genes 30 \
+  --bad_quality_policy keep \
+  --iterative_search_cpus 2 \
+  --iterative_search_memory '6 GB' \
+  --iterative_search_max_forks 1 \
+  --mmseqs_split_memory_limit 2G \
+  --mmseqs_verbosity 0 \
+  --iterative_quiet_subtools true \
+  --outdir results_3snake_3ftx
+```
+
+## 9) Full Parameter Reference
+
+Defaults are taken from `nextflow.config`.
 
 ### Mode and I/O
 
-- `--mode` (default: `easy`): `easy` or `pro`
-- `--gene` (default: `null`): query ID or FASTA path
-- `--query_id` (default: `null`): legacy ID input
-- `--home_species` (default: `null`): required in some easy-mode cases
-- `--home_genome` (default: `null`): required in pro mode
-- `--home_gff` (default: `null`): optional in pro mode
-- `--target_genomes` (default: `null`): target FASTA glob in pro mode
-- `--target_species` (default: `null`): optional easy-mode species override list
-- `--max_genomes` (default: `0`): easy-mode target count (`0` = auto policy)
-- `--assembly_ranking` (default: `hybrid`): easy-mode assembly ranking mode (`hybrid`, `counts`, `nstats`)
-- `--bad_quality_policy` (default: `ask`): low-quality assembly handling (`ask`, `drop`, `keep`)
-- `--bad_quality_timeout` (default: `300`): seconds to wait for answer when policy=`ask`
-- `--bad_max_contigs` (default: `100000`): low-quality threshold for contig count
-- `--bad_max_scaffolds` (default: `50000`): low-quality threshold for scaffold count
-- `--bad_min_n50` (default: `20000`): low-quality threshold for best available N50
-- `--outdir` (default: `results`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--mode` | `easy` | `easy` or `pro`. |
+| `--gene` | `null` | Query input (ID or FASTA path). |
+| `--query_id` | `null` | Legacy query ID input. |
+| `--home_species` | `null` | Easy-mode home species name. |
+| `--home_genome` | `null` | Pro-mode home genome FASTA path. |
+| `--home_gff` | `null` | Pro-mode home GFF path (optional). |
+| `--target_genomes` | `null` | Pro-mode target genome glob. |
+| `--target_species` | `null` | Easy-mode comma-separated species list. |
+| `--max_genomes` | `0` | Easy-mode target count (`0` = auto strategy). |
+| `--outdir` | `results` | Output directory. |
+| `--docker_container` | `synterra-local:latest` | Container image for docker profile. |
 
-### Synteny and Search
+### Easy-mode assembly filtering and ranking
 
-- `--n_flanking_genes` (default: `10`)
-- `--min_flanking_size` (default: `500`)
-- `--prefer_large_genes` (default: `true`)
-- `--exon_level_search` (default: `true`)
-- `--cluster_distance` (default: `50000`)
-- `--min_synteny_score` (default: `0.6`)
-- `--min_hit_identity` (default: `40`)
-- `--min_hit_length` (default: `100`)
-- `--search_evalue` (default: `1e-5`)
-- `--mmseqs_sensitivity` (default: `8.5`)
-- `--max_intron` (default: `20000`)
-- `--max_blocks_per_genome` (default: `80`)
-- `--min_block_genes` (default: `2`)
-- `--max_consecutive_empty_blocks` (default: `25`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--assembly_ranking` | `hybrid` | Assembly ranking mode: `hybrid`, `counts`, `nstats`. |
+| `--bad_quality_policy` | `ask` | Low-quality policy: `ask`, `drop`, `keep`. |
+| `--bad_quality_timeout` | `300` | Seconds to wait for `ask` policy. |
+| `--bad_max_contigs` | `100000` | Assemblies above this are flagged low-quality. |
+| `--bad_max_scaffolds` | `50000` | Assemblies above this are flagged low-quality. |
+| `--bad_min_n50` | `20000` | Assemblies below this best-N50 are flagged low-quality. |
 
-### GOI/Exon Refinement
+### Synteny and search controls
 
-- `--gff_search_window` (default: `100000`)
-- `--gap_search_window` (default: `50000`)
-- `--gap_min_size` (default: `10`)
-- `--gap_evalue` (default: `10`)
-- `--gap_min_identity` (default: `25.0`)
-- `--gap_min_alnlen` (default: `10`)
-- `--gap_max_hits` (default: `5`)
-- `--min_exon_query_cov` (default: `0.25`)
-- `--min_exon_alnlen` (default: `30`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--n_flanking_genes` | `10` | Number of flanking genes to extract per locus side. |
+| `--prefer_large_genes` | `true` | Prefer larger gene models where relevant. |
+| `--min_flanking_size` | `500` | Minimum flanking gene span (bp). |
+| `--exon_level_search` | `true` | Enables exon-oriented flanking behavior. |
+| `--cluster_distance` | `50000` | Region clustering distance (bp). |
+| `--min_synteny_score` | `0.6` | Minimum synteny score threshold. |
+| `--min_hit_identity` | `40` | Minimum identity for hits in iterative search. |
+| `--min_hit_length` | `100` | Minimum hit length. |
+| `--search_evalue` | `1e-5` | Core MMseqs e-value threshold. |
+| `--max_intron` | `20000` | Max intron size used in model assembly. |
+| `--mmseqs_sensitivity` | `8.5` | MMseqs sensitivity setting. |
+| `--mmseqs_split_memory_limit` | `3G` | MMseqs internal split memory limit. |
+| `--mmseqs_verbosity` | `1` | MMseqs verbosity. |
+| `--min_gene_identity` | `30` | Minimum identity for gene-level consolidation steps. |
 
-### Smith-Waterman Augmentation
+### GOI refinement and gap search
 
-- `--enable_smith_waterman` (default: `true`)
-- `--sw_method` (default: `auto`)
-- `--sw_min_score` (default: `50`)
-- `--sw_min_identity` (default: `20.0`)
-- `--sw_timeout_seconds` (default: `300`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--gff_search_window` | `100000` | Window around hits for GFF match recovery. |
+| `--gap_search_window` | `50000` | GOI gap-search window. |
+| `--gap_min_size` | `10` | Minimum gap size for gap search. |
+| `--gap_evalue` | `10` | Gap search e-value threshold. |
+| `--gap_min_identity` | `25.0` | Gap search minimum identity. |
+| `--gap_min_alnlen` | `10` | Gap search minimum alignment length. |
+| `--gap_max_hits` | `5` | Max gap hits retained. |
+| `--min_exon_query_cov` | `0.25` | Minimum exon query coverage. |
+| `--min_exon_alnlen` | `30` | Minimum exon alignment length. |
 
-### Region Padding / Relaxed Augmented Search
+### Smith-Waterman augmentation
 
-- `--region_padding` (default: `150000`)
-- `--padding_min` (default: `50000`)
-- `--padding_max` (default: `200000`)
-- `--aug_relaxed_evalue_mult` (default: `1000`)
-- `--aug_relaxed_evalue_cap` (default: `10.0`)
-- `--aug_relaxed_parse_evalue_mult` (default: `10`)
-- `--aug_relaxed_identity_factor` (default: `0.6`)
-- `--aug_relaxed_identity_min` (default: `25.0`)
-- `--aug_relaxed_length_div` (default: `2`)
-- `--aug_relaxed_length_min` (default: `15`)
-- `--aug_dedup_bin_bp` (default: `100`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--enable_smith_waterman` | `true` | Enables Smith-Waterman local refinement. |
+| `--sw_method` | `auto` | SW engine selection (`auto`, `parasail`, `ssearch36`). |
+| `--sw_min_score` | `50` | Minimum SW score. |
+| `--sw_min_identity` | `20.0` | Minimum SW identity. |
+| `--sw_timeout_seconds` | `300` | SW timeout per task. |
 
-### Prodigal Fallback
+### Region padding and relaxed augmented search
 
-- `--pred_flank_window` (default: `50000`)
-- `--pred_keep_pct` (default: `0.10`)
-- `--prodigal_full_genome_fallback` (default: `false`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--region_padding` | `150000` | Base region padding around loci. |
+| `--padding_min` | `50000` | Minimum adaptive padding. |
+| `--padding_max` | `200000` | Maximum adaptive padding. |
+| `--aug_relaxed_evalue_mult` | `1000` | Multiplier for relaxed e-value pass. |
+| `--aug_relaxed_evalue_cap` | `10.0` | Cap for relaxed e-value. |
+| `--aug_relaxed_parse_evalue_mult` | `10` | Relaxed parse threshold multiplier. |
+| `--aug_relaxed_identity_factor` | `0.6` | Identity relaxation factor. |
+| `--aug_relaxed_identity_min` | `25.0` | Floor for relaxed identity. |
+| `--aug_relaxed_length_div` | `2` | Length relaxation divisor. |
+| `--aug_relaxed_length_min` | `15` | Minimum relaxed length. |
+| `--aug_dedup_bin_bp` | `100` | Deduplication bin size (bp). |
+| `--max_blocks_per_genome` | `80` | Cap on candidate blocks per target genome. |
+| `--min_block_genes` | `2` | Minimum genes per block. |
+| `--max_consecutive_empty_blocks` | `25` | Early-stop guard for empty block streaks. |
 
-### Synteny Scoring Weights
+### Resource guards
 
-- `--synteny_weight_base` (default: `0.4`)
-- `--synteny_weight_consistency` (default: `0.3`)
-- `--synteny_weight_strand` (default: `0.3`)
+| Parameter | Default | Description |
+|---|---|---|
+| `--iterative_search_cpus` | `2` | CPUs for iterative search process. |
+| `--iterative_search_memory` | `6 GB` | Memory for iterative search process. |
+| `--iterative_search_max_forks` | `1` | Max parallel forks for iterative search. |
+| `--iterative_quiet_subtools` | `true` | Quieter subtool logs in iterative phase. |
+| `--locate_gene_cpus` | `1` | CPUs for home GOI localization process. |
+| `--locate_gene_memory` | `3 GB` | Memory for home GOI localization process. |
 
-### Reserved / Future Parameters
+### Fallback prediction and scoring
 
-These are defined but currently not central to the main decision path:
-- `--augustus_species`
-- `--expand_db_threshold`
-- `--diamond_sensitivity`
-- `--enable_splice_variants`
-- `--enable_frameshifts`
-- `--mutation_rate`
-- `--num_mutant_variants`
-- `--keep_intermediate`
-- `--max_retries`
+| Parameter | Default | Description |
+|---|---|---|
+| `--pred_flank_window` | `50000` | Window for fallback Prodigal extraction. |
+| `--pred_keep_pct` | `0.10` | Fraction of fallback predictions retained. |
+| `--prodigal_full_genome_fallback` | `false` | Enables full-genome Prodigal fallback path. |
+| `--synteny_weight_base` | `0.4` | Base term weight in synteny scoring. |
+| `--synteny_weight_consistency` | `0.3` | Consistency term weight in synteny scoring. |
+| `--synteny_weight_strand` | `0.3` | Strand term weight in synteny scoring. |
 
-## 7) Outputs
+### Advanced and reserved
 
-Main outputs:
+| Parameter | Default | Description |
+|---|---|---|
+| `--keep_intermediate` | `false` | Keep extra intermediate artifacts. |
+| `--max_retries` | `3` | Pipeline retry-related knob (advanced). |
+| `--augustus_species` | `honeybee1` | Reserved for future wiring. |
+| `--expand_db_threshold` | `1e-10` | Reserved for future wiring. |
+| `--diamond_sensitivity` | `very-sensitive` | Reserved for future wiring. |
+| `--enable_splice_variants` | `true` | Reserved for future wiring. |
+| `--enable_frameshifts` | `true` | Reserved for future wiring. |
+| `--mutation_rate` | `0.05` | Reserved for future wiring. |
+| `--num_mutant_variants` | `10` | Reserved for future wiring. |
+
+## 10) Output Structure
+
+Typical outputs in `--outdir`:
+
 - `synterra_report.json`
 - `*_synteny_plot.html`
 - `*_tree.nwk`
 - `regions/*.regions.bed`
-
-Plot behavior:
-- Target genes are filtered to candidate region BED intervals before rendering, so off-locus annotations are not drawn.
-
-Intermediate outputs:
+- `downloaded_genomes/easy_mode_genomes/genomes_manifest.txt` (easy mode)
+- `downloaded_genomes/easy_mode_genomes/species_mapping.tsv` (easy mode)
+- `downloaded_genomes/easy_mode_genomes/assembly_quality.tsv` (easy mode)
 - `intermediate/locate_gene/`
 - `intermediate/annotate_goi/`
 - `intermediate/flanking/`
@@ -301,12 +326,62 @@ Intermediate outputs:
 - `intermediate/phylo_sort/`
 - `intermediate/query/`
 
-## 8) Standalone Local Recheck (ground-truth test harness)
+## 11) Logs, Resume, and Cleanup
 
-Uses the project test script, useful during method tuning.
+Last live log:
 
 ```bash
-conda run --no-capture-output -n syntenyfinder \
-  python scripts/reproduce_annotation.py \
-  --outdir tests/ground_truth_test/output_recheck
+ls -1t .synterra_logs/run_*.log | head -n 1
 ```
+
+Follow most recent log:
+
+```bash
+tail -f "$(ls -1t .synterra_logs/run_*.log | head -n 1)"
+```
+
+Resume run:
+
+```bash
+./synterra --mode easy --gene P01501 --outdir results -resume
+```
+
+Remove old outputs and work directory:
+
+```bash
+rm -rf results_* work
+```
+
+## 12) Troubleshooting
+
+### `RESOLVE_GENE_INPUT` failed
+
+- Check whether local FASTA path exists.
+- For ID inputs, verify identifier correctness and internet connectivity.
+- In easy mode with local FASTA, set `--home_species`.
+
+### Pipeline appears stuck at fetch stage
+
+- Easy mode can spend long time in NCBI metadata + genome download.
+- Check `.synterra_logs` to confirm progress.
+- Reduce search/download scope using explicit `--target_species` and small `--max_genomes`.
+
+### Very long runtime or desktop instability
+
+- Use docker profile.
+- Limit JVM heap with `NXF_OPTS='-Xms512m -Xmx2g'`.
+- Keep iterative search conservative: `--iterative_search_cpus 2`, `--iterative_search_max_forks 1`, `--iterative_search_memory '6 GB'`.
+- Reduce `--mmseqs_split_memory_limit` when memory pressure persists.
+
+### No loci found (`SPLIT_LOCI done: identified 0`)
+
+- Increase search sensitivity or relax thresholds.
+- Try higher `--mmseqs_sensitivity`.
+- Try looser `--search_evalue`.
+- Re-check query correctness (protein sequence, ID, species context).
+
+### Synteny plot labels look generic
+
+- Prefer assemblies with usable GFF annotations.
+- Verify home/target GFF availability in run outputs.
+- Check whether the selected assemblies in `assembly_quality.tsv` are scaffold-heavy or weakly annotated.

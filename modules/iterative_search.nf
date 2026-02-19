@@ -21,7 +21,7 @@ process ITERATIVE_SEARCH {
 
     script:
     """
-    iterative_search_runner.py \\
+    ${projectDir}/bin/iterative_search_runner.py \\
         --initial_db $initial_db \\
         --sorted_genomes $sorted_genomes_file \\
         --genomes_dir $genomes \\
@@ -29,6 +29,8 @@ process ITERATIVE_SEARCH {
         --output_dir iterative_results \\
         --threads ${task.cpus} \\
         --mmseqs_sens ${sensitivity} \\
+        --mmseqs_split_memory_limit ${params.mmseqs_split_memory_limit} \\
+        --mmseqs_verbosity ${params.mmseqs_verbosity} \\
         --evalue ${params.search_evalue} \\
         --min_identity ${params.min_hit_identity} \\
         --min_length ${params.min_hit_length} \\
@@ -62,6 +64,8 @@ process ITERATIVE_SEARCH {
         --max_blocks_per_genome ${params.max_blocks_per_genome} \\
         --min_block_genes ${params.min_block_genes} \\
         --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
-        --prefix ${locus_id}
+        --quiet_subtools ${params.iterative_quiet_subtools} \\
+        --prefix ${locus_id} \\
+        --resume
     """
 }

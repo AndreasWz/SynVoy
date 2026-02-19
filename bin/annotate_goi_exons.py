@@ -1028,7 +1028,9 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
             
             exons.append({
                 'id': f'exon_{i}',
-                'seq': exon_prot.rstrip('*'),
+                # Remove all stop codons; internal stops can appear in noisy models
+                # and degrade downstream protein->DNA searches.
+                'seq': exon_prot.replace('*', ''),
                 'exon_num': i,
                 'qstart': cds['qstart'],
                 'qend': cds['qend'],
@@ -1049,7 +1051,8 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
         full_cds = ''.join(dna_fragments)
         # Trim to codon boundary
         full_cds = full_cds[:len(full_cds) - len(full_cds) % 3]
-        full_protein = translate(full_cds).rstrip('*')
+        # Keep a stop-free protein for downstream querying.
+        full_protein = translate(full_cds).replace('*', '')
         
         if not full_protein:
             full_protein = query_seq
@@ -1277,8 +1280,17 @@ def main():
     fasta_records.append((goi_full_id, query_seq))
 
     # Add individual exon sequences
-    for exon in exons:
-        exon_id = exon['id']
+    # Normalize IDs so all GOI-derived entries are explicitly prefixed with GOI_.
+    for idx, exon in enumerate(exons, start=1):
+        raw_exon_id = exon.get('id', '') or f"exon_{idx}"
+        exon_num = exon.get('exon_num', idx)
+        exon_id = raw_exon_id
+        if not (raw_exon_id.startswith("GOI_") or raw_exon_id.startswith("GOI_copy_")):
+            if raw_exon_id.startswith("exon_"):
+                exon_id = f"{goi_full_id}|{raw_exon_id}"
+            else:
+                exon_id = f"{goi_full_id}|exon_{exon_num}"
+        exon['id'] = exon_id
         fasta_records.append((exon_id, exon['seq']))
 
         # BED record

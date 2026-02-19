@@ -30,9 +30,15 @@ process LOCATE_GENE {
     fi
 
     # MMSEQS
-    # Removed --mask-mode 0 (invalid)
+    # Keep an empty placeholder so downstream steps can proceed on BLAST-only
+    # fallback if MMseqs is killed on very large/fragmented genomes.
+    touch hits_mmseqs.m8
     mmseqs easy-search $gene $home_genome hits_mmseqs.m8 tmp \\
         --search-type \$SEARCH_TYPE \\
+        --threads ${task.cpus} \\
+        --split-memory-limit ${params.mmseqs_split_memory_limit} \\
+        -v ${params.mmseqs_verbosity} \\
+        -e ${params.search_evalue} \\
         --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits" \\
         -s ${params.mmseqs_sensitivity} || echo "MMSeqs search failed or found no hits"
 
@@ -68,6 +74,10 @@ process LOCATE_GENE {
     fi
 
     # Run Python Merge Script
-    merge_hits.py --mmseqs mmseqs.bed --blast blast.bed --output home_gene_location.bed
+    merge_hits.py \\
+        --mmseqs mmseqs.bed \\
+        --blast blast.bed \\
+        --max_evalue ${params.search_evalue} \\
+        --output home_gene_location.bed
     """
 }

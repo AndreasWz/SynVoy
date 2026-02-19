@@ -1,122 +1,72 @@
 # SynTerra
 
-SynTerra is a Nextflow pipeline for synteny-guided ortholog discovery in related genomes.
-It is designed to work when target genomes are:
-- well annotated,
-- partially annotated,
-- custom annotated,
-- or completely unannotated.
+SynTerra is a Nextflow pipeline for synteny-guided ortholog discovery across related genomes.
+It supports annotated genomes, partially annotated genomes, and no-annotation fallback paths.
 
 ## What SynTerra Does
 
-1. Resolves your GOI query (UniProt/NCBI ID or FASTA).
-2. Locates GOI loci in a home genome (MMseqs + BLAST).
-3. Annotates GOI exon structure (from GFF when available, otherwise from protein-to-genome evidence).
-4. Extracts flanking genes around each home locus.
-5. Iteratively searches phylogenetically ordered target genomes.
-6. Annotates GOI and flanking models in target regions.
-7. Produces synteny plots, trees, and summary outputs.
+1. Resolves GOI input from UniProt/NCBI ID or FASTA.
+2. Retrieves or loads the home genome.
+3. Locates GOI locus/loci in the home genome.
+4. Builds GOI exon-aware representation.
+5. Extracts flanking genes per locus.
+6. Iteratively searches target genomes in phylogenetic order.
+7. Annotates GOI + flanking context in target loci.
+8. Generates region clusters, synteny plots, trees, and summary reports.
 
-## Key Logic Choices
+## Current Runtime Model
 
-- Search operates in protein space against genomic DNA (translated search), then refines exon/intron structures.
-- GOI and flanking handling are separate by design.
-- Flanking model collapsing is per-locus, not global:
-  - one best model per parent ID per genomic locus,
-  - multiple loci for the same parent ID are kept if they are distinct loci.
-- Iterative DB expansion uses GOI-derived models; flanking models are kept for context/annotation and plotting.
-- Parent IDs are handled generically (not tied to `XP_` accessions).
+- Wrapper command `./synterra` runs `nextflow run main.nf` with a compact live console UI.
+- `./synterra --raw ...` disables the custom UI and prints raw Nextflow output.
+- Raw logs are always stored in `.synterra_logs/run_YYYYMMDD_HHMMSS.log`.
 
-## Input Robustness
+## Setup
 
-SynTerra is built to handle:
-- NCBI GFF/GFF3,
-- Ensembl-like GFF/GTF attribute styles,
-- custom GFFs,
-- missing GFF (`NO_GFF` fallback path with Prodigal + borrowed annotations).
-
-## Setup (Choose One Backend)
-
-You can run SynTerra with Conda (recommended), Docker, or Singularity/Apptainer.
-
-### Option A: Conda/Mamba (recommended for most users)
-
-1. Install Miniconda or Mambaforge.
-2. Create and activate the environment.
-3. Run SynTerra.
+### Conda (recommended)
 
 ```bash
 cd /path/to/SynTerra
 conda env create -f environment.yml
 conda activate syntenyfinder
 nextflow -version
-```
-
-If `nextflow` is not on your `PATH`, use the bundled launcher in this repo:
-
-```bash
-./nextflow -version
-```
-
-Use the modern live terminal UI launcher:
-
-```bash
 ./synterra --help
 ```
 
-### Option B: Docker
+If `nextflow` is not on your `PATH`, use `./nextflow`.
 
-Prerequisites:
-- Docker installed and running.
-- Nextflow installed on host.
-
-Run with Docker profile:
+### Docker
 
 ```bash
-nextflow run main.nf -profile docker --gene P01501 --mode easy --outdir results
+docker build -t synterra-local:latest .
+./synterra -profile docker --gene P01501 --mode easy --outdir results
 ```
 
-### Option C: Singularity/Apptainer
+To use another image:
 
-Prerequisites:
-- Singularity or Apptainer installed.
-- Nextflow installed on host.
+```bash
+./synterra -profile docker --docker_container your/image:tag --gene P01501 --mode easy --outdir results
+```
 
-Recommended cache setup:
+### Singularity / Apptainer
 
 ```bash
 mkdir -p "$HOME/.singularity/cache"
 export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
-```
-
-Run with Singularity profile:
-
-```bash
-nextflow run main.nf -profile singularity --gene P01501 --mode easy --outdir results
-```
-
-Optional quick smoke test (bundled test data):
-
-```bash
-nextflow run main.nf -profile test
+./synterra -profile singularity --gene P01501 --mode easy --outdir results
 ```
 
 ## Quick Start
 
-Easy mode (ID-based, automatic genome retrieval):
+### Easy mode (automatic genome retrieval)
 
 ```bash
 ./synterra \
-  --gene P01501 \
   --mode easy \
+  --gene P01501 \
   --outdir results
 ```
 
-Note: easy mode requires internet access to fetch genomes/metadata.
-Assembly selection prefers reference/representative genomes, then ranks fallback assemblies by quality.  
-If only low-quality assemblies exist, default policy is `--bad_quality_policy ask` with `--bad_quality_timeout 300` seconds (auto-NO on timeout).
-
-Pro mode (user-provided files):
+### Pro mode (local genomes)
 
 ```bash
 ./synterra \
@@ -128,29 +78,91 @@ Pro mode (user-provided files):
   --outdir results
 ```
 
-Resume an interrupted run (same command and same `--outdir`):
+### Resume a stopped run
 
 ```bash
-./synterra --gene P01501 --mode easy --outdir results -resume
+./synterra --mode easy --gene P01501 --outdir results -resume
 ```
 
-Modern single-screen terminal UI is provided by `./synterra` and hides repetitive `executor` table reprints.
-If you want classic Nextflow console output instead:
+## Practical 3FTx Example (3 snake species)
+
+This pattern is tuned for desktop stability and lower crash risk:
 
 ```bash
-nextflow run main.nf --gene P01501 --mode easy --outdir results -resume
+conda activate syntenyfinder
+
+NXF_OPTS='-Xms512m -Xmx2g' ./synterra \
+  -profile docker \
+  --mode easy \
+  --gene P60615 \
+  --home_species "Naja naja" \
+  --target_species "Ophiophagus hannah,Bungarus multicinctus" \
+  --max_genomes 2 \
+  --n_flanking_genes 30 \
+  --bad_quality_policy keep \
+  --iterative_search_cpus 2 \
+  --iterative_search_memory '6 GB' \
+  --iterative_search_max_forks 1 \
+  --mmseqs_split_memory_limit 2G \
+  --mmseqs_verbosity 0 \
+  --iterative_quiet_subtools true \
+  --outdir results_3snake_3ftx
 ```
+
+## Input Rules
+
+- `--gene` accepts UniProt IDs (for example `P60615`), NCBI protein accessions, or local FASTA paths.
+- `--query_id` is legacy and still supported.
+- In easy mode, `--home_species` is optional when GOI input is a resolvable ID.
+- In easy mode, when `--gene` is a local FASTA file, provide `--home_species`.
+- If a FASTA path does not exist, input resolution fails early (`RESOLVE_GENE_INPUT` or input validation).
+
+## Annotation Behavior
+
+- If home GFF is available, SynTerra uses annotation-based extraction first.
+- If no usable home GFF exists, SynTerra falls back to local prediction (Prodigal/borrowed annotations path).
+- Flanking genes keep stable IDs and now also carry display labels derived from annotation names when available.
+- Iterative expansion is GOI-driven; flanking models are retained for context and plotting.
 
 ## Main Outputs
 
-Under `--outdir`:
+Inside `--outdir`:
+
+- `synterra_report.json`: run summary
 - `*_synteny_plot.html`: interactive synteny plots
 - `*_tree.nwk`: GOI tree per locus
-- `synterra_report.json`: run summary
-- `regions/*.regions.bed`: clustered candidate regions
-- `intermediate/`: phase-level intermediate artifacts
+- `regions/*.regions.bed`: clustered regions
+- `downloaded_genomes/easy_mode_genomes/assembly_quality.tsv`: easy-mode assembly quality report
+- `intermediate/`: phase-level intermediate files
+
+## Troubleshooting
+
+### Long runtime in fetch phase
+
+- Easy mode downloads large genomes and metadata; this can take hours on slow links.
+- Check live raw logs in `.synterra_logs/`.
+- Use explicit `--target_species` and small `--max_genomes` to reduce search/download scope.
+
+### `RESOLVE_GENE_INPUT` failed
+
+- Verify `--gene` path exists when passing a local FASTA.
+- For ID input, verify the ID is valid and internet access is available.
+- If using local FASTA in easy mode, provide `--home_species`.
+
+### Desktop crashes / resource pressure
+
+- Use Docker profile.
+- Constrain Java with `NXF_OPTS='-Xms512m -Xmx2g'`.
+- Keep `--iterative_search_cpus 2` and `--iterative_search_max_forks 1` for workstation runs.
+- Lower `--mmseqs_split_memory_limit` if needed.
+
+### Clean old runs
+
+```bash
+rm -rf results_* work
+```
 
 ## Documentation
 
-- Detailed setup, runtime profiles, and parameters: `USAGE.md`
-- Detailed algorithm and data flow: `PIPELINE_DETAILED.md`
+- Full setup, profiles, complete parameter reference, and recipes: `USAGE.md`
+- Architecture and deep details: `PIPELINE_DETAILED.md`

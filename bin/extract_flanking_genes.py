@@ -4,6 +4,7 @@ import argparse
 import sys
 import os
 import subprocess
+import re
 
 # Use our own sequence utilities (no BioPython dependency)
 try:
@@ -35,6 +36,7 @@ def parse_gff_for_genes(gff_file):
     cds_by_parent = {}
     cds_orphans = []
     parent_map = {} # Transcript -> Gene
+    transcript_attrs = {} # Transcript ID -> attributes
     
     with open(gff_file, 'r') as f:
         for line in f:
@@ -66,6 +68,7 @@ def parse_gff_for_genes(gff_file):
                 tid = attributes.get('ID')
                 gid = attributes.get('Parent')
                 if tid:
+                     transcript_attrs[tid] = attributes
                      # Check if Parent is present, sometimes might be gene ID itself or absent
                      if gid:
                          parent_map[tid] = gid
@@ -104,11 +107,13 @@ def parse_gff_for_genes(gff_file):
         if not transcripts:
             if gid in cds_by_parent:
                 gene['cds_parts'] = cds_by_parent[gid]
+            gene['transcript_attrs'] = {}
         else:
             # Pick first transcript (or longest)
             # Just take the first one for now
             # TODO: Improve isoform selection
             best_t = transcripts[0]
+            gene['transcript_attrs'] = transcript_attrs.get(best_t, {})
             if best_t in cds_by_parent:
                 gene['cds_parts'] = cds_by_parent[best_t]
         
@@ -160,6 +165,57 @@ def parse_gff_for_genes(gff_file):
         processed_genes = pseudo_genes
 
     return sorted(processed_genes, key=lambda x: (x['chrom'], x['start']))
+
+def _is_generic_id_label(label):
+    if not label:
+        return True
+    txt = str(label).strip()
+    if not txt:
+        return True
+    if re.match(r'^(gene-)?[A-Za-z]{1,8}\d*_\d+$', txt):
+        return True
+    if re.match(r'^LOC\d+$', txt, re.IGNORECASE):
+        return True
+    return False
+
+def _is_noninformative_product(product):
+    if not product:
+        return True
+    txt = str(product).strip().lower()
+    if not txt:
+        return True
+    return txt in {
+        'hypothetical protein',
+        'uncharacterized protein',
+        'predicted protein',
+    }
+
+def _preferred_gene_label(gene):
+    """
+    Choose a human-readable label while keeping stable IDs as primary keys.
+    Priority: gene symbol/name -> informative product -> locus_tag/ID.
+    """
+    attrs = gene.get('attrs', {}) or {}
+    tattrs = gene.get('transcript_attrs', {}) or {}
+
+    for source in (tattrs, attrs):
+        for key in ('gene', 'Name'):
+            cand = str(source.get(key, '')).strip()
+            if cand and not _is_generic_id_label(cand):
+                return cand
+
+    for source in (tattrs, attrs):
+        product = str(source.get('product', '')).strip()
+        if product and not _is_noninformative_product(product):
+            return product
+
+    for source in (tattrs, attrs):
+        for key in ('locus_tag', 'Name', 'ID'):
+            cand = str(source.get(key, '')).strip()
+            if cand:
+                return cand
+
+    return str(gene.get('id', '')).strip()
 
 # load_genome now imported from sequence_utils
 
@@ -400,16 +456,20 @@ def main():
             gid = gene['attrs'].get('ID', f"{gene['chrom']}_{gene['start']}")
             if gid in seen: continue
             seen.add(gid)
+            display_label = _preferred_gene_label(gene).replace('\t', ' ').strip() or gid
+            seq_header = gid if display_label == gid else f"{gid} label={display_label}"
             
             # Write BED (always the full gene)
-            bed_out.write(f"{gene['chrom']}\t{gene['start']}\t{gene['end']}\t{gid}\t.\t{gene['strand']}\n")
+            bed_out.write(
+                f"{gene['chrom']}\t{gene['start']}\t{gene['end']}\t{gid}\t.\t{gene['strand']}\t{display_label}\n"
+            )
             
             # Write FASTA - depends on exon_mode
             if 'seq' in gene:
                 # From prediction - no exon info available, use whole sequence
                 prot_seq = str(gene['seq'])
                 if len(prot_seq) * 3 >= args.min_size:
-                    all_fasta_records.append((gid, prot_seq))
+                    all_fasta_records.append((seq_header, prot_seq))
             else:
                 if gene['chrom'] not in genome_seqs:
                     continue
@@ -475,7 +535,7 @@ def main():
                             prot_seq = prot_seq.split('*')[0]
                         
                         if len(prot_seq) * 3 >= args.min_size:
-                            all_fasta_records.append((gid, prot_seq))
+                            all_fasta_records.append((seq_header, prot_seq))
                         
                 else:
                     # NAIVE FALLBACK (No CDS parts, use full genomic)
@@ -488,7 +548,7 @@ def main():
                         prot_seq = prot_seq.split('*')[0]
                     
                     if len(prot_seq) * 3 >= args.min_size:
-                        all_fasta_records.append((gid, prot_seq))
+                        all_fasta_records.append((seq_header, prot_seq))
     
     # Write all FASTA records at once
     write_fasta(all_fasta_records, args.out_faa)

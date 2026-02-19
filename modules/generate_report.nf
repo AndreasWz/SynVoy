@@ -2,37 +2,66 @@ process GENERATE_REPORT {
     publishDir "${params.outdir}", mode: 'copy'
     
     input:
-    path region_files
-    path hits_dirs
-    path augmented_genes
+    val region_files
+    val hits_dirs
+    val augmented_genes
     path qc_json
     
     output:
     path "synterra_report.json", emit: report
     
     script:
+    def flattenInput = { obj ->
+        if (obj == null) {
+            return []
+        }
+        if (obj instanceof Collection) {
+            def out = []
+            obj.each { item ->
+                out.addAll(flattenInput(item))
+            }
+            return out
+        }
+        return [obj]
+    }
+    def regionList = flattenInput(region_files).collect { it.toString() }.join('\n')
+    def hitsList = flattenInput(hits_dirs).collect { it.toString() }.join('\n')
+    def augmentedList = flattenInput(augmented_genes).collect { it.toString() }.join('\n')
     """
     mkdir -p results/regions results/hits results/augmented
+
+    cat > .hits.list <<'EOF'
+${hitsList}
+EOF
+    cat > .regions.list <<'EOF'
+${regionList}
+EOF
+    cat > .augmented.list <<'EOF'
+${augmentedList}
+EOF
     
     # Check if inputs exist
-    for d in ${hits_dirs}; do
+    while IFS= read -r d; do
+        [ -z "\$d" ] && continue
         if [ -d "\$d" ]; then
-            cp -r \$d/* results/hits/ 2>/dev/null || true
+            cp -r "\$d"/* results/hits/ 2>/dev/null || true
         fi
-    done
+    done < .hits.list
     
-    for f in ${augmented_genes}; do
+    while IFS= read -r f; do
+       [ -z "\$f" ] && continue
        if [ -f "\$f" ]; then
-           cp \$f results/augmented/ 2>/dev/null || true
+           cp "\$f" results/augmented/ 2>/dev/null || true
        fi
-    done
+    done < .augmented.list
     
-    for f in ${region_files}; do
+    while IFS= read -r f; do
+       [ -z "\$f" ] && continue
        if [ -f "\$f" ]; then
-           cp \$f results/regions/ 2>/dev/null || true
+           cp "\$f" results/regions/ 2>/dev/null || true
        fi
-    done
+    done < .regions.list
     
-    generate_report.py --results_dir results --qc_json ${qc_json} --output synterra_report.json
+    ${projectDir}/bin/generate_report.py --results_dir results --qc_json "${qc_json}" --output synterra_report.json
     """
 }

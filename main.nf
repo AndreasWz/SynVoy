@@ -115,6 +115,10 @@ def printParams() {
 printHeader()
 printParams()
 
+// Stable sentinel files for optional path inputs.
+def no_gff_file = file("${projectDir}/assets/sentinels/NO_GFF")
+def no_species_map_file = file("${projectDir}/assets/sentinels/NO_SPECIES_MAP")
+
 workflow {
     log.info ""
     
@@ -156,18 +160,27 @@ workflow {
     
     // Channel setup — depends on mode
     if (params.mode == 'easy') {
-        // --- Easy mode: Resolve gene input (ID → FASTA + species) ---
-        def gene_input = params.gene ?: params.query_id
-        def species_override = params.home_species ?: ''
-        
-        uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query input')
-        RESOLVE_GENE_INPUT(gene_input, species_override)
-        
-        // Use resolved FASTA as query
-        raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
-        
-        // Get resolved species (auto-detected from ID, or user-provided)
-        resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
+        // --- Easy mode query handling ---
+        // If user provided a local FASTA path, use it directly. This avoids
+        // resolving an already-resolved file path from process work dirs.
+        if (params.gene && file(params.gene).exists()) {
+            uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: using provided query FASTA')
+            raw_gene_ch = Channel.fromPath(params.gene)
+            resolved_species_ch = Channel.value(params.home_species ?: '')
+        } else {
+            // ID/symbol mode: resolve input via resolver process.
+            def gene_input = params.gene ?: params.query_id
+            def species_override = params.home_species ?: ''
+            
+            uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query input')
+            RESOLVE_GENE_INPUT(gene_input, species_override)
+            
+            // Use resolved FASTA as query
+            raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
+            
+            // Get resolved species (auto-detected from ID, or user-provided)
+            resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
+        }
         
         // Determine home species: user-provided takes priority, else auto-detected
         home_species_ch = resolved_species_ch.map { resolved ->
@@ -183,7 +196,7 @@ workflow {
         FETCH_HOME_GENOME(home_species_ch)
         home_genome_ch = FETCH_HOME_GENOME.out.genome
         // Use GFF if available, otherwise mark as missing
-        home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(file("NO_GFF"))
+        home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(no_gff_file)
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
@@ -215,7 +228,7 @@ workflow {
         if (params.home_gff) {
             home_gff_ch = Channel.fromPath(params.home_gff).first()
         } else {
-            home_gff_ch = Channel.value(file("NO_GFF"))
+            home_gff_ch = Channel.value(no_gff_file)
         }
         
         // 3. Target Genomes Setup
@@ -230,12 +243,12 @@ workflow {
             
             STAGE_GENOMES(target_genomes_list)
             genomes_dir_ch = STAGE_GENOMES.out.dir
-            species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
+            species_map_ch = Channel.value(no_species_map_file)
             
         } else {
             uiStatus('WARN', 'STAGE_GENOMES', 'No target genomes provided; running home-genome-only analysis')
             genomes_dir_ch = Channel.empty()
-            species_map_ch = Channel.fromPath("NO_SPECIES_MAP")
+            species_map_ch = Channel.value(no_species_map_file)
         }
     }
 
@@ -322,7 +335,7 @@ workflow {
         fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
             .mix(BORROW_ANNOTATIONS.out.gff)
             .collectFile(name: 'merged_home_annotations.gff')
-            .ifEmpty(file("NO_GFF"))
+            .ifEmpty(no_gff_file)
         
         effective_home_gff_ch = gff_status.real
             .concat(
@@ -416,11 +429,11 @@ workflow {
         ITERATIVE_SEARCH.out.hits
             .join(EXTRACT_FLANKING.out.faa)
             .join(EXTRACT_FLANKING.out.bed)
-            .map { locus_id, hits_dir, faa_file, bed_file ->
+            .flatMap { locus_id, hits_dir, faa_file, bed_file ->
                 // Explode hits directory
                 def dir_file = new File(hits_dir.toString())
                 if (dir_file.exists() && dir_file.isDirectory()) {
-                    dir_file.listFiles()
+                    (dir_file.listFiles() ?: [])
                         .findAll { it.name.endsWith(".m8") }
                         .collect { hit_file ->
                             def genome_name = hit_file.name.replace(".m8", "").replace("${locus_id}_", "")
@@ -430,13 +443,58 @@ workflow {
                      [] 
                 }
             }
-            .flatten()
-            .collate(5) // [genome_name, faa_file, hit_file, locus_id, bed_file]
             .combine(genomes_dir_ch) // Combine with genomes_dir -> [..., genomes_dir]
+            // Normalize combine output across Nextflow tuple-shape variants.
+            .map { rec ->
+                if (!(rec instanceof List)) {
+                    return null
+                }
+                // Variant A: [left_tuple, genomes_dir]
+                if (rec.size() == 2 && rec[0] instanceof List) {
+                    def left = rec[0]
+                    if (left.size() < 5) return null
+                    return tuple(left[0], left[1], left[2], left[3], left[4], rec[1])
+                }
+                // Variant B: already flattened [genome, faa, hits, locus, bed, genomes_dir]
+                if (rec.size() >= 6) {
+                    return tuple(rec[0], rec[1], rec[2], rec[3], rec[4], rec[5])
+                }
+                return null
+            }
+            .filter { rec ->
+                rec != null && rec[2] != null && rec[4] != null && rec[5] != null
+            }
+            .set { clustering_inputs_raw }
+
+        // Key iterative target GFFs by locus+genome so CLUSTER_REGIONS can
+        // prioritize regions that actually overlap final GOI annotations.
+        gff_keyed_ch = ITERATIVE_SEARCH.out.gff
+            .transpose()
+            .map { locus_id, gff ->
+                def genome_name = gff.baseName
+                tuple("${locus_id}::${genome_name}", gff)
+            }
+
+        clustering_inputs_raw
+            .map { rec ->
+                def key = "${rec[3]}::${rec[0]}"
+                tuple(key, rec)
+            }
+            .join(gff_keyed_ch, remainder: true)
+            // remainder:true can emit right-only tuples with rec=null;
+            // keep only left-origin records for clustering inputs.
+            .filter { key, rec, gff -> rec != null }
+            .map { key, rec, gff ->
+                def effective_target_gff = gff ?: no_gff_file
+                tuple(rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], effective_target_gff)
+            }
+            .filter { rec ->
+                rec[2] != null && rec[4] != null && rec[5] != null && rec[6] != null
+            }
             .set { clustering_inputs }
 
         CLUSTER_REGIONS(
-            clustering_inputs.map { tuple(it[0], it[1], it[2], it[5]) }, // [genome, payload, hit, genomes_dir]
+            clustering_inputs.map { tuple(it[0], it[1], it[2], it[5], it[6]) }, // [genome, payload, hit, genomes_dir, target_gff]
             clustering_inputs.map { tuple(it[3], it[4]) }, // [locus_id, synteny_bed]
             params.n_flanking_genes,
             params.min_synteny_score

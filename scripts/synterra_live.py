@@ -12,6 +12,7 @@ import argparse
 import os
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -152,6 +153,7 @@ def update_state(state: LiveState, line: str) -> None:
         proc = m.group(1)
         state.progress_label = proc
         state.current_task = proc
+        state.task_detail = ""
         set_phase_for_task(state, proc)
         c = PROC_COUNTS_RE.search(line)
         if c:
@@ -165,6 +167,7 @@ def update_state(state: LiveState, line: str) -> None:
         proc = m.group(1)
         state.progress_label = proc
         state.current_task = proc
+        state.task_detail = ""
         set_phase_for_task(state, proc)
         c = PROC_COUNTS_RE.search(line)
         if c:
@@ -178,6 +181,7 @@ def update_state(state: LiveState, line: str) -> None:
         proc = m.group(1)
         state.current_task = proc
         state.progress_label = proc
+        state.task_detail = ""
         set_phase_for_task(state, proc)
         return
 
@@ -194,6 +198,8 @@ def update_state(state: LiveState, line: str) -> None:
     m = ERROR_RE.search(line)
     if m:
         state.last_error = m.group(1).strip()
+        state.last_info = f"ERROR: {state.last_error}"
+        state.add_event(state.last_info)
         return
 
     if "Pipeline completed successfully" in line:
@@ -231,6 +237,8 @@ def render_line(state: LiveState, start_time: float, spinner_idx: int) -> str:
         core += "]"
     if state.task_detail:
         core += f"  -  {state.task_detail}"
+    elif state.last_error:
+        core += f"  -  ERROR: {state.last_error}"
     elif state.last_info:
         core += f"  -  {state.last_info}"
     return core
@@ -341,6 +349,9 @@ def main() -> int:
     start_time = time.time()
     spinner_idx = 0
     done = False
+    fatal_since: float | None = None
+    sent_sigint = False
+    sent_kill = False
     interactive_ui = (not ns.raw) and sys.stdout.isatty()
     last_non_tty_line = ""
     last_non_tty_emit = 0.0
@@ -368,6 +379,8 @@ def main() -> int:
                     continue
 
                 update_state(state, clean)
+                if state.last_error and fatal_since is None:
+                    fatal_since = time.time()
                 if should_skip_line(clean):
                     continue
 
@@ -389,6 +402,26 @@ def main() -> int:
 
             if done and proc.poll() is not None:
                 break
+
+            # Guardrail: in rare cases Nextflow can remain alive after a fatal
+            # process error; nudge it to exit so users are not left with a
+            # spinner for hours.
+            if fatal_since is not None and proc.poll() is None:
+                fatal_age = time.time() - fatal_since
+                if fatal_age > 30 and not sent_sigint:
+                    try:
+                        proc.send_signal(signal.SIGINT)
+                        state.add_event("Sent SIGINT after fatal error to avoid hang.")
+                    except Exception:
+                        pass
+                    sent_sigint = True
+                if fatal_age > 45 and not sent_kill and proc.poll() is None:
+                    try:
+                        proc.kill()
+                        state.add_event("Forced process termination after fatal hang.")
+                    except Exception:
+                        pass
+                    sent_kill = True
 
             # Keep spinner moving even when no new lines arrive.
             time.sleep(0.08 if not drained else 0.02)

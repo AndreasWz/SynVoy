@@ -55,7 +55,7 @@ process PLOT_SYNTENY {
         cp $species_map "\$inputs_dir/" || true
     fi
 
-    plot_synteny.py \\
+    ${projectDir}/bin/plot_synteny.py \\
         --query_bed $query_bed \\
         --home_bed $home_bed \\
         --home_gff $home_gff \\

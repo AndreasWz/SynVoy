@@ -30,8 +30,10 @@ import argparse
 import colorsys
 import json
 import os
+import re
 import sys
 from collections import defaultdict
+from urllib.parse import unquote
 
 import plotly.graph_objects as go
 
@@ -83,6 +85,8 @@ def parse_bed(bed_file):
                 "end":    int(p[2]),
                 "name":   p[3],
                 "strand": p[5] if len(p) > 5 else "+",
+                # Optional display label (BED col7 from extract_flanking_genes.py)
+                "display_name": p[6] if len(p) > 6 else "",
             })
     return genes
 
@@ -150,6 +154,141 @@ def filter_genes_to_candidate_regions(genes, candidate_regions):
     return kept
 
 
+def _is_goi_target_gene(gene):
+    name = gene.get("name", "") or ""
+    home_id = gene.get("home_gene_id", "") or ""
+    return name.startswith("GOI_") or home_id.startswith("GOI_")
+
+
+def _region_overlaps_gene(region, gene):
+    chrom, rs, re = region
+    if gene.get("chrom") != chrom:
+        return False
+    # Candidate BED is 0-based half-open; GFF genes are 1-based closed.
+    gs0 = max(0, int(gene["start"]) - 1)
+    ge0 = int(gene["end"])
+    ov = max(0, min(ge0, re) - max(gs0, rs))
+    return ov > 0
+
+
+def _candidate_regions_with_goi(candidate_regions, genes):
+    goi_genes = [g for g in genes if _is_goi_target_gene(g)]
+    if not goi_genes:
+        return []
+    return [
+        reg for reg in candidate_regions
+        if any(_region_overlaps_gene(reg, gg) for gg in goi_genes)
+    ]
+
+
+def _select_goi_context_genes(genes, flank_bp=200000):
+    """
+    Fallback when candidate regions miss GOI loci:
+    keep genes on the dominant GOI chromosome around GOI coordinates.
+    """
+    goi_genes = [g for g in genes if _is_goi_target_gene(g)]
+    if not goi_genes:
+        return []
+
+    per_chrom = defaultdict(list)
+    for g in goi_genes:
+        per_chrom[g["chrom"]].append(g)
+
+    def _chrom_key(item):
+        chrom, glist = item
+        best_identity = max((x.get("identity", 0.0) for x in glist), default=0.0)
+        return (len(glist), best_identity)
+
+    goi_chrom, goi_list = max(per_chrom.items(), key=_chrom_key)
+    goi_min = min(g["start"] for g in goi_list)
+    goi_max = max(g["end"] for g in goi_list)
+    win_s = max(1, goi_min - max(0, int(flank_bp)))
+    win_e = goi_max + max(0, int(flank_bp))
+
+    selected = [
+        g for g in genes
+        if g["chrom"] == goi_chrom and g["end"] >= win_s and g["start"] <= win_e
+    ]
+    return selected
+
+
+def _parse_gff_attrs(attr_field):
+    attrs = {}
+    for kv in (attr_field or "").split(";"):
+        if "=" not in kv:
+            continue
+        k, v = kv.split("=", 1)
+        attrs[k] = unquote(v)
+    return attrs
+
+
+def _is_generic_gene_label(name):
+    """Return True for non-informative locus-tag style labels."""
+    if not name:
+        return True
+    txt = clean_gene_label(str(name).strip())
+    if not txt:
+        return True
+    if re.match(r"^[A-Za-z]{1,8}\d*_\d+$", txt):
+        return True
+    if re.match(r"^LOC\d+$", txt, re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_noninformative_product(product):
+    """Return True for generic/placeholder product annotations."""
+    if not product:
+        return True
+    txt = str(product).strip().lower()
+    generic = (
+        "hypothetical protein",
+        "uncharacterized protein",
+        "unknown protein",
+        "predicted protein",
+    )
+    return any(tok in txt for tok in generic)
+
+
+def _format_product_label(product, max_words=5, max_chars=42):
+    """
+    Convert long product descriptions into compact labels suitable for plotting.
+    """
+    if not product:
+        return ""
+    txt = str(product).strip()
+    txt = re.sub(r"^(putative|probable|predicted)\s+", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\s+", " ", txt)
+    words = txt.split(" ")
+    if len(words) > max_words:
+        txt = " ".join(words[:max_words])
+    if len(txt) > max_chars:
+        txt = txt[: max_chars - 3].rstrip() + "..."
+    return txt
+
+
+def _preferred_target_label(gene):
+    """
+    Prefer native target annotation labels when informative.
+    Fallback order: target_gene -> target_product -> name -> home_gene_id.
+    """
+    target_gene = gene.get("target_gene", "")
+    if target_gene and not _is_generic_gene_label(target_gene):
+        return target_gene
+
+    target_product = gene.get("target_product", "")
+    if target_product and not _is_noninformative_product(target_product):
+        pretty = _format_product_label(target_product)
+        if pretty:
+            return pretty
+
+    name = gene.get("name", "")
+    if name and not _is_generic_gene_label(name):
+        return name
+
+    return target_gene or name or gene.get("home_gene_id", "")
+
+
 def parse_target_gff(gff_file):
     """
     Parse a SynTerra target-genome GFF.
@@ -172,18 +311,27 @@ def parse_target_gff(gff_file):
             ftype = p[2]
             if ftype not in ("mRNA", "gene", "tandem_copy"):
                 continue
-            attrs = {}
-            for kv in p[8].split(";"):
-                if "=" in kv:
-                    k, v = kv.split("=", 1)
-                    attrs[k] = v
+            attrs = _parse_gff_attrs(p[8])
+            raw_name = attrs.get("Name", attrs.get("ID", ""))
+            target_gene = attrs.get("TargetGene", "")
+            target_product = attrs.get("TargetProduct", "")
+            target_id = attrs.get("TargetID", "")
+
+            try:
+                identity = float(attrs.get("Identity", "0"))
+            except Exception:
+                identity = 0.0
+
             genes.append({
                 "chrom":        p[0],
                 "start":        int(p[3]),
                 "end":          int(p[4]),
-                "name":         attrs.get("Name", attrs.get("ID", "")),
+                "name":         raw_name,
+                "target_gene":  target_gene,
+                "target_product": target_product,
+                "target_id":    target_id,
                 "strand":       p[6],
-                "identity":     float(attrs.get("Identity", "0")),
+                "identity":     identity,
                 "home_gene_id": attrs.get("SynTerra_Parent", attrs.get("Parent", "")),
                 "n_exons":      int(attrs.get("Exons", "1")),
             })
@@ -247,7 +395,7 @@ def parse_home_gff_products(gff_file):
                         attrs[k] = unquote(v)
                 product = attrs.get("product", "")
                 if product:
-                    for key in ("ID", "Name", "Parent"):
+                    for key in ("ID", "Name", "Parent", "gene", "locus_tag"):
                         if key in attrs:
                             products[attrs[key]] = product
     except Exception as exc:
@@ -442,6 +590,9 @@ def clean_genome_name(name):
 
 def clean_gene_label(name):
     """gene-LOC412898 -> LOC412898 ;  GOI_P01501 -> P01501"""
+    if name is None:
+        return ""
+    name = str(name)
     if name.startswith("gene-"):
         return name[5:]
     if name.startswith("GOI_"):
@@ -661,6 +812,30 @@ def _lookup_product(gene_name, products):
     return ""
 
 
+def _preferred_home_label(gene, home_products):
+    """
+    Prefer informative home labels:
+    gene symbol/name first, then product for generic locus-tag IDs.
+    """
+    display_name = gene.get("display_name", "")
+    cleaned_display = clean_gene_label(display_name)
+    if cleaned_display and not _is_generic_gene_label(cleaned_display):
+        return cleaned_display
+
+    name = gene.get("name", "")
+    cleaned = clean_gene_label(name)
+    if cleaned and not _is_generic_gene_label(cleaned):
+        return cleaned
+
+    product = _lookup_product(name, home_products)
+    if product and not _is_noninformative_product(product):
+        pretty = _format_product_label(product)
+        if pretty:
+            return pretty
+
+    return cleaned or name
+
+
 # ======================================================================
 # Tree visualization
 # ======================================================================
@@ -870,11 +1045,33 @@ def main():
     for gff_file in args.target_gffs:
         genome_id = clean_genome_name(
             os.path.basename(gff_file).replace(".gff", ""))
-        genes = parse_target_gff(gff_file)
-        genes = filter_genes_to_candidate_regions(
-            genes,
-            _match_regions_for_genome(candidate_regions_by_genome, genome_id),
-        )
+        genes_all = parse_target_gff(gff_file)
+        candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
+        genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
+
+        # Prefer candidate regions that actually overlap GOI models.
+        goi_candidate_regions = _candidate_regions_with_goi(candidate_regions, genes_all)
+        if goi_candidate_regions:
+            genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
+            candidate_regions = goi_candidate_regions
+
+        # If candidate regions exist but miss GOI, recover a GOI-centered context.
+        if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
+            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=200000)
+            if fallback_genes:
+                genes = fallback_genes
+                print(
+                    f"[plot] {genome_id}: candidate regions missed GOI; "
+                    f"using GOI-centered fallback ({len(genes)} genes)."
+                )
+
+        # Reduce clutter: if GOI is present, keep the GOI chromosome only.
+        if any(_is_goi_target_gene(g) for g in genes):
+            goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
+            if len(goi_chroms) == 1:
+                goi_chrom = next(iter(goi_chroms))
+                genes = [g for g in genes if g["chrom"] == goi_chrom]
+
         if not genes:
             continue
         genes.sort(key=lambda g: g["start"])
@@ -1012,8 +1209,9 @@ def main():
                                reverse=True)
 
         for gene in sorted_genes:
-            name    = gene["name"]
+            name = gene["name"]
             home_id = gene.get("home_gene_id", name)
+            target_label = _preferred_target_label(gene)
             goi_f   = is_goi(name) or is_goi(home_id)
 
             # --- colour ---
@@ -1032,7 +1230,10 @@ def main():
                 bclr, bw = "rgba(0,0,0,0.15)", 0.5
 
             # --- hover text ---
-            cn = clean_gene_label(name)
+            if track["is_home"]:
+                cn = _preferred_home_label(gene, home_products)
+            else:
+                cn = clean_gene_label(target_label)
             if track["is_home"]:
                 product = _lookup_product(name, home_products)
                 hover = f"<b>{cn}</b>"
@@ -1045,7 +1246,10 @@ def main():
                     hover += "<br><b>GENE OF INTEREST</b>"
             else:
                 hover = f"<b>{cn}</b>"
-                hover += f"<br>Homolog: {clean_gene_label(home_id)}"
+                if gene.get("target_product"):
+                    hover += f"<br><i>{gene['target_product']}</i>"
+                if home_id:
+                    hover += f"<br>Homolog: {clean_gene_label(home_id)}"
                 if "identity" in gene:
                     hover += f"<br>Identity: {gene['identity']:.1f}%"
                 if "n_exons" in gene:
@@ -1072,10 +1276,12 @@ def main():
             name    = gene["name"]
             home_id = gene.get("home_gene_id", name)
             goi_f   = is_goi(name) or is_goi(home_id)
-            if not track["is_home"] and home_id:
-                label = clean_gene_label(home_id)
+            if not track["is_home"]:
+                label = clean_gene_label(_preferred_target_label(gene))
+                if not label and home_id:
+                    label = clean_gene_label(home_id)
             else:
-                label = clean_gene_label(name)
+                label = _preferred_home_label(gene, home_products)
             add_label(fig, gene, x_off, yb, GENE_H, label,
                       fsize=8, is_goi_flag=goi_f)
 

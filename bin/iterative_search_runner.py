@@ -11,8 +11,12 @@ import uuid
 import sys
 import json
 import logging
+import contextlib
+from bisect import bisect_right
 from collections import defaultdict
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
+from urllib.parse import unquote
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +36,38 @@ def has_parasail_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _tail_lines(text: str, n: int = 20) -> str:
+    if not text:
+        return ""
+    return "\n".join(text.strip().splitlines()[-n:])
+
+
+def _format_mmseqs_failure(proc: subprocess.CompletedProcess) -> str:
+    """
+    Return compact failure details from an mmseqs subprocess result.
+    """
+    stderr_tail = _tail_lines(proc.stderr or "", n=20)
+    stdout_tail = _tail_lines(proc.stdout or "", n=20)
+    return stderr_tail or stdout_tail or "no tool output captured"
+
+
+def _is_mmseqs_resource_failure(details: str) -> bool:
+    """
+    Detect common low-memory / prefilter-failure signatures from MMseqs.
+    """
+    txt = (details or "").lower()
+    patterns = (
+        "prefilter died",
+        "search step died",
+        "search died",
+        "out of memory",
+        "cannot allocate memory",
+        "std::bad_alloc",
+        "killed",
+    )
+    return any(p in txt for p in patterns)
 
 
 # Shared helpers
@@ -73,6 +109,20 @@ except ImportError:
 def run_command(cmd):
     subprocess.check_call(cmd)
 
+
+@contextlib.contextmanager
+def maybe_quiet_streams(quiet: bool):
+    """
+    Suppress noisy third-party stdout/stderr (e.g. miniprot diagnostics)
+    when running in low-noise mode.
+    """
+    if not quiet:
+        yield
+        return
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
 def normalize_coordinates(start: int, end: int) -> Tuple[int, int]:
     return min(start, end), max(start, end)
 
@@ -97,7 +147,15 @@ def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int,
         kept.append(h)
     return kept
 
-def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thresh: float) -> List[Dict[str, Any]]:
+def parse_hits(
+    hits_file: str,
+    min_identity: float,
+    min_length: int,
+    evalue_thresh: float,
+    query_lengths: Optional[Dict[str, int]] = None,
+    short_query_frac: float = 0.60,
+    short_query_min: int = 12,
+) -> List[Dict[str, Any]]:
     """
     Parse MMseqs2 hits and return a list of hit dictionaries.
     Filters by basic quality metrics.
@@ -119,9 +177,22 @@ def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thre
                 alnlen = int(parts[3])
                 evalue = float(parts[10])
                 
-                if (evalue <= evalue_thresh and 
-                    pident >= min_identity and 
-                    alnlen >= min_length):
+                q_id = parts[0]
+                q_len = None
+                if query_lengths:
+                    q_len = query_lengths.get(q_id)
+                    if q_len is None:
+                        q_base = extract_base_gene_id(q_id)
+                        q_len = query_lengths.get(q_base)
+
+                effective_min_length = min_length
+                if q_len and q_len > 0:
+                    adaptive_min = max(short_query_min, int(round(q_len * short_query_frac)))
+                    effective_min_length = min(min_length, adaptive_min)
+
+                if (evalue <= evalue_thresh and
+                    pident >= min_identity and
+                    alnlen >= effective_min_length):
                     
                     t_start = int(parts[8])
                     t_end = int(parts[9])
@@ -137,7 +208,7 @@ def parse_hits(hits_file: str, min_identity: float, min_length: int, evalue_thre
                     bits = float(parts[11]) if len(parts) > 11 else 0.0
 
                     hits.append({
-                        'query': parts[0],
+                        'query': q_id,
                         'target': parts[1], # Chromosome/Scaffold
                         'chrom': parts[1],
                         'start': start,
@@ -196,10 +267,14 @@ def is_goi_query_id(query_id: str) -> bool:
     if not query_id:
         return False
     base_id = extract_base_gene_id(query_id)
+    # Backward compatibility: older runs could emit bare "exon_N" IDs
+    # for GOI-derived exons (missing GOI_ prefix).
+    bare_legacy_goi_exon = bool(re.fullmatch(r'exon_\d+', query_id))
     return (
         query_id.startswith('GOI_') or
         base_id.startswith('GOI_') or
-        query_id.startswith('GOI_copy_')
+        query_id.startswith('GOI_copy_') or
+        bare_legacy_goi_exon
     )
 
 
@@ -361,6 +436,207 @@ def _select_parent_id(attrs: Dict[str, str], model_id: str) -> str:
         if value:
             return value
     return extract_base_gene_id(model_id)
+
+
+def _is_generic_label(label: str) -> bool:
+    """Heuristic for non-informative locus-tag style labels."""
+    if not label:
+        return True
+    txt = str(label).strip()
+    if not txt:
+        return True
+    if txt.startswith("gene-"):
+        txt = txt[5:]
+    if re.match(r"^[A-Za-z]+\d*_\d+$", txt):
+        return True
+    if re.match(r"^[A-Z]{2,6}\d{0,3}_\d+$", txt):
+        return True
+    if re.match(r"^LOC\d+$", txt, re.IGNORECASE):
+        return True
+    return False
+
+
+def _safe_gff_value(value: Any) -> str:
+    """Sanitize attribute values so GFF parsing remains robust."""
+    txt = str(value) if value is not None else ""
+    txt = txt.replace(";", ",").replace("\t", " ").replace("\n", " ").strip()
+    return txt
+
+
+def _compose_gff_attrs(base_attrs: Dict[str, Any],
+                       native_annot: Optional[Dict[str, str]] = None) -> str:
+    """
+    Compose a GFF attribute field from base attrs plus optional native-annotation attrs.
+    """
+    merged: Dict[str, Any] = {}
+    for key, value in base_attrs.items():
+        if value is None:
+            continue
+        sval = _safe_gff_value(value)
+        if sval:
+            merged[key] = sval
+
+    if native_annot:
+        if native_annot.get("label"):
+            merged["TargetGene"] = _safe_gff_value(native_annot["label"])
+        if native_annot.get("product"):
+            merged["TargetProduct"] = _safe_gff_value(native_annot["product"])
+        if native_annot.get("feature_id"):
+            merged["TargetID"] = _safe_gff_value(native_annot["feature_id"])
+
+    return ";".join(f"{k}={v}" for k, v in merged.items())
+
+
+def find_native_annotation_path(genome_path: str) -> Optional[str]:
+    """
+    Locate the native annotation file next to a genome FASTA.
+    Supports .gff/.gff3 (+ gz variants).
+    """
+    p = Path(genome_path)
+    candidates = [
+        p.with_suffix(".gff"),
+        p.with_suffix(".gff3"),
+        Path(str(p) + ".gff"),
+        Path(str(p) + ".gff3"),
+        p.with_suffix(".gff.gz"),
+        p.with_suffix(".gff3.gz"),
+        Path(str(p) + ".gff.gz"),
+        Path(str(p) + ".gff3.gz"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return None
+
+
+def load_native_annotation_index(gff_path: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Build a per-chromosome interval index from native target annotations.
+    """
+    if not gff_path or not os.path.exists(gff_path):
+        return {}
+
+    entries_by_chrom: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    accepted_types = {"gene", "mRNA", "mrna", "transcript"}
+
+    for feat in parse_gff(gff_path):
+        ftype = feat.get("type")
+        if ftype not in accepted_types:
+            continue
+
+        attrs = feat.get("attributes", {}) or {}
+        label = (
+            attrs.get("gene")
+            or attrs.get("Name")
+            or attrs.get("locus_tag")
+            or attrs.get("gene_id")
+            or attrs.get("ID")
+            or ""
+        )
+        product = attrs.get("product", "") or ""
+        feature_id = attrs.get("ID") or attrs.get("locus_tag") or ""
+
+        label = unquote(str(label)).strip()
+        product = unquote(str(product)).strip()
+        feature_id = unquote(str(feature_id)).strip()
+
+        if not label and not product and not feature_id:
+            continue
+
+        try:
+            s = int(feat.get("start", 0))
+            e = int(feat.get("end", 0))
+        except Exception:
+            continue
+        if e < s:
+            s, e = e, s
+
+        entries_by_chrom[str(feat.get("seqid", ""))].append({
+            "start": s,
+            "end": e,
+            "strand": feat.get("strand", "."),
+            "label": label,
+            "product": product,
+            "feature_id": feature_id,
+        })
+
+    index: Dict[str, Dict[str, Any]] = {}
+    for chrom, entries in entries_by_chrom.items():
+        if not chrom:
+            continue
+        entries.sort(key=lambda x: (x["start"], x["end"]))
+        index[chrom] = {
+            "entries": entries,
+            "starts": [e["start"] for e in entries],
+        }
+    return index
+
+
+def lookup_native_annotation(native_index: Dict[str, Dict[str, Any]],
+                             chrom: str,
+                             start: int,
+                             end: int,
+                             strand: Optional[str] = None,
+                             max_distance: int = 5000) -> Optional[Dict[str, str]]:
+    """
+    Find the best native annotation overlapping (or very near) an interval.
+    Coordinates are expected as 1-based inclusive.
+    """
+    if not native_index or not chrom:
+        return None
+    chrom_data = native_index.get(chrom)
+    if not chrom_data:
+        return None
+
+    s, e = int(start), int(end)
+    if e < s:
+        s, e = e, s
+
+    entries = chrom_data["entries"]
+    starts = chrom_data["starts"]
+    i = bisect_right(starts, e + max_distance)
+    if i <= 0:
+        return None
+
+    best = None
+    best_score = None
+    j = i - 1
+    while j >= 0:
+        ent = entries[j]
+        if ent["end"] < s - max_distance:
+            break
+        ov = max(0, min(e, ent["end"]) - max(s, ent["start"]) + 1)
+        if ov > 0:
+            dist = 0
+        else:
+            dist = min(abs(s - ent["end"]), abs(e - ent["start"]))
+            if dist > max_distance:
+                j -= 1
+                continue
+
+        strand_score = 1 if strand and strand in {"+", "-"} and ent.get("strand") == strand else 0
+        label_quality = 0 if _is_generic_label(ent.get("label", "")) else 1
+        score = (
+            1 if ov > 0 else 0,
+            ov,
+            -dist,
+            strand_score,
+            label_quality,
+            (ent["end"] - ent["start"] + 1),
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best = ent
+        j -= 1
+
+    if not best:
+        return None
+
+    return {
+        "label": best.get("label", ""),
+        "product": best.get("product", ""),
+        "feature_id": best.get("feature_id", ""),
+    }
 
 
 def _flanking_chain_consistent(cds_intervals: List[Tuple[int, int]], strand: str) -> bool:
@@ -896,6 +1172,115 @@ def estimate_cluster_dist(genome_file: str, gff_file: Optional[str] = None, defa
     
     return default_dist
 
+def run_augmented_mmseqs_with_retries(
+    variants_fasta: str,
+    region_fasta: str,
+    aug_hits_file: str,
+    aug_tmp_dir: str,
+    args,
+    threads: int,
+    genome_name: str,
+) -> Tuple[bool, str]:
+    """
+    Run augmented MMseqs search with low-memory retries.
+
+    Unlike the primary whole-genome search, this runs on per-block regions, but
+    still needs retry logic because strict split-memory limits (e.g. 1G) can
+    fail on translated ORF DB construction for certain blocks.
+    """
+    base_attempts = [
+        {
+            "label": "aug_primary",
+            "threads": max(1, int(threads)),
+            "sens": float(args.mmseqs_sens),
+            "split": str(args.mmseqs_split_memory_limit),
+        },
+        {
+            "label": "aug_lowmem_auto",
+            "threads": 1,
+            "sens": min(float(args.mmseqs_sens), 7.0),
+            "split": "0",
+        },
+        {
+            "label": "aug_lowmem_2g",
+            "threads": 1,
+            "sens": min(float(args.mmseqs_sens), 7.0),
+            "split": "2G",
+        },
+        {
+            "label": "aug_lowmem_verysafe",
+            "threads": 1,
+            "sens": min(float(args.mmseqs_sens), 6.0),
+            "split": "0",
+        },
+    ]
+
+    attempts = []
+    seen = set()
+    for a in base_attempts:
+        key = (a["threads"], a["sens"], a["split"])
+        if key in seen:
+            continue
+        seen.add(key)
+        attempts.append(a)
+
+    os.makedirs(aug_tmp_dir, exist_ok=True)
+    last_details = ""
+
+    for i, attempt in enumerate(attempts, start=1):
+        if os.path.exists(aug_hits_file):
+            try:
+                os.remove(aug_hits_file)
+            except OSError:
+                pass
+
+        attempt_tmp = os.path.join(aug_tmp_dir, f"attempt_{i}")
+        cmd = [
+            "mmseqs", "easy-search",
+            variants_fasta, region_fasta, aug_hits_file, attempt_tmp,
+            "--search-type", "2",
+            "--threads", str(attempt["threads"]),
+            "-s", str(attempt["sens"]),
+            "-e", str(min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)),
+            "--min-seq-id", "0.0",
+            "--min-length", "2",
+            "--split-memory-limit", str(attempt["split"]),
+            "-v", str(args.mmseqs_verbosity),
+            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits",
+        ]
+
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if proc.returncode == 0:
+            if i > 1:
+                logger.warning(
+                    f"[{genome_name}] Augmented MMseqs succeeded on retry {i}/{len(attempts)} "
+                    f"({attempt['label']}: threads={attempt['threads']}, "
+                    f"s={attempt['sens']}, split={attempt['split']})."
+                )
+            return True, ""
+
+        details = _format_mmseqs_failure(proc)
+        last_details = details
+        resource_fail = _is_mmseqs_resource_failure(details)
+        logger.warning(
+            f"[{genome_name}] Augmented MMseqs attempt {i}/{len(attempts)} failed "
+            f"({attempt['label']}: threads={attempt['threads']}, "
+            f"s={attempt['sens']}, split={attempt['split']}): {details}"
+        )
+
+        # Keep trying on resource failures; for hard syntax/binary errors, stop.
+        if not resource_fail:
+            break
+
+    return False, last_details or "unknown augmented MMseqs failure"
+
 def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
                         genome_name: str, args, unique_id: str, threads: int) -> List[Dict[str, Any]]:
     """
@@ -927,6 +1312,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         
         # Write full query sequences for Smith-Waterman
         write_fasta([(q['id'], q['seq']) for q in goi_queries], query_fasta)
+        goi_query_lengths = {
+            q['id']: len(q['seq'])
+            for q in goi_queries
+            if q.get('id') and q.get('seq')
+        }
         
         if not FRAGMENT_SUPPORT:
             print(f"[{genome_name}] Warning: fragment_query module not available, using full sequences only", flush=True)
@@ -939,6 +1329,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 all_variants.extend([(f[0], f[1]) for f in fragments])
         
         write_fasta(all_variants, variants_fasta)
+        variant_query_lengths = {
+            vid: len(vseq)
+            for vid, vseq in all_variants
+            if vid and vseq
+        }
         
         # Shared relaxed thresholds for augmented search.
         relaxed_evalue = min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)
@@ -951,31 +1346,33 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         
         os.makedirs(aug_tmp_dir, exist_ok=True)
         
-        subprocess.run([
-            "mmseqs", "easy-search",
-            variants_fasta, region_fasta, aug_hits_file, aug_tmp_dir,
-            "--search-type", "2",  # Protein search
-            "--threads", str(threads),
-            "-s", str(args.mmseqs_sens),  # Use same sensitivity as main search
-            "-e", str(relaxed_evalue),  # RELAXED e-value to capture divergent hits
-            "--min-seq-id", "0.0",  # NO identity filtering at search time - we filter in parse_hits
-            "--min-length", "2",  # Allow small exons
-            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
-        ], check=True, stderr=subprocess.DEVNULL)
-        
-        # Parse hits - use relaxed thresholds for augmented search
-        relaxed_identity = max(args.aug_relaxed_identity_min, args.min_identity * args.aug_relaxed_identity_factor)
-        relaxed_length = max(args.aug_relaxed_length_min, int(args.min_length // args.aug_relaxed_length_div))
-        
-        mmseqs_hits = parse_hits(
-            aug_hits_file,
-            relaxed_identity,
-            relaxed_length,
-            args.evalue * args.aug_relaxed_parse_evalue_mult
+        mmseqs_ok, mmseqs_details = run_augmented_mmseqs_with_retries(
+            variants_fasta=variants_fasta,
+            region_fasta=region_fasta,
+            aug_hits_file=aug_hits_file,
+            aug_tmp_dir=aug_tmp_dir,
+            args=args,
+            threads=threads,
+            genome_name=genome_name,
         )
-        if mmseqs_hits:
-            print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
-            all_hits.extend(mmseqs_hits)
+
+        if mmseqs_ok:
+            # Parse hits - use relaxed thresholds for augmented search
+            relaxed_identity = max(args.aug_relaxed_identity_min, args.min_identity * args.aug_relaxed_identity_factor)
+            relaxed_length = max(args.aug_relaxed_length_min, int(args.min_length // args.aug_relaxed_length_div))
+            
+            mmseqs_hits = parse_hits(
+                aug_hits_file,
+                relaxed_identity,
+                relaxed_length,
+                args.evalue * args.aug_relaxed_parse_evalue_mult,
+                query_lengths=variant_query_lengths
+            )
+            if mmseqs_hits:
+                print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
+                all_hits.extend(mmseqs_hits)
+        else:
+            print(f"[{genome_name}] Augmented MMseqs failed after retries: {mmseqs_details}", flush=True)
 
         # ========== 2. tblastn Search ==========
         tblastn_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_tblastn_hits.m8"
@@ -1007,7 +1404,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 tblastn_hits_file,
                 relaxed_identity,
                 relaxed_length,
-                args.evalue * args.aug_relaxed_parse_evalue_mult
+                args.evalue * args.aug_relaxed_parse_evalue_mult,
+                query_lengths=goi_query_lengths
             )
             if tblastn_hits:
                 print(f"[{genome_name}] tblastn augmented search found {len(tblastn_hits)} hits.", flush=True)
@@ -1042,7 +1440,13 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 
                 if result.returncode == 0 and os.path.exists(sw_hits_file):
                     # Parse Smith-Waterman hits (BLAST m8 format)
-                    sw_hits = parse_hits(sw_hits_file, args.sw_min_identity, 2, 20000.0)
+                    sw_hits = parse_hits(
+                        sw_hits_file,
+                        args.sw_min_identity,
+                        2,
+                        20000.0,
+                        query_lengths=goi_query_lengths
+                    )
                     if sw_hits:
                         print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
                         # Mark hits as from Smith-Waterman
@@ -1294,12 +1698,14 @@ def batch_rbh_check(
             "-e", str(evalue),
             "--format-output", "query,target,pident,qcov,tcov,evalue,bits,qlen,tlen,alnlen",
             "--max-seqs", "1", # Top hit only
+            "--split-memory-limit", str(args.mmseqs_split_memory_limit),
+            "-v", str(args.mmseqs_verbosity),
             "--threads", str(threads)
         ]
 
         mmseqs_ok = True
         try:
-            subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             mmseqs_ok = False
             logger.warning(
@@ -1364,7 +1770,8 @@ def batch_rbh_check(
                           
     return valid_ids
 
-def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, genome_name, args, unique_id, threads_per_job):
+def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, genome_name, args, unique_id,
+                         threads_per_job, native_annot_index=None):
     """
     Process a single synteny block: extract region, identify queries, run augmented search, and annotate.
     Returns: (list_of_new_genes, list_of_gff_lines)
@@ -1448,6 +1855,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     raw_candidates = []
     flanking_candidates = []
     clean_gname = genome_name.replace('.', '_').replace('-', '_').replace(' ', '_')
+
+    def _mRNA_attrs(base_attrs: Dict[str, Any], g_start: int, g_end: int, g_strand: str) -> str:
+        native = lookup_native_annotation(
+            native_annot_index or {},
+            chrom=chrom,
+            start=g_start,
+            end=g_end,
+            strand=g_strand,
+        )
+        return _compose_gff_attrs(base_attrs, native)
 
     try:
         augmented_hits_mmseqs = run_augmented_search(
@@ -1574,23 +1991,24 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         if is_tandem and tandem_copies:
                             exons = tandem_copies
                         else:
-                            exons, _ = annotate_exons_from_hit_list(
-                                work_hits,
-                                parent_query_seq,
-                                subseq,
-                                chrom,
-                                search_missing=True,
-                                gap_min_size=args.gap_min_size,
-                                gap_search_window=args.gap_search_window,
-                                gap_evalue=args.gap_evalue,
-                                gap_min_identity=args.gap_min_identity,
-                                gap_min_alnlen=args.gap_min_alnlen,
-                                gap_max_hits=args.gap_max_hits,
-                                exon_query_mode=(parent_id in exon_parents),
-                                min_exon_query_cov=args.min_exon_query_cov,
-                                min_exon_alnlen=args.min_exon_alnlen,
-                                sensitive=is_goi_parent
-                            )
+                            with maybe_quiet_streams(args.quiet_subtools):
+                                exons, _ = annotate_exons_from_hit_list(
+                                    work_hits,
+                                    parent_query_seq,
+                                    subseq,
+                                    chrom,
+                                    search_missing=True,
+                                    gap_min_size=args.gap_min_size,
+                                    gap_search_window=args.gap_search_window,
+                                    gap_evalue=args.gap_evalue,
+                                    gap_min_identity=args.gap_min_identity,
+                                    gap_min_alnlen=args.gap_min_alnlen,
+                                    gap_max_hits=args.gap_max_hits,
+                                    exon_query_mode=(parent_id in exon_parents),
+                                    min_exon_query_cov=args.min_exon_query_cov,
+                                    min_exon_alnlen=args.min_exon_alnlen,
+                                    sensitive=is_goi_parent
+                                )
                     except Exception:
                         exons = []
 
@@ -1618,8 +2036,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'gff': [
                                         f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
                                         f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"ID={copy_id};Name={copy['id']};SynTerra_Parent={parent_id};"
-                                        f"Identity={copy.get('pident', 0):.1f};Type=tandem_copy"
+                                        f"{_mRNA_attrs({'ID': copy_id, 'Name': copy['id'], 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(copy.get('pident', 0)), 'Type': 'tandem_copy'}, global_start, global_end, strand)}"
                                     ]
                                 })
                         else:
@@ -1636,8 +2053,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 (
                                     f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
-                                    f"Identity={avg_pident:.1f};Exons={len(exons)}"
+                                    f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Exons': str(len(exons))}, global_start, global_end, strand)}"
                                 )
                             ]
                             for eidx, exon in enumerate(exons, 1):
@@ -1718,7 +2134,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             'description': f"coords:{gs}-{ge} parent:{parent_id} type:rescued_exon"
                                         },
                                         'gff': [
-                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\tID={raw_id};Name={parent_id};SynTerra_Parent={parent_id}",
+                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs({'ID': raw_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, gs, ge, hit.get('strand','+'))}",
                                             f"{chrom}\trescued_exon\tCDS\t{gs}\t{ge}\t.\t{hit.get('strand','+')}\t0\tID={raw_id}_CDS1;Parent={raw_id}"
                                         ]
                                     })
@@ -1782,7 +2198,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'description': f"coords:{nt_s}-{nt_e} parent:{parent_id} identity:{hit.get('pident', 0):.1f}"
                                 },
                                 'gff': [
-                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\tID={new_id};Name={parent_id};SynTerra_Parent={parent_id}",
+                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, nt_s, nt_e, hit.get('strand', '+'))}",
                                     f"{chrom}\traw_hit\tCDS\t{nt_s}\t{nt_e}\t.\t{hit.get('strand', '+')}\t0\tID={new_id}_CDS1;Parent={new_id}"
                                 ]
                             })
@@ -1854,23 +2270,24 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
             for locus_idx, work_hits in enumerate(parent_loci, start=1):
                 try:
-                    exons, _ = annotate_exons_from_hit_list(
-                        work_hits,
-                        parent_query_seq,
-                        subseq,
-                        chrom,
-                        search_missing=True,
-                        gap_min_size=args.gap_min_size,
-                        gap_search_window=args.gap_search_window,
-                        gap_evalue=args.gap_evalue,
-                        gap_min_identity=args.gap_min_identity,
-                        gap_min_alnlen=args.gap_min_alnlen,
-                        gap_max_hits=args.gap_max_hits,
-                        exon_query_mode=False,
-                        min_exon_query_cov=args.min_exon_query_cov,
-                        min_exon_alnlen=args.min_exon_alnlen,
-                        sensitive=False
-                    )
+                    with maybe_quiet_streams(args.quiet_subtools):
+                        exons, _ = annotate_exons_from_hit_list(
+                            work_hits,
+                            parent_query_seq,
+                            subseq,
+                            chrom,
+                            search_missing=True,
+                            gap_min_size=args.gap_min_size,
+                            gap_search_window=args.gap_search_window,
+                            gap_evalue=args.gap_evalue,
+                            gap_min_identity=args.gap_min_identity,
+                            gap_min_alnlen=args.gap_min_alnlen,
+                            gap_max_hits=args.gap_max_hits,
+                            exon_query_mode=False,
+                            min_exon_query_cov=args.min_exon_query_cov,
+                            min_exon_alnlen=args.min_exon_alnlen,
+                            sensitive=False
+                        )
                 except Exception:
                     exons = []
 
@@ -1950,8 +2367,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         (
                             f"{chrom}\tflanking_hits\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
-                            f"Identity={avg_pident:.1f};Type=flanking_hit_span"
+                            f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Type': 'flanking_hit_span'}, global_start, global_end, strand)}"
                         )
                     ]
                     for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -1992,8 +2408,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     (
                         f"{chrom}\tflanking_annotation\tmRNA\t{global_start}\t{global_end}\t"
                         f"{avg_pident:.1f}\t{strand}\t.\t"
-                        f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
-                        f"Identity={avg_pident:.1f};Exons={len(exons)};Type=flanking_miniprot"
+                        f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Exons': str(len(exons)), 'Type': 'flanking_miniprot'}, global_start, global_end, strand)}"
                     )
                 ]
                 for eidx, exon in enumerate(exons, 1):
@@ -2161,42 +2576,175 @@ def merge_synteny_blocks(blocks, padding):
     return merged
 
 
+def run_mmseqs_easy_search_with_retries(
+    db_path: str,
+    genome_path: str,
+    hits_file: str,
+    tmp_dir: str,
+    args,
+    threads_per_job: int,
+    genome_name: str,
+) -> Tuple[bool, str, bool]:
+    """
+    Run mmseqs easy-search with conservative retries for resource failures.
+
+    Returns:
+      (success, details, resource_related_failure)
+    """
+    base_attempts = [
+        {
+            "label": "primary",
+            "threads": max(1, int(threads_per_job)),
+            "sens": float(args.mmseqs_sens),
+            "split": str(args.mmseqs_split_memory_limit),
+        },
+        {
+            "label": "lowmem_retry_1",
+            "threads": 1,
+            "sens": min(float(args.mmseqs_sens), 7.0),
+            "split": "0",
+        },
+        {
+            "label": "lowmem_retry_2",
+            "threads": 1,
+            "sens": min(float(args.mmseqs_sens), 6.0),
+            "split": "0",
+        },
+    ]
+
+    attempts = []
+    seen = set()
+    for a in base_attempts:
+        key = (a["threads"], a["sens"], a["split"])
+        if key in seen:
+            continue
+        seen.add(key)
+        attempts.append(a)
+
+    last_details = ""
+    last_resource_fail = False
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    for i, attempt in enumerate(attempts, start=1):
+        if os.path.exists(hits_file):
+            try:
+                os.remove(hits_file)
+            except OSError:
+                pass
+
+        attempt_tmp = os.path.join(tmp_dir, f"attempt_{i}")
+        cmd = [
+            "mmseqs", "easy-search",
+            db_path, genome_path, hits_file, attempt_tmp,
+            "--search-type", "2",
+            "--threads", str(attempt["threads"]),
+            "-s", str(attempt["sens"]),
+            "-e", str(args.evalue),
+            "--split-memory-limit", str(attempt["split"]),
+            "-v", str(args.mmseqs_verbosity),
+            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits",
+        ]
+
+        mmseqs_proc = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if mmseqs_proc.returncode == 0:
+            if i > 1:
+                logger.warning(
+                    f"[{genome_name}] MMseqs succeeded on retry {i}/{len(attempts)} "
+                    f"({attempt['label']}: threads={attempt['threads']}, "
+                    f"s={attempt['sens']}, split={attempt['split']})."
+                )
+            return True, "", False
+
+        details = _format_mmseqs_failure(mmseqs_proc)
+        resource_fail = _is_mmseqs_resource_failure(details)
+        last_details = details
+        last_resource_fail = resource_fail
+
+        logger.warning(
+            f"[{genome_name}] MMseqs attempt {i}/{len(attempts)} failed "
+            f"({attempt['label']}: threads={attempt['threads']}, "
+            f"s={attempt['sens']}, split={attempt['split']}): {details}"
+        )
+
+        # Non-resource failures are unlikely to recover with lower-memory retries.
+        if not resource_fail:
+            break
+
+    return False, last_details, last_resource_fail
+
+
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
     """
     Worker function to search a single genome.
-    Returns: (genome_name, list_of_new_genes)
+    Returns: (genome_name, list_of_new_genes, error_message_or_none)
     """
     genome_name = os.path.basename(genome_path)
     if not os.path.exists(genome_path):
-        logger.warning(f"[{genome_name}] Genome file not found. Skipping.")
-        return genome_name, []
+        msg = "Genome file not found"
+        logger.error(f"[{genome_name}] {msg}.")
+        return genome_name, [], msg
     
     unique_id = uuid.uuid4().hex
     hits_file = f"{args.output_dir}/hits/{prefix}{genome_name}.m8"
     tmp_dir = f"{args.output_dir}/tmp_mmseqs_{unique_id}_{genome_name}"
     
     new_genes = []
+    error_message = None
     
     try:
+        # Parse DB once so we can adapt hit-length filtering for short proteins.
+        base_db_sequences = {}
+        query_lengths = {}
+        for header, clean_id, seq in parse_fasta(db_path):
+            base_db_sequences[clean_id] = {'id': clean_id, 'seq': seq, 'header': header}
+            query_lengths[clean_id] = len(seq)
+            base = extract_base_gene_id(clean_id)
+            if base != clean_id and base not in base_db_sequences:
+                base_db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
+            query_lengths.setdefault(base, len(seq))
+
         c_dist = args.cluster_dist
         if c_dist <= 0:
             c_dist = estimate_cluster_dist(genome_path)
             
-        # 1. Search (MMseqs)
-        subprocess.run([
-            "mmseqs", "easy-search",
-            db_path, genome_path, hits_file, tmp_dir,
-            "--search-type", "2", 
-            "--threads", str(threads_per_job),
-            "-s", str(args.mmseqs_sens), 
-            "-e", str(args.evalue),
-            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
-        ], check=True, stderr=subprocess.DEVNULL)
+        # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
+        mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
+            db_path=db_path,
+            genome_path=genome_path,
+            hits_file=hits_file,
+            tmp_dir=tmp_dir,
+            args=args,
+            threads_per_job=threads_per_job,
+            genome_name=genome_name,
+        )
+        if not mmseqs_ok:
+            if resource_fail:
+                logger.warning(
+                    f"[{genome_name}] Skipping genome after MMseqs resource failures "
+                    "(prefilter/search crash persisted across retries)."
+                )
+                return genome_name, [], None
+            raise RuntimeError(
+                f"MMseqs easy-search failed for {genome_name}: {mmseqs_details}"
+            )
 
-        hits = parse_hits(hits_file, args.min_identity, args.min_length, args.evalue)
+        hits = parse_hits(
+            hits_file,
+            args.min_identity,
+            args.min_length,
+            args.evalue,
+            query_lengths=query_lengths,
+        )
         if not hits:
             logger.info(f"[{genome_name}] No hits found in MMseqs output.")
-            return genome_name, []
+            return genome_name, [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
 
@@ -2259,24 +2807,41 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             )
             synteny_blocks = synteny_blocks[:args.max_blocks_per_genome]
         
-        # Parse DB once for all blocks
-        base_db_sequences = {}
-        for header, clean_id, seq in parse_fasta(db_path):
-            base_db_sequences[clean_id] = {'id': clean_id, 'seq': seq, 'header': header}
-            base = extract_base_gene_id(clean_id)
-            if base != clean_id and base not in base_db_sequences:
-                base_db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
-
         all_genes = []
         all_gff_lines = []
         
         genome_seqs = load_genome(genome_path)
+        native_gff_path = find_native_annotation_path(genome_path)
+        native_annot_index = load_native_annotation_index(native_gff_path)
+        if native_gff_path and native_annot_index:
+            logger.info(
+                f"[{genome_name}] Native annotation index loaded from "
+                f"{os.path.basename(native_gff_path)} ({len(native_annot_index)} contigs)."
+            )
+        elif native_gff_path:
+            logger.info(
+                f"[{genome_name}] Native annotation file found ({os.path.basename(native_gff_path)}) "
+                f"but no usable gene/transcript features parsed."
+            )
+        else:
+            logger.info(f"[{genome_name}] No native annotation GFF found next to genome FASTA.")
 
         empty_block_streak = 0
         for i, block in enumerate(synteny_blocks):
             # Limit number of blocks to process? (e.g. top 50?)
             # For now process all valid blocks.
-            block_genes, block_gff = process_region_block(i, block, hits, genome_seqs, base_db_sequences, genome_name, args, unique_id, threads_per_job)
+            block_genes, block_gff = process_region_block(
+                i,
+                block,
+                hits,
+                genome_seqs,
+                base_db_sequences,
+                genome_name,
+                args,
+                unique_id,
+                threads_per_job,
+                native_annot_index=native_annot_index,
+            )
             all_genes.extend(block_genes)
             all_gff_lines.extend(block_gff)
 
@@ -2340,12 +2905,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             )
 
     except Exception as e:
-        logger.error(f"[{genome_name}] Error processing: {e}")
+        error_message = str(e)
+        logger.error(f"[{genome_name}] Error processing: {error_message}")
     finally:
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
             
-    return genome_name, new_genes
+    return genome_name, new_genes, error_message
 def main():
     parser = argparse.ArgumentParser(description="Iterative Genome Search Runner (Wavefront Parallel)")
     parser.add_argument("--initial_db", required=True)
@@ -2361,6 +2927,8 @@ def main():
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
     parser.add_argument("--cluster_dist", type=int, default=-1, help="Auto-detect if -1")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
+    parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
+    parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
     parser.add_argument("--min_gene_identity", type=float, default=25.0, help="Minimum identity for RBH validation")
     parser.add_argument("--region_padding", type=int, default=100000, help="Default padding around synteny block")
     parser.add_argument("--padding_min", type=int, default=50000, help="Minimum adaptive padding")
@@ -2406,6 +2974,12 @@ def main():
         default=25,
         help="Stop processing more blocks after this many GOI-empty blocks in a row (0 = disable)"
     )
+    parser.add_argument(
+        "--quiet_subtools",
+        type=str2bool,
+        default=True,
+        help="Suppress noisy third-party tool output (miniprot/tblastn diagnostics)"
+    )
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
     
@@ -2445,6 +3019,9 @@ def main():
     
     if args.mmseqs_sens < 1 or args.mmseqs_sens > 9:
         logger.warning(f"MMseqs sensitivity {args.mmseqs_sens} outside typical range (1-9)")
+    if args.mmseqs_verbosity < 0 or args.mmseqs_verbosity > 3:
+        logger.error("mmseqs_verbosity must be between 0 and 3")
+        sys.exit(1)
     if args.padding_min < 0 or args.padding_max < 0 or args.region_padding < 0:
         logger.error("Padding values must be non-negative")
         sys.exit(1)
@@ -2490,6 +3067,10 @@ def main():
     
     logger.info(f"Starting iterative search with {args.threads} threads")
     logger.info(f"Parameters: identity>={args.min_identity}%, length>={args.min_length}, evalue<={args.evalue}")
+    logger.info(
+        f"MMseqs controls: split_memory_limit={args.mmseqs_split_memory_limit}, "
+        f"verbosity={args.mmseqs_verbosity}, quiet_subtools={args.quiet_subtools}"
+    )
     
     prefix = f"{args.prefix}_" if args.prefix else ""
     
@@ -2610,6 +3191,7 @@ def main():
         logger.info(f"  Running {len(wave)} jobs in parallel with {max_workers} workers, each using {threads_per_job} threads.")
         
         wave_results = []
+        wave_errors = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for entry in wave:
@@ -2620,11 +3202,20 @@ def main():
             
             for future in concurrent.futures.as_completed(futures):
                 try:
-                    gname, new_genes = future.result()
+                    gname, new_genes, genome_error = future.result()
+                    if genome_error:
+                        wave_errors.append((gname, genome_error))
+                        continue
                     if new_genes:
                         wave_results.extend(new_genes)
                 except Exception as exc:
-                    logger.error(f"Wave execution generated an exception for one genome: {exc}")
+                    wave_errors.append(("unknown", str(exc)))
+
+        if wave_errors:
+            for gname, msg in wave_errors:
+                logger.error(f"Wave {i+1} failed for genome '{gname}': {msg}")
+            logger.error("Aborting iterative search due to per-genome processing errors.")
+            sys.exit(1)
 
         # Update DB after Wave
         if wave_results:

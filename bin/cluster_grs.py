@@ -4,6 +4,7 @@ import argparse
 import sys
 import csv
 import os
+import re
 from collections import defaultdict
 
 # No BioPython needed - we parse FASTA manually for genome length
@@ -15,12 +16,30 @@ def parse_args():
     parser.add_argument("--genome", required=False, default=None,
                         help="Target Genome FASTA (optional; used for approximate p-value context)")
     parser.add_argument("--output", required=True, help="Output Region BED")
+    parser.add_argument(
+        "--target_gff",
+        required=False,
+        default=None,
+        help="Optional target GFF from iterative search (used to prioritize GOI-overlapping regions)",
+    )
+    parser.add_argument(
+        "--goi_padding",
+        type=int,
+        default=20000,
+        help="Padding (bp) around GOI intervals when injecting fallback candidate regions",
+    )
     parser.add_argument("--flanking_count", type=int, default=10, help="Expected number of flanking genes (fallback)")
     parser.add_argument("--cluster_dist", type=int, default=50000, help="Max distance to cluster hits (bp)")
     parser.add_argument("--min_score", type=float, default=0.5, help="Score threshold for High Confidence")
     parser.add_argument("--weight_base", type=float, default=0.4, help="Base weight for coverage")
     parser.add_argument("--weight_consistency", type=float, default=0.3, help="Weight for order consistency")
     parser.add_argument("--weight_strand", type=float, default=0.3, help="Weight for strand consistency")
+    parser.add_argument(
+        "--goi_overlap_bonus",
+        type=float,
+        default=0.4,
+        help="Additive score bonus for clusters overlapping GOI intervals",
+    )
     return parser.parse_args()
 
 def load_synteny_map(bed_file):
@@ -51,6 +70,181 @@ def load_synteny_map(bed_file):
     except Exception as e:
         print(f"Error loading synteny map: {e}", file=sys.stderr)
     return gene_map
+
+
+def parse_gff_attrs(attr_field):
+    attrs = {}
+    for kv in (attr_field or "").split(";"):
+        if "=" not in kv:
+            continue
+        key, value = kv.split("=", 1)
+        attrs[key] = value
+    return attrs
+
+
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+
+    by_chrom = defaultdict(list)
+    for iv in intervals:
+        by_chrom[iv["chrom"]].append((iv["start"], iv["end"]))
+
+    merged = []
+    for chrom, spans in by_chrom.items():
+        spans.sort()
+        cur_s, cur_e = spans[0]
+        for s, e in spans[1:]:
+            if s <= cur_e + 1:
+                cur_e = max(cur_e, e)
+            else:
+                merged.append({"chrom": chrom, "start": cur_s, "end": cur_e})
+                cur_s, cur_e = s, e
+        merged.append({"chrom": chrom, "start": cur_s, "end": cur_e})
+    return merged
+
+
+def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
+    """
+    Parse GOI intervals from SynTerra iterative target GFF.
+    GOI records are detected via Name/ID/SynTerra_Parent containing GOI_.
+    """
+    if not gff_file or not os.path.exists(gff_file):
+        return []
+
+    goi_intervals = []
+    accepted_types = {"mRNA", "gene", "tandem_copy", "transcript", "mrna"}
+
+    try:
+        with open(gff_file) as fh:
+            for line in fh:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 9:
+                    continue
+                if parts[2] not in accepted_types:
+                    continue
+
+                attrs = parse_gff_attrs(parts[8])
+                tokens = [
+                    attrs.get("Name", ""),
+                    attrs.get("ID", ""),
+                    attrs.get("SynTerra_Parent", ""),
+                    attrs.get("Parent", ""),
+                ]
+                marker = "|".join(tokens)
+                if "GOI_" not in marker:
+                    continue
+
+                try:
+                    s = int(parts[3])
+                    e = int(parts[4])
+                except ValueError:
+                    continue
+                if e < s:
+                    s, e = e, s
+
+                s = max(0, s - max(0, int(padding_bp)))
+                e = e + max(0, int(padding_bp))
+                goi_intervals.append({"chrom": parts[0], "start": s, "end": e})
+    except Exception as exc:
+        print(f"WARNING: Could not parse GOI intervals from target GFF: {exc}", file=sys.stderr)
+        return []
+
+    return merge_intervals(goi_intervals)
+
+def _is_goi_query_name(query_name):
+    """
+    Identify GOI-derived query names in m8 hits.
+    """
+    if not query_name:
+        return False
+    q = str(query_name).strip()
+    if q.startswith("GOI_") or q.startswith("GOI|"):
+        return True
+    base = q.split("|")[0]
+    if base.startswith("GOI_"):
+        return True
+    # Backward compatibility for legacy bare exon IDs from GOI expansion.
+    if re.fullmatch(r"exon_\d+", base):
+        return True
+    return False
+
+def load_goi_intervals_from_hits(hits, padding_bp=20000):
+    """
+    Build GOI intervals from m8 hits when target GFF GOI models are missing.
+    """
+    if not hits:
+        return []
+
+    intervals = []
+    pad = max(0, int(padding_bp))
+    for h in hits:
+        if not _is_goi_query_name(h.get("query", "")):
+            continue
+        chrom = h.get("chrom")
+        if not chrom:
+            continue
+        start = int(h.get("start", 0))
+        end = int(h.get("end", 0))
+        if end < start:
+            start, end = end, start
+        intervals.append(
+            {
+                "chrom": chrom,
+                "start": max(0, start - pad),
+                "end": end + pad,
+            }
+        )
+
+    return merge_intervals(intervals)
+
+
+def overlaps_interval(chrom, start, end, interval):
+    if chrom != interval["chrom"]:
+        return False
+    return not (end < interval["start"] or start > interval["end"])
+
+
+def cluster_overlaps_goi(cluster, goi_intervals):
+    if not goi_intervals:
+        return False
+    for iv in goi_intervals:
+        if overlaps_interval(cluster["chrom"], cluster["start"], cluster["end"], iv):
+            return True
+    return False
+
+
+def build_goi_anchor_clusters(goi_intervals, existing_clusters):
+    """
+    Inject GOI anchor regions when score-ranked clusters miss GOI loci entirely.
+    """
+    anchors = []
+    for iv in goi_intervals:
+        covered = False
+        for cl in existing_clusters:
+            if overlaps_interval(cl["chrom"], cl["start"], cl["end"], iv):
+                covered = True
+                break
+        if covered:
+            continue
+        anchors.append(
+            {
+                "cluster": [],
+                "unique": 1,
+                "consistency": 1.0,
+                "strand_cons": 1.0,
+                "score": 1.0,
+                "p_value": 0.0,
+                "start": iv["start"],
+                "end": iv["end"],
+                "chrom": iv["chrom"],
+                "is_goi_anchor": True,
+                "goi_overlap": True,
+            }
+        )
+    return anchors
 
 def get_genome_length(genome_file):
     """Get total length of genome (sum of sequence lengths)."""
@@ -226,43 +420,57 @@ def main():
     args = parse_args()
     
     gene_map = load_synteny_map(args.synteny_bed)
-    total_genes_expected = len(gene_map)
+    # gene_map contains alias keys (raw + cleaned IDs) that may point to the
+    # same rank; coverage must use unique ranks, not raw key count.
+    total_genes_expected = len(set(gene_map.values()))
     if total_genes_expected == 0: total_genes_expected = args.flanking_count
     
     hits = []
-    try:
+    if os.path.exists(args.hits):
         with open(args.hits) as f:
             reader = csv.reader(f, delimiter='\t')
             for row in reader:
-                if not row or row[0].startswith('query'): continue 
+                if not row or row[0].startswith('query'):
+                    continue
                 try:
                     # MMseqs FMT: query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits
                     #              0     1      2      3       4        5       6      7      8      9     10     11
-                    
                     t_start = int(row[8])
                     t_end = int(row[9])
-                    
-                    # Detect Strand
-                    # Standard BLAST/MMseqs convention: t_start > t_end implies minus strand
+
+                    # Detect strand and normalize coordinates.
                     strand = "+"
                     if t_start > t_end:
                         strand = "-"
-                        t_start, t_end = t_end, t_start # Normalize for object
-                        
+                        t_start, t_end = t_end, t_start
+
                     h = {
-                        'query': row[0], 'chrom': row[1],
-                        'start': t_start, 'end': t_end,
+                        'query': row[0],
+                        'chrom': row[1],
+                        'start': t_start,
+                        'end': t_end,
                         'strand': strand,
                         'evalue': float(row[10])
                     }
                     hits.append(h)
-                except ValueError: continue
-    except FileNotFoundError:
-        # Valid state: no hits found
-        print(f"INFO: Hits file {args.hits} not found or empty.", file=sys.stderr)
-        with open(args.output, 'w') as f_out:
-            pass
-        return
+                except ValueError:
+                    continue
+    else:
+        print(f"INFO: Hits file {args.hits} not found. Continuing with GOI-anchor fallback if possible.", file=sys.stderr)
+
+    goi_intervals_gff = load_goi_intervals_from_gff(args.target_gff, padding_bp=args.goi_padding)
+    goi_intervals_hits = load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding)
+    goi_intervals = merge_intervals(goi_intervals_gff + goi_intervals_hits)
+    if goi_intervals_hits and not goi_intervals_gff:
+        print(
+            f"INFO: Derived {len(goi_intervals_hits)} GOI interval(s) from hit file (no GOI GFF intervals).",
+            file=sys.stderr,
+        )
+    elif goi_intervals_hits:
+        print(
+            f"INFO: Added GOI support from hits ({len(goi_intervals_hits)} interval(s)) on top of GFF GOI intervals.",
+            file=sys.stderr,
+        )
 
     # Cluster
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_dist)
@@ -284,6 +492,19 @@ def main():
                         args.weight_strand * strand_cons)
         
         final_score = coverage_score * quality_mult
+        cluster_chrom = cl[0]['chrom']
+        cluster_start = min(h['start'] for h in cl)
+        cluster_end = max(h['end'] for h in cl)
+        goi_overlap = cluster_overlaps_goi(
+            {
+                "chrom": cluster_chrom,
+                "start": cluster_start,
+                "end": cluster_end,
+            },
+            goi_intervals,
+        )
+        if goi_overlap:
+            final_score += max(0.0, float(args.goi_overlap_bonus))
         
         p_val = estimate_pvalue(final_score, hits, genome_len, args.cluster_dist, score_flexible_synteny, gene_map, n=100)
         
@@ -294,26 +515,47 @@ def main():
             'strand_cons': strand_cons,
             'score': final_score,
             'p_value': p_val,
-            'start': min(h['start'] for h in cl),
-            'end': max(h['end'] for h in cl),
-            'chrom': cl[0]['chrom']
+            'start': cluster_start,
+            'end': cluster_end,
+            'chrom': cluster_chrom,
+            'goi_overlap': goi_overlap,
         })
 
     # Sort: Score desc, P-value asc
     scored_clusters.sort(key=lambda x: (-x['score'], x['p_value']))
-    
+
+    # GOI-aware prioritization:
+    # 1) Prefer clusters overlapping GOI intervals from iterative target GFF.
+    # 2) If none overlap, inject GOI-anchor region(s) so the true locus is never dropped.
+    ordered_clusters = list(scored_clusters)
+    if goi_intervals:
+        goi_clusters = [cl for cl in scored_clusters if cluster_overlaps_goi(cl, goi_intervals)]
+        non_goi_clusters = [cl for cl in scored_clusters if not cluster_overlaps_goi(cl, goi_intervals)]
+        if goi_clusters:
+            for cl in goi_clusters:
+                cl["goi_overlap"] = True
+            for cl in non_goi_clusters:
+                cl["goi_overlap"] = False
+            ordered_clusters = goi_clusters + non_goi_clusters
+        else:
+            anchors = build_goi_anchor_clusters(goi_intervals, scored_clusters)
+            if anchors:
+                print(
+                    f"INFO: No score-ranked cluster overlapped GOI; injected {len(anchors)} GOI-anchor region(s).",
+                    file=sys.stderr,
+                )
+                ordered_clusters = anchors + scored_clusters
+
     with open(args.output, 'w') as f_out:
-        if not scored_clusters:
-            # Case 1: No clusters formed at all
+        if not ordered_clusters:
+            # Case 1: No clusters formed and no GOI fallback available.
             print(f"INFO: No synteny clusters could be formed for this genome.", file=sys.stderr)
-            # Produce empty file (success state)
-            pass
         else:
             # Case 2: Clusters found - Output top 3
-            num_to_output = min(3, len(scored_clusters))
+            num_to_output = min(3, len(ordered_clusters))
             
             for i in range(num_to_output):
-                best = scored_clusters[i]
+                best = ordered_clusters[i]
                 
                 # Determine Confidence
                 if best['score'] >= args.min_score:
@@ -328,7 +570,10 @@ def main():
                 minus_cnt = len(best['cluster']) - plus_cnt
                 region_strand = "-" if minus_cnt > plus_cnt else "+"
                 
-                name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
+                if best.get("is_goi_anchor"):
+                    name = f"Reg{i+1}_GOI_anchor_C{confidence}_S{best['score']:.2f}"
+                else:
+                    name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
                 
                 f_out.write(f"{best['chrom']}\t{best['start']}\t{best['end']}\t{name}\t{best['score']:.2f}\t{region_strand}\n")
 
@@ -340,13 +585,14 @@ def main():
                 )
                 
                 # Log Low Confidence
+                goi_tag = " [GOI]" if best.get("goi_overlap") or best.get("is_goi_anchor") else ""
                 if confidence == "LOW":
                     print(f"WARNING: Region {i+1} has LOW confidence (score={best['score']:.2f}), "
                           f"Genes: {best['unique']}/{total_genes_expected}, "
-                          f"Consistency: {best['consistency']:.2f}", file=sys.stderr)
+                          f"Consistency: {best['consistency']:.2f}{goi_tag}", file=sys.stderr)
                 else:
                     print(f"Region {i+1}: {best['chrom']}:{best['start']}-{best['end']} "
-                          f"(Score: {best['score']:.2f}, Conf: {confidence})", file=sys.stderr)
+                          f"(Score: {best['score']:.2f}, Conf: {confidence}){goi_tag}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

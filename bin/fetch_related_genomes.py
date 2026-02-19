@@ -5,12 +5,15 @@ Uses NCBI E-utilities + Datasets and ranks assemblies by quality.
 """
 
 import argparse
+import gzip
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 
@@ -28,6 +31,15 @@ def run_safe_command(cmd, check=True):
         if check:
             raise e
         return None
+
+
+def extract_zip_archive(zip_path: Path, extract_dir: Path):
+    """
+    Extract datasets ZIP archives without requiring external `unzip`.
+    """
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
 
 
 def run_piped_command(cmds):
@@ -609,6 +621,50 @@ def get_related_species(
     return unique_assemblies
 
 
+def _extract_best_gff(extract_dir: Path, gff_target: Path) -> str:
+    """
+    Extract best available annotation GFF from an extracted datasets directory.
+
+    Returns:
+      "ok"          -> valid GFF copied to gff_target
+      "no_features" -> GFF files exist but no gene/CDS found in quick scan
+      "absent"      -> no GFF-like files found
+    """
+    gff_files = []
+    for pat in ("*.gff", "*.gff3", "*.gff.gz", "*.gff3.gz"):
+        gff_files.extend(extract_dir.rglob(pat))
+    if not gff_files:
+        return "absent"
+
+    best_gff = None
+    for gff in gff_files:
+        try:
+            _open = gzip.open if str(gff).endswith(".gz") else open
+            with _open(gff, "rt") as f:
+                has_features = False
+                for line_num, line in enumerate(f):
+                    if line_num > 500:
+                        break
+                    if "\tCDS\t" in line or "\tgene\t" in line:
+                        has_features = True
+                        break
+                if has_features:
+                    best_gff = gff
+                    break
+        except Exception:
+            continue
+
+    if not best_gff:
+        return "no_features"
+
+    if str(best_gff).endswith(".gz"):
+        with gzip.open(best_gff, "rt") as src, open(gff_target, "w") as dst:
+            shutil.copyfileobj(src, dst)
+    else:
+        shutil.move(str(best_gff), str(gff_target))
+    return "ok"
+
+
 def download_genome(accession, output_dir):
     """Download genome from NCBI using datasets. Also attempts to download GFF if available."""
     print(f"Downloading {accession}...")
@@ -617,6 +673,10 @@ def download_genome(accession, output_dir):
     output_path.mkdir(parents=True, exist_ok=True)
 
     zip_file = output_path / f"{accession}.zip"
+    extract_dir = output_path / accession
+    fna_path = None
+    gff_target = output_path / f"{accession}.gff"
+
     cmd = [
         "datasets",
         "download",
@@ -631,60 +691,120 @@ def download_genome(accession, output_dir):
 
     try:
         run_safe_command(cmd)
-
-        extract_dir = output_path / accession
-        cmd_unzip = ["unzip", "-o", str(zip_file), "-d", str(extract_dir)]
-        run_safe_command(cmd_unzip)
+        extract_zip_archive(zip_file, extract_dir)
 
         fna_files = list(extract_dir.rglob("*.fna"))
-        fna_path = None
         if fna_files:
             target = output_path / f"{accession}.fna"
-            os.rename(fna_files[0], target)
+            shutil.move(str(fna_files[0]), str(target))
             fna_path = str(target)
             print(f"  ✓ Genome: {target}")
 
-        gff_files = list(extract_dir.rglob("*.gff"))
-        if gff_files:
-            best_gff = None
-            for gff in gff_files:
-                try:
-                    with open(gff) as f:
-                        has_cds = False
-                        for line_num, line in enumerate(f):
-                            if line_num > 500:
-                                break
-                            if "\tCDS\t" in line or "\tgene\t" in line:
-                                has_cds = True
-                                break
-                        if has_cds:
-                            best_gff = gff
-                            break
-                except Exception:
-                    continue
-
-            if best_gff:
-                gff_target = output_path / f"{accession}.gff"
-                os.rename(best_gff, gff_target)
-                print(f"  ✓ GFF annotations: {gff_target}")
-            else:
-                print("  ○ GFF found but no CDS features (scaffold-only)")
+        gff_status = _extract_best_gff(extract_dir, gff_target)
+        if gff_status == "ok":
+            print(f"  ✓ GFF annotations: {gff_target}")
+        elif gff_status == "no_features":
+            print("  ○ GFF found but no CDS/gene features (scaffold-only)")
         else:
             print("  ○ No GFF annotations available")
 
-        if zip_file.exists():
-            zip_file.unlink()
-        import shutil
-
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir)
+        # Fallback: if GenBank accession has no useful GFF, try RefSeq counterpart.
+        if gff_status != "ok" and accession.startswith("GCA_"):
+            refseq_acc = "GCF_" + accession[4:]
+            ref_zip = output_path / f"{refseq_acc}.zip"
+            ref_extract = output_path / refseq_acc
+            try:
+                print(f"  ○ Trying RefSeq annotation fallback: {refseq_acc}")
+                run_safe_command(
+                    [
+                        "datasets",
+                        "download",
+                        "genome",
+                        "accession",
+                        refseq_acc,
+                        "--include",
+                        "gff3",
+                        "--filename",
+                        str(ref_zip),
+                    ]
+                )
+                extract_zip_archive(ref_zip, ref_extract)
+                ref_status = _extract_best_gff(ref_extract, gff_target)
+                if ref_status == "ok":
+                    print(f"  ✓ GFF annotations (RefSeq fallback): {gff_target}")
+                else:
+                    print("  ○ RefSeq fallback did not yield usable GFF")
+            except Exception:
+                print("  ○ RefSeq annotation fallback unavailable")
+            finally:
+                if ref_zip.exists():
+                    ref_zip.unlink()
+                if ref_extract.exists():
+                    shutil.rmtree(ref_extract)
 
         return fna_path
 
     except Exception as e:
         print(f"  ✗ Could not download {accession}: {e}")
+        return None
+    finally:
+        if zip_file.exists():
+            zip_file.unlink()
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
 
-    return None
+
+def write_quality_report(assemblies, output_dir):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    report_path = output_path / "assembly_quality.tsv"
+    with open(report_path, "w") as out:
+        out.write(
+            "accession\tspecies\ttax_level\trefseq_category\tassembly_level\tchromosomes\t"
+            "scaffolds\tcontigs\tcontig_n50\tscaffold_n50\tcontig_n80\tscaffold_n80\t"
+            "bad_quality\tbad_reasons\n"
+        )
+        for asm in assemblies:
+            out.write(
+                f"{asm.get('accession', '')}\t{asm.get('species', '')}\t{asm.get('tax_level', '')}\t"
+                f"{asm.get('category', '')}\t{asm.get('assembly_status', '')}\t"
+                f"{asm.get('chromosome_count', '')}\t{asm.get('scaffold_count', '')}\t{asm.get('contig_count', '')}\t"
+                f"{asm.get('contig_n50', '')}\t{asm.get('scaffold_n50', '')}\t"
+                f"{asm.get('contig_n80', '')}\t{asm.get('scaffold_n80', '')}\t"
+                f"{str(asm.get('bad_quality', False)).lower()}\t{asm.get('bad_quality_reasons', '')}\n"
+            )
+    print(f"Assembly quality report written to: {report_path}")
+
+
+def write_outputs(assemblies, downloaded_paths, output_dir):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = output_path / "genomes_manifest.txt"
+    with open(manifest_path, "w") as f:
+        for path in downloaded_paths:
+            f.write(f"{path}\n")
+    print(f"Genome paths written to: {manifest_path}")
+
+    downloaded_acc = {Path(p).stem for p in downloaded_paths}
+    selected = [a for a in assemblies if a.get("accession") in downloaded_acc]
+    species_map_path = output_path / "species_mapping.tsv"
+    with open(species_map_path, "w") as f:
+        for asm in selected:
+            tax_level = asm.get("tax_level", "unknown")
+            f.write(f"{asm['accession']}\t{asm['species']}\t{tax_level}\n")
+    print(f"Species mapping written to: {species_map_path}")
+
+    write_quality_report(assemblies, output_dir)
+
+
+def print_selected_assemblies(assemblies, title):
+    print(f"\n{title}:")
+    for i, asm in enumerate(assemblies, 1):
+        cat = asm.get("category", "na")
+        print(f"  {i}. {asm['accession']} - {asm['species']} [{cat}]")
+        print(f"     {format_quality(asm)}")
+
 
 
 def write_quality_report(assemblies, output_dir):

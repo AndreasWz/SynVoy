@@ -10,6 +10,7 @@ import select
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 import shutil
 
@@ -26,6 +27,16 @@ def run_command(cmd, check=True):
         if check:
             raise
         return None
+
+
+def extract_zip_archive(zip_path: Path, extract_dir: Path):
+    """
+    Extract a ZIP archive using Python stdlib so Docker/Conda runs do not
+    depend on external `unzip` being installed.
+    """
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
 
 
 def parse_int(value):
@@ -492,10 +503,9 @@ def download_genome_with_annotation(accession, output_dir):
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         
-        # Unzip
+        # Extract archive (stdlib; avoids external unzip dependency)
         extract_dir = output_path / 'extracted'
-        subprocess.run(['unzip', '-o', str(zip_file), '-d', str(extract_dir)], 
-                      check=True, capture_output=True)
+        extract_zip_archive(zip_file, extract_dir)
         
         # Find files
         fna_files = list(extract_dir.rglob("*.fna"))

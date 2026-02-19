@@ -2,17 +2,24 @@
 work/
 .nextflow/
 .nextflow.log*
+.nextflow*
 
 # Results and testing
 results/
+results_*/
 test_results/
 test_data/
+test_out/
+test_home_db/
 
 # Environment and logs
 archive/
 *.log
 *.tmp
 tmp/
+cache/
+.synterra_logs/
+.pytest_cache/
 
 # Conda/Python
 __pycache__/
@@ -25,3 +32,5 @@ test_out/
 ref/
 archive/
 test_home_db/
+
+ref/Homo_sapiens.fna.gz
