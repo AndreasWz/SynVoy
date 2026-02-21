@@ -7,12 +7,13 @@ It supports annotated genomes, partially annotated genomes, and no-annotation fa
 
 1. Resolves GOI input from UniProt/NCBI ID or FASTA.
 2. Retrieves or loads the home genome.
-3. Locates GOI locus/loci in the home genome.
+3. Locates GOI locus/loci in the home genome (handles home-genome tandem duplications natively).
 4. Builds GOI exon-aware representation.
-5. Extracts flanking genes per locus.
+5. Extracts flanking genes per locus (strictly enforcing CDS-containing models).
 6. Iteratively searches target genomes in phylogenetic order.
 7. Annotates GOI + flanking context in target loci.
-8. Generates region clusters, synteny plots, trees, and summary reports.
+8. Performs **Unconstrained Chromosome-Scale Mapping**, gracefully handling distant translocations without losing block data.
+9. Generates region clusters, synteny plots, trees, and summary reports.
 
 ## Current Runtime Model
 
@@ -121,8 +122,9 @@ NXF_OPTS='-Xms512m -Xmx2g' ./synterra \
 
 - If home GFF is available, SynTerra uses annotation-based extraction first.
 - If no usable home GFF exists, SynTerra falls back to local prediction (Prodigal/borrowed annotations path).
+- Flanking gene extraction strictly filters for valid CDS (Coding Sequence) parts, bypassing purely non-coding entries (e.g., lncRNAs) to guarantee exactly `N` fully protein-coding flanking genes.
 - Flanking genes keep stable IDs and now also carry display labels derived from annotation names when available.
-- Iterative expansion is GOI-driven; flanking models are retained for context and plotting.
+- Iterative expansion is GOI-driven; flanking models are retained for context and plotted with Unconstrained Chromosome-Scale mapping logic.
 
 ## Main Outputs
 

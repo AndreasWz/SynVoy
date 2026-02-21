@@ -1,1 +1,0 @@
-/home/andreas/projects/SynTerra/test_genome.fna

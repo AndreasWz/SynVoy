@@ -283,10 +283,9 @@ def cluster_hits_proximity(hits, gene_map, max_dist):
         h = hits[i]
         prev = current_cluster[-1]
         
-        # Check if same chrom and close enough
-        dist = h['start'] - prev['end']
-        
-        if h['chrom'] == prev['chrom'] and dist < max_dist:
+        # Unconstrained Chromosome Plotting:
+        # Group ALL hits on the same chromosome together, regardless of distance.
+        if h['chrom'] == prev['chrom']:
             current_cluster.append(h)
         else:
             clusters.append(current_cluster)

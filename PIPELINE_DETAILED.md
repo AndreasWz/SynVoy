@@ -87,6 +87,7 @@ Output:
 ## 6. Flanking Gene Construction
 
 `extract_flanking_genes.py` extracts flanking genes around each locus from effective home annotation.
+**Crucially, the extraction logic enforces that genes must contain a valid CDS (Coding Sequence) parts entry.** Purely non-coding RNA (e.g., lncRNAs) models are bypassed entirely, guaranteeing that the `--n_flanking_genes` quota is strictly filled with protein-coding models prior to homology searching.
 
 When home GFF is unavailable/unusable:
 - Prodigal-based fallback predicts proteins in GOI-centered windows.
@@ -167,10 +168,10 @@ DB expansion behavior:
 
 ## 9. Region Clustering, Trees, and Plotting
 
-- `CLUSTER_REGIONS` clusters hit regions using synteny score and distance constraints.
+- `CLUSTER_REGIONS` clusters hit regions using synteny score. **The pipeline now operates on an Unconstrained Chromosome-Scale Mapping paradigm:** distance constraints (`max_dist`) are bypassed during primitive cluster creation, successfully gathering all homologous regions residing on a single chromosome. This natively preserves distant translocation events.
 - `COMPUTE_TREE` filters to GOI entries and computes a GOI-centric phylogeny.
 - `PLOT_SYNTENY` combines home/target beds, GFFs, homology mapping, species map, and tree into HTML plots.
-- Plot step filters target genes to candidate BED regions before drawing, reducing off-locus clutter from non-selected regions.
+- Plot step filters target genes to candidate BED regions before drawing, reducing off-locus clutter from non-selected regions. **The home-genome track natively renders duplicated tandem arrays by cumulatively plotting the multi-locus context around the parent GOI.**
 
 ## 10. Annotation Format Robustness
 

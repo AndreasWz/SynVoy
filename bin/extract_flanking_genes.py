@@ -393,8 +393,8 @@ def main():
         all_genes = parse_gff_for_genes(args.gff)
         
         for region in target_regions:
-            # Filter genes on same chrom
-            chrom_genes = [g for g in all_genes if g['chrom'] == region['chrom']]
+            # Filter genes on same chrom that have at least one valid CDS (exclude lncRNAs)
+            chrom_genes = [g for g in all_genes if g['chrom'] == region['chrom'] and len(g.get('cds_parts', [])) > 0]
             
             # Find closest center
             center_idx = -1

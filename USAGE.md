@@ -152,9 +152,10 @@ Quality report file:
 - If home GFF exists and is usable, SynTerra prioritizes annotation-based extraction.
 - Without usable home GFF, fallback paths predict genes locally.
 - Borrowed annotation support is available for weak/no-annotation home genomes.
-- Flanking genes are extracted per locus and retained for context.
+- Flanking genes are extracted per locus and retained for context. **Crucially, the extraction strictly requires valid CDS (Coding Sequence) parts, bypassing purely non-coding entries (e.g., lncRNAs) to guarantee exactly `N` fully protein-coding flanking genes.**
 - Flanking records keep stable IDs and include display labels from annotation names when available.
 - Iterative region expansion remains GOI-driven.
+- Region clustering operates via **Unconstrained Chromosome-Scale Mapping**, completely grouping all target hits per chromosome rather than discarding distant loci.
 
 ## 8) Desktop-Stable Docker Recipe (3-snake 3FTx)
 
@@ -218,7 +219,7 @@ Defaults are taken from `nextflow.config`.
 | `--prefer_large_genes` | `true` | Prefer larger gene models where relevant. |
 | `--min_flanking_size` | `500` | Minimum flanking gene span (bp). |
 | `--exon_level_search` | `true` | Enables exon-oriented flanking behavior. |
-| `--cluster_distance` | `50000` | Region clustering distance (bp). |
+| `--cluster_distance` | `50000` | Legacy threshold parameter (now overridden by natives Unconstrained Chromosome-Scale clustering). |
 | `--min_synteny_score` | `0.6` | Minimum synteny score threshold. |
 | `--min_hit_identity` | `40` | Minimum identity for hits in iterative search. |
 | `--min_hit_length` | `100` | Minimum hit length. |
