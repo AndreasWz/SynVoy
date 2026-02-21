@@ -1,0 +1,44 @@
+Task Title: Comparative Analysis of Synteny Resolution Tools Across Annotated and Unannotated Genomes
+
+Objective:
+To evaluate and benchmark the performance, limitations, and unique features of several prominent synteny and comparative genomics tools against the newly developed SynTerra pipeline. The evaluation will test the tools' abilities to trace gene clusters across varying evolutionary distances, focusing specifically on their dependence on pre-existing genome annotations.
+
+Tools to Evaluate:
+1. MCScanX (or JCVI MCscan)
+2. SynChro
+3. GENESPACE
+4. SimpleSynteny
+5. OrthoFinder
+6. SynTerra
+
+Methodology & Experimental Design:
+
+Part 1: The Annotated Baseline (Control Experiment)
+In this phase, all genomes are well-characterized model organisms with high-quality reference annotations (GFF/GTF) and proteome FASTA files available.
+1. Select a known, highly conserved gene cluster (e.g., the Hox cluster or a specific cytochrome P450 locus) in a reference species (e.g., Homo sapiens or Mus musculus).
+2. Run each tool to map this syntenic block across 3-5 closely related mammalian species where annotations are perfectly intact.
+3. Compare the outputs based on:
+   - Run-time and computational resource requirements.
+   - Ease of setup and input data preprocessing (e.g., generation of BLAST/DIAMOND all-vs-all reciprocal hits).
+   - The contiguity of the resulting syntenic blocks (how well the tool handles minor translocations or local inversions).
+   - Visualization clarity and interpretability.
+
+Part 2: The Unannotated Challenge (Stress Test)
+In this phase, the pipeline will expand to include non-model organisms (e.g., specific reptile, amphibian, or newly sequenced fish genomes) where formal annotations are either missing, highly fragmented, or unreliable. Raw genomic DNA assemblies (.fna/.fa) are available.
+1. Attempt to trace the same gene cluster from Part 1 into these unannotated genomes using the original reference gene(s) as the query.
+2. Document the necessary workarounds required for the annotation-dependent tools (e.g., MCScanX, SynChro) to function (such as running an external gene predictor like AUGUSTUS beforehand).
+3. Evaluate the annotation-agnostic tools (e.g., SynTerra, SimpleSynteny) on their ability to directly map the homologous coding sequences from the raw DNA.
+4. Compare the outputs based on:
+   - Success rate of ortholog recovery compared to known literature.
+   - The ability to maintain syntenic context/flanking genes when target annotations are absent.
+   - The resolution of the mapping (e.g., whole-gene vs. exon-level alignment).
+
+Part 3: Feature-Specific Benchmarking (Optional Deep Dive)
+1. Phylogenetic Integration: Assess how easily the spatial synteny alignments produced by each tool can be integrated into phylogenetic trees to prove orthology vs. paralogy. 
+2. Tandem Duplications: Evaluate how each tool handles highly duplicated, rapidly evolving multigene families (e.g., the LY6 family or olfactory receptors) where distinguishing orthologs from paralogs is difficult due to massive sequence similarity.
+
+Expected Output:
+A comprehensive report (or presentation) containing:
+1. A feature matrix comparing the input requirements, mapping algorithms, and outputs of the evaluated tools.
+2. A quantitative assessment of block recovery rates between Part 1 and Part 2.
+3. A qualitative analysis of where SynTerra excels or falls short compared to established industry standards, particularly regarding annotation dependence and visualization resolution.

@@ -226,7 +226,7 @@ workflow {
         home_genome_ch = Channel.fromPath(params.home_genome)
         
         if (params.home_gff) {
-            home_gff_ch = Channel.fromPath(params.home_gff).first()
+            home_gff_ch = Channel.value(file(params.home_gff, checkIfExists: true))
         } else {
             home_gff_ch = Channel.value(no_gff_file)
         }

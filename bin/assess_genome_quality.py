@@ -33,7 +33,11 @@ def main():
     parser = argparse.ArgumentParser(description="Assess Genome Assembly Quality")
     parser.add_argument("--genome", required=True)
     parser.add_argument("--output", required=True, help="JSON output file")
-    parser.add_argument("--min_n50", type=int, default=10000)
+    # Match fetch_related_genomes.py defaults for consistency
+    parser.add_argument("--min_n50", type=int, default=20000,
+                        help="N50 below this → bad quality (default: 20000, matches fetch-stage)")
+    parser.add_argument("--max_contigs", type=int, default=100000,
+                        help="Contig count above this → bad quality (default: 100000, matches fetch-stage)")
     
     args = parser.parse_args()
     
@@ -55,10 +59,17 @@ def main():
         num_contigs = len(lengths)
         
         status = "PASS"
-        msg = "OK"
+        reasons = []
         if n50 < args.min_n50:
-            status = "WARNING"
-            msg = f"N50 ({n50}) below threshold ({args.min_n50})"
+            reasons.append(f"N50 ({n50}) below threshold ({args.min_n50})")
+        if num_contigs > args.max_contigs:
+            reasons.append(f"contig count ({num_contigs}) above threshold ({args.max_contigs})")
+        
+        if reasons:
+            status = "FAIL"
+            msg = "; ".join(reasons)
+        else:
+            msg = "OK"
         
         stats = {
             "genome": os.path.basename(args.genome),

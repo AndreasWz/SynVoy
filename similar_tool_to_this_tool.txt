@@ -1,0 +1,7 @@
+halSynteny
+MCScanX
+SynChro
+VGSC
+JAX synteny browser
+GENESPACE (integrates MS, MCScanX)
+Orthofinder

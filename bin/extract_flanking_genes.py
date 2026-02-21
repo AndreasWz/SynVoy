@@ -515,6 +515,26 @@ def main():
                             # Write exon sequence with metadata in header
                             exon_header = f"{exon_id} parent={gid} exon={exon_idx}/{len(cds_parts)} coords={part['start']}-{part['end']} strand={gene['strand']}"
                             all_fasta_records.append((exon_header, exon_prot))
+
+                        # ALSO emit the full-length protein (CDS DNA
+                        # concatenated in genomic order, then translated).
+                        # Per-exon records drive sensitive MMseqs search;
+                        # the full-length protein is used by miniprot for
+                        # multi-exon gene modeling in target genomes.
+                        full_dna = ""
+                        for part in cds_parts:
+                            full_dna += seq_record[part['start']:part['end']]
+                        if gene['strand'] == '-':
+                            full_dna = reverse_complement(full_dna)
+                        remainder = len(full_dna) % 3
+                        if remainder:
+                            full_dna = full_dna[:-remainder]
+                        full_prot = translate(full_dna)
+                        if '*' in full_prot:
+                            full_prot = full_prot.split('*')[0]
+                        if len(full_prot) >= 10:
+                            full_header = f"{gid} full_length_protein exons={len(cds_parts)} strand={gene['strand']}"
+                            all_fasta_records.append((full_header, full_prot))
                     else:
                         # WHOLE PROTEIN MODE: Concatenate all exons
                         dna_seq = ""

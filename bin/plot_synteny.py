@@ -1065,6 +1065,33 @@ def main():
                     f"using GOI-centered fallback ({len(genes)} genes)."
                 )
 
+        # Richest-block fallback: if candidate regions yielded very few genes
+        # (≤2), they likely cover low-quality scoring windows rather than the
+        # block with the best synteny evidence.  Find the densest genomic
+        # cluster of genes from the full GFF and show that instead.
+        if len(genes) <= 2 and len(genes_all) > len(genes):
+            from collections import Counter
+            block_counter = Counter()
+            block_genes = defaultdict(list)
+            for g in genes_all:
+                # Group by block ID extracted from gene name (e.g. "...b15_fl1...")
+                gname = g.get("name", "")
+                import re as _re
+                m = _re.search(r'_b(\d+)_', gname)
+                if m:
+                    bid = m.group(1)
+                    block_counter[bid] += 1
+                    block_genes[bid].append(g)
+            if block_counter:
+                best_block = block_counter.most_common(1)[0][0]
+                best_genes = block_genes[best_block]
+                if len(best_genes) > len(genes):
+                    genes = best_genes
+                    print(
+                        f"[plot] {genome_id}: candidate regions had ≤2 genes; "
+                        f"using richest block b{best_block} ({len(genes)} genes)."
+                    )
+
         # Reduce clutter: if GOI is present, keep the GOI chromosome only.
         if any(_is_goi_target_gene(g) for g in genes):
             goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
@@ -1072,8 +1099,7 @@ def main():
                 goi_chrom = next(iter(goi_chroms))
                 genes = [g for g in genes if g["chrom"] == goi_chrom]
 
-        if not genes:
-            continue
+        # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
         # Use species name from mapping if available
         display = genome_id
@@ -1081,11 +1107,13 @@ def main():
             if acc in genome_id:
                 display = sp_name
                 break
+        target_chrom = genes[0]["chrom"] if genes else (candidate_regions[0][0] if candidate_regions else "unknown")
+        
         target_tracks.append({
             "genome_id":    genome_id,
             "display_name": display,
             "genes":        genes,
-            "chrom":        genes[0]["chrom"],
+            "chrom":        target_chrom,
         })
 
     # Order targets by phylogenetic distance (if tree available), else alphabetically by species name

@@ -829,36 +829,6 @@ def write_quality_report(assemblies, output_dir):
     print(f"Assembly quality report written to: {report_path}")
 
 
-def write_outputs(assemblies, downloaded_paths, output_dir):
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    manifest_path = output_path / "genomes_manifest.txt"
-    with open(manifest_path, "w") as f:
-        for path in downloaded_paths:
-            f.write(f"{path}\n")
-    print(f"Genome paths written to: {manifest_path}")
-
-    downloaded_acc = {Path(p).stem for p in downloaded_paths}
-    selected = [a for a in assemblies if a.get("accession") in downloaded_acc]
-    species_map_path = output_path / "species_mapping.tsv"
-    with open(species_map_path, "w") as f:
-        for asm in selected:
-            tax_level = asm.get("tax_level", "unknown")
-            f.write(f"{asm['accession']}\t{asm['species']}\t{tax_level}\n")
-    print(f"Species mapping written to: {species_map_path}")
-
-    write_quality_report(assemblies, output_dir)
-
-
-def print_selected_assemblies(assemblies, title):
-    print(f"\n{title}:")
-    for i, asm in enumerate(assemblies, 1):
-        cat = asm.get("category", "na")
-        print(f"  {i}. {asm['accession']} - {asm['species']} [{cat}]")
-        print(f"     {format_quality(asm)}")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch related genomes from NCBI for easy mode",

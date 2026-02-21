@@ -13,40 +13,34 @@ process PREPARE_INITIAL_DB {
     script:
     """
     #!/usr/bin/env python3
-    
-    # Build the initial search database from:
-    # 1. Flanking genes (from GFF or Prodigal prediction)
-    # 2. GOI exon sequences (from ANNOTATE_GOI - real exons, not arbitrary fragments)
-    # 3. Fallback fragments (halves/thirds) only if no real exons were found
-    
     import sys
     import os
+    import re
     
     sys.path.insert(0, "${projectDir}/bin")
     from sequence_utils import parse_fasta, write_fasta
-    from flanking_query_utils import collapse_flanking_query_records
     from fragment_query import generate_fragments
     
     output_faa = "initial_db_${locus_id}.faa"
     all_records = []
     
-    # 1. Add flanking genes (collapse split exon/fragment records to one query per gene)
+    # 1. Add flanking genes — keep per-exon CDS sequences, do NOT collapse.
+    #    Downstream code uses extract_base_gene_id() to map exon hits back
+    #    to parent genes (e.g. gene-TOP1MT|exon_1 -> gene-TOP1MT).
     print("Loading flanking genes from ${flanking_faa}...")
     flanking_raw = list(parse_fasta("${flanking_faa}"))
-    flanking_records, flanking_stats = collapse_flanking_query_records(flanking_raw)
-    for clean_id, seq in flanking_records:
-        all_records.append((clean_id, seq))
+    NON_AA = re.compile(r"[^A-Za-z]")
+    skipped = 0
+    for raw_header, clean_id, seq in flanking_raw:
+        cleaned = NON_AA.sub("", str(seq).upper()).replace("*", "")
+        if cleaned and len(cleaned) >= 5:
+            all_records.append((clean_id, cleaned))
+        else:
+            skipped += 1
     flanking_count = len(all_records)
     print(
-        "  Loaded {count} normalized flanking genes "
-        "(from {inp} records; exon_reconstructed={recon}, fragment_collapsed={frag}, dropped_empty={drop})"
-        .format(
-            count=flanking_count,
-            inp=flanking_stats.get("input_records", 0),
-            recon=flanking_stats.get("exon_reconstructed", 0),
-            frag=flanking_stats.get("fragment_collapsed", 0),
-            drop=flanking_stats.get("dropped_empty", 0),
-        )
+        f"  Loaded {flanking_count} per-exon flanking sequences "
+        f"(from {len(flanking_raw)} records, {skipped} skipped)"
     )
     
     # 2. Add GOI sequences (full protein + individual exons from ANNOTATE_GOI)

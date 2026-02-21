@@ -5,6 +5,7 @@ import sys
 import csv
 import os
 import re
+import random
 from collections import defaultdict
 
 # No BioPython needed - we parse FASTA manually for genome length
@@ -248,11 +249,8 @@ def build_goi_anchor_clusters(goi_intervals, existing_clusters):
 
 def get_genome_length(genome_file):
     """Get total length of genome (sum of sequence lengths)."""
-    total_len = 1
+    total_len = 0
     try:
-        # Fast approximate length from file size or index?
-        # Parsing fasta is safer.
-        # Check if .fai exists?
         fai = genome_file + ".fai"
         if os.path.exists(fai):
             with open(fai) as f:
@@ -260,13 +258,12 @@ def get_genome_length(genome_file):
                     parts = line.split('\t')
                     total_len += int(parts[1])
         else:
-            # Parse FASTA (could be slow for huge genomes, but usually okay)
             with open(genome_file) as f:
                 for line in f:
                     if not line.startswith('>'):
                         total_len += len(line.strip())
-    except:
-        pass
+    except Exception as e:
+        print(f"WARNING: Could not determine genome length from {genome_file}: {e}", file=sys.stderr)
     return max(1, total_len)
 
 def cluster_hits_proximity(hits, gene_map, max_dist):
@@ -375,46 +372,44 @@ def score_flexible_synteny(cluster, gene_map):
     
     return unique_genes, consistency, strand_cons
 
-def estimate_pvalue(observed_score, all_hits, genome_len, cluster_dist, score_func, gene_map, n=100):
+def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_dist, score_func, gene_map, total_genes_expected, n=200):
     """
-    Estimate P-value by randomizing hits positions/identity.
-    Actually, randomizing positions in genome is better.
-    Simplified: Shuffle "query identity" among the hits and re-score?
-    Conservative: Count how many random sets of N hits from the genome would score this high?
-    For speed: We skip complex P-value if score is low anyway.
-    Implementation:
-    Shuffle the 'query' assignments of the hits in the cluster to see if random composition gives this score.
+    Estimate P-value via label-shuffling permutation test.
+
+    Shuffles gene-label assignments among the cluster's hits and re-scores,
+    counting how often a random labelling achieves the observed score or better.
+    This tests whether the *identity* of genes in the cluster is non-random
+    (i.e., they match the expected synteny map better than chance).
     """
-    if not all_hits: return 1.0
-    
-    # We want to see if the structure (positions) + random genes would form a cluster?
-    # No, the cluster exists. Is the *content* significant?
-    # Shuffle ranks.
-    
-    # Collect all available ranks in the hits (background)
-    background_ranks = []
-    for h in all_hits:
-        q = h['query'].split('|')[0]
-        if q in gene_map: background_ranks.append(gene_map[q])
-    
-    if len(background_ranks) < len(gene_map):
-        # Pad with -1
-        background_ranks.extend([-1] * (len(all_hits) - len(background_ranks)))
-        
-    cluster_size = len(all_hits) # Approximate
-    
-    better_count = 0
-    
-    # This is a placeholder for a real permutation test.
-    # Given limited time/compute, we rely mainly on Score.
-    # Return 0.05 if Score > 0.5?
-    
-    # Real logic:
-    # return observed_score > 0.5 ? 0.01 : 0.5
-    
-    # Let's simplify: P-value is inversely proportional to score here.
-    # Real statistical test is overkill for this step if we just prioritize.
-    return 1.0 - observed_score
+    if not cluster_hits or not gene_map or total_genes_expected <= 0:
+        return 1.0
+
+    # Pool of all query labels seen across the genome
+    all_queries = [h['query'].split('|')[0] for h in all_hits]
+    if not all_queries:
+        return 1.0
+
+    cluster_size = len(cluster_hits)
+    better_or_equal = 0
+
+    for _ in range(n):
+        # Create a synthetic cluster by shuffling query labels
+        shuffled = list(cluster_hits)  # shallow copy
+        sampled_labels = random.choices(all_queries, k=cluster_size)
+        fake_cluster = []
+        for hit, label in zip(shuffled, sampled_labels):
+            fake_hit = dict(hit)
+            fake_hit['query'] = label
+            fake_cluster.append(fake_hit)
+
+        rand_unique, rand_consistency, rand_strand = score_func(fake_cluster, gene_map)
+        rand_coverage = rand_unique / total_genes_expected if total_genes_expected > 0 else 0
+        # Use same weighted formula as the real scoring
+        rand_score = rand_coverage * (rand_consistency * 0.5 + rand_strand * 0.5)
+        if rand_score >= observed_score:
+            better_or_equal += 1
+
+    return (better_or_equal + 1) / (n + 1)  # Laplace-corrected
 
 def main():
     args = parse_args()
@@ -422,7 +417,14 @@ def main():
     gene_map = load_synteny_map(args.synteny_bed)
     # gene_map contains alias keys (raw + cleaned IDs) that may point to the
     # same rank; coverage must use unique ranks, not raw key count.
-    total_genes_expected = len(set(gene_map.values()))
+    # Exclude GOI-derived entries from the denominator — those are the targets
+    # of the search, not flanking synteny anchors. Without this, max coverage
+    # can never reach 1.0.
+    flanking_ranks = set()
+    for key, rank in gene_map.items():
+        if not key.startswith('GOI_'):
+            flanking_ranks.add(rank)
+    total_genes_expected = len(flanking_ranks) if flanking_ranks else len(set(gene_map.values()))
     if total_genes_expected == 0: total_genes_expected = args.flanking_count
     
     hits = []
@@ -443,6 +445,9 @@ def main():
                     if t_start > t_end:
                         strand = "-"
                         t_start, t_end = t_end, t_start
+
+                    # Convert from 1-based (m8 format) to 0-based half-open (BED/Python)
+                    t_start = t_start - 1
 
                     h = {
                         'query': row[0],
@@ -487,11 +492,15 @@ def main():
         else:
             coverage_score = 0
         
-        quality_mult = (args.weight_base +
-                        args.weight_consistency * consistency +
-                        args.weight_strand * strand_cons)
+        # Weighted quality: each weight is a true proportion of the quality score.
+        # Uses coverage as base metric, modulated by order consistency and strand coherence.
+        quality_score = (
+            args.weight_base * coverage_score +
+            args.weight_consistency * consistency +
+            args.weight_strand * strand_cons
+        )
         
-        final_score = coverage_score * quality_mult
+        final_score = quality_score * coverage_score
         cluster_chrom = cl[0]['chrom']
         cluster_start = min(h['start'] for h in cl)
         cluster_end = max(h['end'] for h in cl)
@@ -504,9 +513,10 @@ def main():
             goi_intervals,
         )
         if goi_overlap:
-            final_score += max(0.0, float(args.goi_overlap_bonus))
+            # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
+            final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
         
-        p_val = estimate_pvalue(final_score, hits, genome_len, args.cluster_dist, score_flexible_synteny, gene_map, n=100)
+        p_val = estimate_pvalue(final_score, cl, hits, genome_len, args.cluster_dist, score_flexible_synteny, gene_map, total_genes_expected, n=200)
         
         scored_clusters.append({
             'cluster': cl,

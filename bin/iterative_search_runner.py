@@ -135,7 +135,7 @@ def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int,
     for h in hits:
         qstart = h.get('qstart')
         qend = h.get('qend')
-        if not qstart or not qend:
+        if qstart is None or qend is None:
             continue
         qspan = abs(qend - qstart) + 1
         alnlen = h.get('alnlen', qspan)
@@ -329,6 +329,10 @@ def build_flanking_query_by_parent(
     Flanking DB entries are often exon-level (`gene|exon_N`). For these, we
     reconstruct a pseudo full-length protein by concatenating exon proteins in
     transcript order (reverse exon order on minus strand).
+
+    Returns dict mapping parent_id -> {id, seq, header, exon_offsets}.
+    exon_offsets maps exon_num -> (start_offset, length) in the reconstructed
+    protein, enabling downstream qstart/qend remapping.
     """
     if not parent_ids:
         return {}
@@ -359,7 +363,8 @@ def build_flanking_query_by_parent(
                 result[parent] = {
                     'id': parent,
                     'seq': best.get('seq', ''),
-                    'header': best.get('header', parent)
+                    'header': best.get('header', parent),
+                    'exon_offsets': {},
                 }
                 continue
 
@@ -382,12 +387,19 @@ def build_flanking_query_by_parent(
 
         if exon_parts:
             exon_parts.sort(key=lambda x: x[0], reverse=(strand_hint == '-'))
+            # Build offset map: exon_num -> (start_offset_in_reconstructed, length)
+            exon_offsets = {}
+            offset = 0
+            for exon_num, seq in exon_parts:
+                exon_offsets[exon_num] = (offset, len(seq))
+                offset += len(seq)
             recon_seq = ''.join(seq for _, seq in exon_parts)
             if recon_seq:
                 result[parent] = {
                     'id': parent,
                     'seq': recon_seq,
-                    'header': f"{parent}|reconstructed_exons={len(exon_parts)}|strand={strand_hint}"
+                    'header': f"{parent}|reconstructed_exons={len(exon_parts)}|strand={strand_hint}",
+                    'exon_offsets': exon_offsets,
                 }
                 continue
 
@@ -397,7 +409,8 @@ def build_flanking_query_by_parent(
             result[parent] = {
                 'id': parent,
                 'seq': best.get('seq', ''),
-                'header': best.get('header', parent)
+                'header': best.get('header', parent),
+                'exon_offsets': {},
             }
 
     return result
@@ -1199,7 +1212,7 @@ def run_augmented_mmseqs_with_retries(
             "label": "aug_lowmem_auto",
             "threads": 1,
             "sens": min(float(args.mmseqs_sens), 7.0),
-            "split": "0",
+            "split": str(args.mmseqs_split_memory_limit),
         },
         {
             "label": "aug_lowmem_2g",
@@ -1211,7 +1224,7 @@ def run_augmented_mmseqs_with_retries(
             "label": "aug_lowmem_verysafe",
             "threads": 1,
             "sens": min(float(args.mmseqs_sens), 6.0),
-            "split": "0",
+            "split": str(args.mmseqs_split_memory_limit),
         },
     ]
 
@@ -1227,6 +1240,25 @@ def run_augmented_mmseqs_with_retries(
     os.makedirs(aug_tmp_dir, exist_ok=True)
     last_details = ""
 
+    # Create query and target databases ONCE.
+    query_db = os.path.join(aug_tmp_dir, "queryDB")
+    target_db = os.path.join(aug_tmp_dir, "targetDB")
+    fmt_output = "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
+
+    proc_qdb = subprocess.run(
+        ["mmseqs", "createdb", variants_fasta, query_db],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if proc_qdb.returncode != 0:
+        return False, _format_mmseqs_failure(proc_qdb)
+
+    proc_tdb = subprocess.run(
+        ["mmseqs", "createdb", region_fasta, target_db],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if proc_tdb.returncode != 0:
+        return False, _format_mmseqs_failure(proc_tdb)
+
     for i, attempt in enumerate(attempts, start=1):
         if os.path.exists(aug_hits_file):
             try:
@@ -1235,49 +1267,60 @@ def run_augmented_mmseqs_with_retries(
                 pass
 
         attempt_tmp = os.path.join(aug_tmp_dir, f"attempt_{i}")
-        cmd = [
-            "mmseqs", "easy-search",
-            variants_fasta, region_fasta, aug_hits_file, attempt_tmp,
+        os.makedirs(attempt_tmp, exist_ok=True)
+        result_db = os.path.join(attempt_tmp, "resultDB")
+
+        search_cmd = [
+            "mmseqs", "search",
+            query_db, target_db, result_db, attempt_tmp,
             "--search-type", "2",
             "--threads", str(attempt["threads"]),
             "-s", str(attempt["sens"]),
             "-e", str(min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)),
             "--min-seq-id", "0.0",
-            "--min-length", "2",
             "--split-memory-limit", str(attempt["split"]),
             "-v", str(args.mmseqs_verbosity),
-            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits",
         ]
 
         proc = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            search_cmd,
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
-        if proc.returncode == 0:
-            if i > 1:
-                logger.warning(
-                    f"[{genome_name}] Augmented MMseqs succeeded on retry {i}/{len(attempts)} "
-                    f"({attempt['label']}: threads={attempt['threads']}, "
-                    f"s={attempt['sens']}, split={attempt['split']})."
-                )
-            return True, ""
+        if proc.returncode != 0:
+            details = _format_mmseqs_failure(proc)
+            last_details = details
+            resource_fail = _is_mmseqs_resource_failure(details)
+            logger.warning(
+                f"[{genome_name}] Augmented MMseqs search attempt {i}/{len(attempts)} failed "
+                f"({attempt['label']}): {details}"
+            )
+            if not resource_fail:
+                break
+            continue
 
-        details = _format_mmseqs_failure(proc)
-        last_details = details
-        resource_fail = _is_mmseqs_resource_failure(details)
-        logger.warning(
-            f"[{genome_name}] Augmented MMseqs attempt {i}/{len(attempts)} failed "
-            f"({attempt['label']}: threads={attempt['threads']}, "
-            f"s={attempt['sens']}, split={attempt['split']}): {details}"
+        # convertalis
+        conv_cmd = [
+            "mmseqs", "convertalis",
+            query_db, target_db, result_db, aug_hits_file,
+            "--format-output", fmt_output,
+            "-v", str(args.mmseqs_verbosity),
+        ]
+        conv_proc = subprocess.run(
+            conv_cmd,
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-
-        # Keep trying on resource failures; for hard syntax/binary errors, stop.
-        if not resource_fail:
+        if conv_proc.returncode != 0:
+            last_details = _format_mmseqs_failure(conv_proc)
             break
+
+        if i > 1:
+            logger.warning(
+                f"[{genome_name}] Augmented MMseqs succeeded on retry {i}/{len(attempts)} "
+                f"({attempt['label']}: threads={attempt['threads']}, "
+                f"s={attempt['sens']}, split={attempt['split']})."
+            )
+        return True, ""
 
     return False, last_details or "unknown augmented MMseqs failure"
 
@@ -1911,17 +1954,42 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 parent = query_id.split('|frag_')[0] if '|frag_' in query_id else query_id
                 parent = extract_base_gene_id(parent)
 
-                frag_offset = 0
+                # Calculate offset for fragment or exon queries so qstart/qend
+                # are expressed in full-protein coordinates.
+                q_offset = 0
                 if '|frag_' in query_id and FRAGMENT_SUPPORT:
                     try:
                         frag_info = parse_fragment_id(query_id)
-                        frag_offset = frag_info['start'] - 1
+                        q_offset = frag_info['start'] - 1
                     except Exception:
-                        frag_offset = 0
+                        q_offset = 0
+                elif '|exon_' in query_id:
+                    # Build exon offset map from DB sequences on first encounter.
+                    if not hasattr(run_augmented_search, '_goi_exon_offsets'):
+                        run_augmented_search._goi_exon_offsets = {}
+                    if parent not in run_augmented_search._goi_exon_offsets:
+                        exon_seqs = []
+                        for rid, rec in db_sequences.items():
+                            if extract_base_gene_id(rid) == parent:
+                                m = re.search(r'\|exon_(\d+)$', rid)
+                                if m and rec.get('seq'):
+                                    exon_seqs.append((int(m.group(1)), len(rec['seq'])))
+                        exon_seqs.sort()
+                        offmap = {}
+                        off = 0
+                        for enum, elen in exon_seqs:
+                            offmap[enum] = off
+                            off += elen
+                        run_augmented_search._goi_exon_offsets[parent] = offmap
+                    offmap = run_augmented_search._goi_exon_offsets.get(parent, {})
+                    m = re.search(r'\|exon_(\d+)$', query_id)
+                    if m:
+                        enum = int(m.group(1))
+                        q_offset = offmap.get(enum, 0)
 
                 hits_by_gene[parent].append({
-                    'qstart': hit.get('qstart', 1) + frag_offset,
-                    'qend': hit.get('qend', 100) + frag_offset,
+                    'qstart': hit.get('qstart', 1) + q_offset,
+                    'qend': hit.get('qend', 100) + q_offset,
                     'gstart': local_start,
                     'gend': local_end,
                     'evalue': hit.get('evalue', 1),
@@ -2248,6 +2316,31 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 'strand': hit.get('strand', '+'),
                 'chrom': chrom
             })
+
+        # Remap per-exon qstart/qend to reconstructed full-protein coordinates.
+        # Without this, a hit from gene-TOP1MT|exon_5 (qstart=1,qend=37) would
+        # be compared against the 601aa full protein → qcov=6% → wrongly fails
+        # coverage thresholds.  After remapping, it becomes qstart=170,qend=207
+        # which correctly reflects its position in the reconstructed protein.
+        for parent_id, parent_hits in flanking_hits_by_parent.items():
+            query_rec = flanking_query_by_parent.get(parent_id)
+            if not query_rec:
+                continue
+            exon_offsets = query_rec.get('exon_offsets', {})
+            if not exon_offsets:
+                continue
+            for h in parent_hits:
+                qid = h.get('query', '')
+                m = re.search(r'\|exon_(\d+)$', qid)
+                if not m:
+                    continue
+                exon_num = int(m.group(1))
+                if exon_num not in exon_offsets:
+                    continue
+                offset, _exon_len = exon_offsets[exon_num]
+                # Shift from exon-local to full-protein coordinates (1-based)
+                h['qstart'] = h.get('qstart', 1) + offset
+                h['qend'] = h.get('qend', 1) + offset
 
         for parent_id, parent_hits in flanking_hits_by_parent.items():
             query_rec = flanking_query_by_parent.get(parent_id)
@@ -2602,13 +2695,13 @@ def run_mmseqs_easy_search_with_retries(
             "label": "lowmem_retry_1",
             "threads": 1,
             "sens": min(float(args.mmseqs_sens), 7.0),
-            "split": "0",
+            "split": str(args.mmseqs_split_memory_limit),
         },
         {
             "label": "lowmem_retry_2",
             "threads": 1,
             "sens": min(float(args.mmseqs_sens), 6.0),
-            "split": "0",
+            "split": str(args.mmseqs_split_memory_limit),
         },
     ]
 
@@ -2625,6 +2718,31 @@ def run_mmseqs_easy_search_with_retries(
     last_resource_fail = False
     os.makedirs(tmp_dir, exist_ok=True)
 
+    # Create query and target databases ONCE (outside retry loop).
+    query_db = os.path.join(tmp_dir, "queryDB")
+    target_db = os.path.join(tmp_dir, "targetDB")
+    fmt_output = "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
+
+    # -- createdb for query (protein FASTA) --
+    proc_qdb = subprocess.run(
+        ["mmseqs", "createdb", db_path, query_db],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if proc_qdb.returncode != 0:
+        details = _format_mmseqs_failure(proc_qdb)
+        logger.warning(f"[{genome_name}] mmseqs createdb (query) failed: {details}")
+        return False, details, False
+
+    # -- createdb for target (nucleotide genome) --
+    proc_tdb = subprocess.run(
+        ["mmseqs", "createdb", genome_path, target_db],
+        check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if proc_tdb.returncode != 0:
+        details = _format_mmseqs_failure(proc_tdb)
+        logger.warning(f"[{genome_name}] mmseqs createdb (target) failed: {details}")
+        return False, details, False
+
     for i, attempt in enumerate(attempts, start=1):
         if os.path.exists(hits_file):
             try:
@@ -2633,49 +2751,66 @@ def run_mmseqs_easy_search_with_retries(
                 pass
 
         attempt_tmp = os.path.join(tmp_dir, f"attempt_{i}")
-        cmd = [
-            "mmseqs", "easy-search",
-            db_path, genome_path, hits_file, attempt_tmp,
+        os.makedirs(attempt_tmp, exist_ok=True)
+        result_db = os.path.join(attempt_tmp, "resultDB")
+
+        # -- mmseqs search (protein query vs translated nucleotide target) --
+        search_cmd = [
+            "mmseqs", "search",
+            query_db, target_db, result_db, attempt_tmp,
             "--search-type", "2",
             "--threads", str(attempt["threads"]),
             "-s", str(attempt["sens"]),
             "-e", str(args.evalue),
             "--split-memory-limit", str(attempt["split"]),
             "-v", str(args.mmseqs_verbosity),
-            "--format-output", "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits",
         ]
 
-        mmseqs_proc = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        search_proc = subprocess.run(
+            search_cmd,
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
-        if mmseqs_proc.returncode == 0:
-            if i > 1:
-                logger.warning(
-                    f"[{genome_name}] MMseqs succeeded on retry {i}/{len(attempts)} "
-                    f"({attempt['label']}: threads={attempt['threads']}, "
-                    f"s={attempt['sens']}, split={attempt['split']})."
-                )
-            return True, "", False
+        if search_proc.returncode != 0:
+            details = _format_mmseqs_failure(search_proc)
+            resource_fail = _is_mmseqs_resource_failure(details)
+            last_details = details
+            last_resource_fail = resource_fail
+            logger.warning(
+                f"[{genome_name}] MMseqs search attempt {i}/{len(attempts)} failed "
+                f"({attempt['label']}: threads={attempt['threads']}, "
+                f"s={attempt['sens']}, split={attempt['split']}): {details}"
+            )
+            if not resource_fail:
+                break
+            continue
 
-        details = _format_mmseqs_failure(mmseqs_proc)
-        resource_fail = _is_mmseqs_resource_failure(details)
-        last_details = details
-        last_resource_fail = resource_fail
+        # -- mmseqs convertalis → m8 output --
+        conv_cmd = [
+            "mmseqs", "convertalis",
+            query_db, target_db, result_db, hits_file,
+            "--format-output", fmt_output,
+            "-v", str(args.mmseqs_verbosity),
+        ]
 
-        logger.warning(
-            f"[{genome_name}] MMseqs attempt {i}/{len(attempts)} failed "
-            f"({attempt['label']}: threads={attempt['threads']}, "
-            f"s={attempt['sens']}, split={attempt['split']}): {details}"
+        conv_proc = subprocess.run(
+            conv_cmd,
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
-        # Non-resource failures are unlikely to recover with lower-memory retries.
-        if not resource_fail:
+        if conv_proc.returncode != 0:
+            details = _format_mmseqs_failure(conv_proc)
+            last_details = details
+            logger.warning(f"[{genome_name}] mmseqs convertalis failed: {details}")
             break
+
+        if i > 1:
+            logger.warning(
+                f"[{genome_name}] MMseqs succeeded on retry {i}/{len(attempts)} "
+                f"({attempt['label']}: threads={attempt['threads']}, "
+                f"s={attempt['sens']}, split={attempt['split']})."
+            )
+        return True, "", False
 
     return False, last_details, last_resource_fail
 
