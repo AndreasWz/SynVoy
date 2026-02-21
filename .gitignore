@@ -34,3 +34,5 @@ archive/
 test_home_db/
 
 ref/Homo_sapiens.fna.gz
+bin_backup_pre_unconstrained.tar.gz
+local_runs/
