@@ -16,8 +16,7 @@ It supports annotated genomes, partially annotated genomes, and no-annotation fa
 
 ## Current Runtime Model
 
-- Wrapper command `./synterra` runs `nextflow run main.nf` with a compact live console UI.
-- `./synterra --raw ...` disables the custom UI and prints raw Nextflow output.
+- Standard usage is via `nextflow run main.nf`.
 - Raw logs are always stored in `.synterra_logs/run_YYYYMMDD_HHMMSS.log`.
 
 ## Setup
@@ -29,7 +28,7 @@ cd /path/to/SynTerra
 conda env create -f environment.yml
 conda activate syntenyfinder
 nextflow -version
-./synterra --help
+nextflow run main.nf --help
 ```
 
 If `nextflow` is not on your `PATH`, use `./nextflow`.
@@ -38,13 +37,13 @@ If `nextflow` is not on your `PATH`, use `./nextflow`.
 
 ```bash
 docker build -t synterra-local:latest .
-./synterra -profile docker --gene P01501 --mode easy --outdir results
+nextflow run main.nf -profile docker --query_id P01501 --mode easy --outdir results
 ```
 
 To use another image:
 
 ```bash
-./synterra -profile docker --docker_container your/image:tag --gene P01501 --mode easy --outdir results
+nextflow run main.nf -profile docker --docker_container your/image:tag --query_id P01501 --mode easy --outdir results
 ```
 
 ### Singularity / Apptainer
@@ -52,7 +51,7 @@ To use another image:
 ```bash
 mkdir -p "$HOME/.singularity/cache"
 export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
-./synterra -profile singularity --gene P01501 --mode easy --outdir results
+nextflow run main.nf -profile singularity --query_id P01501 --mode easy --outdir results
 ```
 
 ## Quick Start
@@ -60,18 +59,18 @@ export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
 ### Easy mode (automatic genome retrieval)
 
 ```bash
-./synterra \
+nextflow run main.nf \
   --mode easy \
-  --gene P01501 \
+  --query_id P01501 \
   --outdir results
 ```
 
 ### Pro mode (local genomes)
 
 ```bash
-./synterra \
+nextflow run main.nf \
   --mode pro \
-  --gene input/query.fasta \
+  --query input/query.fasta \
   --home_genome input/home.fna \
   --home_gff input/home.gff \
   --target_genomes "input/targets/*.fna" \
@@ -81,7 +80,7 @@ export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
 ### Resume a stopped run
 
 ```bash
-./synterra --mode easy --gene P01501 --outdir results -resume
+nextflow run main.nf --mode easy --query_id P01501 --outdir results -resume
 ```
 
 ## Practical 3FTx Example (3 snake species)
@@ -91,10 +90,10 @@ This pattern is tuned for desktop stability and lower crash risk:
 ```bash
 conda activate syntenyfinder
 
-NXF_OPTS='-Xms512m -Xmx2g' ./synterra \
+NXF_OPTS='-Xms512m -Xmx2g' nextflow run main.nf \
   -profile docker \
   --mode easy \
-  --gene P60615 \
+  --query_id P60615 \
   --home_species "Naja naja" \
   --target_species "Ophiophagus hannah,Bungarus multicinctus" \
   --max_genomes 2 \

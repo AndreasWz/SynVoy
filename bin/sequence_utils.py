@@ -97,7 +97,7 @@ def count_sequences(filepath: str) -> int:
 # Known ID patterns (order matters - more specific first)
 ID_PATTERNS = [
     # NCBI RefSeq proteins: XP_123456.1, NP_123456.1, YP_123456.1, WP_123456.1
-    (r'^([XNYWZ]P_\d+(?:\.\d+)?)', 'ncbi_refseq'),
+    (r'^([XNYWZ]P_\d+(?:\.\d+)?)(?=$|[\s|])', 'ncbi_refseq'),
     
     # NCBI GenBank proteins: AAA12345.1
     # Require token boundary after accession so long IDs like LOC143834063 are
@@ -108,34 +108,34 @@ ID_PATTERNS = [
     (r'^gi\|(\d+)\|', 'ncbi_gi'),
     
     # NCBI accession with version: NC_123456.1, NZ_CP123456.1
-    (r'^((?:NC|NZ|NW|NT|AC|NG)_[A-Z]*\d+(?:\.\d+)?)', 'ncbi_nucl'),
+    (r'^((?:NC|NZ|NW|NT|AC|NG)_[A-Z]*\d+(?:\.\d+)?)(?=$|[\s|])', 'ncbi_nucl'),
     
     # NCBI assembly accession in sequence name: lcl|NC_123456.1_cds_XP_123456.1_1
-    (r'cds_([XNYWZ]P_\d+(?:\.\d+)?)_', 'ncbi_cds'),
+    (r'cds_([XNYWZ]P_\d+(?:\.\d+)?)(?=$|[\s|])_', 'ncbi_cds'),
     
     # UniProt: P12345, Q9NXB0, A0A1B2C3D4
-    (r'^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})', 'uniprot'),
+    (r'^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})(?=$|[\s|])', 'uniprot'),
     
     # UniProt with prefix: sp|P12345|NAME, tr|A0A123|NAME
     (r'^(?:sp|tr)\|([^\|]+)\|', 'uniprot_full'),
     
     # Ensembl proteins: ENSP00000123456, ENSMUSP00000123456
-    (r'^(ENS[A-Z]*P\d+(?:\.\d+)?)', 'ensembl_protein'),
+    (r'^(ENS[A-Z]*P\d+(?:\.\d+)?)(?=$|[\s|])', 'ensembl_protein'),
     
     # Ensembl genes: ENSG00000123456
-    (r'^(ENS[A-Z]*G\d+(?:\.\d+)?)', 'ensembl_gene'),
+    (r'^(ENS[A-Z]*G\d+(?:\.\d+)?)(?=$|[\s|])', 'ensembl_gene'),
     
     # Ensembl transcripts: ENST00000123456
-    (r'^(ENS[A-Z]*T\d+(?:\.\d+)?)', 'ensembl_transcript'),
+    (r'^(ENS[A-Z]*T\d+(?:\.\d+)?)(?=$|[\s|])', 'ensembl_transcript'),
     
     # FlyBase: FBgn0000001, FBpp0000001
-    (r'^(FB[a-z]{2}\d+)', 'flybase'),
+    (r'^(FB[a-z]{2}\d+)(?=$|[\s|])', 'flybase'),
     
     # WormBase: WBGene00000001
-    (r'^(WBGene\d+)', 'wormbase'),
+    (r'^(WBGene\d+)(?=$|[\s|])', 'wormbase'),
     
     # TAIR (Arabidopsis): AT1G01010.1
-    (r'^(AT[1-5MC]G\d+(?:\.\d+)?)', 'tair'),
+    (r'^(AT[1-5MC]G\d+(?:\.\d+)?)(?=$|[\s|])', 'tair'),
     
     # Prodigal format: >1_1 # start # end # strand # ID=1_1;...
     (r'^(\d+_\d+)\s*#', 'prodigal'),

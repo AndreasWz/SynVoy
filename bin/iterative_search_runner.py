@@ -140,10 +140,13 @@ def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int,
         qspan = abs(qend - qstart) + 1
         alnlen = h.get('alnlen', qspan)
         qcov = qspan / query_len if query_len > 0 else 0
-        if min_alnlen and alnlen < min_alnlen:
-            continue
-        if min_query_cov and qcov < min_query_cov:
-            continue
+        
+        # We comment out the strict constraints here because they destroy fragmented exon hits
+        # before the more robust miniprot/fallback logic can assemble them.
+        # if min_alnlen and alnlen < min_alnlen:
+        #    continue
+        # if min_query_cov and qcov < min_query_cov:
+        #    continue
         kept.append(h)
     return kept
 
@@ -975,7 +978,7 @@ def collapse_flanking_cds_to_gene_span(gff_lines: List[str]) -> List[str]:
     return output
 
 
-def identify_synteny_blocks(hits, max_intron=20000, cluster_dist=50000):
+def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000):
     """
     Identify all synteny blocks from hits.
     
@@ -989,7 +992,7 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_dist=50000):
     Args:
         hits: List of hit dictionaries
         max_intron: Maximum distance between exons of same gene (bp)
-        cluster_dist: Maximum distance to cluster genes into synteny block (bp)
+        cluster_distance: Maximum distance to cluster genes into synteny block (bp)
     
     Returns:
         List of dictionaries (blocks), sorted by score (descending).
@@ -1049,7 +1052,7 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_dist=50000):
         
         # Same chromosome and within clustering distance
         if (locus['chrom'] == last_locus['chrom'] and 
-            locus['start'] - last_locus['end'] < cluster_dist):
+            locus['start'] - last_locus['end'] < cluster_distance):
             current_block.append(locus)
         else:
             synteny_blocks.append(current_block)
@@ -1079,11 +1082,11 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_dist=50000):
     return final_blocks
 
 
-def identify_best_synteny_block(hits, max_intron=20000, cluster_dist=50000):
+def identify_best_synteny_block(hits, max_intron=20000, cluster_distance=50000):
     """
     Backwards-compatible wrapper kept for tests/importers.
     """
-    blocks = identify_synteny_blocks(hits, max_intron=max_intron, cluster_dist=cluster_dist)
+    blocks = identify_synteny_blocks(hits, max_intron=max_intron, cluster_distance=cluster_distance)
     return blocks[0] if blocks else None
 
 def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str, Any],
@@ -1121,9 +1124,9 @@ def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str
     return final_padding
 
 
-def estimate_cluster_dist(genome_file: str, gff_file: Optional[str] = None, default_dist: int = 50000) -> int:
+def estimate_cluster_distance(genome_file: str, gff_file: Optional[str] = None, default_dist: int = 50000) -> int:
     """
-    Estimate gene density to adjust cluster_dist intelligently.
+    Estimate gene density to adjust cluster_distance intelligently.
     
     Strategy:
     1. If GFF provided: Calculate actual inter-gene distances
@@ -1154,12 +1157,12 @@ def estimate_cluster_dist(genome_file: str, gff_file: Optional[str] = None, defa
                     # Use median distance * 2.5 as clustering threshold
                     all_distances.sort()
                     median_dist = all_distances[len(all_distances) // 2]
-                    cluster_dist = int(median_dist * 2.5)
+                    cluster_distance = int(median_dist * 2.5)
                     # Clamp to reasonable range
-                    cluster_dist = max(10000, min(200000, cluster_dist))
-                    print(f"Estimated cluster distance from GFF: {cluster_dist} bp "
+                    cluster_distance = max(10000, min(200000, cluster_distance))
+                    print(f"Estimated cluster distance from GFF: {cluster_distance} bp "
                           f"(median inter-gene: {median_dist} bp)", file=sys.stderr)
-                    return cluster_dist
+                    return cluster_distance
         except Exception as e:
             print(f"Warning: Could not parse GFF for gene density: {e}", file=sys.stderr)
     
@@ -2001,7 +2004,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 })
 
             exon_parents = set()
-            for q in goi_queries:
+            for q in found_queries:
                 qid = q.get('id', '')
                 if '|exon_' in qid:
                     exon_parents.add(extract_base_gene_id(qid))
@@ -2021,6 +2024,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     continue
 
                 parent_loci = split_hits_into_loci(parent_hits, max_gap=locus_gap)
+                print(f"[DEBUG PARENT] parent_id={parent_id} is_goi={is_goi_parent} num_loci={len(parent_loci)} exon_parents={exon_parents}", flush=True)
                 if not parent_loci:
                     continue
 
@@ -2037,13 +2041,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 for locus_idx, gene_hits in enumerate(parent_loci, start=1):
                     work_hits = gene_hits
                     if parent_id in exon_parents:
+                        print(f"[DEBUG EXON] {parent_id} starting with {len(work_hits)} hits", flush=True)
                         work_hits = filter_exon_hits(
                             work_hits,
                             len(parent_query_seq),
                             args.min_exon_query_cov,
                             args.min_exon_alnlen
                         )
+                        print(f"[DEBUG EXON] {parent_id} after filter: {len(work_hits)} hits", flush=True)
                         if not work_hits:
+                            print(f"[DEBUG EXON] {parent_id} dropped entirely by filter_exon_hits!", flush=True)
                             continue
 
                     exons = []
@@ -2077,8 +2084,95 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     min_exon_alnlen=args.min_exon_alnlen,
                                     sensitive=is_goi_parent
                                 )
-                    except Exception:
+                    except Exception as e:
+                        import traceback
+                        print(f"[ERROR] miniprot annotation failed for {parent_id} at {chrom}:{w_start}-{w_end}: {e}")
+                        traceback.print_exc()
                         exons = []
+
+                    if not exons:
+                        if work_hits:
+                            strand_votes = {'+': 0, '-': 0}
+                            for h in work_hits:
+                                strand_votes[h.get('strand', '+')] += 1
+                            strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
+
+                            ordered_hits = sorted(
+                                [h for h in work_hits if h.get('strand', '+') == strand],
+                                key=lambda h: h.get('gstart', 0)
+                            )
+                            if ordered_hits:
+                                ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand)
+                                if ordered_hits:
+                                    qmin = min(min(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
+                                    qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
+                                    query_len = max(1, len(parent_query_seq))
+                                    qcov = (qmax - qmin + 1) / query_len
+                                    aln_total = sum(max(0, int(h.get('alnlen', 0))) for h in ordered_hits)
+                                    best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
+                                    print(f"[DEBUG FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}", flush=True)
+
+                                    valid_fallback = True
+                                    if len(ordered_hits) == 1:
+                                        # Less strict coverage constraint for GOI fragments matching strongly
+                                        if qcov < 0.25 or int(ordered_hits[0].get('alnlen', 0)) < 25:
+                                            valid_fallback = False
+                                    else:
+                                        if qcov < 0.25 and aln_total < 35 and best_bits < 60.0:
+                                            valid_fallback = False
+                                            
+                                    print(f"[DEBUG FALLBACK] valid_fallback={valid_fallback}", flush=True)
+
+                                    if valid_fallback:
+                                        coding_frags = []
+                                        cds_intervals = []
+                                        for h in ordered_hits:
+                                            hs = h.get('gstart', 0)
+                                            he = h.get('gend', 0)
+                                            if he <= hs: continue
+                                            dna = subseq[hs:he]
+                                            if strand == '-': dna = reverse_complement(dna)
+                                            dna = dna[:len(dna) - (len(dna) % 3)]
+                                            if len(dna) < 9: continue
+                                            aa = translate(dna).replace('*', '')
+                                            if not aa: continue
+                                            coding_frags.append(aa)
+                                            cds_intervals.append((hs, he))
+
+                                        if coding_frags and cds_intervals:
+                                            if strand == '-': coding_frags = list(reversed(coding_frags))
+                                            flank_protein = ''.join(coding_frags)
+                                            global_start = w_start + min(s for s, _ in cds_intervals) + 1
+                                            global_end = w_start + max(e for _, e in cds_intervals)
+                                            avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
+                                            
+                                            copy_id = f"{parent_id}|{clean_gname}_b{block_idx}_l{locus_idx}_fallback"
+                                            
+                                            cand_gff = [
+                                                (
+                                                    f"{chrom}\tfallback_hits\tmRNA\t{global_start}\t{global_end}\t"
+                                                    f"{avg_pident:.1f}\t{strand}\t.\t"
+                                                    f"{_mRNA_attrs({'ID': copy_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Type': 'fallback_hit_span'}, global_start, global_end, strand)}"
+                                                )
+                                            ]
+                                            for eidx, (hs, he) in enumerate(cds_intervals, 1):
+                                                exon_gs = w_start + hs + 1
+                                                exon_ge = w_start + he
+                                                cand_gff.append(
+                                                    f"{chrom}\tfallback_hits\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\tID={copy_id}_CDS{eidx};Parent={copy_id}"
+                                                )
+                                            
+                                            raw_candidates.append({
+                                                'start': global_start,
+                                                'end': global_end,
+                                                'score': avg_pident,
+                                                'record': {
+                                                    'id': copy_id,
+                                                    'seq': flank_protein,
+                                                    'description': f"coords:{global_start}-{global_end} parent:{parent_id} type:fallback identity:{avg_pident:.1f}"
+                                                },
+                                                'gff': cand_gff
+                                            })
 
                     if exons:
                         is_tandem_result = any(e.get('id', '').startswith('GOI_copy_') for e in exons)
@@ -2845,9 +2939,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 base_db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
             query_lengths.setdefault(base, len(seq))
 
-        c_dist = args.cluster_dist
+        c_dist = args.cluster_distance
         if c_dist <= 0:
-            c_dist = estimate_cluster_dist(genome_path)
+            c_dist = estimate_cluster_distance(genome_path)
             
         # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
         mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
@@ -2896,7 +2990,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         synteny_blocks = identify_synteny_blocks(
             seed_hits,
             max_intron=args.max_intron,
-            cluster_dist=c_dist
+            cluster_distance=c_dist
         )
         
         if not synteny_blocks:
@@ -2930,7 +3024,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             synteny_blocks = identify_synteny_blocks(
                 seed_hits,
                 max_intron=args.max_intron,
-                cluster_dist=c_dist
+                cluster_distance=c_dist
             )
             synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
 
@@ -2997,17 +3091,16 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 empty_block_streak >= args.max_consecutive_empty_blocks
             ):
                 logger.info(
-                    f"[{genome_name}] Early stop after {empty_block_streak} consecutive blocks "
-                    f"with no GOI-derived annotations (max_consecutive_empty_blocks)."
+                    f"[{genome_name}] Early stop logic disabled to ensure complete block evaluation (streak={empty_block_streak})."
                 )
-                break
+                # break
 
         # Flanking-only post-pass: keep one best chain per flanking parent per locus across blocks.
         all_genes, all_gff_lines = deduplicate_flanking_models(
             all_genes,
             all_gff_lines,
             genome_name=genome_name,
-            locus_gap_bp=max(5000, int(args.cluster_dist)),
+            locus_gap_bp=max(5000, int(args.cluster_distance)),
         )
         all_gff_lines = collapse_flanking_cds_to_gene_span(all_gff_lines)
 
@@ -3060,7 +3153,7 @@ def main():
     parser.add_argument("--min_length", type=int, default=50)
     parser.add_argument("--max_intron", type=int, default=20000)
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
-    parser.add_argument("--cluster_dist", type=int, default=-1, help="Auto-detect if -1")
+    parser.add_argument("--cluster_distance", type=int, default=-1, help="Auto-detect if -1")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")

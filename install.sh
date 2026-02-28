@@ -52,7 +52,7 @@ conda activate syntenyfinder
 
 # Check key tools
 echo "Checking dependencies..."
-for tool in mmseqs blast prodigal augustus plotly; do
+for tool in mmseqs blast prodigal miniprot plotly; do
     if command -v $tool &> /dev/null || python -c "import $tool" 2>/dev/null; then
         echo "  ✓ $tool"
     else
@@ -73,7 +73,7 @@ echo "  2. Test with example data:"
 echo "     nextflow run main.nf -profile test"
 echo ""
 echo "  3. Run with your data:"
-echo "     nextflow run main.nf --gene gene.fasta --home_genome genome.fna --target_genomes 'targets/*.fna'"
+echo "     nextflow run main.nf --mode pro --query query.fasta --home_genome genome.fna --target_genomes 'targets/*.fna'"
 echo ""
 echo "For help:"
 echo "  - See README.md for overview"

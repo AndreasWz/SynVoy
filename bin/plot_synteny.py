@@ -984,6 +984,7 @@ def main():
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
+    ap.add_argument("--sorted_genomes", default=None)
     ap.add_argument("--species_map",    default=None,
                     help="TSV mapping accession → species name")
     ap.add_argument("--output",         required=True)
@@ -1038,6 +1039,11 @@ def main():
 
     goi_genome_colours, tree_target_order = parse_tree_clade_colours(args.tree)
 
+    if args.sorted_genomes and os.path.exists(args.sorted_genomes):
+        with open(args.sorted_genomes) as fh:
+            tree_target_order = [line.strip().split("\t")[0] for line in fh if line.strip()]
+            print(f"[plot] Overriding target order with {len(tree_target_order)} genomes from {args.sorted_genomes}")
+
     # -- 2. Build target tracks (matched by filename, not positional index)
     candidate_regions_by_genome = parse_candidate_regions(args.candidate_beds)
 
@@ -1057,7 +1063,7 @@ def main():
 
         # If candidate regions exist but miss GOI, recover a GOI-centered context.
         if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
-            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=200000)
+            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=1000000)
             if fallback_genes:
                 genes = fallback_genes
                 print(
@@ -1221,7 +1227,7 @@ def main():
                                upper["offset"], lower["offset"],
                                y_ribbon_top, y_ribbon_bot,
                                colour, alpha=0.20)
-                    break
+                    # Do not break; allow connecting to all duplicated matching loci
 
     # -- 5c. Gene arrows -------------------------------------------------
     legend_shown = set()

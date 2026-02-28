@@ -1275,21 +1275,33 @@ def main():
     fasta_records = []
     bed_records = []
 
-    # Always include the full GOI protein
-    goi_full_id = f"GOI_{query_id}"
+    # Enforce a consistent prefix across the full sequence and all exon sequences.
+    base_goi_name = query_id
+    if exons and exons[0].get('id', '').startswith('GOI_'):
+        import re
+        m = re.match(r'^GOI_([A-Za-z0-9_.-]+)(?:\||$)', exons[0]['id'])
+        if m:
+            base_goi_name = m.group(1)
+            
+    # Fallback if base_goi_name is empty (e.g. Pro Mode with no query_id)
+    if not base_goi_name:
+        base_goi_name = "target"
+        
+    goi_full_id = f"GOI_{base_goi_name}"
     fasta_records.append((goi_full_id, query_seq))
 
     # Add individual exon sequences
-    # Normalize IDs so all GOI-derived entries are explicitly prefixed with GOI_.
     for idx, exon in enumerate(exons, start=1):
         raw_exon_id = exon.get('id', '') or f"exon_{idx}"
         exon_num = exon.get('exon_num', idx)
-        exon_id = raw_exon_id
-        if not (raw_exon_id.startswith("GOI_") or raw_exon_id.startswith("GOI_copy_")):
-            if raw_exon_id.startswith("exon_"):
-                exon_id = f"{goi_full_id}|{raw_exon_id}"
-            else:
-                exon_id = f"{goi_full_id}|exon_{exon_num}"
+        
+        if raw_exon_id.startswith('GOI_copy_'):
+            # Tandem copies maintain their own ID
+            exon_id = raw_exon_id
+        else:
+            # Overwrite all exon IDs to strictly match the full sequence's parent ID
+            exon_id = f"{goi_full_id}|exon_{exon_num}"
+            
         exon['id'] = exon_id
         fasta_records.append((exon_id, exon['seq']))
 

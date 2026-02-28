@@ -91,7 +91,7 @@ def printHeader() {
 }
 
 def printParams() {
-    def query_display = params.gene ? new File(params.gene).name : params.query_id
+    def query_display = params.mode == 'easy' ? params.query_id : (params.query ? new File(params.query).name : 'N/A')
     def home_display = params.mode == 'easy' ? params.home_species : (params.home_genome ? new File(params.home_genome).name : 'N/A')
     def target_display = params.target_species ?: 'auto (taxonomic search)'
     
@@ -124,35 +124,34 @@ workflow {
     
     // ========== INPUT VALIDATION ==========
     
-    // Check if we have EITHER gene file OR query_id
-    if (!params.gene && !params.query_id) { 
-        log.error "${c_red}No query provided. Please provide either --gene or --query_id${c_reset}"
-        exit 1
-    }
-    
-    if (params.gene && params.query_id) {
-        uiStatus('WARN', 'INPUT', 'Both --gene and --query_id provided; using --gene')
-    }
-    
-    // Easy mode: home_species is now optional (auto-detected from UniProt/NCBI ID)
-    // Only required when --gene is a FASTA file
+    // Mode-specific validation
     if (params.mode == 'easy') {
-        // Validation deferred — species can be auto-detected from ID
-    } else {
-        if (!params.home_genome) { 
-            log.error "${c_red}Pro mode requires --home_genome${c_reset}"
+        if (!params.query_id) {
+            log.error "${c_red}Easy mode requires --query_id (UniProt or NCBI ID)${c_reset}"
             exit 1
         }
-        
+        if (params.query) {
+            uiStatus('WARN', 'INPUT', 'Pro mode flag --query was provided but ignored in easy mode; using --query_id.')
+        }
+    } else if (params.mode == 'pro') {
+        if (!params.query) {
+            log.error "${c_red}Pro mode requires --query (path to FASTA file)${c_reset}"
+            exit 1
+        }
+        if (!params.home_genome) { 
+            log.error "${c_red}Pro mode requires --home_genome (path to home FASTA)${c_reset}"
+            exit 1
+        }
         if (!file(params.home_genome).exists()) {
             log.error "${c_red}Home genome not found: ${params.home_genome}${c_reset}"
             exit 1
         }
-    }
-    
-    // Only check file existence if --gene looks like a file path (not a UniProt/NCBI ID)
-    if (params.gene && !params.gene.matches('^[A-Za-z]{1,3}[_P]?[0-9].*') && !file(params.gene).exists()) {
-        log.error "${c_red}Gene file not found: ${params.gene}${c_reset}"
+        if (!file(params.query).exists()) {
+            log.error "${c_red}Query FASTA not found: ${params.query}${c_reset}"
+            exit 1
+        }
+    } else {
+        log.error "${c_red}Invalid mode: ${params.mode}. Expected 'easy' or 'pro'${c_reset}"
         exit 1
     }
     
@@ -160,27 +159,18 @@ workflow {
     
     // Channel setup — depends on mode
     if (params.mode == 'easy') {
-        // --- Easy mode query handling ---
-        // If user provided a local FASTA path, use it directly. This avoids
-        // resolving an already-resolved file path from process work dirs.
-        if (params.gene && file(params.gene).exists()) {
-            uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: using provided query FASTA')
-            raw_gene_ch = Channel.fromPath(params.gene)
-            resolved_species_ch = Channel.value(params.home_species ?: '')
-        } else {
-            // ID/symbol mode: resolve input via resolver process.
-            def gene_input = params.gene ?: params.query_id
-            def species_override = params.home_species ?: ''
-            
-            uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query input')
-            RESOLVE_GENE_INPUT(gene_input, species_override)
-            
-            // Use resolved FASTA as query
-            raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
-            
-            // Get resolved species (auto-detected from ID, or user-provided)
-            resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
-        }
+        // ID/symbol mode: resolve input via resolver process.
+        def gene_input = params.query_id
+        def species_override = params.home_species ?: ''
+        
+        uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query_id input')
+        RESOLVE_GENE_INPUT(gene_input, species_override)
+        
+        // Use resolved FASTA as query
+        raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
+        
+        // Get resolved species (auto-detected from ID, or user-provided)
+        resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
         
         // Determine home species: user-provided takes priority, else auto-detected
         home_species_ch = resolved_species_ch.map { resolved ->
@@ -209,20 +199,9 @@ workflow {
         // --- Pro mode: User provides files directly ---
         
         // 1. Query Setup
-        if (params.gene) {
-            raw_gene_ch = Channel.fromPath(params.gene)
-        } else {
-            def pro_species_override = params.home_species ?: ''
-            RESOLVE_GENE_INPUT(params.query_id, pro_species_override)
-            raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
-        }
+        raw_gene_ch = Channel.fromPath(params.query)
         
         // 2. Home Genome Setup
-        if (!params.home_genome) {
-            log.error "${c_red}Pro mode requires --home_genome${c_reset}"
-            exit 1
-        }
-        
         home_genome_ch = Channel.fromPath(params.home_genome)
         
         if (params.home_gff) {
@@ -352,7 +331,7 @@ workflow {
     EXTRACT_FLANKING(
         distinct_loci_ch, 
         effective_home_gff_ch, 
-        home_genome_ch,
+        home_genome_ch.first(),
         params.n_flanking_genes,
         params.min_flanking_size,
         params.prefer_large_genes
@@ -576,7 +555,7 @@ workflow {
             plot_inputs_split.candidate_beds, // candidate_beds
             plot_inputs_split.homology_tsvs,  // homology_tsvs
             plot_inputs_split.tree,           // tree
-            species_map_ch                    // species_mapping.tsv
+            species_map_ch.first()            // species_mapping.tsv
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->

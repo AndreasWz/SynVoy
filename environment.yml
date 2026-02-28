@@ -12,7 +12,6 @@ dependencies:
   - mmseqs2 >=14.7e284
   - blast >=2.13.0
   - prodigal >=2.6.3
-  - augustus >=3.5.0
   - mafft >=7.505
   - miniprot
   - iqtree >=2.2.0

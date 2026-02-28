@@ -30,7 +30,7 @@ def parse_args():
         help="Padding (bp) around GOI intervals when injecting fallback candidate regions",
     )
     parser.add_argument("--flanking_count", type=int, default=10, help="Expected number of flanking genes (fallback)")
-    parser.add_argument("--cluster_dist", type=int, default=50000, help="Max distance to cluster hits (bp)")
+    parser.add_argument("--cluster_distance", type=int, default=50000, help="Max distance to cluster hits (bp)")
     parser.add_argument("--min_score", type=float, default=0.5, help="Score threshold for High Confidence")
     parser.add_argument("--weight_base", type=float, default=0.4, help="Base weight for coverage")
     parser.add_argument("--weight_consistency", type=float, default=0.3, help="Weight for order consistency")
@@ -372,7 +372,7 @@ def score_flexible_synteny(cluster, gene_map):
     
     return unique_genes, consistency, strand_cons
 
-def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_dist, score_func, gene_map, total_genes_expected, n=200):
+def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_distance, score_func, gene_map, total_genes_expected, n=200):
     """
     Estimate P-value via label-shuffling permutation test.
 
@@ -478,7 +478,7 @@ def main():
         )
 
     # Cluster
-    clusters = cluster_hits_proximity(hits, gene_map, args.cluster_dist)
+    clusters = cluster_hits_proximity(hits, gene_map, args.cluster_distance)
     
     genome_len = get_genome_length(args.genome) if args.genome else 1
     
@@ -516,7 +516,7 @@ def main():
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
         
-        p_val = estimate_pvalue(final_score, cl, hits, genome_len, args.cluster_dist, score_flexible_synteny, gene_map, total_genes_expected, n=200)
+        p_val = estimate_pvalue(final_score, cl, hits, genome_len, args.cluster_distance, score_flexible_synteny, gene_map, total_genes_expected, n=200)
         
         scored_clusters.append({
             'cluster': cl,

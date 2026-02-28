@@ -11,6 +11,7 @@ process NORMALIZE_QUERY {
 
     script:
     """
-    normalize_query.py --input $gene --output normalized_query.faa
+    normalize_query.py --input $gene --output tmp_query_out.faa
+    mv tmp_query_out.faa normalized_query.faa
     """
 }

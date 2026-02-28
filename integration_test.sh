@@ -22,10 +22,10 @@ rm -rf $OUTDIR .nextflow* work
 # Assuming we run normal execution on small test data
 echo "Running Nextflow..."
 nextflow run main.nf \
-    --gene "$QUERY" \
+    --mode pro \
+    --query "$QUERY" \
     --target_genomes "$TARGET_DIR/*.fna" \
     --home_genome "$HOME_GENOME" \
-    --mode pro \
     --outdir "$OUTDIR" \
     -resume
 

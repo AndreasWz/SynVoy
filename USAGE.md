@@ -19,7 +19,7 @@ cd /path/to/SynTerra
 conda env create -f environment.yml
 conda activate syntenyfinder
 nextflow -version
-./synterra --help
+nextflow run main.nf --help
 ```
 
 If `nextflow` is not on your `PATH`, use `./nextflow`.
@@ -28,13 +28,13 @@ If `nextflow` is not on your `PATH`, use `./nextflow`.
 
 ```bash
 docker build -t synterra-local:latest .
-./synterra -profile docker --mode easy --gene P01501 --outdir results
+nextflow run main.nf -profile docker --mode easy --gene P01501 --outdir results
 ```
 
 Override image:
 
 ```bash
-./synterra -profile docker --docker_container your/image:tag --mode easy --gene P01501 --outdir results
+nextflow run main.nf -profile docker --docker_container your/image:tag --mode easy --query_id P01501 --outdir results
 ```
 
 ### Option C: Singularity/Apptainer
@@ -42,7 +42,7 @@ Override image:
 ```bash
 mkdir -p "$HOME/.singularity/cache"
 export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
-./synterra -profile singularity --mode easy --gene P01501 --outdir results
+nextflow run main.nf -profile singularity --mode easy --query_id P01501 --outdir results
 ```
 
 ### Optional smoke test
@@ -53,14 +53,14 @@ nextflow run main.nf -profile test
 
 ## 3) How to Run
 
-`./synterra` is the recommended launcher.
+`nextflow run main.nf` is the recommended launcher.
 It forwards pipeline arguments to Nextflow and adds a compact live UI.
 
 Examples:
 
 ```bash
-./synterra --mode easy --gene P01501 --outdir results
-./synterra --raw --mode easy --gene P01501 --outdir results
+nextflow run main.nf --mode easy --gene P01501 --outdir results
+nextflow run main.nf --raw --mode easy --gene P01501 --outdir results
 ```
 
 - `--raw` prints raw Nextflow output.
@@ -73,9 +73,9 @@ Examples:
 SynTerra resolves query input, fetches the home genome, and fetches target genomes.
 
 ```bash
-./synterra \
+nextflow run main.nf \
   --mode easy \
-  --gene P01501 \
+  --query_id P01501 \
   --outdir results
 ```
 
@@ -84,9 +84,9 @@ SynTerra resolves query input, fetches the home genome, and fetches target genom
 You provide local home and target genomes.
 
 ```bash
-./synterra \
+nextflow run main.nf \
   --mode pro \
-  --gene input/query.fasta \
+  --query input/query.fasta \
   --home_genome input/home.fna \
   --home_gff input/home.gff \
   --target_genomes "input/targets/*.fna" \
@@ -98,24 +98,19 @@ You provide local home and target genomes.
 Use the same command and same `--outdir`, then add `-resume`.
 
 ```bash
-./synterra --mode easy --gene P01501 --outdir results -resume
+nextflow run main.nf --mode easy --gene P01501 --outdir results -resume
 ```
 
 ## 5) Query Input Behavior
 
-`--gene` accepts:
+SynTerra strictly separates input parameters by `--mode`:
 
-- UniProt ID (for example `P60615`)
-- NCBI protein accession
-- Local FASTA path
-
-`--query_id` is legacy and still supported.
+- `--mode easy`: Requires `--query_id` (a UniProt ID or NCBI accession). Do not pass a file.
+- `--mode pro`: Requires `--query` (a local FASTA file path).
 
 Rules:
-
-- In easy mode, `--home_species` is optional when input is a resolvable protein ID.
-- In easy mode, if `--gene` is a local FASTA path, provide `--home_species`.
-- If a FASTA path is missing, input validation/resolution fails early.
+- In easy mode, `--home_species` is auto-detected from the UniProt/NCBI annotation. You can provide `--home_species` to override it.
+- In pro mode, a FASTA path must be supplied for both `--query` and `--home_genome`.
 - DNA query FASTA is normalized to protein space before search/annotation.
 
 ## 6) Easy-Mode Genome Selection
@@ -161,10 +156,10 @@ Quality report file:
 ```bash
 conda activate syntenyfinder
 
-NXF_OPTS='-Xms512m -Xmx2g' ./synterra \
+NXF_OPTS='-Xms512m -Xmx2g' nextflow run main.nf \
   -profile docker \
   --mode easy \
-  --gene P60615 \
+  --query_id P60615 \
   --home_species "Naja naja" \
   --target_species "Ophiophagus hannah,Bungarus multicinctus" \
   --max_genomes 2 \
@@ -188,8 +183,8 @@ Defaults are taken from `nextflow.config`.
 | Parameter | Default | Description |
 |---|---|---|
 | `--mode` | `easy` | `easy` or `pro`. |
-| `--gene` | `null` | Query input (ID or FASTA path). |
-| `--query_id` | `null` | Legacy query ID input. |
+| `--query` | `null` | Pro-mode path to local query FASTA file. |
+| `--query_id` | `null` | Easy-mode query UniProt/NCBI Accession ID. |
 | `--home_species` | `null` | Easy-mode home species name. |
 | `--home_genome` | `null` | Pro-mode home genome FASTA path. |
 | `--home_gff` | `null` | Pro-mode home GFF path (optional). |
@@ -300,7 +295,6 @@ Defaults are taken from `nextflow.config`.
 |---|---|---|
 | `--keep_intermediate` | `false` | Keep extra intermediate artifacts. |
 | `--max_retries` | `3` | Pipeline retry-related knob (advanced). |
-| `--augustus_species` | `honeybee1` | Reserved for future wiring. |
 | `--expand_db_threshold` | `1e-10` | Reserved for future wiring. |
 | `--diamond_sensitivity` | `very-sensitive` | Reserved for future wiring. |
 | `--enable_splice_variants` | `true` | Reserved for future wiring. |
@@ -343,7 +337,7 @@ tail -f "$(ls -1t .synterra_logs/run_*.log | head -n 1)"
 Resume run:
 
 ```bash
-./synterra --mode easy --gene P01501 --outdir results -resume
+nextflow run main.nf --mode easy --query_id P01501 --outdir results -resume
 ```
 
 Remove old outputs and work directory:

@@ -36,7 +36,7 @@ mkdir -p "${NXF_SINGULARITY_CACHEDIR}"
 # EDIT THESE PARAMETERS FOR YOUR RUN
 # ============================================================
 
-QUERY_ID="P01501"                    # UniProt ID (or use --gene for FASTA)
+QUERY_ID="P01501"                    # UniProt ID (or switch to --mode pro with --query for local FASTA)
 HOME_SPECIES="Apis mellifera"        # Species name for Easy Mode
 MAX_GENOMES=10                       # Number of related genomes to fetch
 OUTDIR="results/${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
