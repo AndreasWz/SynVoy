@@ -289,6 +289,16 @@ Defaults are taken from `nextflow.config`.
 | `--synteny_weight_consistency` | `0.3` | Consistency term weight in synteny scoring. |
 | `--synteny_weight_strand` | `0.3` | Strand term weight in synteny scoring. |
 
+### Visual plotting and rendering
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--gap_threshold` | `50000` | Minimum empty sequence gap size to trigger plot compression (bp). |
+| `--gap_visual_size` | `3000` | Rendered visual coordinate size of compressed gaps (bp). |
+| `--flank_fallback_bp` | `1000000` | Hard boundary threshold for dropping flanking genes from the plot window (bp). |
+| `--scale_bar_len` | `10000` | Calibration marker size drawn on the output plot scale (bp). |
+| `--plot_width` | `1500` | HTML layout constraint governing the master plot canvas width. |
+
 ### Advanced and reserved
 
 | Parameter | Default | Description |

@@ -65,6 +65,11 @@ process PLOT_SYNTENY {
         $homo_arg \\
         --tree $tree \\
         $species_arg \\
+        --gap_threshold ${params.gap_threshold} \\
+        --gap_visual_size ${params.gap_visual_size} \\
+        --flank_fallback_bp ${params.flank_fallback_bp} \\
+        --scale_bar_len ${params.scale_bar_len} \\
+        --plot_width ${params.plot_width} \\
         --output ${home_bed.baseName}_synteny_plot.html
     """
 }

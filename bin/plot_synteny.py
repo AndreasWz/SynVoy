@@ -987,6 +987,11 @@ def main():
     ap.add_argument("--sorted_genomes", default=None)
     ap.add_argument("--species_map",    default=None,
                     help="TSV mapping accession → species name")
+    ap.add_argument("--gap_threshold",  type=int, default=50000, help="Min gap size to compress (bp)")
+    ap.add_argument("--gap_visual_size",type=int, default=3000, help="Visual size of compressed gaps (bp)")
+    ap.add_argument("--flank_fallback_bp",type=int, default=1000000, help="Fallback window if candidate genes miss GOI")
+    ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
+    ap.add_argument("--plot_width",     type=int, default=1500, help="Total width of the output HTML plot")
     ap.add_argument("--output",         required=True)
     args = ap.parse_args()
 
@@ -1063,7 +1068,7 @@ def main():
 
         # If candidate regions exist but miss GOI, recover a GOI-centered context.
         if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
-            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=1000000)
+            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=args.flank_fallback_bp)
             if fallback_genes:
                 genes = fallback_genes
                 print(
@@ -1162,7 +1167,7 @@ def main():
     all_tracks = []
     for track in raw_tracks:
         # 1. Compress
-        c_genes, breaks = compress_track_coordinates(track["genes"], threshold=50000, visual_gap=3000)
+        c_genes, breaks = compress_track_coordinates(track["genes"], threshold=args.gap_threshold, visual_gap=args.gap_visual_size)
         track["genes"]  = c_genes
         track["breaks"] = breaks
         
@@ -1367,7 +1372,7 @@ def main():
             x=0.5, font=dict(size=15),
         ),
         height=fig_height,
-        width=1500,
+        width=args.plot_width,
         xaxis=dict(
             title="", # No title since numbers are relative/discontinuous
             showgrid=False, 
@@ -1392,10 +1397,10 @@ def main():
         hovermode="closest",
     )
     
-    # Add Scale Bar (10 kb)
+    # Add Scale Bar
     # Place it in bottom right? Or top left?
     # Let's put it at bottom right
-    scale_len = 10000
+    scale_len = args.scale_bar_len
     sb_x1 = x_max
     sb_x0 = x_max - scale_len
     sb_y  = -0.4
