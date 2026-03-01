@@ -1,226 +1,154 @@
-# SynTerra: The Complete Manual
+# SynTerra Execution Manual
 
-SynTerra is a pipeline designed for extreme evolutionary distances. When you are looking for highly divergent orthologs (e.g., fast-mutating immunity genes, complex multi-exonic micro-peptides, or deeply ancient paralogs), standard aligners lose their statistical signal. 
+SynTerra is an experimental Nextflow pipeline developed for the identification of orthologous genes across related species using macro-syntenic mapping and local iterative alignment. 
 
-**SynTerra assumes that while a gene sequence may mutate wildly, its position relative to its neighboring genes (its syntenic architecture) remains highly conserved.** 
-
-This manual is exhaustively structured to guide you through every feature, parameter, runtime profile, and execution mode SynTerra offers.
+This document details the configuration parameters, execution modes, output artifacts, and algorithm architecture.
 
 ---
 
-## Table of Contents
-1. [Installation & Requirements](#1-installation--requirements)
-2. [Runtime Profiles (HPC vs. Desktop)](#2-runtime-profiles-hpc-vs-desktop)
-3. [Execution Modes](#3-execution-modes)
-   - [Easy Mode (Auto-Pilot)](#easy-mode-auto-pilot)
-   - [Pro Mode (Bring-Your-Own-Data)](#pro-mode-bring-your-own-data)
-4. [The SynTerra Search Algorithm](#4-the-synterra-search-algorithm)
-5. [Complete Parameter Reference](#5-complete-parameter-reference)
-   - [Core I/O Parameters](#core-io-parameters)
-   - [Synteny & Region Tuning](#synteny--region-tuning)
-   - [Iterative Search Stringency](#iterative-search-stringency)
-   - [Visual Plotting Configuration](#visual-plotting-configuration)
-   - [Quality Control & Assembly Filtering](#quality-control--assembly-filtering)
-6. [Output Artifacts](#6-output-artifacts)
-7. [Advanced Troubleshooting](#7-advanced-troubleshooting)
+## 1. Execution Environments
 
----
+SynTerra requires Nextflow version `>=22.10.1`. Resource requirements vary significantly depending on the profile used and the parameters defined in `nextflow.config`.
 
-## 1. Installation & Requirements
-
-SynTerra requires a Linux/macOS environment (or WSL2 on Windows) strictly running **Nextflow >=22.10.1**. Everything else is completely containerized.
-
-### Option A: Conda/Mamba (Recommended for Headless Servers)
-The supplied `environment.yml` contains the exact lock-versions of `MMseqs2`, `miniprot`, `tblastn`, `Prodigal`, and tree-builders needed.
-
+### Recommended Execution (Conda)
+For headless environments without Docker support:
 ```bash
-git clone https://github.com/AndreasWz/SynTerra.git
-cd SynTerra
 conda env create -f environment.yml
 conda activate syntenyfinder
+nextflow run main.nf [parameters]
 ```
 
-### Option B: Docker (Recommended for Desktops & Workstations)
-Containerized execution ensures zero host-system contamination regarding binary paths.
-
+### Containerized Execution (Docker / Singularity)
+The `-profile docker` or `-profile singularity` arguments bypass local environment setups.
 ```bash
 docker build -t synterra-local:latest .
 ```
-You simply append `-profile docker` to any of your run commands.
 
-### Option C: Singularity/Apptainer (Recommended for HPC/Slurm)
-HPC clusters typically forbid Docker daemons. Nextflow integrates perfectly with Singularity.
-
-```bash
-mkdir -p "$HOME/.singularity/cache"
-export NXF_SINGULARITY_CACHEDIR="$HOME/.singularity/cache"
-```
-Append `-profile singularity` to your run commands.
+### Resource Profiles
+The profile appended to the run command dictates how the pipeline scales on the host system:
+*   `-profile standard`: Default executor. Utilizes `6 GB` RAM and `2` CPUs per iterative search task.
+*   `-profile laptop_safe`: Strict resource restriction. Constrains execution to a single task at a time and strictly manages memory JVM heaps to prevent system stalls.
+*   `-profile docker_max`: Hardware-aware autoscaling. Attempts to allocate the absolute maximum physical cores and available memory on the host system to the heaviest MMseqs2 tasks.
+*   `-profile slurm`: Native configuration for HPC batch submission.
 
 ---
 
-## 2. Runtime Profiles (HPC vs. Desktop)
+## 2. Core Execution Modes
 
-SynTerra executes mathematically heavy all-vs-all sequence translations on raw genomic bins. It will happily consume 128 CPU cores and 1TB of RAM if you let it.
+The pipeline operates in two distinct operational modes.
 
-### `-profile standard` (Default)
-Runs entirely locally using the host's native `PATH`. Limits itself to standard memory allocations (`6GB` for search, `2GB` for prep).
+### A. Easy Mode 
+Automatically fetches taxonomy data, assemblies, and the query sequence from NCBI/UniProt databases given an accession identifier.
 
-### `-profile laptop_safe` (The Safest Route)
-**Highly recommended for desktop users.** Restricts the pipeline to sequential, single-fork processing using strict RAM limitations (`-Xmx`). Prevents the pipeline from instantly thrashing a 16GB laptop when analyzing massive, 3Gb mammalian genomes.
-
-### `-profile docker_max` (Saturate The Machine)
-Automatically detects your host's maximum logical cores and available RAM. It will dynamically rewrite the internal allocation matrices to consume ~90% of your system resources across heavily threaded `MMseqs2` forks. **Only use this on dedicated cloud instances.**
-
-### `-profile slurm`
-Configures standard Nextflow executor arrays to dispatch every single genome alignment and annotation chunk as an independent Slurm batch job.
-
----
-
-## 3. Execution Modes
-
-SynTerra operates in two distinct philosophies:
-
-### Easy Mode (Auto-Pilot)
-You provide a single Protein ID (`--query_id Q16553`). You do not provide any fasta files. You do not provide any target genome paths.
-
-1. SynTerra queries the UniProt/NCBI REST APIs.
-2. It identifies the origin species (e.g., *Homo sapiens*).
-3. It downloads the highest-quality Reference Genome and GFF annotation directly from NCBI servers.
-4. It navigates the taxonomic tree to identify related species.
-5. It mass-downloads their assemblies (`.fna.gz`), running quality-control filtering to drop shattered/scaffold-only genomes.
-6. It runs the full syntenic search pipeline.
-
-**Example Command:**
 ```bash
 nextflow run main.nf \
   --mode easy \
   --query_id Q16553 \
   --max_genomes 5 \
-  --outdir results_easy \
-  -profile laptop_safe
+  --outdir results
 ```
+**Required Arguments:**
+*   `--mode easy`
+*   `--query_id`: A valid UniProt or NCBI identifier.
 
-### Pro Mode (Bring-Your-Own-Data)
-You operate in a completely offline, isolated environment. You provide all `.fasta` genomes via glob paths. 
+### B. Pro Mode
+Expects locally provided target genome assemblies (`.fna` or `.fna.gz`), a local reference genome, and a local query FASTA file.
 
-*Note: In Pro mode, your `--query` must be a local FASTA file, not an ID.*
-
-**Example Command:**
 ```bash
 nextflow run main.nf \
   --mode pro \
-  --query input/my_gene.fasta \
-  --home_genome input/Homo_sapiens.fna.gz \
-  --home_gff input/Homo_sapiens_primary.gff \
-  --target_genomes "input/raw_vertebrates/*.fna" \
-  --outdir results_pro \
-  -profile docker
+  --query local_gene.fasta \
+  --home_genome reference_assembly.fna \
+  --target_genomes "target_assemblies/*.fna" \
+  --outdir results
 ```
+**Required Arguments:**
+*   `--mode pro`
+*   `--query`: Path to local sequence FASTA.
+*   `--home_genome`: Path to local reference assembly.
+*   `--target_genomes`: Glob pattern matching target genomes.
 
 ---
 
-## 4. The SynTerra Search Algorithm
+## 3. Algorithm Methodology
 
-The magic of SynTerra lies in its `ITERATIVE_SEARCH` state machine. It does not blindly BLAST your GOI against a 3Gb genome.
-
-1. **Anchoring:** SynTerra finds the exact coordinates of your GOI sequence inside your `home_genome`.
-2. **Flanking:** It sweeps outwards `N` genes to the left and right (`--n_flanking_genes 10`), extracting their protein sequences.
-3. **Target Sweeping:** It maps these 20 flanking genes against the massive target genomes using high-speed `MMseqs2` profiling.
-4. **Clustering:** It identifies regions on the target genome where a subset of these flanking genes successfully bound within close proximity (`--cluster_distance 500000`). This is a **Candidate Block**.
-5. **Micro-Scanning:** SynTerra completely disregards the rest of the 3Gb target genome. It zooms in exclusively on that Candidate Block. It drops the stringency barriers, switches to exhaustive translation matrices (`tblastn`, `miniprot`), and deeply sequence-sweeps the empty genomic space looking for the highly mutated remnants of your GOI.
-
----
-
-## 5. Complete Parameter Reference
-
-SynTerra's behavior can be radically altered by overriding the default parameters located inside `nextflow.config`. You can append any of these directly to your `nextflow run main.nf` invocation as `--parameter_name value`.
-
-### Core I/O Parameters
-
-| Flag | Description | Mode Requirement |
-| :--- | :--- | :--- |
-| `--mode` | Define execution variant (`easy` or `pro`). | Required. |
-| `--query` | Path to your local protein FASTA file. | **Pro** Mode. |
-| `--query_id` | UniProt/NCBI ID (e.g., `P60615`). | **Easy** Mode. |
-| `--home_genome` | Path to your local reference assembly (`.fna` or `.fna.gz`). | **Pro** Mode. |
-| `--home_gff` | Path to the known annotation (`.gff`) for the home genome. Optional but massively improves performance. | **Pro** Mode. |
-| `--target_genomes` | Standard glob-string matching local files (e.g., `"data/*.fna"`). Wrap in quotes. | **Pro** Mode. |
-| `--target_species` | Comma-separated list of exact species to download (e.g., `"Felis catus,Canis lupus"`). | **Easy** Mode. |
-| `--max_genomes` | Limits the maximum amount of auto-taxonomic genomes downloaded. Specify `0` for unlimited. | **Easy** Mode. |
-| `--outdir` | Path to place the final plots, trees, and reports. Default: `results`. | Universal. |
-
-### Synteny & Region Tuning
-
-These parameters govern how large the "net" is when hunting for candidate blocks.
-
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--n_flanking_genes` | `10` | The number of genes extracted to the immediate Left and Right of your GOI on the home genome. Increase this (e.g., `30`) for highly fragmented target genomes where synteny blocks may be shattered. |
-| `--cluster_distance` | `50000` | (50kb). The maximum allowable distance between two mapped flanking hits for them to be considered part of the same syntenic block. |
-| `--region_padding` | `150000` | (150kb). The absolute physical space appended to the left and right boundaries of a discovered candidate block before deep-scanning. Increase to ensure you don't miss GOIs lying on the periphery. |
-| `--min_synteny_score` | `0.6` | Requires at least 60% of the originally pulled `--n_flanking_genes` to be successfully mapped in the target cluster to warrant a deep GOI sweep. Drop to `0.3` for extremely ancient lineages. |
-
-### Iterative Search Stringency
-
-Control the ferocity of the inner sequence-aligners when they are zooming into a candidate block.
-
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--search_evalue` | `0.01` | The baseline e-value required for the algorithm to trust a matching hit. |
-| `--aug_relaxed_identity_min` | `25.0` | In the deepest sweep matrices, what is the absolute floor percentage identity SynTerra will accept as a valid mutant GOI hit? |
-| `--mmseqs_sensitivity` | `9.5` | Top-end `k-mer` seeding depth. Values above `10.0` provide highly marginal returns at massive RAM cost. |
-| `--gap_min_alnlen` | `10` | The absolute minimum sequence length (in amino acids) recovered from an empty gap to count as a micro-exon. |
-
-### Visual Plotting Configuration
-
-SynTerra automatically draws massive, interactive, browser-based HTML ribbons demonstrating the exact evolutionary conservation mapping. You can tune the visual output layout perfectly for screenshots or publication.
-
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--plot_width` | `1500` | Global width (in pixels) of the dynamically rendered HTML canvas. |
-| `--gap_threshold` | `50000` | (50kb). If a genomic gap contains absolutely no mapped genes and exceeds this size, it will be visually squished/compressed to save screen space. |
-| `--gap_visual_size` | `3000` | The physical pixel-coordinate width drawn to represent a compressed gap. |
-| `--flank_fallback_bp` | `1000000` | (1Mb). The absolute maximum distance outward from the centered GOI to draw flanking genes in the plot. Extremely distally mapped genes are discarded from the visual to prevent zoom-out collapse. |
-| `--scale_bar_len` | `10000` | The biological distance (bp) represented by the physical scale bar drawn at the bottom of the plot. |
-
-### Quality Control & Assembly Filtering
-
-Specifically for `Easy Mode` where vast NCBI downloads are automated.
-
-| Flag | Default | Description |
-| :--- | :--- | :--- |
-| `--bad_quality_policy` | `ask` | How to handle garbage-tier assemblies. Options: `ask` (pauses pipeline for user input), `drop` (silently ignores them), `keep` (forces synteny alignment on shattering contigs). |
-| `--bad_max_scaffolds` | `50000` | If an assembly has more than 50k disconnected fragments, it triggers the bad quality flag. |
-| `--bad_min_n50` | `20000` | If the N50 contiguity is lower than 20kb, synteny mapping is mathematically nearly impossible. It triggers the bad quality flag. |
+The default search behavior (`ITERATIVE_SEARCH`) is divided into several deterministic phases:
+1.  **Reference Localization:** The pipeline aligns the user-provided query sequence to the `--home_genome` to define the baseline coordinate locus.
+2.  **Context Extraction:** The *n* genes immediately upstream and downstream of the localized query are identified via GFF annotation or local Prodigal prediction.
+3.  **Target Mappings:** The extracted flanking genes are queried against the `--target_genomes` dataset using `MMseqs2`.
+4.  **Clustering:** Adjacent mappings on the target sequence are grouped into candidate syntenic blocks based on the `--cluster_distance` threshold.
+5.  **Target Search:** The candidate blocks undergo an iterative sequence search, parsing alignment scores from increasingly relaxed sequence matching logic (`miniprot`, `tblastn`) to identify sequences morphologically matching the initial query.
 
 ---
 
-## 6. Output Artifacts
+## 4. Parameter Reference
 
-If you successfully run the pipeline, target your `--outdir`.
+The following parameters can be overridden in the command line invocation.
 
-1. **`*synteny_plot.html`**: Open this in Chrome/Firefox/Safari. You can interact with it, hover over genes to see their precise chromosomal coordinates and `% identity` matches, and take screenshots for publications.
-2. **`regions/` subdirectory**: If you prefer to construct your own plots in R (e.g., `gggenomes`) or Python (`Matplotlib`), you can parse these `.bed` files directly.
-3. **`synterra_report.json`**: An incredibly dense, programmatic JSON payload summarizing exactly which genomes were probed, how many candidate blocks were constructed on each, how many blocks actually contained the GOI, and the pipeline execution duration.
-4. **`_tree.nwk`**: A raw Newick-format topological branching matrix defining the evolutionary proximity between the identified genomic blocks.
+### Search and Synteny Boundaries
+
+| Parameter | Default | Definition |
+| :--- | :--- | :--- |
+| `--n_flanking_genes` | `10` | The number of flanking genes parsed per boundary (upstream and downstream) from the reference locus. |
+| `--cluster_distance` | `50000` | The minimum allowable gap (in base pairs) between target mappings to establish a unified syntenic candidate block. |
+| `--min_synteny_score` | `0.6` | The fractional threshold of the retrieved flanking genes required to map onto the target to trigger sequence scanning. |
+| `--region_padding` | `150000` | Genomic sequence (bp) artificially concatenated to the left and right borders of a synthesized candidate block prior to local search. |
+| `--max_blocks_per_genome` | `80` | Safety limit on the maximum number of structural blocks evaluated per target sequence. |
+
+### Quality Filtration and Fetch Constraints
+
+Parameters evaluating automatically retrieved assemblies via Easy Mode.
+
+| Parameter | Default | Definition |
+| :--- | :--- | :--- |
+| `--assembly_ranking` | `hybrid` | Scoring metric used when multiple genomes resolve to a requested target species. |
+| `--bad_quality_policy` | `ask` | Action invoked when retrieved genomic metadata flags poor contiguity (`ask`, `drop`, `keep`). |
+| `--bad_quality_timeout` | `300` | Duration (seconds) the runtime pauses awaiting user standard input during the `ask` policy. |
+| `--bad_max_scaffolds` | `50000` | Threshold of maximum fragmentation permitted. Genomes breaching this limit are flagged. |
+| `--bad_min_n50` | `20000` | Minimum N50 (contiguity depth) allowed. Assemblies beneath this are flagged. |
+
+### Inference Constraints
+
+| Parameter | Default | Definition |
+| :--- | :--- | :--- |
+| `--search_evalue` | `0.01` | The baseline e-value required for standard iteration logic to map a protein segment. |
+| `--aug_relaxed_identity_min` | `25.0` | In extreme sequence divergence passes, the absolute identity (%) minimum the parser will allow. |
+| `--mmseqs_sensitivity` | `9.5` | Operational sensitivity setting for underlying MMseqs2 calls. Values >10 incur massive computational penalties. |
+
+### Visualization Constraints
+
+| Parameter | Default | Definition |
+| :--- | :--- | :--- |
+| `--gap_threshold` | `50000` | Unannotated sequences mapping larger than this value (bp) are compressed in the layout. |
+| `--gap_visual_size` | `3000` | The absolute pixel coordinate assigned to represent instances of compressed gaps. |
+| `--flank_fallback_bp` | `1000000` | Maximum bounding boundary limit (bp) evaluated when rendering distal targets on the HTML canvas. |
+| `--scale_bar_len` | `10000` | The physical representation metric evaluated by the plot scale bar (bp). |
+| `--plot_width` | `1500` | Constraint width bounding the output HTML matrix (pixels). |
 
 ---
 
-## 7. Advanced Troubleshooting
+## 5. Directory Artifacts
 
-### "Error executing process > LOCATE_GENE" / "No Space Left on Device"
-SynTerra extracts massive temporary databases during MMseqs2 generation. If your local `/tmp` environment is small, the pipeline will crash. Change Nextflow's working directory to a large storage volume:
-```bash
-export NXF_WORK=/path/to/massive/storage/work
-```
+Execution generates several output files within `--outdir`:
 
-### The pipeline froze/hung at "ITERATIVE_SEARCH"!
-**It is not frozen, it is doing its job.** 
-When SynTerra encounters a heavily duplicated locus (like a massive 3FTx snake-venom toxin array), it generates a candidate block containing dozens of empty sequence gaps. It spawns internal `tblastn` and `miniprot` evaluators against *every single gap* to ensure it doesn't miss a micro-exon. 
-*Do not cancel the run!* If you inspect `.synterra_logs/run_....log`, you will see it actively grinding through the genomic windows. 
+1.  `_synteny_plot.html`: Dynamic HTML representation mapping evolutionary relationships and boundary thresholds alongside compressed sequence gaps.
+2.  `regions/*.bed`: Standardized tab-delimited text files denoting candidate bounding coordinates on target assemblies.
+3.  `synterra_report.json`: Formatted trace detailing pipeline input arguments, genomic targets handled, memory limits utilized, and internal exit codes.
+4.  `_tree.nwk`: Distance-matrix representation mapping output loci clustering via phylogenetic divergence.
+5.  `downloaded_genomes/easy_mode_genomes/assembly_quality.tsv`: Generated log file reporting contiguity indices for remote assemblies pulled dynamically.
 
-### My Plot Labels Look Bad / "Gene-123445"
-SynTerra inherits the naming conventions of the GFF annotations provided to it. 
-If an NCBI assembly does not contain recognizable labels (e.g., relying entirely on uninformative generic locus tags like `LOC1234`), SynTerra will display exactly that.
-For the absolute highest quality visualization, supply your own `--home_gff` where you have manually corrected the `Name=` or `gene=` field tags.
+---
+
+## 6. Known Execution States (Troubleshooting)
+
+### Memory Halts During MMseqs2 Profile Building
+
+**Symptom:** The pipeline crashes reporting a SIGKILL (137) during `LOCATE_GENE`.
+**Cause:** Host system ran out of RAM or standard /tmp space mapping the index database.
+**Resolution:** Supply a high-memory custom profile or restrict internal MMseqs chunk sizing using `--mmseqs_split_memory_limit '1G'`. Ensure `/tmp` is not constrained. 
+
+### Prolonged Duration at ITERATIVE_SEARCH
+
+**Symptom:** Nextflow interface lists `ITERATIVE_SEARCH` as processing for >40 minutes without state change on specific instances.
+**Cause:** SynTerra has evaluated a target sequence containing massive tandem duplication arrays with complex inter-block spacing and is executing exhaustive localized `tblastn` matrices sequentially over all generated blocks.
+**Resolution:** This is an expected mathematical calculation block. Await resolution unless explicitly violating the runtime timeout limit. You can dynamically read block state progress by performing a `tail -f` command against the target `.command.log` output inside the Nextflow `work/` directory hash.
