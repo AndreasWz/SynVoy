@@ -665,6 +665,86 @@ def _extract_best_gff(extract_dir: Path, gff_target: Path) -> str:
     return "ok"
 
 
+def filter_chromosomes_only(fna_path: Path) -> None:
+    """
+    If a FASTA contains both chromosome sequences (NC_/CM_ accession prefixes)
+    and unlocalized/placed scaffolds (NW_, NZ_, or other prefixes), rewrite the
+    file keeping only the chromosome sequences.
+
+    Rationale:
+      Chromosome-level assemblies are distributed with the assembled chromosomes
+      *plus* unlocalized/unplaced scaffolds in the same .fna.  Including NW_
+      scaffolds alongside NC_ chromosomes adds noise to the synteny search:
+      flanking genes may falsely appear multiple times (once on the chromosome,
+      again on a scaffold that overlaps the same region).
+
+    If NO chromosome sequences are found (e.g. pure scaffold assembly), the file
+    is left untouched so we do not discard all sequence data.
+    """
+    # Prefixes that indicate assembled (placed) chromosomes in NCBI nomenclature.
+    # NC_ = RefSeq chromosome; CM_ = GenBank chromosome/complete genomic molecule.
+    CHROM_PREFIXES = ("NC_", "CM")
+
+    # First pass: scan only FASTA headers (fast — avoids reading sequence content)
+    chrom_ids = []
+    non_chrom_ids = []
+    try:
+        with open(fna_path) as fh:
+            for line in fh:
+                if not line.startswith(">"):
+                    continue
+                # The sequence ID is the first whitespace-delimited token after ">"
+                seq_id = line[1:].split()[0] if line.strip() else ""
+                if any(seq_id.startswith(p) for p in CHROM_PREFIXES):
+                    chrom_ids.append(seq_id)
+                else:
+                    non_chrom_ids.append(seq_id)
+    except Exception as e:
+        print(f"  [chr-filter] Warning: could not scan {fna_path}: {e}")
+        return
+
+    if not chrom_ids:
+        # Pure scaffold/contig assembly — keep as-is
+        print(
+            f"  [chr-filter] No NC_/CM_ chromosomes found — retaining all "
+            f"{len(non_chrom_ids)} sequences as-is (scaffold assembly)."
+        )
+        return
+
+    if not non_chrom_ids:
+        # Already chromosomes only
+        print(
+            f"  [chr-filter] {len(chrom_ids)} chromosome sequence(s) — no scaffold sequences to remove."
+        )
+        return
+
+    # Mixed assembly: chromosomes + scaffolds. Filter to chromosomes only.
+    keep_set = set(chrom_ids)
+    tmp_path = Path(str(fna_path) + ".chr_only.tmp")
+    kept = 0
+    skipping = False
+    try:
+        with open(fna_path) as src, open(tmp_path, "w") as dst:
+            for line in src:
+                if line.startswith(">"):
+                    seq_id = line[1:].split()[0] if line.strip() else ""
+                    skipping = seq_id not in keep_set
+                    if not skipping:
+                        kept += 1
+                if not skipping:
+                    dst.write(line)
+        # Atomic rename
+        tmp_path.replace(fna_path)
+        print(
+            f"  [chr-filter] Kept {kept} chromosome sequence(s), "
+            f"removed {len(non_chrom_ids)} scaffold/unlocalized sequence(s)."
+        )
+    except Exception as e:
+        print(f"  [chr-filter] Warning: filter failed for {fna_path}: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def download_genome(accession, output_dir):
     """Download genome from NCBI using datasets. Also attempts to download GFF if available."""
     print(f"Downloading {accession}...")
@@ -698,6 +778,9 @@ def download_genome(accession, output_dir):
             target = output_path / f"{accession}.fna"
             shutil.move(str(fna_files[0]), str(target))
             fna_path = str(target)
+            # Filter to chromosome sequences only when both chromosomes
+            # and unlocalized scaffolds are present in the same assembly.
+            filter_chromosomes_only(target)
             print(f"  ✓ Genome: {target}")
 
         gff_status = _extract_best_gff(extract_dir, gff_target)

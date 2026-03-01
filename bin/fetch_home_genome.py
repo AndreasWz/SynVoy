@@ -484,6 +484,71 @@ def find_closest_relative_genome(species_name):
     return None, False, species_name
 
 
+def filter_chromosomes_only(fna_path: Path) -> None:
+    """
+    If a FASTA contains both chromosome sequences (NC_/CM_ accession prefixes)
+    and unlocalized/placed scaffolds (NW_, NZ_, or other prefixes), rewrite the
+    file keeping only the chromosome sequences.
+
+    If NO chromosome sequences are found (pure scaffold assembly), the file is
+    left untouched so we do not discard all sequence data.
+    """
+    CHROM_PREFIXES = ("NC_", "CM")
+
+    chrom_ids = []
+    non_chrom_ids = []
+    try:
+        with open(fna_path) as fh:
+            for line in fh:
+                if not line.startswith(">"):
+                    continue
+                seq_id = line[1:].split()[0] if line.strip() else ""
+                if any(seq_id.startswith(p) for p in CHROM_PREFIXES):
+                    chrom_ids.append(seq_id)
+                else:
+                    non_chrom_ids.append(seq_id)
+    except Exception as e:
+        print(f"  [chr-filter] Warning: could not scan {fna_path}: {e}")
+        return
+
+    if not chrom_ids:
+        print(
+            f"  [chr-filter] No NC_/CM_ chromosomes found — retaining all "
+            f"{len(non_chrom_ids)} sequences as-is (scaffold assembly)."
+        )
+        return
+
+    if not non_chrom_ids:
+        print(
+            f"  [chr-filter] {len(chrom_ids)} chromosome sequence(s) — no scaffolds to remove."
+        )
+        return
+
+    keep_set = set(chrom_ids)
+    tmp_path = Path(str(fna_path) + ".chr_only.tmp")
+    kept = 0
+    skipping = False
+    try:
+        with open(fna_path) as src, open(tmp_path, "w") as dst:
+            for line in src:
+                if line.startswith(">"):
+                    seq_id = line[1:].split()[0] if line.strip() else ""
+                    skipping = seq_id not in keep_set
+                    if not skipping:
+                        kept += 1
+                if not skipping:
+                    dst.write(line)
+        tmp_path.replace(fna_path)
+        print(
+            f"  [chr-filter] Kept {kept} chromosome sequence(s), "
+            f"removed {len(non_chrom_ids)} scaffold/unlocalized sequence(s)."
+        )
+    except Exception as e:
+        print(f"  [chr-filter] Warning: filter failed for {fna_path}: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def download_genome_with_annotation(accession, output_dir):
     """Download genome and GFF annotation using NCBI datasets."""
     print(f"\nDownloading {accession} with annotation...")
@@ -517,6 +582,9 @@ def download_genome_with_annotation(accession, output_dir):
         if fna_files:
             genome_path = output_path / "home_genome.fna"
             shutil.copy(fna_files[0], genome_path)
+            # Filter to chromosome sequences only when the assembly contains
+            # both chromosomes (NC_/CM_) and unlocalized scaffolds (NW_/NZ_).
+            filter_chromosomes_only(genome_path)
             print(f"  Genome: {genome_path}")
         
         if gff_files:
