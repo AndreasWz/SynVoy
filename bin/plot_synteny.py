@@ -1078,23 +1078,37 @@ def main():
 
         # Richest-block fallback: if candidate regions yielded very few genes
         # (≤2), they likely cover low-quality scoring windows rather than the
-        # block with the best synteny evidence.  Find the densest genomic
-        # cluster of genes from the full GFF and show that instead.
+        # block with the best synteny evidence.  Find the block containing
+        # a GOI gene with the most flanking genes, or fall back to the globally
+        # richest block.
         if len(genes) <= 2 and len(genes_all) > len(genes):
+            import re as _re
             from collections import Counter
             block_counter = Counter()
             block_genes = defaultdict(list)
             for g in genes_all:
-                # Group by block ID extracted from gene name (e.g. "...b15_fl1...")
                 gname = g.get("name", "")
-                import re as _re
                 m = _re.search(r'_b(\d+)_', gname)
                 if m:
                     bid = m.group(1)
                     block_counter[bid] += 1
                     block_genes[bid].append(g)
+
             if block_counter:
-                best_block = block_counter.most_common(1)[0][0]
+                # Blocks that contain at least one GOI gene
+                goi_bids = set()
+                for g in genes_all:
+                    if _is_goi_target_gene(g):
+                        m = _re.search(r'_b(\d+)_', g.get("name", ""))
+                        if m:
+                            goi_bids.add(m.group(1))
+
+                if goi_bids:
+                    # Pick richest block that contains a GOI
+                    best_block = max(goi_bids, key=lambda bid: block_counter.get(bid, 0))
+                else:
+                    best_block = block_counter.most_common(1)[0][0]
+
                 best_genes = block_genes[best_block]
                 if len(best_genes) > len(genes):
                     genes = best_genes
@@ -1103,8 +1117,13 @@ def main():
                         f"using richest block b{best_block} ({len(genes)} genes)."
                     )
 
-        # Reduce clutter: if GOI is present, keep the GOI chromosome only.
-        if any(_is_goi_target_gene(g) for g in genes):
+        # Reduce clutter on chromosome-level assemblies: keep only the GOI chromosome.
+        # For scaffold/contig-level assemblies (many distinct contigs), flanking genes
+        # may legitimately reside on different contigs — do NOT apply the restriction.
+        all_chroms_in_gff = {g["chrom"] for g in genes_all}
+        is_scaffold_assembly = len(all_chroms_in_gff) > 20
+
+        if not is_scaffold_assembly and any(_is_goi_target_gene(g) for g in genes):
             goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
             if len(goi_chroms) == 1:
                 goi_chrom = next(iter(goi_chroms))
