@@ -3104,6 +3104,285 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         )
         all_gff_lines = collapse_flanking_cds_to_gene_span(all_gff_lines)
 
+        # --- Cross-chromosome flanking recovery ---
+        # Some flanking genes may have translocated to a different chromosome.
+        # After standard block processing, check which flanking parents are still
+        # missing, look for strong hits on other chromosomes, and annotate them
+        # with a "rearranged" flag so the plot can show them.
+        all_db_flanking_parents = {
+            extract_base_gene_id(rid)
+            for rid in base_db_sequences
+            if not is_goi_query_id(rid) and '|' not in rid
+        }
+        found_flanking_parents = set()
+        for g in all_genes:
+            gid = g.get('id', '')
+            if not is_goi_query_id(gid):
+                found_flanking_parents.add(extract_base_gene_id(gid))
+
+        missing_flanking = all_db_flanking_parents - found_flanking_parents
+        block_chroms = {b['chrom'] for b in synteny_blocks}
+
+        if missing_flanking and hits:
+            # Gather off-block-chrom hits for missing parents
+            off_chrom_hits_by_parent = defaultdict(list)
+            for h in hits:
+                parent = extract_base_gene_id(h.get('query', ''))
+                if parent not in missing_flanking:
+                    continue
+                if h['chrom'] in block_chroms:
+                    continue  # Already considered during block processing
+                off_chrom_hits_by_parent[parent].append(h)
+
+            if off_chrom_hits_by_parent:
+                logger.info(
+                    f"[{genome_name}] Cross-chromosome flanking recovery: "
+                    f"{len(off_chrom_hits_by_parent)} missing parents have off-block hits."
+                )
+                flanking_query_map = build_flanking_query_by_parent(
+                    base_db_sequences, set(off_chrom_hits_by_parent.keys())
+                )
+                clean_gname = genome_name.replace('.', '_').replace('-', '_').replace(' ', '_')
+                flanking_locus_gap = max(5000, min(100000, args.max_intron * 2))
+
+                for parent_id, parent_hits in off_chrom_hits_by_parent.items():
+                    query_rec = flanking_query_map.get(parent_id)
+                    if not query_rec:
+                        continue
+                    parent_query_seq = query_rec.get('seq', '')
+                    if not parent_query_seq:
+                        continue
+
+                    # Remap exon-level qstart/qend
+                    exon_offsets = query_rec.get('exon_offsets', {})
+                    if exon_offsets:
+                        for h in parent_hits:
+                            m = re.search(r'\|exon_(\d+)$', h.get('query', ''))
+                            if m:
+                                exon_num = int(m.group(1))
+                                if exon_num in exon_offsets:
+                                    offset, _ = exon_offsets[exon_num]
+                                    h['qstart'] = h.get('qstart', 1) + offset
+                                    h['qend'] = h.get('qend', 1) + offset
+
+                    parent_loci = split_hits_into_loci(parent_hits, max_gap=flanking_locus_gap)
+                    if not parent_loci:
+                        continue
+
+                    # Only process the single strongest off-chrom locus
+                    best_locus = max(
+                        parent_loci,
+                        key=lambda hs: (max(h.get('bits', 0) for h in hs), len(hs))
+                    )
+                    best_bits = max(h.get('bits', 0) for h in best_locus)
+                    if best_bits < 40:
+                        continue  # Too weak to be a real ortholog
+
+                    off_chrom = best_locus[0].get('chrom', '')
+                    if off_chrom not in genome_seqs:
+                        continue
+
+                    # Build a local region around the off-chrom hits
+                    off_start = min(h.get('start', 0) for h in best_locus)
+                    off_end = max(h.get('end', 0) for h in best_locus)
+                    off_slen = len(genome_seqs[off_chrom])
+                    off_pad = min(args.region_padding, 50000)
+                    off_w_start = max(0, off_start - off_pad)
+                    off_w_end = min(off_slen, off_end + off_pad)
+                    off_subseq = genome_seqs[off_chrom][off_w_start:off_w_end]
+
+                    # Remap hits to local coordinates for annotation
+                    local_hits = []
+                    for h in best_locus:
+                        local_start = max(0, int(h.get('start', 0)) - off_w_start)
+                        local_end = min(len(off_subseq), int(h.get('end', 0)) - off_w_start)
+                        if local_end <= local_start:
+                            continue
+                        local_hits.append({
+                            'query': h.get('query', ''),
+                            'qstart': h.get('qstart', 1),
+                            'qend': h.get('qend', 1),
+                            'gstart': local_start,
+                            'gend': local_end,
+                            'evalue': h.get('evalue', 1),
+                            'pident': h.get('pident', 0),
+                            'alnlen': h.get('alnlen', 0),
+                            'bits': h.get('bits', 0),
+                            'strand': h.get('strand', '+'),
+                            'chrom': off_chrom,
+                        })
+
+                    if not local_hits:
+                        continue
+
+                    # Attempt miniprot-style exon annotation
+                    exons = []
+                    try:
+                        with maybe_quiet_streams(args.quiet_subtools):
+                            exons, _ = annotate_exons_from_hit_list(
+                                local_hits,
+                                parent_query_seq,
+                                off_subseq,
+                                off_chrom,
+                                search_missing=True,
+                                gap_min_size=args.gap_min_size,
+                                gap_search_window=args.gap_search_window,
+                                gap_evalue=args.gap_evalue,
+                                gap_min_identity=args.gap_min_identity,
+                                gap_min_alnlen=args.gap_min_alnlen,
+                                gap_max_hits=args.gap_max_hits,
+                                exon_query_mode=False,
+                                min_exon_query_cov=args.min_exon_query_cov,
+                                min_exon_alnlen=args.min_exon_alnlen,
+                                sensitive=False
+                            )
+                    except Exception:
+                        exons = []
+
+                    if exons:
+                        exons.sort(key=lambda e: e.get('qstart', 0))
+                        exon_protein = ''.join(e['seq'] for e in exons)
+                        strand = exons[0].get('strand', '+')
+                        avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+                        global_start = off_w_start + min(e['gstart'] for e in exons) + 1
+                        global_end = off_w_start + max(e['gend'] for e in exons)
+                        new_id = f"{parent_id}|{clean_gname}_rearranged"
+
+                        rearr_gff = [
+                            f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
+                            f"{avg_pident:.1f}\t{strand}\t.\t"
+                            f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
+                            f"Identity={avg_pident:.1f};Type=rearranged_flanking;"
+                            f"Rearranged_from={','.join(block_chroms)}"
+                        ]
+                        for eidx, e in enumerate(exons, 1):
+                            exon_gs = off_w_start + e['gstart'] + 1
+                            exon_ge = off_w_start + e['gend']
+                            rearr_gff.append(
+                                f"{off_chrom}\trearranged_flanking\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\t"
+                                f"ID={new_id}_CDS{eidx};Parent={new_id}"
+                            )
+
+                        all_genes.append({
+                            'id': new_id,
+                            'seq': exon_protein,
+                            'description': (
+                                f"coords:{off_chrom}:{global_start}-{global_end} "
+                                f"parent:{parent_id} type:rearranged_flanking "
+                                f"identity:{avg_pident:.1f}"
+                            )
+                        })
+                        all_gff_lines.extend(rearr_gff)
+                        found_flanking_parents.add(parent_id)
+                        logger.info(
+                            f"[{genome_name}] Recovered rearranged flanking gene "
+                            f"{parent_id} on {off_chrom} ({avg_pident:.1f}% identity, "
+                            f"{len(exons)} exons)."
+                        )
+                    else:
+                        # Fallback: use concatenated hit-derived protein
+                        strand_votes = {'+': 0, '-': 0}
+                        for h in local_hits:
+                            strand_votes[h.get('strand', '+')] += 1
+                        strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
+
+                        ordered_hits = sorted(
+                            [h for h in local_hits if h.get('strand', '+') == strand],
+                            key=lambda h: h.get('gstart', 0)
+                        )
+                        ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand) if ordered_hits else []
+
+                        if ordered_hits:
+                            coding_frags = []
+                            cds_intervals = []
+                            for h in ordered_hits:
+                                hs = h.get('gstart', 0)
+                                he = h.get('gend', 0)
+                                if he <= hs:
+                                    continue
+                                dna = off_subseq[hs:he]
+                                if strand == '-':
+                                    dna = reverse_complement(dna)
+                                dna = dna[:len(dna) - (len(dna) % 3)]
+                                if len(dna) < 9:
+                                    continue
+                                aa = translate(dna).replace('*', '')
+                                if not aa:
+                                    continue
+                                coding_frags.append(aa)
+                                cds_intervals.append((hs, he))
+
+                            if coding_frags and cds_intervals:
+                                if strand == '-':
+                                    coding_frags = list(reversed(coding_frags))
+                                flank_protein = ''.join(coding_frags)
+                                global_start = off_w_start + min(s for s, _ in cds_intervals) + 1
+                                global_end = off_w_start + max(e for _, e in cds_intervals)
+                                avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
+                                new_id = f"{parent_id}|{clean_gname}_rearranged_fallback"
+
+                                rearr_gff = [
+                                    f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
+                                    f"{avg_pident:.1f}\t{strand}\t.\t"
+                                    f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
+                                    f"Identity={avg_pident:.1f};Type=rearranged_flanking_fallback;"
+                                    f"Rearranged_from={','.join(block_chroms)}"
+                                ]
+                                for cidx, (hs, he) in enumerate(cds_intervals, 1):
+                                    exon_gs = off_w_start + hs + 1
+                                    exon_ge = off_w_start + he
+                                    rearr_gff.append(
+                                        f"{off_chrom}\trearranged_flanking\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\t"
+                                        f"ID={new_id}_CDS{cidx};Parent={new_id}"
+                                    )
+
+                                all_genes.append({
+                                    'id': new_id,
+                                    'seq': flank_protein,
+                                    'description': (
+                                        f"coords:{off_chrom}:{global_start}-{global_end} "
+                                        f"parent:{parent_id} type:rearranged_flanking_fallback "
+                                        f"identity:{avg_pident:.1f}"
+                                    )
+                                })
+                                all_gff_lines.extend(rearr_gff)
+                                found_flanking_parents.add(parent_id)
+                                logger.info(
+                                    f"[{genome_name}] Recovered rearranged flanking gene "
+                                    f"{parent_id} on {off_chrom} (fallback, {avg_pident:.1f}% identity)."
+                                )
+
+        # --- Flanking gene tracking summary (Step 4) ---
+        still_missing = all_db_flanking_parents - found_flanking_parents
+        if all_db_flanking_parents:
+            found_count = len(found_flanking_parents & all_db_flanking_parents)
+            total_count = len(all_db_flanking_parents)
+            logger.info(
+                f"[{genome_name}] Flanking gene summary: "
+                f"{found_count}/{total_count} parents found."
+            )
+            if still_missing:
+                # For each missing parent, report best hit info from raw hits
+                missing_details = []
+                for parent_id in sorted(still_missing):
+                    parent_hits = [
+                        h for h in hits
+                        if extract_base_gene_id(h.get('query', '')) == parent_id
+                    ]
+                    if parent_hits:
+                        best = max(parent_hits, key=lambda h: h.get('bits', 0))
+                        missing_details.append(
+                            f"{parent_id}(best_hit:{best['chrom']},"
+                            f"bits={best.get('bits', 0):.1f},"
+                            f"id={best.get('pident', 0):.1f}%)"
+                        )
+                    else:
+                        missing_details.append(f"{parent_id}(no_hits)")
+                logger.info(
+                    f"[{genome_name}] Missing flanking parents: "
+                    f"{'; '.join(missing_details)}"
+                )
+
         # Write aggregated GFF
         if all_gff_lines:
              gff_out = f"{args.output_dir}/regions/{genome_name}.gff"

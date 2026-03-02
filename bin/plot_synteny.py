@@ -44,6 +44,105 @@ except ImportError:
     ETE3_AVAILABLE = False
 
 
+# ---- Lightweight Newick parser (fallback when ete3 is unavailable) ----
+
+class _SimpleNode:
+    """Minimal tree node for Newick parsing when ete3 is broken."""
+
+    __slots__ = ("name", "dist", "children", "up")
+
+    def __init__(self, name="", dist=0.0):
+        self.name = name
+        self.dist = dist
+        self.children = []
+        self.up = None
+
+    def is_leaf(self):
+        return len(self.children) == 0
+
+    def is_root(self):
+        return self.up is None
+
+    def iter_leaves(self):
+        if self.is_leaf():
+            yield self
+        else:
+            for child in self.children:
+                yield from child.iter_leaves()
+
+    def traverse(self):
+        yield self
+        for child in self.children:
+            yield from child.traverse()
+
+    def get_distance(self, other):
+        """Compute patristic distance via LCA (simple BFS approach)."""
+        # Build path-to-root for both nodes
+        def _path_to_root(node):
+            path = {}
+            d = 0.0
+            n = node
+            while n is not None:
+                path[id(n)] = d
+                d += n.dist
+                n = n.up
+            return path
+
+        path_self = _path_to_root(self)
+        n = other
+        d_other = 0.0
+        while n is not None:
+            if id(n) in path_self:
+                return path_self[id(n)] + d_other
+            d_other += n.dist
+            n = n.up
+        return float("inf")
+
+
+def _parse_newick(newick_str):
+    """Parse a Newick string into a _SimpleNode tree."""
+    s = newick_str.strip().rstrip(";").strip()
+    if not s:
+        return _SimpleNode()
+
+    pos = [0]
+
+    def _parse():
+        node = _SimpleNode()
+        if s[pos[0]] == "(":
+            pos[0] += 1  # skip '('
+            while True:
+                child = _parse()
+                child.up = node
+                node.children.append(child)
+                if pos[0] < len(s) and s[pos[0]] == ",":
+                    pos[0] += 1
+                elif pos[0] < len(s) and s[pos[0]] == ")":
+                    pos[0] += 1
+                    break
+                else:
+                    break
+
+        # Read label and/or distance
+        label_chars = []
+        while pos[0] < len(s) and s[pos[0]] not in (",", ")", ";", "("):
+            label_chars.append(s[pos[0]])
+            pos[0] += 1
+        label = "".join(label_chars).strip()
+        if ":" in label:
+            parts = label.rsplit(":", 1)
+            node.name = parts[0].strip()
+            try:
+                node.dist = float(parts[1])
+            except ValueError:
+                node.dist = 0.0
+        else:
+            node.name = label
+        return node
+
+    return _parse()
+
+
 # ======================================================================
 # Colour palettes
 # ======================================================================
@@ -337,8 +436,17 @@ def parse_target_gff(gff_file):
             })
 
     # Deduplicate overlapping entries (same genomic region from different queries)
+    # GOI entries are ALWAYS preferred over non-GOI entries at the same locus.
     if len(genes) > 1:
-        genes.sort(key=lambda g: -g["identity"])  # best identity first
+        # Sort: GOI first (always kept), then by descending identity
+        def _dedup_sort_key(g):
+            is_goi_entry = (
+                g.get("name", "").startswith("GOI_")
+                or g.get("home_gene_id", "").startswith("GOI_")
+            )
+            return (0 if is_goi_entry else 1, -g["identity"])
+        genes.sort(key=_dedup_sort_key)
+
         kept = []
         for g in genes:
             is_dup = False
@@ -439,12 +547,19 @@ def parse_tree_clade_colours(tree_file):
     goi_colours = {}
     target_order = []
 
-    if not tree_file or not os.path.exists(tree_file) or not ETE3_AVAILABLE:
+    if not tree_file or not os.path.exists(tree_file):
         return goi_colours, target_order
 
     try:
-        t = Tree(tree_file)
-        leaves = list(t.iter_leaves())
+        if ETE3_AVAILABLE:
+            t = Tree(tree_file)
+            leaves = list(t.iter_leaves())
+        else:
+            with open(tree_file) as fh:
+                newick_str = fh.read().strip()
+            t = _parse_newick(newick_str)
+            leaves = list(t.iter_leaves())
+
         n = len(leaves)
         if n == 0:
             return goi_colours, target_order
@@ -472,7 +587,10 @@ def parse_tree_clade_colours(tree_file):
             for tl in target_leaves:
                 gid = _genome_id_from_leaf(tl.name)
                 if gid:
-                    d = t.get_distance(ref, tl)
+                    if ETE3_AVAILABLE:
+                        d = t.get_distance(ref, tl)
+                    else:
+                        d = ref.get_distance(tl)
                     if gid not in dist_map or d < dist_map[gid]:
                         dist_map[gid] = d
             target_order = sorted(dist_map, key=dist_map.get)
@@ -688,28 +806,36 @@ def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
 
 
 
-def draw_gap_break(fig, x_pos, y_pos, height, text):
-    """Draw a visual break mark (zigzag) and text label for a compressed gap."""
-    # Zigzag path
-    w = 200  # visual width of break (in genomic coordinates, scaled by Layout)
-    # Actually, x_pos is the center.
-    # We draw two parallel lines with a slash? Or distinct "break" symbol?
-    # Simple: Text annotation with a small vertical tick or " // "
-    
-    fig.add_annotation(
-        x=x_pos, y=y_pos + height/2,
-        text=f"<b>//</b><br>{text}",
-        showarrow=False,
-        font=dict(size=9, color="black"),
-        xanchor="center", yanchor="middle",
-        yshift=0
-    )
+def draw_gap_break(fig, x_pos, y_pos, height, text, is_chrom_break=False):
+    """Draw a visual break mark and text label for a compressed gap or chromosome boundary."""
+    if is_chrom_break:
+        # Draw a wavy vertical separator for chromosome boundaries
+        fig.add_annotation(
+            x=x_pos, y=y_pos + height / 2,
+            text=f"<b>║</b><br><sub>{text}</sub>",
+            showarrow=False,
+            font=dict(size=9, color="#666666"),
+            xanchor="center", yanchor="middle",
+        )
+    else:
+        fig.add_annotation(
+            x=x_pos, y=y_pos + height / 2,
+            text=f"<b>//</b><br>{text}",
+            showarrow=False,
+            font=dict(size=9, color="black"),
+            xanchor="center", yanchor="middle",
+        )
 
 
 def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
     """
-    Compress large gaps between genes.
-    
+    Compress large gaps between genes and add visual breaks between chromosomes.
+
+    Genes are grouped by chromosome, with each chromosome's genes sorted by
+    start position.  Chromosomes are ordered so that the one containing a GOI
+    gene comes first, then remaining chromosomes ordered by descending gene
+    count (most genes → most synteny evidence → shown first).
+
     Returns
     -------
     compressed_genes : list of dicts (with added 'start_plot', 'end_plot')
@@ -717,53 +843,80 @@ def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
     """
     if not genes:
         return [], []
-    
-    # Sort by start position
-    # Note: genes might overlap, but generally are sequential.
-    sorted_genes = sorted(genes, key=lambda g: g["start"])
+
+    # ---- Group by chromosome & order -----------------------------------
+    from collections import defaultdict as _dd
+    chrom_groups = _dd(list)
+    for g in genes:
+        chrom_groups[g["chrom"]].append(g)
+
+    # Sort each chromosome group by start
+    for chrom in chrom_groups:
+        chrom_groups[chrom].sort(key=lambda g: g["start"])
+
+    # Determine chromosome ordering: GOI chromosome first, then by gene count
+    def _chrom_sort_key(chrom):
+        has_goi = any(
+            g.get("name", "").startswith("GOI_")
+            or g.get("home_gene_id", "").startswith("GOI_")
+            or is_goi(g.get("name", ""))
+            or is_goi(g.get("home_gene_id", ""))
+            for g in chrom_groups[chrom]
+        )
+        return (0 if has_goi else 1, -len(chrom_groups[chrom]))
+
+    ordered_chroms = sorted(chrom_groups.keys(), key=_chrom_sort_key)
+
+    # ---- Build linear sequence with compression ------------------------
+    sorted_genes = []
+    for chrom in ordered_chroms:
+        sorted_genes.extend(chrom_groups[chrom])
+
     compressed = []
     breaks = []
-    
     current_shift = 0
-    
-    # Initialize first gene
-    # We preserve the absolute coordinate of the first gene *minus 0 shift* initially
-    # effectively keeping the first gene at its real coordinate relative to start of cluster?
-    # Yes, but we will shift everything by anchor later anyway.
-    
+    CHROM_VISUAL_GAP = max(visual_gap * 2, 5000)  # wider gap between chromosomes
+
     for i, g in enumerate(sorted_genes):
         new_g = g.copy()
-        
-        # Check gap from previous gene
+
         if i > 0:
-            prev = sorted_genes[i-1]
-            # Use raw coordinates for gap calculation
-            gap = g["start"] - prev["end"]
-            
-            if gap > threshold:
-                remove = gap - visual_gap
-                current_shift += remove
-                
-                # The visual center of the gap in PLOT coordinates
-                # prev_end_plot = prev['end'] - (current_shift - remove) 
-                #               = prev['end_plot']
-                # gap_start_plot = prev_end_plot
-                # gap_end_plot   = gap_start_plot + visual_gap
-                # center = gap_start_plot + visual_gap/2
-                
-                prev_end_plot = prev["end"] - (current_shift - remove) 
-                break_x = prev_end_plot + visual_gap / 2
-                
+            prev = sorted_genes[i - 1]
+            same_chrom = g["chrom"] == prev["chrom"]
+
+            if same_chrom:
+                gap = g["start"] - prev["end"]
+                if gap > threshold:
+                    remove = gap - visual_gap
+                    current_shift += remove
+                    prev_end_plot = prev["end"] - (current_shift - remove)
+                    break_x = prev_end_plot + visual_gap / 2
+                    breaks.append({
+                        "x": break_x,
+                        "gap_size": gap,
+                        "text": (f"{gap / 1e6:.2f} Mb" if gap >= 1e6
+                                 else f"{gap / 1e3:.0f} kb"),
+                    })
+            else:
+                # Chromosome boundary — insert a visual chromosome-break gap
+                prev_end_plot = prev["end"] - current_shift
+                # Shift so the new chromosome starts CHROM_VISUAL_GAP after prev
+                new_origin = prev_end_plot + CHROM_VISUAL_GAP
+                actual_start = g["start"]
+                current_shift = actual_start - new_origin
+
+                break_x = prev_end_plot + CHROM_VISUAL_GAP / 2
                 breaks.append({
                     "x": break_x,
-                    "gap_size": gap,
-                    "text": f"{gap/1e6:.2f} Mb" if gap >= 1e6 else f"{gap/1e3:.0f} kb"
+                    "gap_size": 0,
+                    "text": f"⧫ {g['chrom'][:16]}",
+                    "is_chrom_break": True,
                 })
 
         new_g["start_plot"] = g["start"] - current_shift
         new_g["end_plot"]   = g["end"]   - current_shift
         compressed.append(new_g)
-        
+
     return compressed, breaks
 
 
@@ -847,11 +1000,16 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
     interactive Plotly HTML file.  Leaf nodes are coloured with the same
     clade palette used in the synteny plot.
     """
-    if not tree_file or not os.path.exists(tree_file) or not ETE3_AVAILABLE:
+    if not tree_file or not os.path.exists(tree_file):
         return
 
     try:
-        t = Tree(tree_file)
+        if ETE3_AVAILABLE:
+            t = Tree(tree_file)
+        else:
+            with open(tree_file) as fh:
+                newick_str = fh.read().strip()
+            t = _parse_newick(newick_str)
     except Exception as exc:
         print(f"Warning: could not parse tree for rendering: {exc}")
         return
@@ -1137,7 +1295,13 @@ def main():
             if acc in genome_id:
                 display = sp_name
                 break
-        target_chrom = genes[0]["chrom"] if genes else (candidate_regions[0][0] if candidate_regions else "unknown")
+        gene_chroms = sorted({g["chrom"] for g in genes}) if genes else []
+        if len(gene_chroms) == 1:
+            target_chrom = gene_chroms[0]
+        elif len(gene_chroms) > 1:
+            target_chrom = f"{len(gene_chroms)} chr"
+        else:
+            target_chrom = candidate_regions[0][0] if candidate_regions else "unknown"
         
         target_tracks.append({
             "genome_id":    genome_id,
@@ -1326,29 +1490,76 @@ def main():
             add_gene(fig, gene, x_off, yb, GENE_H, colour, bclr, bw,
                      hover, show_leg, lg_key)
 
+    # -- 5c2. Absent-GOI placeholder for targets without GOI gene --------
+    for ti, track in enumerate(all_tracks):
+        if track["is_home"]:
+            continue
+        has_goi_in_track = any(
+            is_goi(g.get("name")) or is_goi(g.get("home_gene_id"))
+            for g in track["genes"]
+        )
+        if not has_goi_in_track and track["genes"]:
+            yb = (n_tracks - 1 - ti) * TRACK_SPACE
+            # Draw a dashed-outline "?" box at x=0 (GOI center)
+            dash_w = 2000
+            fig.add_shape(
+                type="rect",
+                x0=-dash_w / 2, x1=dash_w / 2,
+                y0=yb, y1=yb + GENE_H,
+                fillcolor="rgba(227,26,28,0.08)",
+                line=dict(color=GOI_COLOUR, width=1.5, dash="dash"),
+            )
+            fig.add_annotation(
+                x=0, y=yb + GENE_H / 2,
+                text="<b>?</b>",
+                showarrow=False,
+                font=dict(size=12, color=GOI_COLOUR),
+                xanchor="center", yanchor="middle",
+            )
+
     # -- 5d. Gene labels -------------------------------------------------
     for ti, track in enumerate(all_tracks):
         yb    = (n_tracks - 1 - ti) * TRACK_SPACE
         x_off = track["offset"]
-        for gene in track["genes"]:
+        genes_in_track = track["genes"]
+        n_genes = len(genes_in_track)
+
+        for gene in genes_in_track:
             name    = gene["name"]
             home_id = gene.get("home_gene_id", name)
             goi_f   = is_goi(name) or is_goi(home_id)
+
+            # In dense tracks, only label GOI and matched flanking genes
+            has_colour = (home_id in gene_colours or name in gene_colours)
+            if n_genes > 15 and not goi_f and not has_colour:
+                continue  # skip labels for unmatched genes in dense tracks
+
             if not track["is_home"]:
                 label = clean_gene_label(_preferred_target_label(gene))
                 if not label and home_id:
                     label = clean_gene_label(home_id)
             else:
                 label = _preferred_home_label(gene, home_products)
+
+            # Use smaller font in dense tracks
+            fsize = 8 if n_genes <= 12 else 7
             add_label(fig, gene, x_off, yb, GENE_H, label,
-                      fsize=8, is_goi_flag=goi_f)
+                      fsize=fsize, is_goi_flag=goi_f)
 
     # -- 5e. Track labels (left margin) ----------------------------------
     for ti, track in enumerate(all_tracks):
         yb = (n_tracks - 1 - ti) * TRACK_SPACE
+        # Check if track has any GOI gene
+        has_goi_in_track = any(
+            is_goi(g.get("name")) or is_goi(g.get("home_gene_id"))
+            for g in track["genes"]
+        )
+        track_label = f"<b>{track['label']}</b>"
+        if not track["is_home"] and not has_goi_in_track:
+            track_label += "<br><span style='color:#d32f2f;font-size:9px'>✗ GOI absent</span>"
         fig.add_annotation(
             x=-0.01, y=yb + GENE_H / 2,
-            text=f"<b>{track['label']}</b>",
+            text=track_label,
             showarrow=False,
             font=dict(size=11, color="black"),
             xref="paper", yref="y",
@@ -1360,7 +1571,8 @@ def main():
         yb    = (n_tracks - 1 - ti) * TRACK_SPACE
         x_off = track["offset"]
         for brk in track.get("breaks", []):
-            draw_gap_break(fig, brk["x"] - x_off, yb, GENE_H, brk["text"])
+            draw_gap_break(fig, brk["x"] - x_off, yb, GENE_H, brk["text"],
+                           is_chrom_break=brk.get("is_chrom_break", False))
 
     # -- 6. Figure styling -----------------------------------------------
 

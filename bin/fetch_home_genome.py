@@ -226,6 +226,13 @@ def format_quality(entry):
 
 
 def is_bad_quality(entry, args):
+    # Chromosome-level and complete-genome assemblies are always acceptable.
+    # NCBI DocSum counts include alternate haplotypes and unplaced sequences,
+    # which inflate contig/scaffold numbers even for excellent assemblies.
+    level_rank = assembly_level_priority(entry.get("assembly_status"))
+    if level_rank <= 1:  # Chromosome or Complete Genome
+        return False, []
+
     reasons = []
     contigs = entry.get("contig_count")
     scaff = entry.get("scaffold_count")
@@ -243,7 +250,7 @@ def is_bad_quality(entry, args):
         best_n50 is None
         and contigs is None
         and scaff is None
-        and assembly_level_priority(entry.get("assembly_status")) >= 3
+        and level_rank >= 3
     ):
         reasons.append("assembly level is contig-like and no quality metrics are available")
 
