@@ -58,7 +58,7 @@ def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
     
     Returns dict with alignment details.
     """
-    if not PARASAIL_AVAILABLE:
+    if not HAS_PARASAIL:
         raise ImportError("parasail library required for Smith-Waterman search")
     
     # Get substitution matrix
@@ -428,7 +428,7 @@ def main():
     # Decide method
     method = args.method
     if method == "auto":
-        method = "parasail" if PARASAIL_AVAILABLE else "ssearch36"
+        method = "parasail" if HAS_PARASAIL else "ssearch36"
     
     print(f"Using Smith-Waterman implementation: {method}", file=sys.stderr)
     
@@ -438,7 +438,7 @@ def main():
     
     elif method == "parasail":
         # Use Python parasail library (faster, in-memory)
-        if not PARASAIL_AVAILABLE:
+        if not HAS_PARASAIL:
             print("ERROR: parasail not installed but requested. Install with:", file=sys.stderr)
             print("  pip install parasail", file=sys.stderr)
             sys.exit(1)

@@ -750,16 +750,14 @@ def filter_chromosomes_only(fna_path: Path) -> None:
             tmp_path.unlink()
 
 
-def download_genome(accession, output_dir):
-    """Download genome from NCBI using datasets. Also attempts to download GFF if available."""
-    print(f"Downloading {accession}...")
+def download_genome(accession, output_dir, max_retries=3):
+    """Download genome from NCBI using datasets with retry. Also attempts to download GFF if available."""
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     zip_file = output_path / f"{accession}.zip"
     extract_dir = output_path / accession
-    fna_path = None
     gff_target = output_path / f"{accession}.gff"
 
     cmd = [
@@ -774,72 +772,90 @@ def download_genome(accession, output_dir):
         str(zip_file),
     ]
 
-    try:
-        run_safe_command(cmd)
-        extract_zip_archive(zip_file, extract_dir)
+    for attempt in range(1, max_retries + 1):
+        print(f"Downloading {accession} (attempt {attempt}/{max_retries})...")
 
-        fna_files = list(extract_dir.rglob("*.fna"))
-        if fna_files:
-            target = output_path / f"{accession}.fna"
-            shutil.move(str(fna_files[0]), str(target))
-            fna_path = str(target)
-            # Filter to chromosome sequences only when both chromosomes
-            # and unlocalized scaffolds are present in the same assembly.
-            filter_chromosomes_only(target)
-            print(f"  ✓ Genome: {target}")
-
-        gff_status = _extract_best_gff(extract_dir, gff_target)
-        if gff_status == "ok":
-            print(f"  ✓ GFF annotations: {gff_target}")
-        elif gff_status == "no_features":
-            print("  ○ GFF found but no CDS/gene features (scaffold-only)")
-        else:
-            print("  ○ No GFF annotations available")
-
-        # Fallback: if GenBank accession has no useful GFF, try RefSeq counterpart.
-        if gff_status != "ok" and accession.startswith("GCA_"):
-            refseq_acc = "GCF_" + accession[4:]
-            ref_zip = output_path / f"{refseq_acc}.zip"
-            ref_extract = output_path / refseq_acc
-            try:
-                print(f"  ○ Trying RefSeq annotation fallback: {refseq_acc}")
-                run_safe_command(
-                    [
-                        "datasets",
-                        "download",
-                        "genome",
-                        "accession",
-                        refseq_acc,
-                        "--include",
-                        "gff3",
-                        "--filename",
-                        str(ref_zip),
-                    ]
-                )
-                extract_zip_archive(ref_zip, ref_extract)
-                ref_status = _extract_best_gff(ref_extract, gff_target)
-                if ref_status == "ok":
-                    print(f"  ✓ GFF annotations (RefSeq fallback): {gff_target}")
-                else:
-                    print("  ○ RefSeq fallback did not yield usable GFF")
-            except Exception:
-                print("  ○ RefSeq annotation fallback unavailable")
-            finally:
-                if ref_zip.exists():
-                    ref_zip.unlink()
-                if ref_extract.exists():
-                    shutil.rmtree(ref_extract)
-
-        return fna_path
-
-    except Exception as e:
-        print(f"  ✗ Could not download {accession}: {e}")
-        return None
-    finally:
+        # Clean up artefacts from a previous failed attempt
         if zip_file.exists():
             zip_file.unlink()
         if extract_dir.exists():
             shutil.rmtree(extract_dir)
+
+        try:
+            run_safe_command(cmd)
+            extract_zip_archive(zip_file, extract_dir)
+
+            fna_files = list(extract_dir.rglob("*.fna"))
+            fna_path = None
+
+            if fna_files:
+                target = output_path / f"{accession}.fna"
+                shutil.move(str(fna_files[0]), str(target))
+                fna_path = str(target)
+                # Filter to chromosome sequences only when both chromosomes
+                # and unlocalized scaffolds are present in the same assembly.
+                filter_chromosomes_only(target)
+                print(f"  ✓ Genome: {target}")
+
+            gff_status = _extract_best_gff(extract_dir, gff_target)
+            if gff_status == "ok":
+                print(f"  ✓ GFF annotations: {gff_target}")
+            elif gff_status == "no_features":
+                print("  ○ GFF found but no CDS/gene features (scaffold-only)")
+            else:
+                print("  ○ No GFF annotations available")
+
+            # Fallback: if GenBank accession has no useful GFF, try RefSeq counterpart.
+            if gff_status != "ok" and accession.startswith("GCA_"):
+                refseq_acc = "GCF_" + accession[4:]
+                ref_zip = output_path / f"{refseq_acc}.zip"
+                ref_extract = output_path / refseq_acc
+                try:
+                    print(f"  ○ Trying RefSeq annotation fallback: {refseq_acc}")
+                    run_safe_command(
+                        [
+                            "datasets",
+                            "download",
+                            "genome",
+                            "accession",
+                            refseq_acc,
+                            "--include",
+                            "gff3",
+                            "--filename",
+                            str(ref_zip),
+                        ]
+                    )
+                    extract_zip_archive(ref_zip, ref_extract)
+                    ref_status = _extract_best_gff(ref_extract, gff_target)
+                    if ref_status == "ok":
+                        print(f"  ✓ GFF annotations (RefSeq fallback): {gff_target}")
+                    else:
+                        print("  ○ RefSeq fallback did not yield usable GFF")
+                except Exception:
+                    print("  ○ RefSeq annotation fallback unavailable")
+                finally:
+                    if ref_zip.exists():
+                        ref_zip.unlink()
+                    if ref_extract.exists():
+                        shutil.rmtree(ref_extract)
+
+            return fna_path
+
+        except (subprocess.CalledProcessError, zipfile.BadZipFile) as e:
+            msg = e.stderr if hasattr(e, 'stderr') else str(e)
+            print(f"  ✗ Attempt {attempt} failed for {accession}: {msg}", file=sys.stderr)
+            if attempt < max_retries:
+                wait = 10 * attempt
+                print(f"  Retrying in {wait}s...", file=sys.stderr)
+                import time; time.sleep(wait)
+            else:
+                print(f"  ✗ All {max_retries} attempts exhausted for {accession}.", file=sys.stderr)
+                return None
+        finally:
+            if zip_file.exists():
+                zip_file.unlink()
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
 
 
 def write_quality_report(assemblies, output_dir):
@@ -963,20 +979,20 @@ def main():
     parser.add_argument(
         "--bad-max-contigs",
         type=int,
-        default=100000,
-        help="Assemblies above this contig count are flagged low quality (default: 100000)",
+        default=500000,
+        help="Assemblies above this contig count are flagged low quality (default: 500000)",
     )
     parser.add_argument(
         "--bad-max-scaffolds",
         type=int,
-        default=50000,
-        help="Assemblies above this scaffold count are flagged low quality (default: 50000)",
+        default=500000,
+        help="Assemblies above this scaffold count are flagged low quality (default: 500000)",
     )
     parser.add_argument(
         "--bad-min-n50",
         type=int,
-        default=20000,
-        help="Assemblies with best N50 below this are flagged low quality (default: 20000)",
+        default=5000,
+        help="Assemblies with best N50 below this are flagged low quality (default: 5000)",
     )
     args = parser.parse_args()
 

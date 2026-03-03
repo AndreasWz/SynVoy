@@ -2120,7 +2120,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     else:
                                         if qcov < 0.25 and aln_total < 35 and best_bits < 60.0:
                                             valid_fallback = False
-                                            
+
                                     print(f"[DEBUG FALLBACK] valid_fallback={valid_fallback}", flush=True)
 
                                     if valid_fallback:

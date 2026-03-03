@@ -1218,11 +1218,24 @@ def main():
         candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
         genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
 
-        # Prefer candidate regions that actually overlap GOI models.
+        # Try restricting to GOI-containing candidate regions, but ONLY if
+        # that doesn't discard most flanking context.  The GOI hit is often in
+        # a tiny region separate from the main synteny block — blindly
+        # restricting to GOI regions would throw away all flanking evidence.
         goi_candidate_regions = _candidate_regions_with_goi(candidate_regions, genes_all)
         if goi_candidate_regions:
-            genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
-            candidate_regions = goi_candidate_regions
+            goi_only_genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
+            if len(goi_only_genes) >= max(3, len(genes) * 0.5):
+                # GOI regions contain enough flanking context — use them.
+                genes = goi_only_genes
+                candidate_regions = goi_candidate_regions
+            else:
+                # GOI is isolated from flanking genes; keep ALL candidate
+                # regions so flanking context is preserved.
+                print(
+                    f"[plot] {genome_id}: GOI-only regions have {len(goi_only_genes)} genes "
+                    f"vs {len(genes)} from all regions — keeping all regions."
+                )
 
         # If candidate regions exist but miss GOI, recover a GOI-centered context.
         if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
@@ -1275,7 +1288,7 @@ def main():
                         f"using richest block b{best_block} ({len(genes)} genes)."
                     )
 
-        # Reduce clutter on chromosome-level assemblies: keep only the GOI chromosome.
+        # Focus on the most informative chromosomes for chromosome-level assemblies.
         # For scaffold/contig-level assemblies (many distinct contigs), flanking genes
         # may legitimately reside on different contigs — do NOT apply the restriction.
         all_chroms_in_gff = {g["chrom"] for g in genes_all}
@@ -1283,9 +1296,28 @@ def main():
 
         if not is_scaffold_assembly and any(_is_goi_target_gene(g) for g in genes):
             goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
-            if len(goi_chroms) == 1:
-                goi_chrom = next(iter(goi_chroms))
-                genes = [g for g in genes if g["chrom"] == goi_chrom]
+            # Count flanking genes per chromosome (non-GOI genes)
+            from collections import Counter as _Counter
+            chrom_flank_counts = _Counter(
+                g["chrom"] for g in genes if not _is_goi_target_gene(g)
+            )
+            # Keep GOI chromosome(s) + any chromosome with >=3 flanking genes
+            # (i.e. chromosomes with real synteny evidence)
+            important_chroms = set(goi_chroms)
+            for ch, cnt in chrom_flank_counts.items():
+                if cnt >= 3:
+                    important_chroms.add(ch)
+
+            # Only filter if we'd still have enough genes
+            filtered = [g for g in genes if g["chrom"] in important_chroms]
+            if len(filtered) >= len(genes) * 0.3 or len(important_chroms) <= 3:
+                if len(filtered) < len(genes):
+                    dropped_chroms = {g["chrom"] for g in genes} - important_chroms
+                    print(
+                        f"[plot] {genome_id}: keeping {len(important_chroms)} informative "
+                        f"chromosomes ({len(filtered)} genes), dropped {dropped_chroms}"
+                    )
+                genes = filtered
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])

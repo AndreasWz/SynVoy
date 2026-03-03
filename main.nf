@@ -213,7 +213,18 @@ workflow {
         // 3. Target Genomes Setup
         if (params.target_genomes) {
             uiStatus('RUN ', 'STAGE_GENOMES', 'Loading target genomes list')
-            target_genomes_list = Channel.fromPath(params.target_genomes).collect()
+            // Support both glob patterns ("genomes/*.fna") and comma-separated
+            // lists ("a.fna,b.fna,c.fna") as well as Nextflow list syntax.
+            def tg = params.target_genomes
+            if (tg instanceof List) {
+                target_genomes_list = Channel.fromPath(tg).collect()
+            } else if (tg.toString().contains(',')) {
+                target_genomes_list = Channel
+                    .fromPath(tg.toString().split(',').collect { it.trim() })
+                    .collect()
+            } else {
+                target_genomes_list = Channel.fromPath(tg).collect()
+            }
             
             // Show count
             target_genomes_list.view { genomes ->

@@ -556,60 +556,71 @@ def filter_chromosomes_only(fna_path: Path) -> None:
             tmp_path.unlink()
 
 
-def download_genome_with_annotation(accession, output_dir):
-    """Download genome and GFF annotation using NCBI datasets."""
-    print(f"\nDownloading {accession} with annotation...")
-    
+def download_genome_with_annotation(accession, output_dir, max_retries=3):
+    """Download genome and GFF annotation using NCBI datasets with retry."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     zip_file = output_path / f"{accession}.zip"
-    
-    # Download with annotation
+    extract_dir = output_path / 'extracted'
+
     cmd = [
         'datasets', 'download', 'genome', 'accession', accession,
         '--include', 'genome,gff3',
         '--filename', str(zip_file)
     ]
-    
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-        
-        # Extract archive (stdlib; avoids external unzip dependency)
-        extract_dir = output_path / 'extracted'
-        extract_zip_archive(zip_file, extract_dir)
-        
-        # Find files
-        fna_files = list(extract_dir.rglob("*.fna"))
-        gff_files = list(extract_dir.rglob("*.gff"))
-        
-        genome_path = None
-        gff_path = None
-        
-        if fna_files:
-            genome_path = output_path / "home_genome.fna"
-            shutil.copy(fna_files[0], genome_path)
-            # Filter to chromosome sequences only when the assembly contains
-            # both chromosomes (NC_/CM_) and unlocalized scaffolds (NW_/NZ_).
-            filter_chromosomes_only(genome_path)
-            print(f"  Genome: {genome_path}")
-        
-        if gff_files:
-            gff_path = output_path / "home_genome.gff"
-            shutil.copy(gff_files[0], gff_path)
-            print(f"  Annotation: {gff_path}")
-        
-        # Cleanup
+
+    for attempt in range(1, max_retries + 1):
+        print(f"\nDownloading {accession} with annotation (attempt {attempt}/{max_retries})...")
+
+        # Clean up any leftover artefacts from a previous failed attempt
         if zip_file.exists():
             zip_file.unlink()
         if extract_dir.exists():
             shutil.rmtree(extract_dir)
-        
-        return genome_path, gff_path
-        
-    except subprocess.CalledProcessError as e:
-        print(f"Error downloading: {e.stderr}", file=sys.stderr)
-        return None, None
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            extract_zip_archive(zip_file, extract_dir)
+
+            # Find files
+            fna_files = list(extract_dir.rglob("*.fna"))
+            gff_files = list(extract_dir.rglob("*.gff"))
+
+            genome_path = None
+            gff_path = None
+
+            if fna_files:
+                genome_path = output_path / "home_genome.fna"
+                shutil.copy(fna_files[0], genome_path)
+                # Filter to chromosome sequences only when the assembly contains
+                # both chromosomes (NC_/CM_) and unlocalized scaffolds (NW_/NZ_).
+                filter_chromosomes_only(genome_path)
+                print(f"  Genome: {genome_path}")
+
+            if gff_files:
+                gff_path = output_path / "home_genome.gff"
+                shutil.copy(gff_files[0], gff_path)
+                print(f"  Annotation: {gff_path}")
+
+            # Cleanup
+            if zip_file.exists():
+                zip_file.unlink()
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+
+            return genome_path, gff_path
+
+        except (subprocess.CalledProcessError, zipfile.BadZipFile) as e:
+            msg = e.stderr if hasattr(e, 'stderr') else str(e)
+            print(f"  Download attempt {attempt} failed: {msg}", file=sys.stderr)
+            if attempt < max_retries:
+                wait = 10 * attempt
+                print(f"  Retrying in {wait}s...", file=sys.stderr)
+                import time; time.sleep(wait)
+            else:
+                print(f"  All {max_retries} attempts exhausted.", file=sys.stderr)
+                return None, None
 
 
 def main():

@@ -611,6 +611,53 @@ def extract_exons_from_gff_match(match, genome_file):
 # TANDEM DUPLICATION DETECTION
 # =============================================================================
 
+
+def _calc_overlap(start1, end1, start2, end2):
+    """Calculate the overlap length between two 1-based closed intervals."""
+    return max(0, min(end1, end2) - max(start1, start2) + 1)
+
+
+def _deduplicate_hits(hits, overlap_threshold=0.8):
+    """
+    Remove redundant hits that overlap heavily in genomic space.
+
+    Keeps the hit with the higher identity (pident) when two hits overlap
+    by >= *overlap_threshold* of the shorter hit's length.
+
+    Parameters
+    ----------
+    hits : list of dict
+        Each dict must have 'gstart', 'gend', 'chrom', and 'pident'.
+    overlap_threshold : float
+        Minimum fraction of the shorter hit covered by overlap to consider
+        two hits redundant.
+
+    Returns
+    -------
+    list of dict – deduplicated hits, sorted by genomic start.
+    """
+    if len(hits) <= 1:
+        return list(hits)
+    # Sort by descending identity so the best hit is kept first
+    sorted_hits = sorted(hits, key=lambda h: -h.get('pident', 0))
+    kept = []
+    for h in sorted_hits:
+        is_dup = False
+        for k in kept:
+            if h.get('chrom') != k.get('chrom'):
+                continue
+            ov = _calc_overlap(h['gstart'], h['gend'], k['gstart'], k['gend'])
+            shorter = min(h['gend'] - h['gstart'] + 1,
+                          k['gend'] - k['gstart'] + 1)
+            if shorter > 0 and ov / shorter >= overlap_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(h)
+    kept.sort(key=lambda h: (h.get('chrom', ''), h['gstart']))
+    return kept
+
+
 def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
                                 max_intergenic_distance=50000):
     """
