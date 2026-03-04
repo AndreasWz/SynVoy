@@ -69,7 +69,8 @@ def parse_gff(gff_file):
                     'strand': parts[6],
                     'exons': []
                 }
-            mRNAs[mrna_id]['exons'].append((int(parts[3]), int(parts[4])))
+            mRNAs[mrna_id]['exons'].append((int(parts[3]), int(parts[4]),
+                                              int(parts[7]) if parts[7] != '.' else 0))
 
     # Third pass: Group mRNAs by gene and pick longest
     gene_to_longest_mrna = {}
@@ -114,8 +115,21 @@ def main():
             
         exons = sorted(info['exons'], key=lambda x: x[0])
         dna_seq = ""
-        for start, end in exons:
+        for i, exon in enumerate(exons):
+            start, end = exon[0], exon[1]
+            phase = exon[2] if len(exon) > 2 else 0
             exon_seq = genome[chrom][start-1:end]
+            # Apply GFF phase to the first CDS in coding order only.
+            # Phase trims bases from the 5' end in coding direction:
+            #   + strand: first CDS genomically → trim from LEFT
+            #   - strand: last CDS genomically → trim from RIGHT
+            #             (genomic right = coding 5' for minus strand;
+            #              reverse-complement happens after concatenation)
+            if phase > 0:
+                if info['strand'] == '+' and i == 0:
+                    exon_seq = exon_seq[phase:]
+                elif info['strand'] == '-' and i == len(exons) - 1:
+                    exon_seq = exon_seq[:-phase]
             dna_seq += exon_seq
             
         if info['strand'] == '-':

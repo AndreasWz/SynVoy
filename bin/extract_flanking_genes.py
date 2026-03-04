@@ -453,9 +453,13 @@ def main():
     with open(args.out_bed, 'w') as bed_out:
         seen = set()
         for gene in extracted_genes:
-            gid = gene['attrs'].get('ID', f"{gene['chrom']}_{gene['start']}")
-            if gid in seen: continue
-            seen.add(gid)
+            raw_id = gene['attrs'].get('ID', '')
+            # Include chromosome and position in dedup key so genes with same ID
+            # on different contigs are not silently dropped
+            gid = raw_id if raw_id else f"{gene['chrom']}_{gene['start']}"
+            dedup_key = f"{gene['chrom']}:{gene['start']}-{gene['end']}:{gid}"
+            if dedup_key in seen: continue
+            seen.add(dedup_key)
             display_label = _preferred_gene_label(gene).replace('\t', ' ').strip() or gid
             seq_header = gid if display_label == gid else f"{gid} label={display_label}"
             

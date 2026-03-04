@@ -18,10 +18,11 @@ def check_rbh(candidate_fasta, home_db, query_id):
     Run search of candidate against home_db.
     Return True if best hit is query_id.
     """
-    tmp_out = "rbh_check.m8"
+    tmp_out = f"rbh_check_{os.getpid()}.m8"
+    tmp_dir = f"tmp_rbh_{os.getpid()}"
     cmd = [
         "mmseqs", "easy-search", 
-        candidate_fasta, home_db, tmp_out, "tmp_rbh",
+        candidate_fasta, home_db, tmp_out, tmp_dir,
         "--search-type", "1", # protein vs protein
         "--format-output", "query,target,pident,evalue,bits",
         "-e", "1e-3",

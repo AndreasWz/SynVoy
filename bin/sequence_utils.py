@@ -439,7 +439,8 @@ def translate(seq: str, table: int = 1) -> str:
     
     Args:
         seq: DNA sequence
-        table: Genetic code table (1 = standard, 11 = bacterial)
+        table: Genetic code table (currently only table 1 = standard is
+               implemented; other values are accepted but ignored)
     """
     # Standard genetic code
     codon_table = {

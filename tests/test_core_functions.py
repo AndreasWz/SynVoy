@@ -223,7 +223,7 @@ class TestSyntenyIdentification(unittest.TestCase):
             {'query': 'gene3', 'chrom': 'chr1', 'start': 1400, 'end': 1500},
         ]
         
-        region = identify_best_synteny_block(hits, cluster_dist=500)
+        region = identify_best_synteny_block(hits, cluster_distance=500)
         
         self.assertIsNotNone(region)
         self.assertEqual(region['chrom'], 'chr1')
@@ -243,7 +243,7 @@ class TestSyntenyIdentification(unittest.TestCase):
             {'query': 'gene5', 'chrom': 'chr1', 'start': 10400, 'end': 10500},
         ]
         
-        region = identify_best_synteny_block(hits, cluster_dist=500)
+        region = identify_best_synteny_block(hits, cluster_distance=500)
         
         self.assertIsNotNone(region)
         self.assertEqual(region['genes_count'], 3)
@@ -252,7 +252,7 @@ class TestSyntenyIdentification(unittest.TestCase):
     
     def test_no_hits(self):
         """Test handling of empty hits list."""
-        region = identify_best_synteny_block([], cluster_dist=500)
+        region = identify_best_synteny_block([], cluster_distance=500)
         self.assertIsNone(region)
     
     def test_different_chromosomes(self):
@@ -263,36 +263,13 @@ class TestSyntenyIdentification(unittest.TestCase):
             {'query': 'gene3', 'chrom': 'chr1', 'start': 1200, 'end': 1300},
         ]
         
-        region = identify_best_synteny_block(hits, cluster_dist=500)
+        region = identify_best_synteny_block(hits, cluster_distance=500)
         
         # Should pick chr1 cluster (2 genes)
         self.assertIsNotNone(region)
         self.assertEqual(region['chrom'], 'chr1')
         self.assertEqual(region['genes_count'], 2)
 
-
-def run_tests():
-    """Run all tests and return results."""
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-    
-    # Add all test classes
-    suite.addTests(loader.loadTestsFromTestCase(TestCoordinateNormalization))
-    suite.addTests(loader.loadTestsFromTestCase(TestGeneIDExtraction))
-    suite.addTests(loader.loadTestsFromTestCase(TestFastaIO))
-    suite.addTests(loader.loadTestsFromTestCase(TestSequenceOperations))
-    suite.addTests(loader.loadTestsFromTestCase(TestHitsFiltering))
-    suite.addTests(loader.loadTestsFromTestCase(TestSyntenyIdentification))
-    
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    
-    return result
-
-
-if __name__ == '__main__':
-    result = run_tests()
-    sys.exit(0 if result.wasSuccessful() else 1)
 
 class TestRegionMerging(unittest.TestCase):
     """Test merging of overlapping synteny blocks."""
@@ -347,3 +324,28 @@ class TestRegionMerging(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]['start'], 1000)
         self.assertEqual(merged[0]['end'], 5000)
+
+
+def run_tests():
+    """Run all tests and return results."""
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    
+    # Add all test classes
+    suite.addTests(loader.loadTestsFromTestCase(TestCoordinateNormalization))
+    suite.addTests(loader.loadTestsFromTestCase(TestGeneIDExtraction))
+    suite.addTests(loader.loadTestsFromTestCase(TestFastaIO))
+    suite.addTests(loader.loadTestsFromTestCase(TestSequenceOperations))
+    suite.addTests(loader.loadTestsFromTestCase(TestHitsFiltering))
+    suite.addTests(loader.loadTestsFromTestCase(TestSyntenyIdentification))
+    suite.addTests(loader.loadTestsFromTestCase(TestRegionMerging))
+    
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    
+    return result
+
+
+if __name__ == '__main__':
+    result = run_tests()
+    sys.exit(0 if result.wasSuccessful() else 1)

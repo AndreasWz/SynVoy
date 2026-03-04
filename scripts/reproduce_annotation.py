@@ -320,7 +320,7 @@ def main():
         print(f"[Analysis] No flanking anchors found; using {len(goi_seed_hits)} GOI hits for block seeding.")
     else:
         seed_hits = hits
-    synteny_blocks = identify_synteny_blocks(seed_hits, max_intron=runner_args.max_intron, cluster_dist=runner_args.cluster_dist)
+    synteny_blocks = identify_synteny_blocks(seed_hits, max_intron=runner_args.max_intron, cluster_distance=runner_args.cluster_dist)
     
     if not synteny_blocks:
         print("No valid synteny blocks found.")
@@ -366,7 +366,7 @@ def main():
         [],
         all_gff_lines,
         genome_name="test_genome",
-        locus_gap_bp=max(5000, int(runner_args.cluster_dist)),
+        locus_gap_bp=max(5000, int(runner_args.cluster_dist)),  # cluster_dist is the attr name on runner_args
     )
     all_gff_lines = collapse_flanking_cds_to_gene_span(all_gff_lines)
         

@@ -850,7 +850,7 @@ def _check_miniprot():
     try:
         result = subprocess.run(["miniprot", "--version"],
                                 capture_output=True, text=True, timeout=5)
-        return result.returncode == 0 or result.stderr.strip()
+        return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
@@ -1050,7 +1050,10 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
             if model_strand == '-':
                 exon_dna = reverse_complement(exon_dna)
             
-            # Handle phase (trim N bases from start if phase > 0)
+            # Handle phase: only the first CDS in coding order needs phase
+            # adjustment (subsequent phases are redundant given exon lengths).
+            # After per-CDS reverse-complement above, left side is always the
+            # coding-direction 5' end, so trimming from the left is correct.
             phase = cds['phase']
             if phase > 0 and i == 1:
                 exon_dna = exon_dna[phase:]
@@ -1335,7 +1338,7 @@ def main():
         base_goi_name = "target"
         
     goi_full_id = f"GOI_{base_goi_name}"
-    fasta_records.append((goi_full_id, query_seq))
+    fasta_records.append((goi_full_id, full_protein))
 
     # Add individual exon sequences
     for idx, exon in enumerate(exons, start=1):

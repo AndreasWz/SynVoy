@@ -41,6 +41,12 @@ def parse_args():
         default=0.4,
         help="Additive score bonus for clusters overlapping GOI intervals",
     )
+    parser.add_argument(
+        "--max_regions",
+        type=int,
+        default=0,
+        help="Max regions to output (0 = adaptive: emit all above relative threshold, capped at 6)",
+    )
     return parser.parse_args()
 
 def load_synteny_map(bed_file):
@@ -561,8 +567,29 @@ def main():
             # Case 1: No clusters formed and no GOI fallback available.
             print(f"INFO: No synteny clusters could be formed for this genome.", file=sys.stderr)
         else:
-            # Case 2: Clusters found - Output top 3
-            num_to_output = min(3, len(ordered_clusters))
+            # Case 2: Clusters found — adaptive region selection
+            if args.max_regions > 0:
+                # User-specified hard cap
+                num_to_output = min(args.max_regions, len(ordered_clusters))
+            else:
+                # Adaptive: emit all regions whose score is at least 30% of
+                # the best region's score OR that have >=3 unique genes,
+                # guaranteeing at least 1 and capping at 6.
+                best_score = ordered_clusters[0]['score'] if ordered_clusters else 0
+                score_floor = max(0.03, best_score * 0.3)
+                num_to_output = 0
+                for cl in ordered_clusters:
+                    if cl['score'] >= score_floor or cl.get('unique', 0) >= 3:
+                        num_to_output += 1
+                    else:
+                        break  # clusters are sorted by score desc
+                num_to_output = max(1, min(num_to_output, 6))
+
+            print(
+                f"INFO: Emitting {num_to_output}/{len(ordered_clusters)} regions "
+                f"(adaptive selection, best_score={ordered_clusters[0]['score']:.2f}).",
+                file=sys.stderr,
+            )
             
             for i in range(num_to_output):
                 best = ordered_clusters[i]

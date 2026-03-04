@@ -1137,12 +1137,14 @@ def estimate_cluster_distance(genome_file: str, gff_file: Optional[str] = None, 
     # Method 1: Use GFF if available (most accurate)
     if gff_file and os.path.exists(gff_file) and gff_file != "NO_GFF":
         try:
-            genes = parse_gff(gff_file)
+            # parse_gff returns a generator; consume it into a list and
+            # filter to gene-level features only for density estimation.
+            genes = [f for f in parse_gff(gff_file, feature_types=['gene'])]
             if len(genes) > 10:  # Need reasonable sample size
                 # Sort by chromosome and position
                 by_chrom = defaultdict(list)
                 for gene in genes:
-                    by_chrom[gene['chrom']].append(gene['start'])
+                    by_chrom[gene['seqid']].append(gene['start'])
                 
                 # Calculate inter-gene distances per chromosome
                 all_distances = []
@@ -2119,6 +2121,25 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             valid_fallback = False
                                     else:
                                         if qcov < 0.25 and aln_total < 35 and best_bits < 60.0:
+                                            valid_fallback = False
+
+                                    # Span sanity check: reject fallback hits whose
+                                    # genomic span is wildly disproportionate to the
+                                    # query protein length.  A gene spanning 50 kb for
+                                    # a 70-aa protein is clearly wrong.  Allow up to
+                                    # 30x the expected coding length (accounts for
+                                    # large introns in some lineages).
+                                    if valid_fallback:
+                                        max_span_nt = max(3000, query_len * 3 * 30)
+                                        gspan_min = min(h.get('gstart', 0) for h in ordered_hits)
+                                        gspan_max = max(h.get('gend', 0) for h in ordered_hits)
+                                        actual_span = gspan_max - gspan_min
+                                        if actual_span > max_span_nt:
+                                            print(
+                                                f"[DEBUG FALLBACK] REJECTED span={actual_span} "
+                                                f"> max_span={max_span_nt} for {parent_id}",
+                                                flush=True,
+                                            )
                                             valid_fallback = False
 
                                     print(f"[DEBUG FALLBACK] valid_fallback={valid_fallback}", flush=True)

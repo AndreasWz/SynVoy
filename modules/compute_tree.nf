@@ -14,17 +14,17 @@ process COMPUTE_TREE {
     # Concatenate all fasta files
     cat ${fasta_files} > all_sequences.faa
     
-    # CRITICAL: Filter to only GOI sequences, then deduplicate by sequence content
-    # Identical sequences from different query proteins should be collapsed
+    # CRITICAL: Filter to GOI sequences, then keep ONE representative per genome.
+    # The tree is only used for genome-level ordering & colouring, so we do not
+    # need hundreds of GOI copies – one longest rep per genome is sufficient.
     python3 -c "
-import sys
+import sys, re
 from collections import OrderedDict
 
-# Pass 1: collect all GOI sequences
-entries = []  # list of (name, seq)
+# ---- Parse FASTA ----
+entries = []
 current_name = None
 current_seq = []
-
 for line in open('all_sequences.faa'):
     if line.startswith('>'):
         if current_name and current_seq:
@@ -36,34 +36,33 @@ for line in open('all_sequences.faa'):
 if current_name and current_seq:
     entries.append((current_name, ''.join(current_seq)))
 
-# Filter to GOI only
-goi_entries = [(n, s) for n, s in entries if 'GOI_' in n or 'GOI|' in n]
+# ---- Filter to GOI only, skip exon fragments ----
+goi_entries = [(n, s) for n, s in entries
+               if ('GOI_' in n or 'GOI|' in n) and '|exon_' not in n]
 
-# Pass 2: deduplicate by sequence content
-# For identical sequences, keep one representative name
-seq_to_name = OrderedDict()  # seq -> first name seen
-name_counts = {}  # handle name collisions
+# ---- Extract genome_id from header ----
+_gcf_re = re.compile(r'(GC[FA]_[0-9]+_[0-9]+)')
+def genome_id(name):
+    m = _gcf_re.search(name)
+    if m:
+        parts = m.group(1).split('_')          # ['GCF','012345','6']
+        return f'{parts[0]}_{parts[1]}.{parts[2]}'
+    return 'home'
 
+# ---- Keep longest representative per genome ----
+best = {}  # genome_id -> (name, seq)
 for name, seq in goi_entries:
-    if seq in seq_to_name:
-        continue  # skip identical sequence
-    # Handle name collisions (same name, different sequence)
-    if name in name_counts:
-        name_counts[name] += 1
-        unique_name = name + '_var' + str(name_counts[name])
-    else:
-        name_counts[name] = 1
-        unique_name = name
-    seq_to_name[seq] = unique_name
+    gid = genome_id(name)
+    if gid not in best or len(seq) > len(best[gid][1]):
+        best[gid] = (name, seq)
 
-# Write deduplicated output
-for seq, name in seq_to_name.items():
+# ---- Write output ----
+for gid, (name, seq) in best.items():
     sys.stdout.write('>' + name + chr(10))
-    # Write sequence in 80-char lines
     for i in range(0, len(seq), 80):
         sys.stdout.write(seq[i:i+80] + chr(10))
 
-print(f'Deduplicated: {len(goi_entries)} GOI entries -> {len(seq_to_name)} unique sequences', file=sys.stderr)
+print(f'Tree filter: {len(entries)} total -> {len(goi_entries)} GOI -> {len(best)} representative seqs (1 per genome)', file=sys.stderr)
 " > goi_only.faa 2> goi_dedup.log
     head -5 goi_dedup.log || true
     

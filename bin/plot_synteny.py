@@ -463,6 +463,22 @@ def parse_target_gff(gff_file):
                 kept.append(g)
         genes = kept
 
+    # Cap GOI entries per genome: keep only the N best by identity.
+    # Iterative search can produce hundreds of low-quality fallback GOI
+    # annotations (especially without target GFFs) scattered across many
+    # chromosomes.  Keeping all of them clutters the plot with noisy
+    # connections.  Retain the best MAX_GOI_PER_GENOME entries.
+    MAX_GOI_PER_GENOME = 10
+    goi_genes = [g for g in genes if _is_goi_target_gene(g)]
+    if len(goi_genes) > MAX_GOI_PER_GENOME:
+        goi_genes.sort(key=lambda g: -g.get("identity", 0))
+        goi_to_drop = set(id(g) for g in goi_genes[MAX_GOI_PER_GENOME:])
+        genes = [g for g in genes if id(g) not in goi_to_drop]
+        print(
+            f"[plot] GOI cap: kept {MAX_GOI_PER_GENOME}/{len(goi_genes)} GOI entries "
+            f"(dropped {len(goi_to_drop)} low-identity entries)"
+        )
+
     return genes
 
 
@@ -706,7 +722,7 @@ def clean_genome_name(name):
     return name
 
 
-def clean_gene_label(name):
+def clean_gene_label(name, keep_goi_prefix=False):
     """gene-LOC412898 -> LOC412898 ;  GOI_P01501 -> P01501"""
     if name is None:
         return ""
@@ -714,6 +730,17 @@ def clean_gene_label(name):
     if name.startswith("gene-"):
         return name[5:]
     if name.startswith("GOI_"):
+        if keep_goi_prefix:
+            # For target tracks: translate 'GOI_copy_3' -> 'GOI #3'
+            suffix = name[4:]
+            import re as _re
+            m = _re.match(r'copy_(\d+)', suffix)
+            if m:
+                return f"GOI #{m.group(1)}"
+            m = _re.match(r'(.*?)_copy_(\d+)', suffix)
+            if m:
+                return f"GOI #{m.group(2)}"
+            return f"GOI {suffix}" if suffix else "GOI"
         return name[4:]
     return name
 
@@ -809,13 +836,12 @@ def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
 def draw_gap_break(fig, x_pos, y_pos, height, text, is_chrom_break=False):
     """Draw a visual break mark and text label for a compressed gap or chromosome boundary."""
     if is_chrom_break:
-        # Draw a wavy vertical separator for chromosome boundaries
-        fig.add_annotation(
-            x=x_pos, y=y_pos + height / 2,
-            text=f"<b>║</b><br><sub>{text}</sub>",
-            showarrow=False,
-            font=dict(size=9, color="#666666"),
-            xanchor="center", yanchor="middle",
+        # Draw a prominent vertical dashed line for chromosome boundaries
+        fig.add_shape(
+            type="line",
+            x0=x_pos, x1=x_pos,
+            y0=y_pos - 0.08, y1=y_pos + height + 0.08,
+            line=dict(color="rgba(80,80,80,0.55)", width=2, dash="dot"),
         )
     else:
         fig.add_annotation(
@@ -824,6 +850,43 @@ def draw_gap_break(fig, x_pos, y_pos, height, text, is_chrom_break=False):
             showarrow=False,
             font=dict(size=9, color="black"),
             xanchor="center", yanchor="middle",
+        )
+
+
+def _draw_chrom_labels(fig, track, ti, track_y, x_off, gene_h):
+    """Draw chromosome labels below each chromosome segment within a track."""
+    genes = track["genes"]
+    if not genes:
+        return
+    yb = track_y[ti]
+
+    # Group genes by chromosome (preserving plot order)
+    from collections import OrderedDict
+    chrom_segments = OrderedDict()
+    for g in genes:
+        ch = g["chrom"]
+        if ch not in chrom_segments:
+            chrom_segments[ch] = []
+        chrom_segments[ch].append(g)
+
+    if len(chrom_segments) <= 1:
+        return  # Only one chromosome — no need for labels
+
+    for ch, ch_genes in chrom_segments.items():
+        # Find the center of this chromosome segment in plot coords
+        xs = [g["start_plot"] - x_off for g in ch_genes] + \
+             [g["end_plot"] - x_off for g in ch_genes]
+        cx = (min(xs) + max(xs)) / 2
+        # Shorten chromosome name for display
+        short = ch
+        if len(ch) > 12:
+            short = ch[-10:]  # e.g. NC_045757.1 → _045757.1
+        fig.add_annotation(
+            x=cx, y=yb - 0.18,
+            text=f"<b>{short}</b>",
+            showarrow=False,
+            font=dict(size=11, color="#333333"),
+            xanchor="center", yanchor="top",
         )
 
 
@@ -875,7 +938,7 @@ def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
     compressed = []
     breaks = []
     current_shift = 0
-    CHROM_VISUAL_GAP = max(visual_gap * 2, 5000)  # wider gap between chromosomes
+    CHROM_VISUAL_GAP = max(visual_gap * 5, 30000)  # wide gap between chromosomes
 
     for i, g in enumerate(sorted_genes):
         new_g = g.copy()
@@ -1146,7 +1209,7 @@ def main():
     ap.add_argument("--species_map",    default=None,
                     help="TSV mapping accession → species name")
     ap.add_argument("--gap_threshold",  type=int, default=50000, help="Min gap size to compress (bp)")
-    ap.add_argument("--gap_visual_size",type=int, default=3000, help="Visual size of compressed gaps (bp)")
+    ap.add_argument("--gap_visual_size",type=int, default=20000, help="Visual size of compressed gaps (bp)")
     ap.add_argument("--flank_fallback_bp",type=int, default=1000000, help="Fallback window if candidate genes miss GOI")
     ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
     ap.add_argument("--plot_width",     type=int, default=1500, help="Total width of the output HTML plot")
@@ -1301,6 +1364,38 @@ def main():
             chrom_flank_counts = _Counter(
                 g["chrom"] for g in genes if not _is_goi_target_gene(g)
             )
+
+            # ── Synteny-aware GOI filter ──────────────────────────────
+            # GOI hits on chromosomes without ANY flanking gene support
+            # are almost certainly low-complexity/spurious matches (e.g.
+            # proline-repeat hits matching the pro-peptide region).
+            # Without synteny context, orthology cannot be established.
+            # Drop them unless they are the ONLY GOI hits in this genome.
+            unsupported_goi_chroms = {
+                ch for ch in goi_chroms
+                if chrom_flank_counts.get(ch, 0) == 0
+            }
+            supported_goi_chroms = goi_chroms - unsupported_goi_chroms
+
+            if unsupported_goi_chroms and supported_goi_chroms:
+                # There are GOI hits with synteny support elsewhere —
+                # safe to drop the unsupported ones.
+                n_dropped = sum(
+                    1 for g in genes
+                    if g["chrom"] in unsupported_goi_chroms
+                )
+                genes = [
+                    g for g in genes
+                    if g["chrom"] not in unsupported_goi_chroms
+                ]
+                print(
+                    f"[plot] {genome_id}: dropped {n_dropped} unsupported GOI "
+                    f"hits on {unsupported_goi_chroms} (no flanking genes = "
+                    f"no synteny evidence)"
+                )
+                # Refresh GOI chroms after drop
+                goi_chroms = supported_goi_chroms
+
             # Keep GOI chromosome(s) + any chromosome with >=3 flanking genes
             # (i.e. chromosomes with real synteny evidence)
             important_chroms = set(goi_chroms)
@@ -1359,24 +1454,25 @@ def main():
     gene_colours = assign_gene_colours(home_genes, query_intervals)
 
     # -- 4. Assemble track list & Compress -------------------------------
+    # Each genome gets one horizontal track bar.  Genes from different
+    # chromosomes are placed side-by-side with clear visual separators
+    # (handled by compress_track_coordinates).
 
     home_chrom = home_genes[0]["chrom"]
-    
-    # Initial list with raw genes
+
     raw_tracks = [{
-        "label":     f"Home genome ({home_chrom})",
-        "genes":     home_genes,
-        "is_home":   True,
-        "genome_id": "home",
-        "chrom":     home_chrom
+        "label":        f"Home genome ({home_chrom})",
+        "genes":        home_genes,
+        "is_home":      True,
+        "genome_id":    "home",
     }]
     for tt in target_tracks:
+        genes = tt["genes"]
         raw_tracks.append({
-            "label":     f"{tt['display_name']} ({tt['chrom']})",
-            "genes":     tt["genes"],
-            "is_home":   False,
-            "genome_id": tt["genome_id"],
-            "chrom":     tt["chrom"]
+            "label":        tt['display_name'],
+            "genes":        genes,
+            "is_home":      False,
+            "genome_id":    tt["genome_id"],
         })
 
     all_tracks = []
@@ -1402,27 +1498,66 @@ def main():
 
     fig = go.Figure()
 
+    # Simple Y positions: uniform spacing, top to bottom.
+    track_y = [(n_tracks - 1 - ti) * TRACK_SPACE for ti in range(n_tracks)]
+
     # -- 5a. Track background bands --------------------------------------
+    # Split the background bar at chromosome breaks so each chromosome
+    # gets its own distinct background rectangle.
+
     for ti, track in enumerate(all_tracks):
-        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        yb = track_y[ti]
         x_off = track["offset"]
         if not track["genes"]:
             continue
-        # Use plotted coordinates for background extent
-        x_min = min(g["start_plot"] for g in track["genes"]) - x_off - 1000
-        x_max = max(g["end_plot"]   for g in track["genes"]) - x_off + 1000
-        fig.add_shape(
-            type="rect",
-            x0=x_min, x1=x_max, y0=yb - 0.02, y1=yb + GENE_H + 0.02,
-            fillcolor=TRACK_BG_CLR, line=dict(width=0), layer="below",
+
+        # Collect chromosome break x positions (in plot-offset coords)
+        chrom_break_xs = sorted(
+            brk["x"] - x_off for brk in track.get("breaks", [])
+            if brk.get("is_chrom_break")
         )
 
+        if not chrom_break_xs:
+            # No chromosome breaks — single background rectangle
+            x_min = min(g["start_plot"] for g in track["genes"]) - x_off - 1000
+            x_max = max(g["end_plot"]   for g in track["genes"]) - x_off + 1000
+            fig.add_shape(
+                type="rect",
+                x0=x_min, x1=x_max, y0=yb - 0.02, y1=yb + GENE_H + 0.02,
+                fillcolor=TRACK_BG_CLR, line=dict(width=0), layer="below",
+            )
+        else:
+            # Draw a separate background rectangle for each chromosome segment
+            all_gene_xs = [(g["start_plot"] - x_off, g["end_plot"] - x_off)
+                           for g in track["genes"]]
+            # Create segment boundaries: [start, brk1, brk2, ..., end]
+            boundaries = [min(s for s, e in all_gene_xs) - 1000]
+            boundaries.extend(chrom_break_xs)
+            boundaries.append(max(e for s, e in all_gene_xs) + 1000)
+
+            for si in range(len(boundaries) - 1):
+                seg_left  = boundaries[si]
+                seg_right = boundaries[si + 1]
+                # Inset from break positions to create visible gap
+                inset = 2500
+                seg_x0 = seg_left  + (inset if si > 0 else 0)
+                seg_x1 = seg_right - (inset if si < len(boundaries) - 2 else 0)
+                if seg_x0 < seg_x1:
+                    fig.add_shape(
+                        type="rect",
+                        x0=seg_x0, x1=seg_x1,
+                        y0=yb - 0.02, y1=yb + GENE_H + 0.02,
+                        fillcolor=TRACK_BG_CLR, line=dict(width=0),
+                        layer="below",
+                    )
+
     # -- 5b. Ribbons (draw first so they sit behind genes) ---------------
-    for ti in range(n_tracks - 1):
+    # Ribbons connect consecutive tracks (one genome per track).
+    for ti in range(len(all_tracks) - 1):
         upper = all_tracks[ti]
         lower = all_tracks[ti + 1]
-        y_u = (n_tracks - 1 - ti)       * TRACK_SPACE
-        y_l = (n_tracks - 1 - (ti + 1)) * TRACK_SPACE
+        y_u = track_y[ti]
+        y_l = track_y[ti + 1]
         y_ribbon_top = y_u - RIBBON_GAP
         y_ribbon_bot = y_l + GENE_H + RIBBON_GAP
 
@@ -1437,7 +1572,6 @@ def main():
                          or (is_goi(u_home) and is_goi(home_id))
                          or (is_goi(u_name) and is_goi(home_id)))
                 if match:
-                    # Determine ribbon colour
                     colour = gene_colours.get(home_id,
                              gene_colours.get(u_name, UNMATCHED_CLR))
                     if is_goi(home_id):
@@ -1447,13 +1581,12 @@ def main():
                                upper["offset"], lower["offset"],
                                y_ribbon_top, y_ribbon_bot,
                                colour, alpha=0.20)
-                    # Do not break; allow connecting to all duplicated matching loci
 
     # -- 5c. Gene arrows -------------------------------------------------
     legend_shown = set()
 
     for ti, track in enumerate(all_tracks):
-        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        yb    = track_y[ti]
         x_off = track["offset"]
 
         # Draw large genes first so small genes render on top
@@ -1531,7 +1664,7 @@ def main():
             for g in track["genes"]
         )
         if not has_goi_in_track and track["genes"]:
-            yb = (n_tracks - 1 - ti) * TRACK_SPACE
+            yb = track_y[ti]
             # Draw a dashed-outline "?" box at x=0 (GOI center)
             dash_w = 2000
             fig.add_shape(
@@ -1547,15 +1680,18 @@ def main():
                 showarrow=False,
                 font=dict(size=12, color=GOI_COLOUR),
                 xanchor="center", yanchor="middle",
+                hovertext=f"<b>GOI not found</b><br>{track['label']}",
             )
 
     # -- 5d. Gene labels -------------------------------------------------
     for ti, track in enumerate(all_tracks):
-        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        yb    = track_y[ti]
         x_off = track["offset"]
         genes_in_track = track["genes"]
         n_genes = len(genes_in_track)
 
+        # Build candidate labels with their x positions, then filter overlaps
+        label_candidates = []  # [(x_center, label_text, gene, is_goi, priority)]
         for gene in genes_in_track:
             name    = gene["name"]
             home_id = gene.get("home_gene_id", name)
@@ -1563,25 +1699,70 @@ def main():
 
             # In dense tracks, only label GOI and matched flanking genes
             has_colour = (home_id in gene_colours or name in gene_colours)
-            if n_genes > 15 and not goi_f and not has_colour:
+            if n_genes > 12 and not goi_f and not has_colour:
                 continue  # skip labels for unmatched genes in dense tracks
 
             if not track["is_home"]:
-                label = clean_gene_label(_preferred_target_label(gene))
-                if not label and home_id:
-                    label = clean_gene_label(home_id)
+                if goi_f:
+                    # GOI on target: show 'GOI #N' instead of 'copy_N'
+                    label = clean_gene_label(name, keep_goi_prefix=True)
+                    if not label or label == 'GOI':
+                        label = clean_gene_label(home_id, keep_goi_prefix=True)
+                else:
+                    label = clean_gene_label(_preferred_target_label(gene))
+                    if not label and home_id:
+                        label = clean_gene_label(home_id)
             else:
                 label = _preferred_home_label(gene, home_products)
 
-            # Use smaller font in dense tracks
-            fsize = 8 if n_genes <= 12 else 7
+            g_start, g_end = _get_coords(gene)
+            xc = (g_start + g_end) / 2 - x_off
+            # Priority: GOI=0 (always show), coloured flanking=1, other=2
+            priority = 0 if goi_f else (1 if has_colour else 2)
+            label_candidates.append((xc, label, gene, goi_f, priority))
+
+        # Sort by priority (highest first), then by x position
+        label_candidates.sort(key=lambda c: (c[4], c[0]))
+
+        # Collision detection: skip labels that would overlap with already-placed ones
+        # Estimate label width in x-data units.
+        # For rotated labels (-35°), the horizontal footprint is
+        #   w_proj = w * cos(35°) ≈ 0.82 * w, but the diagonal sweep
+        # still causes visual collisions — use a 70% factor as effective width.
+        fsize = 8 if n_genes <= 10 else 7
+        char_width = 550 if fsize == 8 else 480
+        import math
+        rotation_factor = 0.70  # accounts for diagonal sweep of -35° text
+        placed_ranges = []  # list of (x_left, x_right) of placed labels
+
+        for xc, label, gene, goi_f, priority in label_candidates:
+            g_start, g_end = _get_coords(gene)
+            gw = g_end - g_start
+            is_rotated = gw < 5000  # matches the angle logic in add_label
+            est_width = len(label) * char_width
+            if is_rotated:
+                est_width = int(est_width * rotation_factor)
+            lbl_left  = xc - est_width / 2
+            lbl_right = xc + est_width / 2
+
+            # Minimum clearance between labels
+            margin = 300 if is_rotated else 400
+
+            # Check if this label overlaps with any already placed
+            overlaps = any(
+                lbl_left < pr + margin and lbl_right > pl - margin
+                for pl, pr in placed_ranges
+            )
+            if overlaps and not goi_f:
+                continue  # skip non-GOI labels that overlap
+
+            placed_ranges.append((lbl_left, lbl_right))
             add_label(fig, gene, x_off, yb, GENE_H, label,
                       fsize=fsize, is_goi_flag=goi_f)
 
     # -- 5e. Track labels (left margin) ----------------------------------
     for ti, track in enumerate(all_tracks):
-        yb = (n_tracks - 1 - ti) * TRACK_SPACE
-        # Check if track has any GOI gene
+        yb = track_y[ti]
         has_goi_in_track = any(
             is_goi(g.get("name")) or is_goi(g.get("home_gene_id"))
             for g in track["genes"]
@@ -1598,13 +1779,15 @@ def main():
             xanchor="right", yanchor="middle",
         )
 
-    # -- 5f. Gap breaks --------------------------------------------------
+    # -- 5f. Gap breaks & chromosome labels ------------------------------
     for ti, track in enumerate(all_tracks):
-        yb    = (n_tracks - 1 - ti) * TRACK_SPACE
+        yb    = track_y[ti]
         x_off = track["offset"]
         for brk in track.get("breaks", []):
             draw_gap_break(fig, brk["x"] - x_off, yb, GENE_H, brk["text"],
                            is_chrom_break=brk.get("is_chrom_break", False))
+        # Draw chromosome labels below each segment
+        _draw_chrom_labels(fig, track, ti, track_y, x_off, GENE_H)
 
     # -- 6. Figure styling -----------------------------------------------
 
@@ -1625,7 +1808,11 @@ def main():
     pad = (x_max - x_min) * 0.05 + 5000
     x_range = [x_min - pad, x_max + pad]
 
-    fig_height = max(500, n_tracks * 200 + 80)
+    fig_height = max(500, n_tracks * 185 + 80)
+
+    # Compute Y range from actual track positions
+    y_min_pos = min(track_y) if track_y else 0
+    y_max_pos = max(track_y) if track_y else 0
 
     fig.update_layout(
         title=dict(
@@ -1645,8 +1832,8 @@ def main():
         ),
         yaxis=dict(
             showticklabels=False, showgrid=False, zeroline=False,
-            range=[-0.6,
-                   (n_tracks - 1) * TRACK_SPACE + GENE_H + 1.0],
+            range=[y_min_pos - 0.6,
+                   y_max_pos + GENE_H + 1.0],
         ),
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -1666,7 +1853,7 @@ def main():
     scale_len = args.scale_bar_len
     sb_x1 = x_max
     sb_x0 = x_max - scale_len
-    sb_y  = -0.4
+    sb_y  = y_min_pos - 0.4
     
     fig.add_shape(
         type="line",
@@ -1683,7 +1870,7 @@ def main():
 
     fig.write_html(args.output)
     print(f"Synteny plot saved to {args.output}")
-    print(f"  Tracks: {n_tracks} (1 home + {len(target_tracks)} targets)")
+    print(f"  Tracks: {n_tracks} ({n_tracks - 1} target genomes)")
     print(f"  Gap compression: active (>50kb -> 3kb visual)")
 
     # -- 7. Tree plot (separate HTML) ------------------------------------

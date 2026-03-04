@@ -910,29 +910,6 @@ def print_selected_assemblies(assemblies, title):
         print(f"     {format_quality(asm)}")
 
 
-
-def write_quality_report(assemblies, output_dir):
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    report_path = output_path / "assembly_quality.tsv"
-    with open(report_path, "w") as out:
-        out.write(
-            "accession\tspecies\ttax_level\trefseq_category\tassembly_level\tchromosomes\t"
-            "scaffolds\tcontigs\tcontig_n50\tscaffold_n50\tcontig_n80\tscaffold_n80\t"
-            "bad_quality\tbad_reasons\n"
-        )
-        for asm in assemblies:
-            out.write(
-                f"{asm.get('accession', '')}\t{asm.get('species', '')}\t{asm.get('tax_level', '')}\t"
-                f"{asm.get('category', '')}\t{asm.get('assembly_status', '')}\t"
-                f"{asm.get('chromosome_count', '')}\t{asm.get('scaffold_count', '')}\t{asm.get('contig_count', '')}\t"
-                f"{asm.get('contig_n50', '')}\t{asm.get('scaffold_n50', '')}\t"
-                f"{asm.get('contig_n80', '')}\t{asm.get('scaffold_n80', '')}\t"
-                f"{str(asm.get('bad_quality', False)).lower()}\t{asm.get('bad_quality_reasons', '')}\n"
-            )
-    print(f"Assembly quality report written to: {report_path}")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch related genomes from NCBI for easy mode",

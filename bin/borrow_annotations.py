@@ -170,10 +170,11 @@ def extract_region_cds(gff_file, genome_file, chrom, region_start, region_end,
         
         cds_parts = sorted(gene['cds_parts'], key=lambda x: x['start'])
         
-        # Concatenate CDS exons
+        # Concatenate CDS exons (GFF coordinates are 1-based inclusive,
+        # convert to 0-based for Python string slicing)
         dna = ""
         for part in cds_parts:
-            dna += chrom_seq[part['start']:part['end']]
+            dna += chrom_seq[part['start']-1:part['end']]
         
         if gene['strand'] == '-':
             dna = reverse_complement(dna)

@@ -69,20 +69,29 @@ def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
         query_seq, target_seq, gap_open, gap_extend, matrix
     )
     
-    # Calculate percent identity if traceback available
+    # Calculate percent identity and alignment length from traceback
     if hasattr(result, 'traceback'):
         traceback = result.traceback
-        identity = (traceback.comp.count('|') / len(traceback.comp)) * 100 if traceback.comp else 0
+        aln_len = len(traceback.comp) if traceback.comp else 0
+        identity = (traceback.comp.count('|') / aln_len) * 100 if aln_len else 0
+        # Count how many reference/query positions are consumed (non-gap)
+        ref_consumed = sum(1 for c in traceback.ref if c != '-') if traceback.ref else aln_len
+        query_consumed = sum(1 for c in traceback.query if c != '-') if traceback.query else aln_len
     else:
         # Estimate from score
         identity = (result.score / (len(query_seq) * 5)) * 100  # Rough estimate
+        aln_len = len(query_seq)
+        ref_consumed = aln_len
+        query_consumed = aln_len
     
     return {
         'score': result.score,
         'end_query': result.end_query,
         'end_ref': result.end_ref,
         'identity': identity,
-        'length': result.end_query - result.end_ref if hasattr(result, 'end_ref') else len(query_seq)
+        'length': aln_len,
+        'ref_consumed': ref_consumed,
+        'query_consumed': query_consumed,
     }
 
 
@@ -342,8 +351,9 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
                 L = len(t_seq_dna)
                 te_fwd = L - rc_start
                 ts_fwd = L - rc_end
-                ts = ts_fwd
-                te = te_fwd
+                # BLAST m8 convention: tstart > tend signals minus strand
+                ts = te_fwd   # larger coord first → minus strand
+                te = ts_fwd   # smaller coord second
                 
                 # For masking, we need the internal "frame coordinates" for every frame.
                 # Simplest: Define Genomic Interval [min_dna, max_dna]
@@ -469,8 +479,22 @@ def main():
                         # Filter by thresholds
                         if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
                             # Convert protein coordinates back to DNA coordinates
-                            dna_start = offset + (result['end_ref'] - result['length']) * 3
-                            dna_end = offset + result['end_ref'] * 3
+                            start_ref = result['end_ref'] - result['ref_consumed'] + 1
+                            start_query = result['end_query'] - result['query_consumed'] + 1
+                            
+                            if frame_id.startswith('+'):
+                                # Forward frame: protein pos p -> DNA pos offset + p*3
+                                dna_start = offset + start_ref * 3 + 1  # 1-based
+                                dna_end = offset + (result['end_ref'] + 1) * 3  # 1-based inclusive
+                            else:
+                                # Reverse frame: positions are in reverse-complement space
+                                # Convert back to forward strand coordinates.
+                                # BLAST m8 convention: tstart > tend signals minus strand.
+                                L = len(t_seq)
+                                rc_start = offset + start_ref * 3
+                                rc_end = offset + (result['end_ref'] + 1) * 3 - 1
+                                dna_start = L - rc_start     # larger coord (1-based)
+                                dna_end = L - rc_end         # smaller coord (1-based)
                             
                             # BLAST m8 format output
                             hits.append({
@@ -480,8 +504,8 @@ def main():
                                 'alnlen': result['length'],
                                 'mismatch': 0,  # Not calculated
                                 'gapopen': 0,   # Not calculated
-                                'qstart': 1,
-                                'qend': result['end_query'],
+                                'qstart': start_query + 1,
+                                'qend': result['end_query'] + 1,
                                 'tstart': dna_start,
                                 'tend': dna_end,
                                 'evalue': 0.001,  # Placeholder

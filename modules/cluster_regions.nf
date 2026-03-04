@@ -33,7 +33,8 @@ process CLUSTER_REGIONS {
         --weight_base ${params.synteny_weight_base} \\
         --weight_consistency ${params.synteny_weight_consistency} \\
         --weight_strand ${params.synteny_weight_strand} \\
-        --goi_overlap_bonus ${params.synteny_goi_overlap_bonus}
+        --goi_overlap_bonus ${params.synteny_goi_overlap_bonus} \\
+        --max_regions ${params.max_regions}
         
     # Create simple scores output from BED regions
     # BED lines start with chrom, extract all non-empty lines as scores
