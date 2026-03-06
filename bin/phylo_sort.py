@@ -1,174 +1,305 @@
 #!/usr/bin/env python3
+"""
+phylo_sort.py - Sort target genomes by phylogenetic distance from home genome.
+
+Strategies (tried in order):
+  1. ETE3 + local taxonomy database (offline, fast)
+  2. NCBI Datasets CLI - extract taxonomy from GCF_/GCA_ accessions (online)
+  3. Alphabetical fallback with distance=0
+
+The key insight: in pro mode, genome filenames typically contain NCBI assembly
+accessions (e.g. GCF_029169275.1.fna). We can extract taxonomy lineages
+from these accessions via the NCBI Datasets CLI, which is already a pipeline
+dependency.
+"""
 
 import sys
 import os
+import re
+import json
+import subprocess
 import argparse
 try:
     from ete3 import NCBITaxa
 except ImportError:
     NCBITaxa = None
 
-def main():
-    parser = argparse.ArgumentParser(description="Sort genomes by phylogenetic distance")
-    parser.add_argument("--home", required=True, help="Home genome name or TaxID")
-    parser.add_argument("--targets", nargs='+', help="List of target genome files or names")
-    parser.add_argument("--targets_dir", help="Directory containing target genomes")
-    parser.add_argument("--img_ext", default=".fna", help="Extension for targets in directory (default: .fna)")
-    parser.add_argument("--taxdb", required=True, help="Path to directory containing taxdump (nodes.dmp, names.dmp) or sqlite db")
-    parser.add_argument("--output", required=True, help="Output sorted list of genomes")
-    
-    args = parser.parse_args()
-    
-    target_list = []
-    if args.targets:
-        target_list = args.targets
-    elif args.targets_dir:
-        # List files in directory
-        if os.path.isdir(args.targets_dir):
-             for f in os.listdir(args.targets_dir):
-                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa") or \
-                    f.endswith(args.img_ext + ".gz") or f.endswith(".fasta.gz") or f.endswith(".fa.gz"):
-                     target_list.append(os.path.join(args.targets_dir, f))
-    
-    if not target_list:
-        print("Warning: No targets provided via --targets or --targets_dir")
-        print("Writing empty sorted list.")
-        with open(args.output, 'w') as f:
-            pass  # empty file
-        return
-        
-    # Standardize to basenames for output sorting consistency if needed, 
-    # BUT we need full paths or at least consistent identifiers.
-    # The downstream tools assume paths or names.
-    # If we output just basenames, iterative_search needs to know the dir.
-    # Let's output Basenames in the sorted list?
-    # Original script wrote what it got.
-    # We should stick to writing Basenames if we use targets_dir, to allow re-construction.
-    
-    # If NCBITaxa is not available, fallback immediately
-    if NCBITaxa is None:
-        print("ETE3 not installed. Falling back to alphabetical sorting.")
-        fallback_sort(args)
-        return
 
-    # 1. Initialize NCBITaxa
-    # ... (rest of code)
-    # ETE3 uses a sqlite database. If args.taxdb serves a directory with dump files, 
-    # we might need to specify the db file location or let ete3 build it.
-    # However, standard NCBITaxa() uses ~/.etetoolkit/taxa.sqlite.
-    # If the user provides a custom path, we should try to use it.
-    # If args.taxdb is a file, assume it's the sqlite.
-    # If it's a directory, we might need to update/create the db.
-    # For this script to be robust in a pipeline, we'll try to use the provided DB or standard one.
-    
-    print(f"Initializing Taxonomy from {args.taxdb}...")
-    
+# =============================================================================
+# ACCESSION-BASED TAXONOMY (via NCBI Datasets CLI)
+# =============================================================================
+
+def _extract_accession(filename):
+    """
+    Extract an NCBI assembly accession (GCF_/GCA_ prefix) from a filename.
+    Returns accession string or None.
+    Examples:
+        GCF_029169275.1.fna -> GCF_029169275.1
+        GCA_928718305.1.fasta.gz -> GCA_928718305.1
+    """
+    basename = os.path.basename(filename)
+    m = re.match(r'(GC[AF]_\d{9}\.\d+)', basename)
+    return m.group(1) if m else None
+
+
+def _datasets_cli_available():
+    """Check if NCBI datasets CLI is available."""
     try:
-        if os.path.isfile(args.taxdb):
-            ncbi = NCBITaxa(dbfile=args.taxdb)
-        elif os.path.isdir(args.taxdb):
-            # Check for taxdump
-            db_path = os.path.join(args.taxdb, 'taxa.sqlite')
-            if os.path.exists(db_path):
-                 ncbi = NCBITaxa(dbfile=db_path)
-            else:
-                 # If we only have dmp files, ete3 constructs the DB.
-                 # This might take time.
-                 # Let's assume standard usage for now or fallback if fails.
-                 # If the user passed the taxdump folder, we can point NCBITaxa to it?
-                 # NCBITaxa(taxdump_file=...) takes a tar.gz usually.
-                 # If uncompressed, we might need to rely on default behavior or custom handling.
-                 # Let's try to load standard if provided arg is just a holder, 
-                 # but arguably we should respect the input.
-                 
-                 # Optimization: If the user provides the taxdump FOLDER, we can't easily tell ETE3 to use it 
-                 # without rebuilding the SQL. 
-                 # Let's assume the user has set up ETE3 or provided a valid SQlite DB path.
-                 # If not, and they provided the dump folder, we warn them.
-                 pass
-            # Fallback for now:
-            ncbi = NCBITaxa(dbfile=db_path if os.path.exists(db_path) else None)
+        result = subprocess.run(
+            ['datasets', '--version'],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _fetch_lineage_from_accessions(accessions):
+    """
+    Fetch taxonomy lineage for a list of assembly accessions using NCBI
+    datasets CLI.
+
+    Two-step approach:
+      1. `datasets summary genome accession` → get tax_id per accession
+      2. `datasets summary taxonomy taxon` → get full lineage (parents list)
+
+    Returns dict: accession -> list of parent tax IDs (from root to species).
+    """
+    if not accessions:
+        return {}
+
+    lineages = {}
+
+    # Step 1: Resolve accessions to tax IDs
+    acc_to_taxid = {}
+    acc_to_name = {}
+    try:
+        cmd = ['datasets', 'summary', 'genome', 'accession'] + list(accessions)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            print(f"[phylo_sort] datasets genome summary error: {result.stderr[:200]}")
+            return {}
+
+        data = json.loads(result.stdout)
+        for report in data.get('reports', []):
+            acc = report.get('accession', '')
+            org = report.get('organism', {})
+            tax_id = org.get('tax_id', 0)
+            species_name = org.get('organism_name', '')
+            if acc and tax_id:
+                acc_to_taxid[acc] = tax_id
+                acc_to_name[acc] = species_name
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        print(f"[phylo_sort] Error in genome summary: {e}")
+        return {}
+
+    if not acc_to_taxid:
+        return {}
+
+    # Step 2: Get full lineage for each tax_id via taxonomy summary
+    taxids = list(set(acc_to_taxid.values()))
+    taxid_to_parents = {}  # tax_id -> [parent_tax_ids from root]
+
+    try:
+        cmd = ['datasets', 'summary', 'taxonomy', 'taxon'] + \
+              [str(t) for t in taxids]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            print(f"[phylo_sort] datasets taxonomy error: {result.stderr[:200]}")
+            # Fall back to just species names
+            for acc, name in acc_to_name.items():
+                if name:
+                    lineages[acc] = [name]
+            return lineages
+
+        data = json.loads(result.stdout)
+        for report in data.get('reports', []):
+            tax = report.get('taxonomy', {})
+            tax_id = tax.get('tax_id', 0)
+            parents = tax.get('parents', [])
+
+            if tax_id and parents:
+                # parents list goes from root (1) to immediate parent
+                # Append the species tax_id itself
+                full_lineage = parents + [tax_id]
+                taxid_to_parents[tax_id] = full_lineage
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        print(f"[phylo_sort] Error in taxonomy summary: {e}")
+
+    # Map back to accessions
+    for acc, tax_id in acc_to_taxid.items():
+        name = acc_to_name.get(acc, '?')
+        if tax_id in taxid_to_parents:
+            lineages[acc] = taxid_to_parents[tax_id]
+            print(f"[phylo_sort] {acc} -> {name} "
+                  f"(lineage depth: {len(lineages[acc])})")
+        elif name:
+            lineages[acc] = [name]
+            print(f"[phylo_sort] {acc} -> {name} (name only, no lineage)")
+
+    return lineages
+
+
+def _lineage_distance(lin1, lin2):
+    """
+    Compute a simple topological distance between two lineage lists
+    (lists of tax IDs or names, ordered root → species).
+    Distance = number of unshared nodes (symmetric difference).
+    Lower values indicate more closely related organisms.
+    """
+    if not lin1 or not lin2:
+        return float('inf')
+
+    # Convert to sets for overlap, then also check prefix
+    set1 = set(lin1)
+    set2 = set(lin2)
+    shared = len(set1 & set2)
+
+    # Distance is total unique nodes minus shared (= symmetric difference)
+    return (len(set1) + len(set2)) - 2 * shared
+
+
+def _fetch_species_lineage(species_name):
+    """
+    Fetch taxonomy lineage for a species name using NCBI Datasets CLI.
+    Returns list of parent tax IDs (root → species) or None.
+    """
+    if not species_name:
+        return None
+    # Clean: strip path components, extensions
+    clean = os.path.basename(species_name)
+    clean = re.sub(r'\.(fna|fasta|fa)(\.gz)?$', '', clean)
+    clean = clean.replace('_', ' ').strip()
+    if not clean or clean.lower() in ('home genome', 'home'):
+        return None
+
+    try:
+        cmd = ['datasets', 'summary', 'taxonomy', 'taxon', clean]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+        for report in data.get('reports', []):
+            tax = report.get('taxonomy', {})
+            tax_id = tax.get('tax_id', 0)
+            parents = tax.get('parents', [])
+            if tax_id and parents:
+                return parents + [tax_id]
+
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        pass
+
+    return None
+
+
+def sort_by_accession_taxonomy(home_identifier, target_list):
+    """
+    Sort targets by phylogenetic distance using NCBI Datasets CLI to
+    resolve taxonomy from assembly accessions.
+
+    Returns list of (distance, basename) or None if method fails.
+    """
+    if not _datasets_cli_available():
+        print("[phylo_sort] NCBI datasets CLI not available, skipping accession-based sort")
+        return None
+
+    # Collect target accessions
+    acc_map = {}  # accession -> filename(s)
+    for f in target_list:
+        acc = _extract_accession(f)
+        if acc:
+            acc_map.setdefault(acc, []).append(f)
+
+    # Also try to extract home accession
+    home_acc = _extract_accession(home_identifier)
+    if home_acc:
+        acc_map.setdefault(home_acc, []).append(home_identifier)
+
+    if not acc_map:
+        print("[phylo_sort] No GCF_/GCA_ accessions found in filenames")
+        return None
+
+    # Fetch lineages for all accessions
+    accessions = list(acc_map.keys())
+    print(f"[phylo_sort] Fetching taxonomy for {len(accessions)} accessions...")
+    lineages = _fetch_lineage_from_accessions(accessions)
+
+    if not lineages:
+        print("[phylo_sort] No lineage data retrieved")
+        return None
+
+    # Determine home lineage
+    home_lineage = None
+    if home_acc and home_acc in lineages:
+        home_lineage = lineages[home_acc]
+        print(f"[phylo_sort] Home lineage from accession {home_acc} "
+              f"(depth: {len(home_lineage)})")
+    else:
+        # Home identifier might be a species name — look it up via taxonomy API
+        home_lineage = _fetch_species_lineage(home_identifier)
+        if home_lineage:
+            print(f"[phylo_sort] Home lineage from species name '{home_identifier}' "
+                  f"(depth: {len(home_lineage)})")
+
+    if not home_lineage:
+        print(f"[phylo_sort] Could not determine home lineage for '{home_identifier}'")
+        # Use the most detailed lineage as reference (imperfect but better than nothing)
+        if lineages:
+            home_lineage = max(lineages.values(), key=len)
+            print(f"[phylo_sort] Using longest lineage as fallback reference")
         else:
-             # Try default
-             ncbi = NCBITaxa()
-    except Exception as e:
-        print(f"Error initializing NCBITaxa: {e}")
-        fallback_sort(args)
-        return
+            return None
 
-    # 2. Resolve Home TaxID
-    home_taxid = get_taxid(args.home, ncbi)
-    if not home_taxid:
-        print(f"Could not find TaxID for home: {args.home}")
-        # Fallback?? Or Exit? Exit is safer for a "sort" tool but maybe fallback is better for pipeline continuity.
-        fallback_sort(args)
-        return
-
-    print(f"Home TaxID: {home_taxid}")
-
-    # 3. Process Targets
-    scored_targets = []
-    
-    # Pre-fetch linege for home
-    try:
-        home_lineage = ncbi.get_lineage(home_taxid)
-    except ValueError:
-        print(f"TaxID {home_taxid} not found in DB")
-        fallback_sort(args)
-        return
-
+    # Score each target
+    scored = []
     for target in target_list:
-        tid = get_taxid(target, ncbi)
-        if not tid:
-            print(f"Warning: Could not resolve TaxID for {target}")
-            # If target is a path, use basename for output if we want clean list
-            scored_targets.append((float('inf'), os.path.basename(target)))
-            continue
-            
-        try:
-            # Simple lineage overlap measure:
-            target_lineage = ncbi.get_lineage(tid)
-            shared = 0
-            for a, b in zip(home_lineage, target_lineage):
-                if a == b:
-                    shared += 1
-                else:
-                    break
-            
-            dist = (len(home_lineage) - shared) + (len(target_lineage) - shared)
-            scored_targets.append((dist, os.path.basename(target)))
-            
-        except Exception as e:
-            print(f"Error calculating distance for {target}: {e}")
-            scored_targets.append((float('inf'), os.path.basename(target)))
-            
-    # 4. Sort and Write
-    scored_targets.sort(key=lambda x: x[0])
-    
-    with open(args.output, 'w') as f:
-        for dist, target in scored_targets:
-            f.write(f"{target}\t{dist}\n")
-            
+        acc = _extract_accession(target)
+        basename = os.path.basename(target)
+        if acc and acc in lineages:
+            dist = _lineage_distance(home_lineage, lineages[acc])
+            scored.append((dist, basename))
+        else:
+            # Unknown taxonomy → push to end
+            scored.append((float('inf'), basename))
+
+    # Ensure we got real distances for at least some targets
+    real_distances = [d for d, _ in scored if d < float('inf')]
+    if not real_distances:
+        print("[phylo_sort] No taxonomic distances computed")
+        return None
+
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return scored
+
+
+# =============================================================================
+# ETE3-BASED TAXONOMY SORTING (original method)
+# =============================================================================
+
 def get_taxid(name, ncbi):
-    # If name is integer-like, assume it's a taxid
-    # Clean up name first
+    """Resolve a name/accession to an NCBI TaxID via ETE3."""
     clean = os.path.basename(name).split('.')[0].replace('_', ' ')
-    # ... (rest of function)
-    
+
     if clean.isdigit():
         return int(clean)
-        
-    # Lookup by name
+
     try:
         name2taxid = ncbi.get_name_translator([clean])
         if clean in name2taxid:
             return name2taxid[clean][0]
-    except:
+    except Exception:
         pass
-        
-    # Try fuzzy or synonyms? ETE3 name translator is exact.
-    # Try parts of name?
-    # e.g. "Drosophila melanogaster release 6" -> "Drosophila melanogaster"
+
+    # Try progressively shorter prefixes
     parts = clean.split()
     for i in range(len(parts), 0, -1):
         subname = " ".join(parts[:i])
@@ -176,32 +307,174 @@ def get_taxid(name, ncbi):
             name2taxid = ncbi.get_name_translator([subname])
             if subname in name2taxid:
                 return name2taxid[subname][0]
-        except:
+        except Exception:
             continue
-            
+
     return None
 
-def fallback_sort(args):
-    print("Falling back to alphabetical sorting")
-    # We need to re-generate target list because it's not passed to this function?
-    # It is better to move target listing to main scope or pass it.
-    # But args doesn't have it.
-    # Let's verify if we can access target_list.
-    # Changing function signature is needed or quick fix:
-    
+
+def sort_by_ete3(args, target_list):
+    """Sort using ETE3 NCBITaxa. Returns list of (distance, basename) or None."""
+    if NCBITaxa is None:
+        return None
+
+    print(f"[phylo_sort] Initializing ETE3 Taxonomy from {args.taxdb}...")
+
+    try:
+        if os.path.isfile(args.taxdb):
+            ncbi = NCBITaxa(dbfile=args.taxdb)
+        elif os.path.isdir(args.taxdb):
+            db_path = os.path.join(args.taxdb, 'taxa.sqlite')
+            if os.path.exists(db_path):
+                ncbi = NCBITaxa(dbfile=db_path)
+            else:
+                ncbi = NCBITaxa()
+        else:
+            ncbi = NCBITaxa()
+    except Exception as e:
+        print(f"[phylo_sort] ETE3 init failed: {e}")
+        return None
+
+    home_taxid = get_taxid(args.home, ncbi)
+    if not home_taxid:
+        print(f"[phylo_sort] Could not find TaxID for home: {args.home}")
+        return None
+
+    print(f"[phylo_sort] Home TaxID: {home_taxid}")
+
+    try:
+        home_lineage = ncbi.get_lineage(home_taxid)
+    except ValueError:
+        print(f"[phylo_sort] TaxID {home_taxid} not found in DB")
+        return None
+
+    scored = []
+    for target in target_list:
+        tid = get_taxid(target, ncbi)
+        if not tid:
+            scored.append((float('inf'), os.path.basename(target)))
+            continue
+
+        try:
+            target_lineage = ncbi.get_lineage(tid)
+            shared = 0
+            for a, b in zip(home_lineage, target_lineage):
+                if a == b:
+                    shared += 1
+                else:
+                    break
+            dist = (len(home_lineage) - shared) + (len(target_lineage) - shared)
+            scored.append((dist, os.path.basename(target)))
+        except Exception as e:
+            print(f"[phylo_sort] Error for {target}: {e}")
+            scored.append((float('inf'), os.path.basename(target)))
+
+    real_distances = [d for d, _ in scored if d < float('inf')]
+    if not real_distances:
+        return None
+
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return scored
+
+
+# =============================================================================
+# FALLBACK SORT
+# =============================================================================
+
+def _collect_targets(args):
+    """Collect target file list from args."""
     target_list = []
     if args.targets:
         target_list = args.targets
     elif args.targets_dir:
         if os.path.isdir(args.targets_dir):
-             for f in os.listdir(args.targets_dir):
-                 if f.endswith(args.img_ext) or f.endswith(".fasta") or f.endswith(".fa") or \
-                    f.endswith(args.img_ext + ".gz") or f.endswith(".fasta.gz") or f.endswith(".fa.gz"):
-                     target_list.append(os.path.basename(f)) # Use basename for safety
-    
+            for f in os.listdir(args.targets_dir):
+                if (f.endswith(args.img_ext) or f.endswith(".fasta") or
+                    f.endswith(".fa") or f.endswith(args.img_ext + ".gz") or
+                    f.endswith(".fasta.gz") or f.endswith(".fa.gz")):
+                    target_list.append(os.path.basename(f))
+    return target_list
+
+
+def fallback_sort(args):
+    """Alphabetical sort with distance=0."""
+    print("[phylo_sort] Falling back to alphabetical sorting")
+    target_list = _collect_targets(args)
     with open(args.output, 'w') as out:
         for target in sorted(target_list):
             out.write(f"{os.path.basename(target)}\t0\n")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sort genomes by phylogenetic distance"
+    )
+    parser.add_argument("--home", required=True,
+                        help="Home genome name, species name, or TaxID")
+    parser.add_argument("--targets", nargs='+',
+                        help="List of target genome files or names")
+    parser.add_argument("--targets_dir",
+                        help="Directory containing target genomes")
+    parser.add_argument("--img_ext", default=".fna",
+                        help="Extension for targets in directory (default: .fna)")
+    parser.add_argument("--taxdb", required=True,
+                        help="Path to taxonomy DB (directory or sqlite file)")
+    parser.add_argument("--output", required=True,
+                        help="Output sorted list of genomes")
+
+    args = parser.parse_args()
+
+    # Collect target files
+    target_list = []
+    if args.targets:
+        target_list = args.targets
+    elif args.targets_dir:
+        if os.path.isdir(args.targets_dir):
+            for f in os.listdir(args.targets_dir):
+                if (f.endswith(args.img_ext) or f.endswith(".fasta") or
+                    f.endswith(".fa") or f.endswith(args.img_ext + ".gz") or
+                    f.endswith(".fasta.gz") or f.endswith(".fa.gz")):
+                    target_list.append(os.path.join(args.targets_dir, f))
+
+    if not target_list:
+        print("[phylo_sort] Warning: No targets found")
+        with open(args.output, 'w') as f:
+            pass
+        return
+
+    # Strategy 1: ETE3 + local taxonomy DB
+    result = sort_by_ete3(args, target_list)
+    if result:
+        print(f"[phylo_sort] Sorted by ETE3 taxonomy ({len(result)} genomes)")
+        _write_result(args.output, result)
+        return
+
+    # Strategy 2: NCBI Datasets CLI (accession-based)
+    home_identifier = args.home if args.home else ''
+    # If home is a file path, also pass it for accession extraction
+    if not home_identifier and hasattr(args, 'home'):
+        home_identifier = args.home
+    result = sort_by_accession_taxonomy(home_identifier, target_list)
+    if result:
+        print(f"[phylo_sort] Sorted by accession taxonomy ({len(result)} genomes)")
+        _write_result(args.output, result)
+        return
+
+    # Strategy 3: Alphabetical fallback
+    fallback_sort(args)
+
+
+def _write_result(output_file, scored_targets):
+    """Write sorted results to output file."""
+    with open(output_file, 'w') as f:
+        for dist, target in scored_targets:
+            dist_val = int(dist) if dist != float('inf') else 0
+            f.write(f"{target}\t{dist_val}\n")
+
 
 if __name__ == "__main__":
     main()

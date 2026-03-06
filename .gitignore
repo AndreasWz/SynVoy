@@ -39,3 +39,6 @@ local_runs/
 queries/
 legacy_source/
 bin_backup_pre_unconstrained.tar.gz
+docs/
+conf/
+queries/

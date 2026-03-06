@@ -193,7 +193,9 @@ workflow {
         def target_species = params.target_species ?: ''
         FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
-        species_map_ch = FETCH_RELATED_GENOMES.out.species_map
+        species_map_ch = FETCH_RELATED_GENOMES.out.species_map.first()
+        // Species name for phylogenetic sorting
+        home_species_for_sort_ch = home_species_ch
         
     } else {
         // --- Pro mode: User provides files directly ---
@@ -240,6 +242,8 @@ workflow {
             genomes_dir_ch = Channel.empty()
             species_map_ch = Channel.value(no_species_map_file)
         }
+        // Species name for phylogenetic sorting (pro mode: use param or extract from filename)
+        home_species_for_sort_ch = Channel.value(params.home_species ?: params.home_genome)
     }
 
     // Normalize query to protein space (DNA queries are translated to best ORF)
@@ -370,7 +374,8 @@ workflow {
         
         PHYLO_SORT(
             phylo_sort_inputs,
-            genomes_dir_ch
+            genomes_dir_ch,
+            home_species_for_sort_ch
         )
         
         PHYLO_SORT.out.sorted_list.view { locus, sorted ->
@@ -566,7 +571,7 @@ workflow {
             plot_inputs_split.candidate_beds, // candidate_beds
             plot_inputs_split.homology_tsvs,  // homology_tsvs
             plot_inputs_split.tree,           // tree
-            species_map_ch.first()            // species_mapping.tsv
+            species_map_ch                    // species_mapping.tsv (already a value channel)
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->
@@ -577,21 +582,27 @@ workflow {
         uiPhase(5, 'Report Generation')
         uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
         
+        // Use sentinel files so that collect() always yields a valid path list
+        // that Nextflow can stage into the process work directory.
+        def no_regions_sentinel = file("${projectDir}/assets/sentinels/NO_REGIONS")
+        def no_hits_sentinel    = file("${projectDir}/assets/sentinels/NO_HITS")
+        def no_augmented_sentinel = file("${projectDir}/assets/sentinels/NO_AUGMENTED")
+        
         ITERATIVE_SEARCH.out.region_genes
             .map { it[1] } 
             .flatten()
             .collect()
-            .ifEmpty([])
+            .ifEmpty(no_regions_sentinel)
             .set { collected_regions }
             
         ITERATIVE_SEARCH.out.hits
             .map { it[1] } 
             .collect()
-            .ifEmpty([])
+            .ifEmpty(no_hits_sentinel)
             .set { collected_hits }
             
-        // No standalone augmented proteins - integrated into iterative search
-        collected_augmented = Channel.of([]).collect()
+        // No standalone augmented proteins - pass sentinel file
+        collected_augmented = Channel.value(no_augmented_sentinel)
         
         GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
         
@@ -611,7 +622,15 @@ workflow.onComplete {
         log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
         log.info uiRule()
         log.info "${c_dim}Key outputs:${c_reset}"
-        log.info "${c_dim}- synterra_report.json          (analysis summary)${c_reset}"
+
+        // Check report existence before listing it
+        def report_file = file("${params.outdir}/synterra_report.json")
+        if (report_file.exists()) {
+            log.info "${c_dim}- synterra_report.json          (analysis summary)${c_reset}"
+        } else {
+            log.info "${c_yellow}- synterra_report.json          (NOT GENERATED)${c_reset}"
+        }
+
         log.info "${c_dim}- *_synteny_plot.html           (interactive visualization)${c_reset}"
         log.info "${c_dim}- *_tree.nwk                    (GOI phylogeny)${c_reset}"
         log.info "${c_dim}- regions/*.regions.bed         (candidate regions)${c_reset}"

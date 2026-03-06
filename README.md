@@ -195,7 +195,7 @@ Results are written to the directory specified by `--outdir`:
 ## Further Reading
 
 - **[USAGE.md](USAGE.md)** — Full parameter reference, execution profiles, algorithm details, HPC/SLURM setup, and troubleshooting.
-- **[docs/PIPELINE_DETAILED.md](docs/PIPELINE_DETAILED.md)** — In-depth technical description of the pipeline architecture.
+
 
 ## License
 

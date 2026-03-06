@@ -534,12 +534,15 @@ def _quick_protein_identity(seq1, seq2):
     return similarity
 
 
-def extract_exons_from_gff_match(match, genome_file):
+def extract_exons_from_gff_match(match, genome_file, query_seq=None):
     """
     Extract individual CDS/exon protein sequences from a GFF match.
 
-    Returns list of dicts:
-    [{'id': 'GOI_genename|exon_1', 'seq': 'MKKV...', 'coords': (start, end)}, ...]
+    When query_seq is provided, computes per-exon percent identity (pident)
+    by aligning the extracted exon protein against the corresponding region
+    of the query. Also detects start/stop codons and splice sites.
+
+    Returns tuple: (exons_list, full_protein)
     """
     genome_seqs = load_genome(genome_file)
     chrom = match['chrom']
@@ -548,6 +551,7 @@ def extract_exons_from_gff_match(match, genome_file):
         print(f"[GFF Exons] Chromosome {chrom} not found in genome!")
         return []
 
+    chrom_seq = genome_seqs[chrom]
     exons = []
     cds_parts = sorted(match['cds_parts'], key=lambda x: x['start'])
 
@@ -557,10 +561,13 @@ def extract_exons_from_gff_match(match, genome_file):
         cds_parts = list(reversed(cds_parts))
 
     gene_name = match.get('gene_name', match['gene_id'])
+    n_exons = len(cds_parts)
 
-    # Extract each exon individually
+    # First pass: translate all exons and build full protein to compute identity
+    exon_proteins = []
+    exon_dna_seqs = []
     for i, part in enumerate(cds_parts, start=1):
-        exon_dna = genome_seqs[chrom][part['start']:part['end']]
+        exon_dna = chrom_seq[part['start']:part['end']]
 
         if match['strand'] == '-':
             exon_dna = reverse_complement(exon_dna)
@@ -575,36 +582,166 @@ def extract_exons_from_gff_match(match, genome_file):
         if remainder:
             exon_dna = exon_dna[:len(exon_dna) - remainder]
 
-        if len(exon_dna) < 9:  # < 3 amino acids
-            continue
+        exon_dna_seqs.append(exon_dna)
+        exon_proteins.append(translate(exon_dna) if len(exon_dna) >= 3 else '')
 
-        exon_prot = translate(exon_dna).replace('*', '')
-
-        if len(exon_prot) < 3:
-            continue
-
-        exons.append({
-            'id': f"GOI_{gene_name}|exon_{i}",
-            'seq': exon_prot,
-            'coords': (part['start'], part['end']),
-            'exon_num': i,
-            'total_exons': len(cds_parts),
-            'strand': match['strand'],
-            'chrom': chrom
-        })
-
-    # Also build the full concatenated protein
+    # Build full concatenated protein
     all_dna = ""
     for part in sorted(match['cds_parts'], key=lambda x: x['start']):
-        all_dna += genome_seqs[chrom][part['start']:part['end']]
-
+        all_dna += chrom_seq[part['start']:part['end']]
     if match['strand'] == '-':
         all_dna = reverse_complement(all_dna)
-
     all_dna = all_dna[:len(all_dna) - len(all_dna) % 3]
     full_protein = translate(all_dna).split('*')[0]
 
+    # Compute per-exon identity against query protein
+    # Map each exon to its approximate query region by cumulative AA offset
+    cumulative_aa = 0
+    for i, (part, exon_prot, exon_dna) in enumerate(
+            zip(cds_parts, exon_proteins, exon_dna_seqs), start=1):
+        clean_prot = exon_prot.replace('*', '')
+        if len(clean_prot) < 3:
+            cumulative_aa += len(clean_prot)
+            continue
+
+        # Compute pident: find best matching region in query via sliding window
+        pident = 0.0
+        best_qstart = cumulative_aa
+        best_qend = cumulative_aa + len(clean_prot)
+        if query_seq and len(clean_prot) >= 3:
+            pident, best_qstart, best_qend = _best_match_pident(
+                clean_prot, query_seq, hint_start=cumulative_aa)
+
+        # Update cumulative offset using best match position for next exon
+        # This self-corrects any drift from split codons at exon boundaries
+        if best_qend > 0:
+            cumulative_aa = best_qend
+        else:
+            cumulative_aa += len(clean_prot)
+
+        # Detect splice sites from genomic DNA
+        gs = part['start']
+        ge = part['end']
+        splice_donor = None
+        splice_acceptor = None
+
+        if i > 1:  # Not the first exon
+            if match['strand'] == '+':
+                if gs >= 2:
+                    splice_acceptor = chrom_seq[gs - 2:gs].upper()
+            else:
+                if ge + 2 <= len(chrom_seq):
+                    splice_acceptor = reverse_complement(
+                        chrom_seq[ge:ge + 2]).upper()
+
+        if i < n_exons:  # Not the last exon
+            if match['strand'] == '+':
+                if ge + 2 <= len(chrom_seq):
+                    splice_donor = chrom_seq[ge:ge + 2].upper()
+            else:
+                if gs >= 2:
+                    splice_donor = reverse_complement(
+                        chrom_seq[gs - 2:gs]).upper()
+
+        # Detect start/stop codons
+        has_start_codon = (i == 1 and exon_prot.startswith('M'))
+        has_stop_codon = False
+        if i == n_exons and len(exon_dna) >= 3:
+            last_codon = exon_dna[-3:].upper()
+            # Check if original (before stop removal) protein ended with stop
+            has_stop_codon = last_codon in ('TAA', 'TAG', 'TGA')
+
+        exons.append({
+            'id': f"GOI_{gene_name}|exon_{i}",
+            'seq': clean_prot,
+            'coords': (gs, ge),
+            'exon_num': i,
+            'total_exons': n_exons,
+            'strand': match['strand'],
+            'chrom': chrom,
+            'gstart': gs,
+            'gend': ge,
+            'qstart': best_qstart,
+            'qend': best_qend,
+            'pident': pident,
+            'has_start_codon': has_start_codon,
+            'has_stop_codon': has_stop_codon,
+            'splice_donor': splice_donor,
+            'splice_acceptor': splice_acceptor,
+            'method': 'gff_annotation'
+        })
+
     return exons, full_protein
+
+
+def _compute_pident(seq1, seq2):
+    """
+    Compute percent identity between two protein sequences.
+    Uses a simple positional comparison (global alignment style).
+    For equal-length or near-equal-length sequences from exon extraction,
+    this gives an accurate pident.
+    """
+    if not seq1 or not seq2:
+        return 0.0
+
+    # If lengths differ significantly, use the shorter for comparison
+    min_len = min(len(seq1), len(seq2))
+    max_len = max(len(seq1), len(seq2))
+
+    if min_len == 0:
+        return 0.0
+
+    # Simple positional identity (no gaps)
+    matches = sum(1 for a, b in zip(seq1[:min_len], seq2[:min_len]) if a == b)
+
+    # Penalize length difference
+    pident = (matches / max_len) * 100.0
+    return round(pident, 1)
+
+
+def _best_match_pident(exon_prot, query_seq, hint_start=0, search_margin=20):
+    """
+    Find the best-matching window in query_seq for exon_prot using a sliding
+    window approach.  Returns (pident, best_qstart, best_qend).
+
+    hint_start is the expected start position (from cumulative AA counting).
+    search_margin is how many positions to search around the hint to handle
+    boundary offsets from split codons.
+    """
+    exon_len = len(exon_prot)
+    query_len = len(query_seq)
+
+    if exon_len == 0 or query_len == 0:
+        return 0.0, hint_start, hint_start
+
+    best_pident = 0.0
+    best_start = hint_start
+    best_end = min(hint_start + exon_len, query_len)
+
+    # Define search window around hint_start
+    search_start = max(0, hint_start - search_margin)
+    search_end = min(query_len - exon_len + 1, hint_start + search_margin + 1)
+
+    # Ensure we have at least some range to search
+    if search_end <= search_start:
+        search_end = search_start + 1
+
+    for start in range(search_start, min(search_end, query_len)):
+        end = min(start + exon_len, query_len)
+        window = query_seq[start:end]
+        compare_len = min(len(window), exon_len)
+        if compare_len == 0:
+            continue
+        matches = sum(1 for a, b in zip(exon_prot[:compare_len],
+                                         window[:compare_len]) if a == b)
+        denom = max(exon_len, len(window))
+        pid = (matches / denom) * 100.0
+        if pid > best_pident:
+            best_pident = pid
+            best_start = start
+            best_end = end
+
+    return round(best_pident, 1), best_start, best_end
 
 
 # =============================================================================
@@ -1268,7 +1405,8 @@ def main():
         )
 
         if match:
-            result = extract_exons_from_gff_match(match, args.genome)
+            result = extract_exons_from_gff_match(match, args.genome,
+                                                  query_seq=query_seq)
             if result:
                 exons, full_protein = result
                 method_used = "gff_annotation"

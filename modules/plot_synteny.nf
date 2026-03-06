@@ -36,8 +36,22 @@ process PLOT_SYNTENY {
     mkdir -p "\$inputs_dir"
     cp $home_bed "\$inputs_dir/" || true
     cp $query_bed "\$inputs_dir/" || true
+
+    # Subset home GFF to synteny block region (+/- 100kb padding) to avoid
+    # copying the entire (potentially 100+ MB) annotation file.
     if [ "$home_gff" != "NO_GFF" ]; then
-        cp $home_gff "\$inputs_dir/" || true
+        REGION_CHROM=\$(awk '{print \$1}' $home_bed | sort -u | head -1)
+        REGION_START=\$(awk '{print \$2}' $home_bed | sort -n | head -1)
+        REGION_END=\$(awk '{print \$3}' $home_bed | sort -n | tail -1)
+        PAD=100000
+        PADDED_START=\$(( REGION_START > PAD ? REGION_START - PAD : 0 ))
+        PADDED_END=\$(( REGION_END + PAD ))
+
+        # Filter GFF: keep header lines and features overlapping the region
+        awk -v chr="\$REGION_CHROM" -v start="\$PADDED_START" -v end="\$PADDED_END" \\
+            'BEGIN{OFS="\\t"} /^#/{print; next} \$1==chr && \$4<=end && \$5>=start{print}' \\
+            $home_gff > "\$inputs_dir/\$(basename $home_gff)" || \\
+            cp $home_gff "\$inputs_dir/" || true
     fi
     if [ -n "${gffs_str}" ]; then
         cp ${gffs_str} "\$inputs_dir/" || true
