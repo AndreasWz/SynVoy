@@ -6,6 +6,7 @@ Downloads both the genome FASTA and GFF annotation.
 
 import argparse
 import json
+import os
 import select
 import subprocess
 import sys
@@ -13,6 +14,14 @@ import time
 import zipfile
 from pathlib import Path
 import shutil
+
+# Robust downloader (FTP+wget hybrid with resume, falls back to datasets)
+try:
+    sys.path.insert(0, os.path.dirname(__file__))
+    from download_genome import download_genome_robust as _download_robust
+    _HAS_ROBUST_DOWNLOADER = True
+except ImportError:
+    _HAS_ROBUST_DOWNLOADER = False
 
 LARGE_RANK = 10**18
 
@@ -556,6 +565,43 @@ def filter_chromosomes_only(fna_path: Path) -> None:
             tmp_path.unlink()
 
 
+def check_disk_space(path: Path, required_gb: float = 5.0) -> None:
+    """Raise RuntimeError if free disk space at *path* is below required_gb."""
+    st = shutil.disk_usage(path)
+    free_gb = st.free / (1024 ** 3)
+    if free_gb < required_gb:
+        raise RuntimeError(
+            f"Insufficient disk space at {path}: {free_gb:.1f} GB free, "
+            f"{required_gb:.1f} GB required. Free up space and retry."
+        )
+
+
+def run_streaming(cmd: list, label: str) -> None:
+    """
+    Run *cmd* with live stdout/stderr forwarded to the console.
+    Raises subprocess.CalledProcessError on non-zero exit (with stderr captured).
+    """
+    stderr_lines: list = []
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    ) as proc:
+        # Stream stdout live so progress bars are visible
+        for line in proc.stdout:  # type: ignore[union-attr]
+            print(line, end="", flush=True)
+        # Collect stderr (usually small status/error text)
+        stderr_lines = proc.stderr.read().splitlines()  # type: ignore[union-attr]
+        proc.wait()
+        if proc.returncode != 0:
+            stderr_text = "\n".join(stderr_lines)
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, stderr=stderr_text
+            )
+
+
 def download_genome_with_annotation(accession, output_dir, max_retries=3):
     """Download genome and GFF annotation using NCBI datasets with retry."""
     output_path = Path(output_dir)
@@ -573,6 +619,13 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"\nDownloading {accession} with annotation (attempt {attempt}/{max_retries})...")
 
+        # Pre-flight: ensure enough free space (heuristic: 5 GB for zip + extracted)
+        try:
+            check_disk_space(output_path, required_gb=5.0)
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return None, None
+
         # Clean up any leftover artefacts from a previous failed attempt
         if zip_file.exists():
             zip_file.unlink()
@@ -580,7 +633,8 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
             shutil.rmtree(extract_dir)
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # Stream output live — captures NCBI progress bars and error messages
+            run_streaming(cmd, label=accession)
             extract_zip_archive(zip_file, extract_dir)
 
             # Find files
@@ -603,7 +657,7 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
                 shutil.copy(gff_files[0], gff_path)
                 print(f"  Annotation: {gff_path}")
 
-            # Cleanup
+            # Cleanup zip and extracted dir — keep only the final .fna/.gff
             if zip_file.exists():
                 zip_file.unlink()
             if extract_dir.exists():
@@ -614,10 +668,15 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
         except (subprocess.CalledProcessError, zipfile.BadZipFile) as e:
             msg = e.stderr if hasattr(e, 'stderr') else str(e)
             print(f"  Download attempt {attempt} failed: {msg}", file=sys.stderr)
+            # Clean up partial zip before retry
+            if zip_file.exists():
+                zip_file.unlink()
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
             if attempt < max_retries:
-                wait = 10 * attempt
+                wait = 15 * attempt
                 print(f"  Retrying in {wait}s...", file=sys.stderr)
-                import time; time.sleep(wait)
+                time.sleep(wait)
             else:
                 print(f"  All {max_retries} attempts exhausted.", file=sys.stderr)
                 return None, None
@@ -738,9 +797,21 @@ def main():
                     )
                     sys.exit(1)
     
-    # Download
-    genome_path, gff_path = download_genome_with_annotation(accession, args.outdir)
-    
+    # Download — prefer FTP+wget hybrid (resumable), fall back to datasets
+    if _HAS_ROBUST_DOWNLOADER:
+        genome_path, gff_path = _download_robust(
+            accession,
+            output_path=Path(args.outdir),
+            fna_name="home_genome.fna",
+            gff_name="home_genome.gff",
+            max_retries=5,
+        )
+        # Apply chromosome filter after download
+        if genome_path and genome_path.exists():
+            filter_chromosomes_only(genome_path)
+    else:
+        genome_path, gff_path = download_genome_with_annotation(accession, args.outdir)
+
     if not genome_path:
         print("ERROR: Failed to download genome", file=sys.stderr)
         sys.exit(1)

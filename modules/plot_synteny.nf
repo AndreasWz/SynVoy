@@ -30,6 +30,7 @@ process PLOT_SYNTENY {
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
+    def hide_absent_arg = params.hide_goi_absent_tracks ? "--hide_goi_absent" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -79,6 +80,7 @@ process PLOT_SYNTENY {
         $homo_arg \\
         --tree $tree \\
         $species_arg \\
+        $hide_absent_arg \\
         --gap_threshold ${params.gap_threshold} \\
         --gap_visual_size ${params.gap_visual_size} \\
         --flank_fallback_bp ${params.flank_fallback_bp} \\

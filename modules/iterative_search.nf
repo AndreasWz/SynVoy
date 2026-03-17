@@ -35,7 +35,7 @@ process ITERATIVE_SEARCH {
         --min_identity ${params.min_hit_identity} \\
         --min_length ${params.min_hit_length} \\
         --max_intron ${params.max_intron} \\
-        --cluster_dist ${params.cluster_distance} \\
+        --cluster_distance ${params.cluster_distance} \\
         --min_gene_identity ${params.min_gene_identity} \\
         --region_padding ${params.region_padding} \\
         --padding_min ${params.padding_min} \\

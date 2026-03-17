@@ -33,11 +33,11 @@ def main():
     parser = argparse.ArgumentParser(description="Assess Genome Assembly Quality")
     parser.add_argument("--genome", required=True)
     parser.add_argument("--output", required=True, help="JSON output file")
-    # Match fetch_related_genomes.py defaults for consistency
-    parser.add_argument("--min_n50", type=int, default=20000,
-                        help="N50 below this → bad quality (default: 20000, matches fetch-stage)")
-    parser.add_argument("--max_contigs", type=int, default=100000,
-                        help="Contig count above this → bad quality (default: 100000, matches fetch-stage)")
+    # Match nextflow.config easy-mode defaults unless explicitly overridden.
+    parser.add_argument("--min_n50", type=int, default=5000,
+                        help="N50 below this → bad quality (default: 5000)")
+    parser.add_argument("--max_contigs", type=int, default=500000,
+                        help="Contig count above this → bad quality (default: 500000)")
     
     args = parser.parse_args()
     
@@ -78,7 +78,11 @@ def main():
             "total_len": total,
             "num_contigs": num_contigs,
             "status": status,
-            "msg": msg
+            "msg": msg,
+            "thresholds": {
+                "min_n50": args.min_n50,
+                "max_contigs": args.max_contigs,
+            },
         }
         
     with open(args.output, 'w') as f:

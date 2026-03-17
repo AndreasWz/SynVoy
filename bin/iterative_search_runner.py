@@ -503,6 +503,149 @@ def _compose_gff_attrs(base_attrs: Dict[str, Any],
     return ";".join(f"{k}={v}" for k, v in merged.items())
 
 
+def _format_attr_float(value: Optional[float], digits: int = 3) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return None
+
+
+def _synteny_context_label(flanking_support: int) -> str:
+    flanking_support = max(0, int(flanking_support or 0))
+    if flanking_support >= 3:
+        return "strong_flanking_support"
+    if flanking_support >= 1:
+        return "weak_flanking_support"
+    return "no_flanking_support"
+
+
+def _classify_goi_evidence(
+    evidence_type: str,
+    identity: float = 0.0,
+    exon_count: int = 1,
+    query_cov: Optional[float] = None,
+    flanking_support: int = 0,
+) -> Tuple[str, str, str]:
+    """
+    Assign a conservative confidence/class label to GOI-derived candidates.
+
+    The goal is not to prove orthology here, but to prevent fallback-heavy
+    output from masquerading as confident GOI evidence downstream.
+    """
+    identity = float(identity or 0.0)
+    exon_count = max(1, int(exon_count or 1))
+    qcov = float(query_cov or 0.0)
+    context = _synteny_context_label(flanking_support)
+
+    if evidence_type == "tandem_copy":
+        return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
+
+    if evidence_type == "exon_annotation":
+        if exon_count >= 2 and identity >= 60.0 and flanking_support >= 2:
+            return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
+        if identity >= 45.0 and (flanking_support >= 1 or qcov >= 0.65):
+            return "MEDIUM", "probable_goi", "modeled_goi_with_partial_support"
+        return "LOW", "ambiguous_goi_family_member", "modeled_goi_but_family_context_is_weak"
+
+    if evidence_type == "fallback_hit_span":
+        if flanking_support >= 2 and qcov >= 0.75 and identity >= 60.0:
+            return "MEDIUM", "probable_goi", "fallback_span_supported_by_flanking_context"
+        return "LOW", "ambiguous_goi_family_member", "fallback_span_only"
+
+    if evidence_type == "rescued_exon":
+        return "LOW", "ambiguous_goi_family_member", "isolated_rescued_exon"
+
+    if evidence_type == "raw_hit":
+        return "LOW", "ambiguous_goi_family_member", "single_raw_hit_only"
+
+    return "LOW", "ambiguous_goi_family_member", f"unclassified_{evidence_type or 'goi'}"
+
+
+def _classify_flanking_evidence(
+    evidence_type: str,
+    identity: float = 0.0,
+    exon_count: int = 1,
+    query_cov: Optional[float] = None,
+) -> Tuple[str, str]:
+    identity = float(identity or 0.0)
+    exon_count = max(1, int(exon_count or 1))
+    qcov = float(query_cov or 0.0)
+
+    if evidence_type in {"flanking_miniprot", "rearranged_flanking"}:
+        if exon_count >= 2 or identity >= 55.0:
+            return "HIGH", "modeled_flanking_gene"
+        return "MEDIUM", "single_exon_flanking_model"
+
+    if evidence_type in {"flanking_hit_span", "rearranged_flanking_fallback"}:
+        if qcov >= 0.65 and identity >= 55.0:
+            return "MEDIUM", "coarse_flanking_span_with_good_support"
+        return "LOW", "coarse_flanking_span_only"
+
+    return "MEDIUM", f"unclassified_{evidence_type or 'flanking'}"
+
+
+def _goi_feature_attrs(
+    base_attrs: Dict[str, Any],
+    evidence_type: str,
+    identity: float = 0.0,
+    exon_count: int = 1,
+    query_cov: Optional[float] = None,
+    flanking_support: int = 0,
+) -> Dict[str, Any]:
+    confidence, goi_class, reason = _classify_goi_evidence(
+        evidence_type=evidence_type,
+        identity=identity,
+        exon_count=exon_count,
+        query_cov=query_cov,
+        flanking_support=flanking_support,
+    )
+    attrs = dict(base_attrs)
+    attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
+    attrs["SynTerraRole"] = "goi"
+    attrs["EvidenceType"] = evidence_type
+    attrs["Confidence"] = confidence
+    attrs["GOIClass"] = goi_class
+    attrs["SyntenyContext"] = _synteny_context_label(flanking_support)
+    attrs["BlockFlankingSupport"] = str(max(0, int(flanking_support or 0)))
+    attrs["InferenceReason"] = reason
+    if query_cov is not None:
+        attrs["QueryCoverage"] = _format_attr_float(query_cov)
+    if exon_count:
+        attrs.setdefault("Exons", str(int(exon_count)))
+    return attrs
+
+
+def _flanking_feature_attrs(
+    base_attrs: Dict[str, Any],
+    evidence_type: str,
+    identity: float = 0.0,
+    exon_count: int = 1,
+    query_cov: Optional[float] = None,
+    context: Optional[str] = None,
+) -> Dict[str, Any]:
+    confidence, reason = _classify_flanking_evidence(
+        evidence_type=evidence_type,
+        identity=identity,
+        exon_count=exon_count,
+        query_cov=query_cov,
+    )
+    attrs = dict(base_attrs)
+    attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
+    attrs["SynTerraRole"] = "flanking"
+    attrs["EvidenceType"] = evidence_type
+    attrs["Confidence"] = confidence
+    attrs["InferenceReason"] = reason
+    if context:
+        attrs["SyntenyContext"] = context
+    if query_cov is not None:
+        attrs["QueryCoverage"] = _format_attr_float(query_cov)
+    if exon_count:
+        attrs.setdefault("Exons", str(int(exon_count)))
+    return attrs
+
+
 def find_native_annotation_path(genome_path: str) -> Optional[str]:
     """
     Locate the native annotation file next to a genome FASTA.
@@ -1852,6 +1995,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         h for h in hits
         if h['chrom'] == chrom and h['end'] > w_start and h['start'] < w_end
     ]
+    block_flanking_support = len({
+        extract_base_gene_id(h.get('query', ''))
+        for h in relevant_hits
+        if h.get('query') and not is_goi_query_id(h.get('query', ''))
+    })
     unique_queries = set(extract_base_gene_id(h['query']) for h in relevant_hits)
 
     found_queries = []
@@ -2173,7 +2321,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                 (
                                                     f"{chrom}\tfallback_hits\tmRNA\t{global_start}\t{global_end}\t"
                                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                                    f"{_mRNA_attrs({'ID': copy_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Type': 'fallback_hit_span'}, global_start, global_end, strand)}"
+                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                                 )
                                             ]
                                             for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -2219,7 +2367,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'gff': [
                                         f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
                                         f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"{_mRNA_attrs({'ID': copy_id, 'Name': copy['id'], 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(copy.get('pident', 0)), 'Type': 'tandem_copy'}, global_start, global_end, strand)}"
+                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynTerra_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=None, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                     ]
                                 })
                         else:
@@ -2227,6 +2375,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             exon_protein = ''.join(e['seq'] for e in exons)
                             strand = exons[0].get('strand', '+')
                             avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+                            model_qcov = None
+                            if parent_query_seq:
+                                qmin_model = min(e.get('qstart', 1) for e in exons)
+                                qmax_model = max(e.get('qend', 1) for e in exons)
+                                model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
 
                             global_start = w_start + min(e['gstart'] for e in exons) + 1
                             global_end = w_start + max(e['gend'] for e in exons)
@@ -2236,7 +2389,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 (
                                     f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Exons': str(len(exons))}, global_start, global_end, strand)}"
+                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                 )
                             ]
                             for eidx, exon in enumerate(exons, 1):
@@ -2306,6 +2459,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                                     gs = w_start + h_start + 1
                                     ge = w_start + h_end
+                                    hit_qspan = abs(hit.get('qend', 0) - hit.get('qstart', 0)) + 1
+                                    hit_qcov = (hit_qspan / len(parent_query_seq)) if parent_query_seq else None
                                     raw_id = f"{parent_id}|{clean_gname}_b{block_idx}_l{locus_idx}_extra{extra_count}"
                                     raw_candidates.append({
                                         'start': gs,
@@ -2317,7 +2472,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             'description': f"coords:{gs}-{ge} parent:{parent_id} type:rescued_exon"
                                         },
                                         'gff': [
-                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs({'ID': raw_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, gs, ge, hit.get('strand','+'))}",
+                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': raw_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='rescued_exon', identity=hit.get('pident', 0), exon_count=1, query_cov=hit_qcov, flanking_support=block_flanking_support), gs, ge, hit.get('strand','+'))}",
                                             f"{chrom}\trescued_exon\tCDS\t{gs}\t{ge}\t.\t{hit.get('strand','+')}\t0\tID={raw_id}_CDS1;Parent={raw_id}"
                                         ]
                                     })
@@ -2370,6 +2525,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                             nt_s = w_start + g_s + 1
                             nt_e = w_start + g_e
+                            qcov = (qspan / len(parent_query_seq)) if len(parent_query_seq) > 0 else 0.0
                             new_id = f"{parent_id}|{clean_gname}_b{block_idx}_l{locus_idx}_fallback_{h_idx}"
                             raw_candidates.append({
                                 'start': nt_s,
@@ -2381,7 +2537,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'description': f"coords:{nt_s}-{nt_e} parent:{parent_id} identity:{hit.get('pident', 0):.1f}"
                                 },
                                 'gff': [
-                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, nt_s, nt_e, hit.get('strand', '+'))}",
+                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='raw_hit', identity=hit.get('pident', 0), exon_count=1, query_cov=qcov, flanking_support=block_flanking_support), nt_s, nt_e, hit.get('strand', '+'))}",
                                     f"{chrom}\traw_hit\tCDS\t{nt_s}\t{nt_e}\t.\t{hit.get('strand', '+')}\t0\tID={new_id}_CDS1;Parent={new_id}"
                                 ]
                             })
@@ -2575,7 +2731,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         (
                             f"{chrom}\tflanking_hits\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Type': 'flanking_hit_span'}, global_start, global_end, strand)}"
+                            f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'flanking_hit_span'}, evidence_type='flanking_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
                         )
                     ]
                     for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -2608,6 +2764,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                 strand = exons[0].get('strand', '+')
                 avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+                model_qcov = None
+                if parent_query_seq:
+                    qmin_model = min(e.get('qstart', 1) for e in exons)
+                    qmax_model = max(e.get('qend', 1) for e in exons)
+                    model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
                 global_start = w_start + min(e['gstart'] for e in exons) + 1
                 global_end = w_start + max(e['gend'] for e in exons)
                 new_id = f"{parent_id}|{clean_gname}_b{block_idx}_fl{locus_idx}_flank_ann"
@@ -2616,7 +2777,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     (
                         f"{chrom}\tflanking_annotation\tmRNA\t{global_start}\t{global_end}\t"
                         f"{avg_pident:.1f}\t{strand}\t.\t"
-                        f"{_mRNA_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Identity': '{:.1f}'.format(avg_pident), 'Exons': str(len(exons)), 'Type': 'flanking_miniprot'}, global_start, global_end, strand)}"
+                        f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'flanking_miniprot'}, evidence_type='flanking_miniprot', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
                     )
                 ]
                 for eidx, exon in enumerate(exons, 1):
@@ -3016,7 +3177,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         
         if not synteny_blocks:
             logger.info(f"[{genome_name}] No valid syntenic region found.")
-            return genome_name, []
+            return genome_name, [], None
             
         # Optimization: Merge overlapping search regions
         pre_merge_count = len(synteny_blocks)
@@ -3075,6 +3236,22 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             )
         else:
             logger.info(f"[{genome_name}] No native annotation GFF found next to genome FASTA.")
+
+        def _target_mrna_attrs(
+            chrom_name: str,
+            g_start: int,
+            g_end: int,
+            g_strand: str,
+            base_attrs: Dict[str, Any],
+        ) -> str:
+            native = lookup_native_annotation(
+                native_annot_index or {},
+                chrom=chrom_name,
+                start=g_start,
+                end=g_end,
+                strand=g_strand,
+            )
+            return _compose_gff_attrs(base_attrs, native)
 
         empty_block_streak = 0
         for i, block in enumerate(synteny_blocks):
@@ -3265,6 +3442,11 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         exon_protein = ''.join(e['seq'] for e in exons)
                         strand = exons[0].get('strand', '+')
                         avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+                        model_qcov = None
+                        if parent_query_seq:
+                            qmin_model = min(e.get('qstart', 1) for e in exons)
+                            qmax_model = max(e.get('qend', 1) for e in exons)
+                            model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
                         global_start = off_w_start + min(e['gstart'] for e in exons) + 1
                         global_end = off_w_start + max(e['gend'] for e in exons)
                         new_id = f"{parent_id}|{clean_gname}_rearranged"
@@ -3272,9 +3454,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         rearr_gff = [
                             f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
-                            f"Identity={avg_pident:.1f};Type=rearranged_flanking;"
-                            f"Rearranged_from={','.join(block_chroms)}"
+                            f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'rearranged_flanking', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                         ]
                         for eidx, e in enumerate(exons, 1):
                             exon_gs = off_w_start + e['gstart'] + 1
@@ -3340,14 +3520,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 global_start = off_w_start + min(s for s, _ in cds_intervals) + 1
                                 global_end = off_w_start + max(e for _, e in cds_intervals)
                                 avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
+                                qmin = min(min(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
+                                qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
+                                model_qcov = ((qmax - qmin + 1) / len(parent_query_seq)) if parent_query_seq else None
                                 new_id = f"{parent_id}|{clean_gname}_rearranged_fallback"
 
                                 rearr_gff = [
                                     f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"ID={new_id};Name={parent_id};SynTerra_Parent={parent_id};"
-                                    f"Identity={avg_pident:.1f};Type=rearranged_flanking_fallback;"
-                                    f"Rearranged_from={','.join(block_chroms)}"
+                                    f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'rearranged_flanking_fallback', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking_fallback', identity=avg_pident, exon_count=len(cds_intervals), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                                 ]
                                 for cidx, (hs, he) in enumerate(cds_intervals, 1):
                                     exon_gs = off_w_start + hs + 1
@@ -3404,6 +3585,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     f"{'; '.join(missing_details)}"
                 )
 
+        feature_meta = {}
+
         # Write aggregated GFF
         if all_gff_lines:
              gff_out = f"{args.output_dir}/regions/{genome_name}.gff"
@@ -3416,20 +3599,84 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      gf.write(gl + "\n")
 
              write_fasta([(g['id'], g['seq']) for g in all_genes], faa_out)
-                 
+
+             for gl in all_gff_lines:
+                 parts = gl.split("\t")
+                 if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
+                     continue
+                 attrs = _parse_gff_attributes(parts[8])
+                 model_id = attrs.get("ID")
+                 if not model_id:
+                     continue
+                 feature_meta[model_id] = {
+                     "parent": _select_parent_id(attrs, model_id),
+                     "role": attrs.get("SynTerraRole", "goi" if is_goi_query_id(model_id) else "flanking"),
+                     "confidence": attrs.get("Confidence", ""),
+                     "goi_class": attrs.get("GOIClass", ""),
+                     "evidence_type": attrs.get("EvidenceType", attrs.get("Type", "")),
+                     "identity": attrs.get("Identity", ""),
+                     "n_exons": attrs.get("Exons", ""),
+                     "synteny_context": attrs.get("SyntenyContext", ""),
+                     "block_flanking_support": attrs.get("BlockFlankingSupport", ""),
+                     "query_coverage": attrs.get("QueryCoverage", ""),
+                     "target_gene": attrs.get("TargetGene", ""),
+                     "target_product": attrs.get("TargetProduct", ""),
+                 }
+
              with open(tsv_out, 'w') as tf:
+                 tf.write(
+                     "target_id\thome_id\trole\tconfidence\tgoi_class\tevidence_type\t"
+                     "identity\tn_exons\tsynteny_context\tblock_flanking_support\t"
+                     "query_coverage\ttarget_gene\ttarget_product\n"
+                 )
                  for rec in all_genes:
-                     parent = extract_base_gene_id(rec['id'])
-                     tf.write(f"{rec['id']}\t{parent}\n")
+                     meta = feature_meta.get(rec['id'], {})
+                     parent = meta.get("parent") or extract_base_gene_id(rec['id'])
+                     tf.write(
+                         "\t".join([
+                             rec['id'],
+                             parent,
+                             meta.get("role", "goi" if is_goi_query_id(rec['id']) else "flanking"),
+                             meta.get("confidence", ""),
+                             meta.get("goi_class", ""),
+                             meta.get("evidence_type", ""),
+                             meta.get("identity", ""),
+                             meta.get("n_exons", ""),
+                             meta.get("synteny_context", ""),
+                             meta.get("block_flanking_support", ""),
+                             meta.get("query_coverage", ""),
+                             meta.get("target_gene", ""),
+                             meta.get("target_product", ""),
+                         ]) + "\n"
+                     )
         
-        # Expansion DB should only be augmented with GOI-derived models.
-        # Flanking annotations are used for regional context/plotting, not as
-        # iterative query seeds for downstream genomes.
-        new_genes = [g for g in all_genes if is_goi_query_id(g.get('id', ''))]
+        # Expansion DB should only be augmented with GOI-derived models that
+        # survived confidence/ambiguity triage. Low-confidence ambiguous/tandem
+        # calls are still reported in GFF/plots but should not recursively seed
+        # later waves.
+        new_genes = []
+        suppressed_seed_count = 0
+        for g in all_genes:
+            gid = g.get('id', '')
+            meta = feature_meta.get(gid, {})
+            role = meta.get("role", "goi" if is_goi_query_id(gid) else "flanking")
+            confidence = meta.get("confidence", "")
+            goi_class = meta.get("goi_class", "")
+            if role != "goi":
+                continue
+            if confidence in {"HIGH", "MEDIUM"} and goi_class in {"confident_goi", "probable_goi"}:
+                new_genes.append(g)
+            else:
+                suppressed_seed_count += 1
         if all_genes:
             logger.info(
                 f"[{genome_name}] Expansion payload: {len(new_genes)} GOI-derived / "
-                f"{len(all_genes)} total annotations."
+                f"{len(all_genes)} total annotations"
+                + (
+                    f" ({suppressed_seed_count} GOI-like annotations withheld from seeding)."
+                    if suppressed_seed_count
+                    else "."
+                )
             )
 
     except Exception as e:

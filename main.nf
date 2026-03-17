@@ -25,6 +25,7 @@ include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
+include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
 
 // ==============================================================================
 // ANSI Color Codes (Script-level variables)
@@ -235,7 +236,7 @@ workflow {
             
             STAGE_GENOMES(target_genomes_list)
             genomes_dir_ch = STAGE_GENOMES.out.dir
-            species_map_ch = Channel.value(no_species_map_file)
+            species_map_ch = STAGE_GENOMES.out.species_map.first()
             
         } else {
             uiStatus('WARN', 'STAGE_GENOMES', 'No target genomes provided; running home-genome-only analysis')
@@ -382,20 +383,30 @@ workflow {
             "${c_green}[OK  ]${c_reset} ${c_white}${'PHYLO_SORT'.padRight(24)}${c_reset} ordering complete for ${locus}"
         }
         
-        // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
-        PREPARE_INITIAL_DB.out.db
-            .join(PHYLO_SORT.out.sorted_list) 
-            .set { iterative_search_inputs_partial } // [locus_id, initial_db, sorted_list]
-            
-        iterative_search_inputs_partial
-            .combine(genomes_dir_ch)
-            .set { iterative_search_inputs } // [locus_id, faa, sorted_list, genomes_dir]
-
         // QC
         uiStatus('RUN ', 'GENOME_QC', 'Assessing target genome quality')
         
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
+
+        FILTER_SORTED_GENOMES(
+            PHYLO_SORT.out.sorted_list,
+            qc_summary_ch,
+            params.qc_fail_policy
+        )
+
+        FILTER_SORTED_GENOMES.out.sorted_list.view { locus, sorted ->
+            "${c_green}[OK  ]${c_reset} ${c_white}${'QC_FILTER'.padRight(24)}${c_reset} filtered target list for ${locus}"
+        }
+
+        // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
+        PREPARE_INITIAL_DB.out.db
+            .join(FILTER_SORTED_GENOMES.out.sorted_list)
+            .set { iterative_search_inputs_partial } // [locus_id, initial_db, sorted_list]
+            
+        iterative_search_inputs_partial
+            .combine(genomes_dir_ch)
+            .set { iterative_search_inputs } // [locus_id, faa, sorted_list, genomes_dir]
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
@@ -585,8 +596,11 @@ workflow {
         // Use sentinel files so that collect() always yields a valid path list
         // that Nextflow can stage into the process work directory.
         def no_regions_sentinel = file("${projectDir}/assets/sentinels/NO_REGIONS")
+        def no_gffs_sentinel    = file("${projectDir}/assets/sentinels/NO_GFFS")
+        def no_homology_sentinel = file("${projectDir}/assets/sentinels/NO_HOMOLOGY")
         def no_hits_sentinel    = file("${projectDir}/assets/sentinels/NO_HITS")
         def no_augmented_sentinel = file("${projectDir}/assets/sentinels/NO_AUGMENTED")
+        def no_scores_sentinel = file("${projectDir}/assets/sentinels/NO_SCORES")
         
         ITERATIVE_SEARCH.out.region_genes
             .map { it[1] } 
@@ -594,17 +608,46 @@ workflow {
             .collect()
             .ifEmpty(no_regions_sentinel)
             .set { collected_regions }
+
+        ITERATIVE_SEARCH.out.gff
+            .map { it[1] }
+            .flatten()
+            .collect()
+            .ifEmpty(no_gffs_sentinel)
+            .set { collected_region_gffs }
+
+        ITERATIVE_SEARCH.out.homology
+            .map { it[1] }
+            .flatten()
+            .collect()
+            .ifEmpty(no_homology_sentinel)
+            .set { collected_homology }
             
         ITERATIVE_SEARCH.out.hits
             .map { it[1] } 
             .collect()
             .ifEmpty(no_hits_sentinel)
             .set { collected_hits }
+
+        CLUSTER_REGIONS.out.scores
+            .map { it[1] }
+            .collect()
+            .ifEmpty(no_scores_sentinel)
+            .set { collected_scores }
             
         // No standalone augmented proteins - pass sentinel file
         collected_augmented = Channel.value(no_augmented_sentinel)
         
-        GENERATE_REPORT(collected_regions, collected_hits, collected_augmented, qc_summary_ch)
+        GENERATE_REPORT(
+            collected_regions,
+            collected_region_gffs,
+            collected_homology,
+            collected_hits,
+            collected_augmented,
+            qc_summary_ch,
+            collected_scores,
+            params.qc_fail_policy
+        )
         
         GENERATE_REPORT.out.report.view { report ->
             "${c_green}[OK  ]${c_reset} ${c_white}${'GENERATE_REPORT'.padRight(24)}${c_reset} analysis report generated"

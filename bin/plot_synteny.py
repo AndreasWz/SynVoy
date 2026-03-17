@@ -253,10 +253,48 @@ def filter_genes_to_candidate_regions(genes, candidate_regions):
     return kept
 
 
+def _confidence_rank(value):
+    return {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get((value or "").upper(), -1)
+
+
 def _is_goi_target_gene(gene):
+    role = (gene.get("role") or "").strip().lower()
+    if role:
+        return role == "goi"
     name = gene.get("name", "") or ""
     home_id = gene.get("home_gene_id", "") or ""
     return name.startswith("GOI_") or home_id.startswith("GOI_")
+
+
+def _is_resolved_goi_target_gene(gene):
+    if not _is_goi_target_gene(gene):
+        return False
+    goi_class = (gene.get("goi_class") or "").strip().lower()
+    confidence = (gene.get("confidence") or "").strip().upper()
+    if goi_class in {"ambiguous_goi_family_member", "tandem_goi_copy"}:
+        return False
+    return confidence != "LOW"
+
+
+def _track_goi_status(track):
+    if any(_is_resolved_goi_target_gene(g) for g in track.get("genes", [])):
+        return "resolved"
+    if any(_is_goi_target_gene(g) for g in track.get("genes", [])):
+        return "ambiguous"
+    return "absent"
+
+
+def _format_bp_label(length_bp):
+    value = max(0, int(length_bp or 0))
+    if value >= 1_000_000:
+        if value % 1_000_000 == 0:
+            return f"{value // 1_000_000} Mb"
+        return f"{value / 1_000_000:.1f} Mb"
+    if value >= 1_000:
+        if value % 1_000 == 0:
+            return f"{value // 1_000} kb"
+        return f"{value / 1_000:.1f} kb"
+    return f"{value} bp"
 
 
 def _region_overlaps_gene(region, gene):
@@ -388,17 +426,67 @@ def _preferred_target_label(gene):
     return target_gene or name or gene.get("home_gene_id", "")
 
 
+def _goi_priority_key(gene):
+    goi_like = 1 if _is_goi_target_gene(gene) else 0
+    resolved = 1 if _is_resolved_goi_target_gene(gene) else 0
+    goi_class = (gene.get("goi_class") or "").strip().lower()
+    class_rank = {
+        "confident_goi": 3,
+        "probable_goi": 2,
+        "tandem_goi_copy": 1,
+        "ambiguous_goi_family_member": 0,
+    }.get(goi_class, 1 if goi_like else -1)
+    return (
+        goi_like,
+        resolved,
+        _confidence_rank(gene.get("confidence")),
+        class_rank,
+        float(gene.get("identity", 0.0)),
+    )
+
+
 def parse_target_gff(gff_file):
     """
     Parse a SynTerra target-genome GFF.
 
     Extracts mRNA plus gene-level features for tandem copies.
+    Also collects CDS sub-features to build exon coordinate lists.
     Returns list of gene dicts with 'home_gene_id' from SynTerra_Parent.
     Deduplicates overlapping entries (same region annotated by different queries).
     """
     genes = []
+    cds_by_parent = defaultdict(list)  # mRNA_ID -> [(start, end), ...]
     if not gff_file or not os.path.exists(gff_file):
         return genes
+    # First pass: collect CDS sub-features
+    with open(gff_file) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) < 9:
+                continue
+            if p[2] == "CDS":
+                attrs = _parse_gff_attrs(p[8])
+                parent = attrs.get("Parent", "")
+                if parent:
+                    try:
+                        cds_by_parent[parent].append((int(p[3]), int(p[4])))
+                    except ValueError:
+                        pass
+    # Deduplicate and sort CDS intervals per parent
+    for parent in cds_by_parent:
+        coords = sorted(set(cds_by_parent[parent]))
+        # Merge overlapping CDS intervals
+        merged = [coords[0]]
+        for s, e in coords[1:]:
+            if s <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        cds_by_parent[parent] = merged
+    # Second pass: collect gene/mRNA features
     with open(gff_file) as fh:
         for line in fh:
             line = line.strip()
@@ -421,6 +509,19 @@ def parse_target_gff(gff_file):
             except Exception:
                 identity = 0.0
 
+            try:
+                query_coverage = float(attrs.get("QueryCoverage", "nan"))
+            except Exception:
+                query_coverage = None
+            if query_coverage is not None and query_coverage != query_coverage:
+                query_coverage = None
+
+            role = (attrs.get("SynTerraRole") or "").strip().lower()
+            if not role:
+                role = "goi" if raw_name.startswith("GOI_") or attrs.get("SynTerra_Parent", "").startswith("GOI_") else "flanking"
+
+            gene_id = attrs.get("ID", "")
+            exon_coords = cds_by_parent.get(gene_id, [])
             genes.append({
                 "chrom":        p[0],
                 "start":        int(p[3]),
@@ -433,6 +534,14 @@ def parse_target_gff(gff_file):
                 "identity":     identity,
                 "home_gene_id": attrs.get("SynTerra_Parent", attrs.get("Parent", "")),
                 "n_exons":      int(attrs.get("Exons", "1")),
+                "exon_coords":  exon_coords,
+                "role":         role,
+                "confidence":   (attrs.get("Confidence", "") or "").upper(),
+                "goi_class":    attrs.get("GOIClass", ""),
+                "evidence_type": attrs.get("EvidenceType", attrs.get("Type", "")),
+                "synteny_context": attrs.get("SyntenyContext", ""),
+                "query_coverage": query_coverage,
+                "inference_reason": attrs.get("InferenceReason", ""),
             })
 
     # Deduplicate overlapping entries (same genomic region from different queries)
@@ -440,11 +549,13 @@ def parse_target_gff(gff_file):
     if len(genes) > 1:
         # Sort: GOI first (always kept), then by descending identity
         def _dedup_sort_key(g):
-            is_goi_entry = (
-                g.get("name", "").startswith("GOI_")
-                or g.get("home_gene_id", "").startswith("GOI_")
+            return (
+                -_goi_priority_key(g)[0],
+                -_goi_priority_key(g)[1],
+                -_goi_priority_key(g)[2],
+                -_goi_priority_key(g)[3],
+                -g["identity"],
             )
-            return (0 if is_goi_entry else 1, -g["identity"])
         genes.sort(key=_dedup_sort_key)
 
         kept = []
@@ -471,12 +582,12 @@ def parse_target_gff(gff_file):
     MAX_GOI_PER_GENOME = 10
     goi_genes = [g for g in genes if _is_goi_target_gene(g)]
     if len(goi_genes) > MAX_GOI_PER_GENOME:
-        goi_genes.sort(key=lambda g: -g.get("identity", 0))
+        goi_genes.sort(key=_goi_priority_key, reverse=True)
         goi_to_drop = set(id(g) for g in goi_genes[MAX_GOI_PER_GENOME:])
         genes = [g for g in genes if id(g) not in goi_to_drop]
         print(
             f"[plot] GOI cap: kept {MAX_GOI_PER_GENOME}/{len(goi_genes)} GOI entries "
-            f"(dropped {len(goi_to_drop)} low-identity entries)"
+            f"(dropped {len(goi_to_drop)} lower-priority GOI-like entries)"
         )
 
     return genes
@@ -492,8 +603,10 @@ def parse_homology_tsvs(tsv_files):
             continue
         with open(tsv) as fh:
             for line in fh:
+                if not line.strip() or line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
-                if len(parts) >= 2:
+                if len(parts) >= 2 and parts[0] != "target_id":
                     mapping[parts[0]] = parts[1]
     return mapping
 
@@ -525,6 +638,97 @@ def parse_home_gff_products(gff_file):
     except Exception as exc:
         print(f"Warning: could not parse home GFF products: {exc}")
     return products
+
+
+def parse_home_gff_exons(gff_file, gene_names):
+    """Parse home GFF to extract exon/CDS coordinates for genes in the plot.
+
+    The NCBI GFF hierarchy is: gene -> mRNA -> exon/CDS.
+    We build a mapping: gene_name -> [(start, end), ...] merged CDS intervals.
+
+    Parameters
+    ----------
+    gff_file : str
+        Path to the home genome GFF.
+    gene_names : set
+        Gene names (e.g. 'gene-LOC412108') present in the home BED.
+
+    Returns
+    -------
+    dict : gene_name -> list of (start, end) tuples (sorted, merged CDS coords)
+    """
+    exons_by_gene = {}
+    if not gff_file or not os.path.exists(gff_file) or gff_file == "NO_GFF":
+        return exons_by_gene
+    try:
+        from urllib.parse import unquote
+
+        # Step 1: map gene-ID -> gene-name, mRNA-ID -> gene-name
+        gene_id_to_name = {}  # gene ID -> gene name from BED
+        mrna_to_gene = {}     # mRNA ID -> gene name
+
+        with open(gff_file) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                p = line.strip().split("\t")
+                if len(p) < 9:
+                    continue
+                ftype = p[2]
+                attrs = {}
+                for kv in p[8].split(";"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        attrs[k] = unquote(v)
+                if ftype == "gene":
+                    gid = attrs.get("ID", "")
+                    # Check if this gene appears in our plot
+                    if gid in gene_names:
+                        gene_id_to_name[gid] = gid
+                elif ftype == "mRNA":
+                    parent = attrs.get("Parent", "")
+                    if parent in gene_id_to_name:
+                        mrna_id = attrs.get("ID", "")
+                        if mrna_id:
+                            mrna_to_gene[mrna_id] = gene_id_to_name[parent]
+
+        # Step 2: collect CDS coordinates keyed by gene name
+        cds_by_gene = defaultdict(list)
+        with open(gff_file) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                p = line.strip().split("\t")
+                if len(p) < 9:
+                    continue
+                if p[2] not in ("CDS", "exon"):
+                    continue
+                attrs = {}
+                for kv in p[8].split(";"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        attrs[k] = unquote(v)
+                parent = attrs.get("Parent", "")
+                gene_name = mrna_to_gene.get(parent)
+                if gene_name:
+                    try:
+                        cds_by_gene[gene_name].append((int(p[3]), int(p[4])))
+                    except ValueError:
+                        pass
+
+        # Merge overlapping intervals per gene
+        for gene_name, coords in cds_by_gene.items():
+            coords = sorted(set(coords))
+            merged = [coords[0]]
+            for s, e in coords[1:]:
+                if s <= merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            exons_by_gene[gene_name] = merged
+    except Exception as exc:
+        print(f"Warning: could not parse home GFF exons: {exc}")
+    return exons_by_gene
 
 
 # ======================================================================
@@ -750,20 +954,77 @@ def clean_gene_label(name, keep_goi_prefix=False):
 # ======================================================================
 
 
-def _arrow_xy(x0, x1, y_base, height, strand):
-    """Pentagon vertices for a gene arrow."""
+def _arrow_xy(x0, x1, y_base, height, strand, junctions=None):
+    """Pentagon vertices for a gene arrow, optionally with V-notch
+    indentations at exon-boundary *junctions* (list of x-positions)."""
     w = x1 - x0
-    aw = min(w * 0.25, height * 2.5)       # arrow-head width (capped)
+    aw = min(w * 0.18, height * 3.5)       # arrow-head width (prominent)
     if aw < 1:
         aw = min(w * 0.5, 1)
     ym = y_base + height / 2
     yt = y_base + height
-    if strand == "+":
-        xs = [x0, x1 - aw, x1, x1 - aw, x0, x0]
-        ys = [y_base, y_base, ym, yt, yt, y_base]
+    yb = y_base
+
+    # ---- notch geometry ------------------------------------------------
+    if junctions:
+        notch_depth = height * 0.35          # how far the V cuts into the body
+        notch_hw = max(abs(w) * 0.018, 120)  # half-width of the V at the edge
+        # keep only junctions that fit between the body edges (not in the
+        # arrowhead or too close to the blunt end)
+        if strand == "+":
+            valid = sorted(j for j in junctions
+                           if x0 + notch_hw * 1.5 < j < x1 - aw - notch_hw)
+        else:
+            valid = sorted(j for j in junctions
+                           if x0 + aw + notch_hw < j < x1 - notch_hw * 1.5)
     else:
-        xs = [x0, x0 + aw, x1, x1, x0 + aw, x0]
-        ys = [ym, y_base, y_base, yt, yt, ym]
+        valid = []
+
+    if not valid:
+        # simple pentagon (no notches)
+        if strand == "+":
+            xs = [x0, x1 - aw, x1, x1 - aw, x0, x0]
+            ys = [yb, yb, ym, yt, yt, yb]
+        else:
+            xs = [x0, x0 + aw, x1, x1, x0 + aw, x0]
+            ys = [ym, yb, yb, yt, yt, ym]
+        return xs, ys
+
+    # ---- build polygon with V-notches ----------------------------------
+    xs, ys = [], []
+    if strand == "+":
+        # bottom edge  left → right  (notches point *up* into body)
+        xs.append(x0); ys.append(yb)
+        for jx in valid:
+            xs.extend([jx - notch_hw, jx, jx + notch_hw])
+            ys.extend([yb, yb + notch_depth, yb])
+        xs.append(x1 - aw); ys.append(yb)
+        # arrowhead
+        xs.append(x1); ys.append(ym)
+        # top edge  right → left  (notches point *down* into body)
+        xs.append(x1 - aw); ys.append(yt)
+        for jx in reversed(valid):
+            xs.extend([jx + notch_hw, jx, jx - notch_hw])
+            ys.extend([yt, yt - notch_depth, yt])
+        xs.append(x0); ys.append(yt)
+        xs.append(x0); ys.append(yb)          # close
+    else:  # strand "-"
+        # arrowhead tip
+        xs.append(x0); ys.append(ym)
+        # bottom edge  arrowhead → right
+        xs.append(x0 + aw); ys.append(yb)
+        for jx in valid:
+            xs.extend([jx - notch_hw, jx, jx + notch_hw])
+            ys.extend([yb, yb + notch_depth, yb])
+        xs.append(x1); ys.append(yb)
+        # right side
+        xs.append(x1); ys.append(yt)
+        # top edge  right → arrowhead
+        for jx in reversed(valid):
+            xs.extend([jx + notch_hw, jx, jx - notch_hw])
+            ys.extend([yt, yt - notch_depth, yt])
+        xs.append(x0 + aw); ys.append(yt)
+        xs.append(x0); ys.append(ym)          # close
     return xs, ys
 
 
@@ -778,14 +1039,41 @@ def _get_coords(gene):
 
 
 def add_gene(fig, gene, x_off, y_base, h, colour, border_clr, border_w,
-             hover, show_legend, legend_group):
+             hover, show_legend, legend_group, line_dash="solid"):
     g_start, g_end = _get_coords(gene)
-    xs, ys = _arrow_xy(g_start - x_off, g_end - x_off, y_base, h, gene["strand"])
+    x0 = g_start - x_off
+    x1 = g_end - x_off
+
+    # Compute junction x-positions for V-notch polygon
+    junction_xs = None
+    exon_coords = gene.get("exon_coords", [])
+    n_exons_attr = gene.get("n_exons", 0)
+    if len(exon_coords) >= 2:
+        # Real exon boundaries available
+        gene_start_raw = gene["start"]
+        gene_end_raw = gene["end"]
+        gene_span_raw = max(1, gene_end_raw - gene_start_raw)
+        junction_xs = []
+        for i in range(len(exon_coords) - 1):
+            junction_genomic = (exon_coords[i][1] + exon_coords[i + 1][0]) / 2.0
+            frac = (junction_genomic - gene_start_raw) / gene_span_raw
+            frac = max(0.02, min(0.98, frac))
+            junction_xs.append(x0 + frac * (x1 - x0))
+    elif n_exons_attr and n_exons_attr >= 2:
+        # No real CDS boundaries; synthesize evenly-spaced notches from
+        # the Exons=N attribute (common for flanking_hit_span genes).
+        gene_w = x1 - x0
+        junction_xs = []
+        for k in range(1, n_exons_attr):
+            frac = k / n_exons_attr
+            junction_xs.append(x0 + frac * gene_w)
+
+    xs, ys = _arrow_xy(x0, x1, y_base, h, gene["strand"], junctions=junction_xs)
     fig.add_trace(go.Scatter(
         x=xs, y=ys,
         fill="toself",
         fillcolor=colour,
-        line=dict(color=border_clr, width=border_w),
+        line=dict(color=border_clr, width=border_w, dash=line_dash),
         mode="lines",
         hoverinfo="text",
         text=hover,
@@ -818,16 +1106,15 @@ def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
               is_goi_flag=False):
     g_start, g_end = _get_coords(gene)
     xc = (g_start + g_end) / 2 - x_off
-    gw = g_end - g_start
     if is_goi_flag:
         text = "* " + text
         fcolour = GOI_BORDER
         fsize = max(fsize, 10)
     fig.add_annotation(
-        x=xc, y=y_base + h + h * 0.35,
+        x=xc, y=y_base + h + h * 0.25,
         text=text, showarrow=False,
         font=dict(size=fsize, color=fcolour),
-        textangle=-35 if gw < 5000 else 0,
+        textangle=-35,
         xanchor="center", yanchor="bottom",
     )
 
@@ -919,13 +1206,7 @@ def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
 
     # Determine chromosome ordering: GOI chromosome first, then by gene count
     def _chrom_sort_key(chrom):
-        has_goi = any(
-            g.get("name", "").startswith("GOI_")
-            or g.get("home_gene_id", "").startswith("GOI_")
-            or is_goi(g.get("name", ""))
-            or is_goi(g.get("home_gene_id", ""))
-            for g in chrom_groups[chrom]
-        )
+        has_goi = any(_is_goi_target_gene(g) or is_goi(g.get("name", "")) for g in chrom_groups[chrom])
         return (0 if has_goi else 1, -len(chrom_groups[chrom]))
 
     ordered_chroms = sorted(chrom_groups.keys(), key=_chrom_sort_key)
@@ -990,8 +1271,7 @@ def get_anchor_center(genes):
     """
     goi_centers = []
     for g in genes:
-        # Check 'name' and 'home_gene_id'
-        if is_goi(g.get("name")) or is_goi(g.get("home_gene_id")):
+        if _is_goi_target_gene(g) or is_goi(g.get("name")) or is_goi(g.get("home_gene_id")):
             goi_centers.append((g["start_plot"] + g["end_plot"]) / 2)
             
     if goi_centers:
@@ -1146,7 +1426,7 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
             if species_map:
                 for acc, sp_name in species_map.items():
                     if acc in genome_pretty:
-                        genome_pretty = sp_name
+                        genome_pretty = f"{sp_name} ({genome_pretty})"
                         break
             label = f"{goi_part} | {genome_pretty}"
         else:
@@ -1212,7 +1492,9 @@ def main():
     ap.add_argument("--gap_visual_size",type=int, default=20000, help="Visual size of compressed gaps (bp)")
     ap.add_argument("--flank_fallback_bp",type=int, default=1000000, help="Fallback window if candidate genes miss GOI")
     ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
-    ap.add_argument("--plot_width",     type=int, default=1500, help="Total width of the output HTML plot")
+    ap.add_argument("--plot_width",     type=int, default=3000, help="Total width of the output HTML plot")
+    ap.add_argument("--hide_goi_absent", action="store_true",
+                    help="Hide target tracks with no GOI-like annotation when informative tracks exist")
     ap.add_argument("--output",         required=True)
     args = ap.parse_args()
 
@@ -1261,6 +1543,14 @@ def main():
     identify_goi_names(home_genes, query_intervals)
 
     home_products = parse_home_gff_products(args.home_gff) if args.home_gff else {}
+
+    # Parse exon boundaries for home genes from the home GFF
+    home_gene_names = {g["name"] for g in home_genes}
+    home_exons = parse_home_gff_exons(args.home_gff, home_gene_names) if args.home_gff else {}
+    for g in home_genes:
+        if g["name"] in home_exons:
+            g["exon_coords"] = home_exons[g["name"]]
+
     homology_map  = parse_homology_tsvs(args.homology_tsvs)
 
     goi_genome_colours, tree_target_order = parse_tree_clade_colours(args.tree)
@@ -1416,11 +1706,11 @@ def main():
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
-        # Use species name from mapping if available
+        # Use species name from mapping if available, format: "Species name (accession)"
         display = genome_id
         for acc, sp_name in species_map.items():
             if acc in genome_id:
-                display = sp_name
+                display = f"<i>{sp_name}</i> ({genome_id})"
                 break
         gene_chroms = sorted({g["chrom"] for g in genes}) if genes else []
         if len(gene_chroms) == 1:
@@ -1449,6 +1739,19 @@ def main():
         # Fallback: order by display name (species name) alphabetically
         target_tracks.sort(key=lambda t: t["display_name"])
 
+    for tt in target_tracks:
+        tt["goi_status"] = _track_goi_status({"genes": tt.get("genes", [])})
+
+    hidden_absent_tracks = 0
+    informative_tracks = [t for t in target_tracks if t.get("goi_status") != "absent"]
+    if args.hide_goi_absent and informative_tracks and len(informative_tracks) < len(target_tracks):
+        hidden_absent_tracks = len(target_tracks) - len(informative_tracks)
+        target_tracks = informative_tracks
+        print(f"[plot] Hid {hidden_absent_tracks} GOI-absent target tracks from overview plot")
+
+    ambiguous_track_count = sum(1 for t in target_tracks if t.get("goi_status") == "ambiguous")
+    resolved_track_count = sum(1 for t in target_tracks if t.get("goi_status") == "resolved")
+
     # -- 3. Colour map ---------------------------------------------------
 
     gene_colours = assign_gene_colours(home_genes, query_intervals)
@@ -1465,6 +1768,7 @@ def main():
         "genes":        home_genes,
         "is_home":      True,
         "genome_id":    "home",
+        "goi_status":   "resolved",
     }]
     for tt in target_tracks:
         genes = tt["genes"]
@@ -1473,6 +1777,7 @@ def main():
             "genes":        genes,
             "is_home":      False,
             "genome_id":    tt["genome_id"],
+            "goi_status":   tt.get("goi_status", _track_goi_status({"genes": genes})),
         })
 
     all_tracks = []
@@ -1492,9 +1797,9 @@ def main():
 
     # -- 5. Layout geometry -----------------------------------------------
 
-    GENE_H      = 0.35          # gene arrow height
-    TRACK_SPACE = 1.4           # vertical pitch between tracks
-    RIBBON_GAP  = 0.12          # gap between gene arrow and ribbon edge
+    GENE_H      = 0.22          # gene arrow height  (flatter = gggenomes-like)
+    TRACK_SPACE = 1.1           # vertical pitch between tracks
+    RIBBON_GAP  = 0.08          # gap between gene arrow and ribbon edge
 
     fig = go.Figure()
 
@@ -1565,6 +1870,7 @@ def main():
             home_id = lg.get("home_gene_id", "")
             if not home_id:
                 continue
+            ribbon_alpha = 0.20
             for ug in upper["genes"]:
                 u_name = ug["name"]
                 u_home = ug.get("home_gene_id", u_name)
@@ -1577,10 +1883,12 @@ def main():
                     if is_goi(home_id):
                         colour = _goi_colour_for_genome(
                             lower["genome_id"], goi_genome_colours)
+                        if _is_goi_target_gene(lg) and not _is_resolved_goi_target_gene(lg):
+                            ribbon_alpha = 0.10
                     add_ribbon(fig, ug, lg,
                                upper["offset"], lower["offset"],
                                y_ribbon_top, y_ribbon_bot,
-                               colour, alpha=0.20)
+                               colour, alpha=ribbon_alpha)
 
     # -- 5c. Gene arrows -------------------------------------------------
     legend_shown = set()
@@ -1599,22 +1907,34 @@ def main():
             name = gene["name"]
             home_id = gene.get("home_gene_id", name)
             target_label = _preferred_target_label(gene)
-            goi_f   = is_goi(name) or is_goi(home_id)
+            goi_like = _is_goi_target_gene(gene)
+            resolved_goi = _is_resolved_goi_target_gene(gene)
+            ambiguous_goi = goi_like and not resolved_goi
+            confidence = (gene.get("confidence") or "").upper()
+            goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
 
             # --- colour ---
-            if goi_f:
-                colour = _goi_colour_for_genome(
-                    track["genome_id"], goi_genome_colours)
-                bclr, bw = GOI_BORDER, 2.5
+            if resolved_goi:
+                colour = _goi_colour_for_genome(track["genome_id"], goi_genome_colours)
+                bclr = GOI_BORDER
+                bw = 2.8 if confidence == "HIGH" else 2.2
+                dash = "solid"
+            elif ambiguous_goi:
+                base_goi = _goi_colour_for_genome(track["genome_id"], goi_genome_colours)
+                colour = _hex_to_rgba(base_goi, 0.32)
+                bclr, bw, dash = GOI_BORDER, 1.8, "dash"
             elif home_id in gene_colours:
                 colour = gene_colours[home_id]
                 bclr, bw = "rgba(0,0,0,0.35)", 1
+                dash = "dot" if confidence == "LOW" else "solid"
             elif name in gene_colours:
                 colour = gene_colours[name]
                 bclr, bw = "rgba(0,0,0,0.35)", 1
+                dash = "dot" if confidence == "LOW" else "solid"
             else:
                 colour = UNMATCHED_CLR
                 bclr, bw = "rgba(0,0,0,0.15)", 0.5
+                dash = "dot" if confidence == "LOW" else "solid"
 
             # --- hover text ---
             if track["is_home"]:
@@ -1627,6 +1947,11 @@ def main():
                 if product:
                     hover += f"<br><i>{product}</i>"
                 # Use raw coords for hover
+                n_ex_home = len(gene.get("exon_coords", []))
+                if n_ex_home <= 1:
+                    n_ex_home = gene.get("n_exons", 0)
+                if n_ex_home and n_ex_home > 1:
+                    hover += f"<br>Exons: {n_ex_home}"
                 hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
                           f"<br>Strand: {gene['strand']}")
                 if goi_f:
@@ -1639,12 +1964,27 @@ def main():
                     hover += f"<br>Homolog: {clean_gene_label(home_id)}"
                 if "identity" in gene:
                     hover += f"<br>Identity: {gene['identity']:.1f}%"
-                if "n_exons" in gene:
-                    hover += f"<br>Exons: {gene['n_exons']}"
+                n_ex = len(gene.get("exon_coords", []))
+                if n_ex <= 1:
+                    n_ex = gene.get("n_exons", 0)
+                if n_ex and n_ex > 1:
+                    hover += f"<br>Exons: {n_ex}"
+                if confidence:
+                    hover += f"<br>Confidence: {confidence}"
+                if gene.get("goi_class"):
+                    hover += f"<br>GOI class: {gene['goi_class'].replace('_', ' ')}"
+                if gene.get("evidence_type"):
+                    hover += f"<br>Evidence: {gene['evidence_type'].replace('_', ' ')}"
+                if gene.get("synteny_context"):
+                    hover += f"<br>Synteny: {gene['synteny_context'].replace('_', ' ')}"
+                if gene.get("query_coverage") is not None:
+                    hover += f"<br>Query coverage: {gene['query_coverage'] * 100:.1f}%"
                 hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
                           f"<br>Strand: {gene['strand']}")
-                if goi_f:
+                if resolved_goi:
                     hover += "<br><b>GENE OF INTEREST</b>"
+                elif ambiguous_goi:
+                    hover += "<br><b>GOI-LIKE / AMBIGUOUS</b>"
 
             # --- legend (one entry per home-gene name) ---
             lg_key = home_id if home_id else name
@@ -1653,17 +1993,13 @@ def main():
                 legend_shown.add(lg_key)
 
             add_gene(fig, gene, x_off, yb, GENE_H, colour, bclr, bw,
-                     hover, show_leg, lg_key)
+                     hover, show_leg, lg_key, line_dash=dash)
 
     # -- 5c2. Absent-GOI placeholder for targets without GOI gene --------
     for ti, track in enumerate(all_tracks):
         if track["is_home"]:
             continue
-        has_goi_in_track = any(
-            is_goi(g.get("name")) or is_goi(g.get("home_gene_id"))
-            for g in track["genes"]
-        )
-        if not has_goi_in_track and track["genes"]:
+        if track.get("goi_status") == "absent" and track["genes"]:
             yb = track_y[ti]
             # Draw a dashed-outline "?" box at x=0 (GOI center)
             dash_w = 2000
@@ -1695,7 +2031,8 @@ def main():
         for gene in genes_in_track:
             name    = gene["name"]
             home_id = gene.get("home_gene_id", name)
-            goi_f   = is_goi(name) or is_goi(home_id)
+            goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
+            resolved_goi = _is_resolved_goi_target_gene(gene) if not track["is_home"] else goi_f
 
             # In dense tracks, only label GOI and matched flanking genes
             has_colour = (home_id in gene_colours or name in gene_colours)
@@ -1708,6 +2045,8 @@ def main():
                     label = clean_gene_label(name, keep_goi_prefix=True)
                     if not label or label == 'GOI':
                         label = clean_gene_label(home_id, keep_goi_prefix=True)
+                    if not resolved_goi:
+                        label = "~ " + label
                 else:
                     label = clean_gene_label(_preferred_target_label(gene))
                     if not label and home_id:
@@ -1738,10 +2077,8 @@ def main():
         for xc, label, gene, goi_f, priority in label_candidates:
             g_start, g_end = _get_coords(gene)
             gw = g_end - g_start
-            is_rotated = gw < 5000  # matches the angle logic in add_label
-            est_width = len(label) * char_width
-            if is_rotated:
-                est_width = int(est_width * rotation_factor)
+            is_rotated = True  # labels always rotated
+            est_width = int(len(label) * char_width * rotation_factor)
             lbl_left  = xc - est_width / 2
             lbl_right = xc + est_width / 2
 
@@ -1763,13 +2100,11 @@ def main():
     # -- 5e. Track labels (left margin) ----------------------------------
     for ti, track in enumerate(all_tracks):
         yb = track_y[ti]
-        has_goi_in_track = any(
-            is_goi(g.get("name")) or is_goi(g.get("home_gene_id"))
-            for g in track["genes"]
-        )
         track_label = f"<b>{track['label']}</b>"
-        if not track["is_home"] and not has_goi_in_track:
+        if not track["is_home"] and track.get("goi_status") == "absent":
             track_label += "<br><span style='color:#d32f2f;font-size:9px'>✗ GOI absent</span>"
+        elif not track["is_home"] and track.get("goi_status") == "ambiguous":
+            track_label += "<br><span style='color:#d97706;font-size:9px'>~ GOI ambiguous</span>"
         fig.add_annotation(
             x=-0.01, y=yb + GENE_H / 2,
             text=track_label,
@@ -1808,17 +2143,28 @@ def main():
     pad = (x_max - x_min) * 0.05 + 5000
     x_range = [x_min - pad, x_max + pad]
 
-    fig_height = max(500, n_tracks * 185 + 80)
+    fig_height = max(400, n_tracks * 140 + 60)
 
     # Compute Y range from actual track positions
     y_min_pos = min(track_y) if track_y else 0
     y_max_pos = max(track_y) if track_y else 0
+    subtitle_bits = [
+        "Genes coloured by homology group",
+        "* = resolved GOI",
+        "dashed GOI = ambiguous/tandem family member",
+        "V-notches = exon boundaries",
+        "ribbons connect orthologs",
+        "// = compressed gaps",
+    ]
+    if hidden_absent_tracks:
+        subtitle_bits.append(f"{hidden_absent_tracks} GOI-absent track(s) hidden")
+    if ambiguous_track_count:
+        subtitle_bits.append(f"{ambiguous_track_count} ambiguous track(s)")
 
     fig.update_layout(
         title=dict(
             text=("<b>SynTerra Synteny Plot</b>"
-                  "<br><sup>Genes coloured by homology group | "
-                  "* = Gene of Interest | Ribbons connect orthologs | // = Compressed Gaps</sup>"),
+                  f"<br><sup>{' | '.join(subtitle_bits)}</sup>"),
             x=0.5, font=dict(size=15),
         ),
         height=fig_height,
@@ -1862,7 +2208,7 @@ def main():
     )
     fig.add_annotation(
         x=(sb_x0 + sb_x1)/2, y=sb_y - 0.1,
-        text="<b>10 kb</b>",
+        text=f"<b>{_format_bp_label(scale_len)}</b>",
         showarrow=False,
         font=dict(size=10, color="black"),
         yanchor="top"
@@ -1871,7 +2217,10 @@ def main():
     fig.write_html(args.output)
     print(f"Synteny plot saved to {args.output}")
     print(f"  Tracks: {n_tracks} ({n_tracks - 1} target genomes)")
-    print(f"  Gap compression: active (>50kb -> 3kb visual)")
+    print(f"  GOI tracks: {resolved_track_count} resolved, {ambiguous_track_count} ambiguous")
+    if hidden_absent_tracks:
+        print(f"  Hidden absent tracks: {hidden_absent_tracks}")
+    print(f"  Gap compression: active (>{args.gap_threshold} bp -> {args.gap_visual_size} bp visual)")
 
     # -- 7. Tree plot (separate HTML) ------------------------------------
     tree_output = args.output.replace("_synteny_plot.html", "_tree.html")

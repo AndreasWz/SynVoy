@@ -18,6 +18,12 @@ def parse_args():
                         help="Target Genome FASTA (optional; used for approximate p-value context)")
     parser.add_argument("--output", required=True, help="Output Region BED")
     parser.add_argument(
+        "--scores_output",
+        required=False,
+        default=None,
+        help="Optional TSV with structured scores for emitted regions",
+    )
+    parser.add_argument(
         "--target_gff",
         required=False,
         default=None,
@@ -529,6 +535,8 @@ def main():
             'unique': unique_genes,
             'consistency': consistency,
             'strand_cons': strand_cons,
+            'coverage_score': coverage_score,
+            'quality_score': quality_score,
             'score': final_score,
             'p_value': p_val,
             'start': cluster_start,
@@ -561,6 +569,8 @@ def main():
                     file=sys.stderr,
                 )
                 ordered_clusters = anchors + scored_clusters
+
+    selected_rows = []
 
     with open(args.output, 'w') as f_out:
         if not ordered_clusters:
@@ -611,8 +621,38 @@ def main():
                     name = f"Reg{i+1}_GOI_anchor_C{confidence}_S{best['score']:.2f}"
                 else:
                     name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
+
+                if args.max_regions > 0:
+                    selected_reason = "user_cap"
+                elif best['score'] >= score_floor:
+                    selected_reason = "score_floor"
+                elif best.get('unique', 0) >= 3:
+                    selected_reason = "unique_gene_floor"
+                else:
+                    selected_reason = "adaptive_backstop"
                 
                 f_out.write(f"{best['chrom']}\t{best['start']}\t{best['end']}\t{name}\t{best['score']:.2f}\t{region_strand}\n")
+
+                selected_rows.append({
+                    "region_rank": i + 1,
+                    "region_name": name,
+                    "chrom": best["chrom"],
+                    "start": best["start"],
+                    "end": best["end"],
+                    "strand": region_strand,
+                    "score": best["score"],
+                    "quality_score": best["quality_score"],
+                    "coverage_score": best["coverage_score"],
+                    "unique_genes": best["unique"],
+                    "total_genes_expected": total_genes_expected,
+                    "consistency": best["consistency"],
+                    "strand_consistency": best["strand_cons"],
+                    "p_value": best["p_value"],
+                    "goi_overlap": bool(best.get("goi_overlap")),
+                    "is_goi_anchor": bool(best.get("is_goi_anchor")),
+                    "confidence": confidence,
+                    "selection_reason": selected_reason,
+                })
 
                 # Emit compact summary to stdout for testability and quick diagnostics.
                 print(
@@ -630,6 +670,33 @@ def main():
                 else:
                     print(f"Region {i+1}: {best['chrom']}:{best['start']}-{best['end']} "
                           f"(Score: {best['score']:.2f}, Conf: {confidence}){goi_tag}", file=sys.stderr)
+
+    if args.scores_output:
+        fieldnames = [
+            "region_rank",
+            "region_name",
+            "chrom",
+            "start",
+            "end",
+            "strand",
+            "score",
+            "quality_score",
+            "coverage_score",
+            "unique_genes",
+            "total_genes_expected",
+            "consistency",
+            "strand_consistency",
+            "p_value",
+            "goi_overlap",
+            "is_goi_anchor",
+            "confidence",
+            "selection_reason",
+        ]
+        with open(args.scores_output, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            for row in selected_rows:
+                writer.writerow(row)
 
 if __name__ == "__main__":
     main()

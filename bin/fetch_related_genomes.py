@@ -19,6 +19,29 @@ from pathlib import Path
 
 LARGE_RANK = 10**18
 
+# Robust downloader (FTP+wget hybrid with resume, falls back to datasets)
+try:
+    from download_genome import download_genome_robust as _download_robust
+    _HAS_ROBUST_DOWNLOADER = True
+except ImportError:
+    _HAS_ROBUST_DOWNLOADER = False
+
+
+def _download_one(accession: str, outdir: str) -> str | None:
+    """Download one genome, using robust FTP+wget if available."""
+    if _HAS_ROBUST_DOWNLOADER:
+        from pathlib import Path as _Path
+        fna, _ = _download_robust(
+            accession,
+            output_path=_Path(outdir),
+            fna_name=f"{accession}.fna",
+            gff_name=f"{accession}.gff",
+            max_retries=5,
+        )
+        return str(fna) if fna else None
+    # Legacy fallback
+    return download_genome(accession, outdir)
+
 
 def run_safe_command(cmd, check=True):
     """Run command with list arguments safely."""
@@ -31,6 +54,41 @@ def run_safe_command(cmd, check=True):
         if check:
             raise e
         return None
+
+
+def check_disk_space(path: Path, required_gb: float = 5.0) -> None:
+    """Raise RuntimeError if free disk space at *path* is below required_gb."""
+    st = shutil.disk_usage(path)
+    free_gb = st.free / (1024 ** 3)
+    if free_gb < required_gb:
+        raise RuntimeError(
+            f"Insufficient disk space at {path}: {free_gb:.1f} GB free, "
+            f"{required_gb:.1f} GB required. Free up space and retry."
+        )
+
+
+def run_streaming(cmd: list, label: str = "") -> None:
+    """
+    Run *cmd* with live stdout/stderr forwarded to the console.
+    Raises subprocess.CalledProcessError on non-zero exit (with stderr captured).
+    """
+    stderr_lines: list = []
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    ) as proc:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            print(line, end="", flush=True)
+        stderr_lines = proc.stderr.read().splitlines()  # type: ignore[union-attr]
+        proc.wait()
+        if proc.returncode != 0:
+            stderr_text = "\n".join(stderr_lines)
+            raise subprocess.CalledProcessError(
+                proc.returncode, cmd, stderr=stderr_text
+            )
 
 
 def extract_zip_archive(zip_path: Path, extract_dir: Path):
@@ -775,6 +833,13 @@ def download_genome(accession, output_dir, max_retries=3):
     for attempt in range(1, max_retries + 1):
         print(f"Downloading {accession} (attempt {attempt}/{max_retries})...")
 
+        # Pre-flight: ensure enough free space (heuristic: 5 GB for zip + extracted)
+        try:
+            check_disk_space(output_path, required_gb=5.0)
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return None
+
         # Clean up artefacts from a previous failed attempt
         if zip_file.exists():
             zip_file.unlink()
@@ -782,7 +847,8 @@ def download_genome(accession, output_dir, max_retries=3):
             shutil.rmtree(extract_dir)
 
         try:
-            run_safe_command(cmd)
+            # Stream download live — NCBI progress and error messages are visible
+            run_streaming(cmd, label=accession)
             extract_zip_archive(zip_file, extract_dir)
 
             fna_files = list(extract_dir.rglob("*.fna"))
@@ -792,8 +858,6 @@ def download_genome(accession, output_dir, max_retries=3):
                 target = output_path / f"{accession}.fna"
                 shutil.move(str(fna_files[0]), str(target))
                 fna_path = str(target)
-                # Filter to chromosome sequences only when both chromosomes
-                # and unlocalized scaffolds are present in the same assembly.
                 filter_chromosomes_only(target)
                 print(f"  ✓ Genome: {target}")
 
@@ -812,7 +876,7 @@ def download_genome(accession, output_dir, max_retries=3):
                 ref_extract = output_path / refseq_acc
                 try:
                     print(f"  ○ Trying RefSeq annotation fallback: {refseq_acc}")
-                    run_safe_command(
+                    run_streaming(
                         [
                             "datasets",
                             "download",
@@ -823,7 +887,8 @@ def download_genome(accession, output_dir, max_retries=3):
                             "gff3",
                             "--filename",
                             str(ref_zip),
-                        ]
+                        ],
+                        label=refseq_acc,
                     )
                     extract_zip_archive(ref_zip, ref_extract)
                     ref_status = _extract_best_gff(ref_extract, gff_target)
@@ -844,18 +909,18 @@ def download_genome(accession, output_dir, max_retries=3):
         except (subprocess.CalledProcessError, zipfile.BadZipFile) as e:
             msg = e.stderr if hasattr(e, 'stderr') else str(e)
             print(f"  ✗ Attempt {attempt} failed for {accession}: {msg}", file=sys.stderr)
-            if attempt < max_retries:
-                wait = 10 * attempt
-                print(f"  Retrying in {wait}s...", file=sys.stderr)
-                import time; time.sleep(wait)
-            else:
-                print(f"  ✗ All {max_retries} attempts exhausted for {accession}.", file=sys.stderr)
-                return None
-        finally:
+            # Clean up partial zip before retry
             if zip_file.exists():
                 zip_file.unlink()
             if extract_dir.exists():
                 shutil.rmtree(extract_dir)
+            if attempt < max_retries:
+                wait = 15 * attempt
+                print(f"  Retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                print(f"  ✗ All {max_retries} attempts exhausted for {accession}.", file=sys.stderr)
+                return None
 
 
 def write_quality_report(assemblies, output_dir):
@@ -1044,7 +1109,7 @@ def main():
         print(f"\nDownloading genomes to {args.outdir}/...")
         downloaded = []
         for asm in assemblies:
-            fna_path = download_genome(asm["accession"], args.outdir)
+            fna_path = _download_one(asm["accession"], args.outdir)
             if fna_path:
                 downloaded.append(fna_path)
 
@@ -1155,7 +1220,7 @@ def main():
     print(f"\nDownloading genomes to {args.outdir}/...")
     downloaded = []
     for asm in assemblies:
-        fna_path = download_genome(asm["accession"], args.outdir)
+        fna_path = _download_one(asm["accession"], args.outdir)
         if fna_path:
             downloaded.append(fna_path)
 
