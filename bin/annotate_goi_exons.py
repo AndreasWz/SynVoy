@@ -586,11 +586,18 @@ def extract_exons_from_gff_match(match, genome_file, query_seq=None):
         exon_proteins.append(translate(exon_dna) if len(exon_dna) >= 3 else '')
 
     # Build full concatenated protein
+    # GFF phase = bases to skip at the 5' coding end (first CDS in coding direction).
+    cds_parts_for_full = sorted(match['cds_parts'], key=lambda x: x['start'])
+    coding_first_phase = int(cds_parts_for_full[0].get('phase', 0) or 0) \
+        if match['strand'] == '+' \
+        else int(cds_parts_for_full[-1].get('phase', 0) or 0)
     all_dna = ""
-    for part in sorted(match['cds_parts'], key=lambda x: x['start']):
+    for part in cds_parts_for_full:
         all_dna += chrom_seq[part['start']:part['end']]
     if match['strand'] == '-':
         all_dna = reverse_complement(all_dna)
+    if coding_first_phase > 0:
+        all_dna = all_dna[coding_first_phase:]
     all_dna = all_dna[:len(all_dna) - len(all_dna) % 3]
     full_protein = translate(all_dna).split('*')[0]
 
@@ -1101,8 +1108,8 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
         return [], query_seq
     
     pid = os.getpid()
-    query_file = f"/tmp/synterra_mp_query_{pid}.faa"
-    target_file = f"/tmp/synterra_mp_target_{pid}.fna"
+    query_file = f"/tmp/synvoy_mp_query_{pid}.faa"
+    target_file = f"/tmp/synvoy_mp_target_{pid}.fna"
     
     try:
         # Write temp files

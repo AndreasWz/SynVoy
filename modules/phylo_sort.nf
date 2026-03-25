@@ -36,17 +36,18 @@ process PHYLO_SORT {
         echo "Attempting phylogenetic sorting using TaxDB: \$TAXDB"
         phylo_sort.py \\
             --home "\$HOME_QUERY" \\
+            --home_fasta "$home_genome" \\
             --targets_dir $genomes_dir \\
             --taxdb \$TAXDB \\
             --output sorted_genomes.txt || {
-                echo "Phylogenetic sorting failed, falling back to alphabetical"
-                phylo_sort.py --home "\$HOME_QUERY" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
+                echo "Phylogenetic sorting failed, falling back to MinHash"
+                phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
             }
     else
         echo "No TaxDB found (set TAXDB environment variable)"
-        echo "Using alphabetical order (no phylogenetic sorting)"
+        echo "Using MinHash fallback (no taxonomic phylogenetic sorting)"
         # Use phylo_sort's fallback logic
-        phylo_sort.py --home "\$HOME_QUERY" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
+        phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
     fi
     """
 }

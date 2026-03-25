@@ -36,7 +36,7 @@ def _load_qc_statuses(qc_json_path: str) -> dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Filter sorted genome list using SynTerra QC summary"
+        description="Filter sorted genome list using SynVoy QC summary"
     )
     parser.add_argument("--sorted", required=True, help="Sorted genomes TSV")
     parser.add_argument("--qc_json", required=True, help="Aggregated QC JSON")

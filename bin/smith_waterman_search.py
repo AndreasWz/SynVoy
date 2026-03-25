@@ -13,7 +13,11 @@ Usage:
 import argparse
 import sys
 import os
-from sequence_utils import parse_fasta, translate, reverse_complement
+try:
+    from sequence_utils import parse_fasta, translate, reverse_complement
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sequence_utils import parse_fasta, translate, reverse_complement
 
 try:
     import parasail
@@ -21,13 +25,6 @@ try:
 except ImportError:
     HAS_PARASAIL = False
     print("WARNING: parasail not installed. Falling back to ssearch36.", file=sys.stderr)
-
-# Use our own sequence utilities
-try:
-    from sequence_utils import parse_fasta, translate, reverse_complement
-except ImportError:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, translate, reverse_complement
 
 
 def translate_in_six_frames(dna_seq):
@@ -362,8 +359,32 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
             
             # print(f"DEBUG_DNA: [{t_start_dna}, {t_end_dna}]")
 
-            # Report
-            hit_line = f"{q_id}\t{t_id}\t99.9\t{aln_len}\t0\t0\t{q_start_aa+1}\t{q_end_aa+1}\t{ts}\t{te}\t1e-10\t{result.score}"
+            # Compute real percent identity, mismatch, and gap-open from parasail traceback
+            try:
+                tb = result.traceback
+                if tb and tb.comp:
+                    real_pident = tb.comp.count('|') / len(tb.comp) * 100
+                    mismatch = tb.comp.count('.')
+                    # Count gap-open events: each run of '-' in ref or query is one gap-open
+                    gapopen = 0
+                    for s in (tb.ref or '', tb.query or ''):
+                        in_gap = False
+                        for c in s:
+                            if c == '-':
+                                if not in_gap:
+                                    gapopen += 1
+                                    in_gap = True
+                            else:
+                                in_gap = False
+                else:
+                    real_pident = 0.0
+                    mismatch = 0
+                    gapopen = 0
+            except Exception:
+                real_pident = 0.0
+                mismatch = 0
+                gapopen = 0
+            hit_line = f"{q_id}\t{t_id}\t{real_pident:.1f}\t{aln_len}\t{mismatch}\t{gapopen}\t{q_start_aa+1}\t{q_end_aa+1}\t{ts}\t{te}\t1e-10\t{result.score}"
             all_hits.append(hit_line)
             
             # MASKING: Mask this genomic region in ALL frames

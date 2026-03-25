@@ -170,6 +170,12 @@ def extract_region_cds(gff_file, genome_file, chrom, region_start, region_end,
         
         cds_parts = sorted(gene['cds_parts'], key=lambda x: x['start'])
         
+        # GFF phase = bases to skip at the coding 5' end.
+        # + strand: first CDS genomically; - strand: last CDS genomically (first in coding order).
+        coding_first_phase = int(cds_parts[0].get('phase') or 0) \
+            if gene['strand'] == '+' \
+            else int(cds_parts[-1].get('phase') or 0)
+        
         # Concatenate CDS exons (GFF coordinates are 1-based inclusive,
         # convert to 0-based for Python string slicing)
         dna = ""
@@ -178,6 +184,10 @@ def extract_region_cds(gff_file, genome_file, chrom, region_start, region_end,
         
         if gene['strand'] == '-':
             dna = reverse_complement(dna)
+        
+        # Apply phase: trim leading bases at coding 5' end
+        if coding_first_phase > 0:
+            dna = dna[coding_first_phase:]
         
         # Trim to codon boundary
         dna = dna[:len(dna) - len(dna) % 3]

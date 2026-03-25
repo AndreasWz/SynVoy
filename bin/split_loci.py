@@ -20,7 +20,7 @@ def main():
                 parts = line.strip().split('\t')
                 if len(parts) < 3: continue
                 
-                evalue = float(parts[4]) if len(parts) > 4 else 0.0
+                evalue = float(parts[4]) if len(parts) > 4 and parts[4] not in ('.', '') else float('inf')
                 entries.append({
                     'chrom': parts[0],
                     'start': int(parts[1]),

@@ -541,6 +541,13 @@ def main():
                             all_fasta_records.append((full_header, full_prot))
                     else:
                         # WHOLE PROTEIN MODE: Concatenate all exons
+                        # GFF phase = bases to skip at the coding 5' end.
+                        # + strand: first exon (index 0) carries the phase.
+                        # - strand: last exon genomically carries the phase;
+                        #           apply after reverse-complementing.
+                        coding_first_phase = int(cds_parts[0].get('phase', 0) or 0) \
+                            if gene['strand'] == '+' \
+                            else int(cds_parts[-1].get('phase', 0) or 0)
                         dna_seq = ""
                         for part in cds_parts:
                             part_seq = seq_record[part['start']:part['end']]
@@ -548,6 +555,10 @@ def main():
                         
                         if gene['strand'] == '-':
                             dna_seq = reverse_complement(dna_seq)
+
+                        # Trim phase at coding 5' end
+                        if coding_first_phase > 0:
+                            dna_seq = dna_seq[coding_first_phase:]
                             
                         remainder = len(dna_seq) % 3
                         if remainder:

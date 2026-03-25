@@ -18,7 +18,7 @@ archive/
 *.tmp
 tmp/
 cache/
-.synterra_logs/
+.synvoy_logs/
 .pytest_cache/
 
 # Conda/Python
@@ -27,7 +27,7 @@ __pycache__/
 .ipynb_checkpoints/
 genomes/
 results_from_local_genomes/
-.synterra_logs/
+.synvoy_logs/
 test_out/
 ref/
 archive/
@@ -42,3 +42,4 @@ bin_backup_pre_unconstrained.tar.gz
 docs/
 conf/
 queries/
+easy_mode_genomes/

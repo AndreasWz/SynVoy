@@ -115,25 +115,22 @@ def main():
             
         exons = sorted(info['exons'], key=lambda x: x[0])
         dna_seq = ""
-        for i, exon in enumerate(exons):
+        # GFF phase = number of bases to skip at the 5' coding end.
+        # For + strand: first CDS genomically is first in coding order → trim from its left.
+        # For - strand: last CDS genomically is first in coding order → trim after revcomp.
+        # Collect phase from the first CDS in coding direction; apply after concat+revcomp.
+        coding_first_phase = exons[0][2] if info['strand'] == '+' else exons[-1][2]
+        for exon in exons:
             start, end = exon[0], exon[1]
-            phase = exon[2] if len(exon) > 2 else 0
             exon_seq = genome[chrom][start-1:end]
-            # Apply GFF phase to the first CDS in coding order only.
-            # Phase trims bases from the 5' end in coding direction:
-            #   + strand: first CDS genomically → trim from LEFT
-            #   - strand: last CDS genomically → trim from RIGHT
-            #             (genomic right = coding 5' for minus strand;
-            #              reverse-complement happens after concatenation)
-            if phase > 0:
-                if info['strand'] == '+' and i == 0:
-                    exon_seq = exon_seq[phase:]
-                elif info['strand'] == '-' and i == len(exons) - 1:
-                    exon_seq = exon_seq[:-phase]
             dna_seq += exon_seq
-            
+
         if info['strand'] == '-':
             dna_seq = reverse_complement(dna_seq)
+
+        # Apply phase: trim leading bases at coding 5' end
+        if coding_first_phase > 0:
+            dna_seq = dna_seq[coding_first_phase:]
             
         try:
             prot_seq = translate(dna_seq)

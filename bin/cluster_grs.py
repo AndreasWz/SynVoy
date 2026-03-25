@@ -119,8 +119,8 @@ def merge_intervals(intervals):
 
 def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
     """
-    Parse GOI intervals from SynTerra iterative target GFF.
-    GOI records are detected via Name/ID/SynTerra_Parent containing GOI_.
+    Parse GOI intervals from SynVoy iterative target GFF.
+    GOI records are detected via Name/ID/SynVoy_Parent containing GOI_.
     """
     if not gff_file or not os.path.exists(gff_file):
         return []
@@ -143,7 +143,7 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
                 tokens = [
                     attrs.get("Name", ""),
                     attrs.get("ID", ""),
-                    attrs.get("SynTerra_Parent", ""),
+                    attrs.get("SynVoy_Parent", ""),
                     attrs.get("Parent", ""),
                 ]
                 marker = "|".join(tokens)
@@ -248,6 +248,8 @@ def build_goi_anchor_clusters(goi_intervals, existing_clusters):
                 "unique": 1,
                 "consistency": 1.0,
                 "strand_cons": 1.0,
+                "coverage_score": 1.0,
+                "quality_score": 1.0,
                 "score": 1.0,
                 "p_value": 0.0,
                 "start": iv["start"],
@@ -384,14 +386,14 @@ def score_flexible_synteny(cluster, gene_map):
     
     return unique_genes, consistency, strand_cons
 
-def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_distance, score_func, gene_map, total_genes_expected, n=200):
+def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_distance, score_func, gene_map, total_genes_expected,
+                    weight_base=0.4, weight_consistency=0.3, weight_strand=0.3, n=200, seed=42):
     """
     Estimate P-value via label-shuffling permutation test.
 
-    Shuffles gene-label assignments among the cluster's hits and re-scores,
-    counting how often a random labelling achieves the observed score or better.
-    This tests whether the *identity* of genes in the cluster is non-random
-    (i.e., they match the expected synteny map better than chance).
+    Shuffles gene-label assignments among the cluster's hits and re-scores
+    using the SAME weighted formula as the real scoring (not a simplified proxy).
+    This tests whether the *identity* of genes in the cluster is non-random.
     """
     if not cluster_hits or not gene_map or total_genes_expected <= 0:
         return 1.0
@@ -401,13 +403,14 @@ def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_
     if not all_queries:
         return 1.0
 
+    rng = random.Random(seed)  # seeded for reproducibility
     cluster_size = len(cluster_hits)
     better_or_equal = 0
 
     for _ in range(n):
         # Create a synthetic cluster by shuffling query labels
         shuffled = list(cluster_hits)  # shallow copy
-        sampled_labels = random.choices(all_queries, k=cluster_size)
+        sampled_labels = rng.choices(all_queries, k=cluster_size)
         fake_cluster = []
         for hit, label in zip(shuffled, sampled_labels):
             fake_hit = dict(hit)
@@ -416,8 +419,13 @@ def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_
 
         rand_unique, rand_consistency, rand_strand = score_func(fake_cluster, gene_map)
         rand_coverage = rand_unique / total_genes_expected if total_genes_expected > 0 else 0
-        # Use same weighted formula as the real scoring
-        rand_score = rand_coverage * (rand_consistency * 0.5 + rand_strand * 0.5)
+        # Use the SAME weighted formula as the real scoring function
+        rand_quality = (
+            weight_base * rand_coverage +
+            weight_consistency * rand_consistency +
+            weight_strand * rand_strand
+        )
+        rand_score = rand_quality * rand_coverage
         if rand_score >= observed_score:
             better_or_equal += 1
 
@@ -528,7 +536,14 @@ def main():
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
         
-        p_val = estimate_pvalue(final_score, cl, hits, genome_len, args.cluster_distance, score_flexible_synteny, gene_map, total_genes_expected, n=200)
+        p_val = estimate_pvalue(
+            final_score, cl, hits, genome_len, args.cluster_distance,
+            score_flexible_synteny, gene_map, total_genes_expected,
+            weight_base=args.weight_base,
+            weight_consistency=args.weight_consistency,
+            weight_strand=args.weight_strand,
+            n=200, seed=42
+        )
         
         scored_clusters.append({
             'cluster': cl,

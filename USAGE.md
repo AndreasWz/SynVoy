@@ -1,6 +1,6 @@
-# SynTerra — Usage & Reference Manual
+# SynVoy — Usage & Reference Manual
 
-Detailed reference for running and configuring SynTerra.  
+Detailed reference for running and configuring SynVoy.  
 For initial setup instructions, see the [README](README.md).
 
 ---
@@ -20,11 +20,11 @@ For initial setup instructions, see the [README](README.md).
 
 ## 1. Execution Modes
 
-SynTerra has two modes: **Easy** (automated genome retrieval) and **Pro** (local files).
+SynVoy has two modes: **Easy** (automated genome retrieval) and **Pro** (local files).
 
 ### Easy Mode
 
-Provide a UniProt or NCBI protein accession. SynTerra resolves the query, fetches the reference genome and related target assemblies from NCBI, and runs the full analysis.
+Provide a UniProt/NCBI protein accession, a local FASTA (`--query`), or an inline sequence (`--query_seq`). SynVoy resolves the query, fetches the reference genome and related target assemblies from NCBI, and runs the full analysis.
 
 ```bash
 nextflow run main.nf \
@@ -35,12 +35,14 @@ nextflow run main.nf \
   -profile standard
 ```
 
-**Required:**
+**Required (one of the query options):**
 
 | Flag | Description |
 |---|---|
 | `--mode easy` | Select Easy Mode |
 | `--query_id` | UniProt accession (e.g. `Q16553`) or NCBI protein ID |
+| `--query` | Path to local FASTA (works in Easy Mode too) |
+| `--query_seq` | Inline protein sequence or FASTA text (requires `--home_species`) |
 
 **Optional (Easy Mode only):**
 
@@ -55,6 +57,8 @@ nextflow run main.nf \
 | `--bad_max_contigs` | `500000` | Assemblies with more contigs are flagged as low quality |
 | `--bad_max_scaffolds` | `500000` | Assemblies with more scaffolds are flagged as low quality |
 | `--bad_min_n50` | `5000` | Assemblies with N50 below this are flagged as low quality |
+
+> **Note:** When using `--query_seq`, you must also provide `--home_species`.
 
 ### Pro Mode
 
@@ -99,7 +103,7 @@ Append a profile with `-profile <name>` to control how resources are allocated. 
 | `standard` | local | Conda | Default. 2 CPUs / 6 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
 | `laptop_safe` | local | Conda | Conservative. 1 CPU, single task at a time, high memory ceiling (12 GB) but strict fork limits. Prevents system freezes on machines with limited RAM. |
-| `docker` | local | Docker | Runs all processes inside the `synterra-local:latest` container. Build it first with `docker build -t synterra-local:latest .` |
+| `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
 | `docker_max` | local | Docker | Auto-detects all host CPUs and RAM. Allocates nearly everything to the heaviest tasks (MMseqs2, ITERATIVE_SEARCH). Single-fork to avoid OOM. Ideal for dedicated machines. |
 | `singularity` | local | Singularity | Like `docker` but uses Singularity with auto-mounts. |
 | `slurm` | SLURM | (none) | Submits tasks to a SLURM scheduler. Edit `nextflow.config` to set your partition and account. |
@@ -304,7 +308,7 @@ All output goes into `--outdir` (default: `results/`):
 | `*_synteny_plot.html` | Interactive HTML visualization. Open in a browser — shows syntenic blocks, gene arrows, homology links, and a phylogenetic tree. |
 | `*_tree.nwk` | Newick-format phylogenetic tree of discovered GOI sequences. |
 | `regions/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome. |
-| `synterra_report.json` | Machine-readable JSON report: input parameters, genome QC metrics, per-target results, internal exit codes. |
+| `synvoy_report.json` | Machine-readable JSON report: input parameters, genome QC metrics, per-target results, internal exit codes. |
 | `intermediate/` | Per-phase artifacts — flanking gene FASTAs, MMseqs2 hit tables, per-target GFFs, miniprot alignments, etc. Only kept if `--keep_intermediate true`. |
 | `downloaded_genomes/` | (Easy Mode only) Downloaded genome assemblies and `assembly_quality.tsv` with contiguity stats. |
 
@@ -365,7 +369,7 @@ nextflow clean -f
 
 **Cause:** Paths are relative to the Nextflow launch directory, not to the script.
 
-**Fix:** Use absolute paths or ensure you run `nextflow` from the SynTerra project root.
+**Fix:** Use absolute paths or ensure you run `nextflow` from the SynVoy project root.
 
 ### Conda environment creation times out
 

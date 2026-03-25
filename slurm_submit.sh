@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=synterra
-#SBATCH --output=synterra_%j.log
-#SBATCH --error=synterra_%j.err
+#SBATCH --job-name=synvoy
+#SBATCH --output=synvoy_%j.log
+#SBATCH --error=synvoy_%j.err
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
@@ -9,7 +9,7 @@
 # Optional: #SBATCH --account=your_account
 
 # ============================================================
-# SynTerra SLURM Submission Script
+# SynVoy SLURM Submission Script
 # ============================================================
 # This script submits the Nextflow controller job.
 # Nextflow will then submit individual tasks to SLURM.
@@ -48,7 +48,7 @@ PROFILE="hpc_singularity"
 # RUN PIPELINE
 # ============================================================
 
-echo "Starting SynTerra pipeline..."
+echo "Starting SynVoy pipeline..."
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Query: ${QUERY_ID}"
 echo "Species: ${HOME_SPECIES}"

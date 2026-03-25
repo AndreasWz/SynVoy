@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Basic test suite for SynTerra pipeline core functions.
+Basic test suite for SynVoy pipeline core functions.
 Tests critical functions for correctness.
 """
 

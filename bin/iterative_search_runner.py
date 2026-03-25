@@ -433,10 +433,10 @@ def _select_parent_id(attrs: Dict[str, str], model_id: str) -> str:
     """
     Select a stable parent identifier from heterogeneous GFF attributes.
 
-    Supports SynTerra, NCBI/Ensembl-style, and custom tags.
+    Supports SynVoy, NCBI/Ensembl-style, and custom tags.
     """
     for key in [
-        "SynTerra_Parent",
+        "SynVoy_Parent",
         "ParentProtein",
         "protein_id",
         "gene_id",
@@ -603,7 +603,7 @@ def _goi_feature_attrs(
     )
     attrs = dict(base_attrs)
     attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
-    attrs["SynTerraRole"] = "goi"
+    attrs["SynVoyRole"] = "goi"
     attrs["EvidenceType"] = evidence_type
     attrs["Confidence"] = confidence
     attrs["GOIClass"] = goi_class
@@ -633,7 +633,7 @@ def _flanking_feature_attrs(
     )
     attrs = dict(base_attrs)
     attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
-    attrs["SynTerraRole"] = "flanking"
+    attrs["SynVoyRole"] = "flanking"
     attrs["EvidenceType"] = evidence_type
     attrs["Confidence"] = confidence
     attrs["InferenceReason"] = reason
@@ -1314,6 +1314,10 @@ def estimate_cluster_distance(genome_file: str, gff_file: Optional[str] = None, 
     # Method 2: Improved genome size heuristic
     try:
         size = os.path.getsize(genome_file)
+
+        # Gzipped FASTA is ~25% of real genome size → scale up to avoid wrong bin
+        if genome_file.endswith('.gz') or genome_file.endswith('.gzip'):
+            size = size * 4
         
         # More refined heuristics based on typical genomes
         if size < 5_000_000:  # < 5MB: Bacteria/Archaea
@@ -1634,8 +1638,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     sw_hits = parse_hits(
                         sw_hits_file,
                         args.sw_min_identity,
-                        2,
-                        20000.0,
+                        10,    # min 10 aa (was 2 – way too permissive)
+                        1.0,   # evalue <= 1.0 (was 20000 – effectively no filter)
                         query_lengths=goi_query_lengths
                     )
                     if sw_hits:
@@ -2321,7 +2325,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                 (
                                                     f"{chrom}\tfallback_hits\tmRNA\t{global_start}\t{global_end}\t"
                                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                                 )
                                             ]
                                             for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -2367,7 +2371,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'gff': [
                                         f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
                                         f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynTerra_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=None, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=None, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                     ]
                                 })
                         else:
@@ -2389,7 +2393,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 (
                                     f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                 )
                             ]
                             for eidx, exon in enumerate(exons, 1):
@@ -2472,7 +2476,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             'description': f"coords:{gs}-{ge} parent:{parent_id} type:rescued_exon"
                                         },
                                         'gff': [
-                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': raw_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='rescued_exon', identity=hit.get('pident', 0), exon_count=1, query_cov=hit_qcov, flanking_support=block_flanking_support), gs, ge, hit.get('strand','+'))}",
+                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': raw_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='rescued_exon', identity=hit.get('pident', 0), exon_count=1, query_cov=hit_qcov, flanking_support=block_flanking_support), gs, ge, hit.get('strand','+'))}",
                                             f"{chrom}\trescued_exon\tCDS\t{gs}\t{ge}\t.\t{hit.get('strand','+')}\t0\tID={raw_id}_CDS1;Parent={raw_id}"
                                         ]
                                     })
@@ -2537,7 +2541,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'description': f"coords:{nt_s}-{nt_e} parent:{parent_id} identity:{hit.get('pident', 0):.1f}"
                                 },
                                 'gff': [
-                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id}, evidence_type='raw_hit', identity=hit.get('pident', 0), exon_count=1, query_cov=qcov, flanking_support=block_flanking_support), nt_s, nt_e, hit.get('strand', '+'))}",
+                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='raw_hit', identity=hit.get('pident', 0), exon_count=1, query_cov=qcov, flanking_support=block_flanking_support), nt_s, nt_e, hit.get('strand', '+'))}",
                                     f"{chrom}\traw_hit\tCDS\t{nt_s}\t{nt_e}\t.\t{hit.get('strand', '+')}\t0\tID={new_id}_CDS1;Parent={new_id}"
                                 ]
                             })
@@ -2731,7 +2735,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         (
                             f"{chrom}\tflanking_hits\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'flanking_hit_span'}, evidence_type='flanking_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
+                            f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'flanking_hit_span'}, evidence_type='flanking_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
                         )
                     ]
                     for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -2777,7 +2781,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     (
                         f"{chrom}\tflanking_annotation\tmRNA\t{global_start}\t{global_end}\t"
                         f"{avg_pident:.1f}\t{strand}\t.\t"
-                        f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'flanking_miniprot'}, evidence_type='flanking_miniprot', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
+                        f"{_mRNA_attrs(_flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'flanking_miniprot'}, evidence_type='flanking_miniprot', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='candidate_region_anchor'), global_start, global_end, strand)}"
                     )
                 ]
                 for eidx, exon in enumerate(exons, 1):
@@ -3454,7 +3458,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         rearr_gff = [
                             f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'rearranged_flanking', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
+                            f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                         ]
                         for eidx, e in enumerate(exons, 1):
                             exon_gs = off_w_start + e['gstart'] + 1
@@ -3528,7 +3532,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 rearr_gff = [
                                     f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynTerra_Parent': parent_id, 'Type': 'rearranged_flanking_fallback', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking_fallback', identity=avg_pident, exon_count=len(cds_intervals), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
+                                    f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking_fallback', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking_fallback', identity=avg_pident, exon_count=len(cds_intervals), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                                 ]
                                 for cidx, (hs, he) in enumerate(cds_intervals, 1):
                                     exon_gs = off_w_start + hs + 1
@@ -3610,7 +3614,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      continue
                  feature_meta[model_id] = {
                      "parent": _select_parent_id(attrs, model_id),
-                     "role": attrs.get("SynTerraRole", "goi" if is_goi_query_id(model_id) else "flanking"),
+                     "role": attrs.get("SynVoyRole", "goi" if is_goi_query_id(model_id) else "flanking"),
                      "confidence": attrs.get("Confidence", ""),
                      "goi_class": attrs.get("GOIClass", ""),
                      "evidence_type": attrs.get("EvidenceType", attrs.get("Type", "")),

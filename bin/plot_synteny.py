@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plot_synteny.py  –  Interactive synteny visualization for SynTerra
+plot_synteny.py  –  Interactive synteny visualization for SynVoy
 
 Layout
 ──────
@@ -15,7 +15,7 @@ Inputs
   --home_bed        Synteny-block BED for the home genome
   --home_gff        NCBI GFF for the home genome (product-name lookup)
   --query_bed       BED file with query-gene location (GOI identification)
-  --target_gffs     Target-genome GFFs (SynTerra exon_annotation format)
+  --target_gffs     Target-genome GFFs (SynVoy exon_annotation format)
   --target_names    Display names (optional – derived from GFF filename if absent)
   --candidate_beds  Cluster-region BED files (used to filter target genes to candidate loci)
   --homology_tsvs   Homology TSV files (target -> home mapping, fallback)
@@ -447,11 +447,11 @@ def _goi_priority_key(gene):
 
 def parse_target_gff(gff_file):
     """
-    Parse a SynTerra target-genome GFF.
+    Parse a SynVoy target-genome GFF.
 
     Extracts mRNA plus gene-level features for tandem copies.
     Also collects CDS sub-features to build exon coordinate lists.
-    Returns list of gene dicts with 'home_gene_id' from SynTerra_Parent.
+    Returns list of gene dicts with 'home_gene_id' from SynVoy_Parent.
     Deduplicates overlapping entries (same region annotated by different queries).
     """
     genes = []
@@ -516,9 +516,9 @@ def parse_target_gff(gff_file):
             if query_coverage is not None and query_coverage != query_coverage:
                 query_coverage = None
 
-            role = (attrs.get("SynTerraRole") or "").strip().lower()
+            role = (attrs.get("SynVoyRole") or "").strip().lower()
             if not role:
-                role = "goi" if raw_name.startswith("GOI_") or attrs.get("SynTerra_Parent", "").startswith("GOI_") else "flanking"
+                role = "goi" if raw_name.startswith("GOI_") or attrs.get("SynVoy_Parent", "").startswith("GOI_") else "flanking"
 
             gene_id = attrs.get("ID", "")
             exon_coords = cds_by_parent.get(gene_id, [])
@@ -532,7 +532,7 @@ def parse_target_gff(gff_file):
                 "target_id":    target_id,
                 "strand":       p[6],
                 "identity":     identity,
-                "home_gene_id": attrs.get("SynTerra_Parent", attrs.get("Parent", "")),
+                "home_gene_id": attrs.get("SynVoy_Parent", attrs.get("Parent", "")),
                 "n_exons":      int(attrs.get("Exons", "1")),
                 "exon_coords":  exon_coords,
                 "role":         role,
@@ -1448,7 +1448,7 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
     n_leaves = len(leaves)
     fig.update_layout(
         title=dict(
-            text="<b>SynTerra GOI Phylogenetic Tree</b>",
+            text="<b>SynVoy GOI Phylogenetic Tree</b>",
             x=0.5, font=dict(size=15),
         ),
         height=max(300, n_leaves * 60 + 100),
@@ -1476,7 +1476,7 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
 # ======================================================================
 
 def main():
-    ap = argparse.ArgumentParser(description="SynTerra synteny plot")
+    ap = argparse.ArgumentParser(description="SynVoy synteny plot")
     ap.add_argument("--home_bed",       required=True)
     ap.add_argument("--home_gff",       default=None)
     ap.add_argument("--query_bed",      default=None)
@@ -1492,7 +1492,10 @@ def main():
     ap.add_argument("--gap_visual_size",type=int, default=20000, help="Visual size of compressed gaps (bp)")
     ap.add_argument("--flank_fallback_bp",type=int, default=1000000, help="Fallback window if candidate genes miss GOI")
     ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
-    ap.add_argument("--plot_width",     type=int, default=3000, help="Total width of the output HTML plot")
+    ap.add_argument("--plot_width",     type=int, default=0, help="Total width of the output HTML plot (0=auto)")
+    ap.add_argument("--plot_height",    type=int, default=0, help="Total height of the output HTML plot (0=auto)")
+    ap.add_argument("--max_legend_entries", type=int, default=25, help="Maximum number of flanking genes to show in legend")
+    ap.add_argument("--ribbon_alpha_dense", type=float, default=0.20, help="Alpha for flanking ribbons")
     ap.add_argument("--hide_goi_absent", action="store_true",
                     help="Hide target tracks with no GOI-like annotation when informative tracks exist")
     ap.add_argument("--output",         required=True)
@@ -1525,7 +1528,7 @@ def main():
             font=dict(size=14, color="crimson"),
         )
         fig.update_layout(
-            title="SynTerra Synteny Plot (Failed: empty home BED)",
+            title="SynVoy Synteny Plot (Failed: empty home BED)",
             plot_bgcolor="white",
             paper_bgcolor="white",
         )
@@ -1870,7 +1873,7 @@ def main():
             home_id = lg.get("home_gene_id", "")
             if not home_id:
                 continue
-            ribbon_alpha = 0.20
+            ribbon_alpha = args.ribbon_alpha_dense
             for ug in upper["genes"]:
                 u_name = ug["name"]
                 u_home = ug.get("home_gene_id", u_name)
@@ -1988,9 +1991,11 @@ def main():
 
             # --- legend (one entry per home-gene name) ---
             lg_key = home_id if home_id else name
-            show_leg = lg_key not in legend_shown
-            if show_leg:
-                legend_shown.add(lg_key)
+            show_leg = False
+            if lg_key not in legend_shown:
+                if goi_like or len(legend_shown) < args.max_legend_entries:
+                    show_leg = True
+                    legend_shown.add(lg_key)
 
             add_gene(fig, gene, x_off, yb, GENE_H, colour, bclr, bw,
                      hover, show_leg, lg_key, line_dash=dash)
@@ -2068,8 +2073,8 @@ def main():
         # For rotated labels (-35°), the horizontal footprint is
         #   w_proj = w * cos(35°) ≈ 0.82 * w, but the diagonal sweep
         # still causes visual collisions — use a 70% factor as effective width.
-        fsize = 8 if n_genes <= 10 else 7
-        char_width = 550 if fsize == 8 else 480
+        fsize = max(6, 11 - (n_genes // 6))
+        char_width = 300 + (fsize * 25)
         import math
         rotation_factor = 0.70  # accounts for diagonal sweep of -35° text
         placed_ranges = []  # list of (x_left, x_right) of placed labels
@@ -2083,7 +2088,7 @@ def main():
             lbl_right = xc + est_width / 2
 
             # Minimum clearance between labels
-            margin = 300 if is_rotated else 400
+            margin = 350 if is_rotated else 450
 
             # Check if this label overlaps with any already placed
             overlaps = any(
@@ -2161,14 +2166,26 @@ def main():
     if ambiguous_track_count:
         subtitle_bits.append(f"{ambiguous_track_count} ambiguous track(s)")
 
+    if args.plot_height > 0:
+        fig_height = args.plot_height
+    else:
+        fig_height = max(450, n_tracks * 140 + 80)
+        
+    if args.plot_width > 0:
+        fig_width = args.plot_width
+    else:
+        # Scale dynamically between 1800 and 5000 based on window width
+        estimated_needed = max(2000, int((x_max - x_min) / 450))
+        fig_width = min(5000, estimated_needed)
+
     fig.update_layout(
         title=dict(
-            text=("<b>SynTerra Synteny Plot</b>"
+            text=("<b>SynVoy Synteny Plot</b>"
                   f"<br><sup>{' | '.join(subtitle_bits)}</sup>"),
             x=0.5, font=dict(size=15),
         ),
         height=fig_height,
-        width=args.plot_width,
+        width=fig_width,
         xaxis=dict(
             title="", # No title since numbers are relative/discontinuous
             showgrid=False, 

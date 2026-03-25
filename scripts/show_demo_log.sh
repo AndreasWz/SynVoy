@@ -25,7 +25,7 @@ case "${mode}" in
       "/ 00:01:39  P3 Region Clustering  |  CLUSTER_REGIONS [10/12]  -  Building loci clusters"
       "- 00:01:56  P4 Trees and Plots  |  COMPUTE_TREE  -  Inferring GOI phylogeny"
       "\\ 00:02:06  P4 Trees and Plots  |  PLOT_SYNTENY  -  Rendering interactive figure"
-      "| 00:02:12  P5 Reporting  |  GENERATE_REPORT  -  Writing synterra_report.json"
+      "| 00:02:12  P5 Reporting  |  GENERATE_REPORT  -  Writing synvoy_report.json"
     )
     for frame in "${frames[@]}"; do
       printf '\r%-140s' "${frame}"
@@ -34,7 +34,7 @@ case "${mode}" in
     printf '\r%-140s\n' "[OK] Pipeline finished successfully"
     printf 'Duration: 2m 12s\n'
     printf 'Tasks Completed: 26\n'
-    printf 'Raw log: .synterra_logs/run_YYYYmmdd_HHMMSS.log\n'
+    printf 'Raw log: .synvoy_logs/run_YYYYmmdd_HHMMSS.log\n'
     ;;
   *)
     echo "Usage: $0 [instant|live]" >&2

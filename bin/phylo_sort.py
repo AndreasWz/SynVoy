@@ -13,7 +13,7 @@ from these accessions via the NCBI Datasets CLI, which is already a pipeline
 dependency.
 """
 
-import sys
+import hashlib
 import os
 import re
 import json
@@ -381,8 +381,49 @@ def sort_by_ete3(args, target_list):
 # FALLBACK SORT
 # =============================================================================
 
+def parse_fasta_simple(filepath):
+    import gzip
+    _open = gzip.open if str(filepath).endswith('.gz') else open
+    current_header = None
+    current_seq = []
+    with _open(filepath, 'rt') as f:
+        for line in f:
+            line = line.rstrip('\n\r')
+            if line.startswith('>'):
+                if current_header is not None:
+                    yield ''.join(current_seq)
+                current_header = line[1:]
+                current_seq = []
+            elif line and current_header is not None:
+                current_seq.append(line.strip())
+        if current_header is not None:
+            yield ''.join(current_seq)
+
+def minhash_sketch(filepath, k=21, sketch_size=10000):
+    import heapq
+    sketch = []
+    try:
+        for seq in parse_fasta_simple(filepath):
+            seq = seq.upper()
+            stride = max(1, len(seq) // 500000)
+            for i in range(0, len(seq) - k + 1, stride):
+                kmer = seq[i:i+k]
+                if 'N' in kmer: continue
+                h = int(hashlib.md5(kmer.encode()).hexdigest(), 16)
+                if len(sketch) < sketch_size:
+                    heapq.heappush(sketch, -h)
+                elif -h > sketch[0]:
+                    heapq.heappushpop(sketch, -h)
+    except Exception as e:
+        pass
+    return set([-x for x in sketch])
+
+def jaccard_distance(s1, s2):
+    if not s1 or not s2: return 1.0
+    union = len(s1 | s2)
+    return 1.0 - (len(s1 & s2) / union) if union > 0 else 1.0
+
 def _collect_targets(args):
-    """Collect target file list from args."""
     target_list = []
     if args.targets:
         target_list = args.targets
@@ -392,17 +433,36 @@ def _collect_targets(args):
                 if (f.endswith(args.img_ext) or f.endswith(".fasta") or
                     f.endswith(".fa") or f.endswith(args.img_ext + ".gz") or
                     f.endswith(".fasta.gz") or f.endswith(".fa.gz")):
-                    target_list.append(os.path.basename(f))
+                    target_list.append(os.path.join(args.targets_dir, f))
     return target_list
 
+def fallback_sort(args, target_list):
+    """Fallback sort using MinHash Jaccard distance or alphabetical if fasta missing."""
+    if not hasattr(args, 'home_fasta') or not args.home_fasta or not os.path.exists(args.home_fasta):
+        print("[phylo_sort] Falling back to alphabetical sorting (no home_fasta)")
+        with open(args.output, 'w') as out:
+            for target in sorted([os.path.basename(t) for t in target_list]):
+                out.write(f"{target}\t0\n")
+        return
 
-def fallback_sort(args):
-    """Alphabetical sort with distance=0."""
-    print("[phylo_sort] Falling back to alphabetical sorting")
-    target_list = _collect_targets(args)
-    with open(args.output, 'w') as out:
-        for target in sorted(target_list):
-            out.write(f"{os.path.basename(target)}\t0\n")
+    print(f"[phylo_sort] Falling back to MinHash sorting against {args.home_fasta}")
+    home_sketch = minhash_sketch(args.home_fasta)
+    results = []
+    for tgt in target_list:
+        tgt_path = tgt if os.path.exists(tgt) else os.path.join(args.targets_dir or "", tgt)
+        if not os.path.exists(tgt_path):
+            results.append((1.0, os.path.basename(tgt)))
+            continue
+        tgt_sketch = minhash_sketch(tgt_path)
+        dist = jaccard_distance(home_sketch, tgt_sketch)
+        # Store scaled distance so sorting and integers work, max 1000
+        dist_scaled = dist * 1000.0
+        results.append((dist_scaled, os.path.basename(tgt)))
+    
+    results.sort(key=lambda x: x[0])
+    with open(args.output, 'w') as f:
+        for dist, target in results:
+            f.write(f"{target}\t{int(dist)}\n")
 
 
 # =============================================================================
@@ -415,6 +475,8 @@ def main():
     )
     parser.add_argument("--home", required=True,
                         help="Home genome name, species name, or TaxID")
+    parser.add_argument("--home_fasta", default="",
+                        help="Path to home genome FASTA for MinHash fallback")
     parser.add_argument("--targets", nargs='+',
                         help="List of target genome files or names")
     parser.add_argument("--targets_dir",
@@ -464,8 +526,8 @@ def main():
         _write_result(args.output, result)
         return
 
-    # Strategy 3: Alphabetical fallback
-    fallback_sort(args)
+    # Strategy 3: MinHash / Alphabetical fallback
+    fallback_sort(args, target_list)
 
 
 def _write_result(output_file, scored_targets):

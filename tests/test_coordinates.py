@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration tests for coordinate transformations in SynTerra.
+Integration tests for coordinate transformations in SynVoy.
 
 Tests the critical coordinate conversion logic:
 1. GFF3 (1-based, closed) to BED (0-based, half-open)
@@ -168,7 +168,7 @@ def test_coordinate_edge_cases():
 def run_all_tests():
     """Run all coordinate transformation tests."""
     print("=" * 60)
-    print("Running SynTerra Coordinate Transformation Tests")
+    print("Running SynVoy Coordinate Transformation Tests")
     print("=" * 60)
     
     tests = [

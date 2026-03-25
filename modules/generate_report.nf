@@ -15,7 +15,7 @@ process GENERATE_REPORT {
     val qc_policy
     
     output:
-    path "synterra_report.json", emit: report
+    path "synvoy_report.json", emit: report
     
     script:
     """
@@ -58,6 +58,6 @@ process GENERATE_REPORT {
         --results_dir staged_results \\
         --qc_json "${qc_json}" \\
         --qc_policy "${qc_policy}" \\
-        --output synterra_report.json
+        --output synvoy_report.json
     """
 }

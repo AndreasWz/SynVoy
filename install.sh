@@ -1,15 +1,15 @@
 #!/bin/bash
-# SynTerra Installation Script
+# SynVoy Installation Script
 # Sets up the Conda environment and verifies dependencies.
-# Run from the SynTerra project root: ./install.sh
+# Run from the SynVoy project root: ./install.sh
 
 set -e
 
 echo "==========================================="
-echo "  SynTerra Installation Script"
+echo "  SynVoy Installation Script"
 echo "==========================================="
 
-ENV_NAME="synterra_env"
+ENV_NAME="synvoy_env"
 
 # ── Check for Conda ──────────────────────────────────────────
 if ! command -v conda &> /dev/null; then

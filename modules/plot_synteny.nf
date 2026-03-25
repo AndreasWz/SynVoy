@@ -37,7 +37,9 @@ process PLOT_SYNTENY {
     mkdir -p "\$inputs_dir"
     cp $home_bed "\$inputs_dir/" || true
     cp $query_bed "\$inputs_dir/" || true
-
+    # Default to original GFF if none provided or subsetting fails
+    FINAL_HOME_GFF="$home_gff"
+    
     # Subset home GFF to synteny block region (+/- 100kb padding) to avoid
     # copying the entire (potentially 100+ MB) annotation file.
     if [ "$home_gff" != "NO_GFF" ]; then
@@ -49,10 +51,14 @@ process PLOT_SYNTENY {
         PADDED_END=\$(( REGION_END + PAD ))
 
         # Filter GFF: keep header lines and features overlapping the region
+        SUBSET_GFF="\$inputs_dir/\$(basename $home_gff)"
         awk -v chr="\$REGION_CHROM" -v start="\$PADDED_START" -v end="\$PADDED_END" \\
             'BEGIN{OFS="\\t"} /^#/{print; next} \$1==chr && \$4<=end && \$5>=start{print}' \\
-            $home_gff > "\$inputs_dir/\$(basename $home_gff)" || \\
-            cp $home_gff "\$inputs_dir/" || true
+            $home_gff > "\$SUBSET_GFF" || \\
+            cp $home_gff "\$SUBSET_GFF" || true
+        
+        # Point plot_synteny to the much smaller subset GFF
+        FINAL_HOME_GFF="\$SUBSET_GFF"
     fi
     if [ -n "${gffs_str}" ]; then
         cp ${gffs_str} "\$inputs_dir/" || true
@@ -73,7 +79,7 @@ process PLOT_SYNTENY {
     ${projectDir}/bin/plot_synteny.py \\
         --query_bed $query_bed \\
         --home_bed $home_bed \\
-        --home_gff $home_gff \\
+        --home_gff "\$FINAL_HOME_GFF" \\
         $gffs_arg \\
         $names_arg \\
         $cands_arg \\

@@ -54,8 +54,8 @@ class TestGenerateReport(unittest.TestCase):
             "\n".join(
                 [
                     "##gff-version 3",
-                    "chr1\texon_annotation\tmRNA\t100\t300\t92.0\t+\t.\tID=GOI_gene|pass;Name=GOI_gene;SynTerra_Parent=GOI_gene;SynTerraRole=goi;Confidence=HIGH;GOIClass=confident_goi;EvidenceType=exon_annotation;Identity=92.0;Exons=3",
-                    "chr1\tflanking_annotation\tmRNA\t400\t600\t81.0\t+\t.\tID=geneA|pass;Name=geneA;SynTerra_Parent=geneA;SynTerraRole=flanking;Confidence=HIGH;EvidenceType=flanking_miniprot;Identity=81.0;Exons=2",
+                    "chr1\texon_annotation\tmRNA\t100\t300\t92.0\t+\t.\tID=GOI_gene|pass;Name=GOI_gene;SynVoy_Parent=GOI_gene;SynVoyRole=goi;Confidence=HIGH;GOIClass=confident_goi;EvidenceType=exon_annotation;Identity=92.0;Exons=3",
+                    "chr1\tflanking_annotation\tmRNA\t400\t600\t81.0\t+\t.\tID=geneA|pass;Name=geneA;SynVoy_Parent=geneA;SynVoyRole=flanking;Confidence=HIGH;EvidenceType=flanking_miniprot;Identity=81.0;Exons=2",
                 ]
             ) + "\n",
         )
@@ -64,7 +64,7 @@ class TestGenerateReport(unittest.TestCase):
             "\n".join(
                 [
                     "##gff-version 3",
-                    "chr7\tfallback_hits\tmRNA\t1000\t1200\t55.0\t-\t.\tID=GOI_gene|ambig;Name=GOI_gene;SynTerra_Parent=GOI_gene;SynTerraRole=goi;Confidence=LOW;GOIClass=ambiguous_goi_family_member;EvidenceType=fallback_hit_span;Identity=55.0;Exons=1",
+                    "chr7\tfallback_hits\tmRNA\t1000\t1200\t55.0\t-\t.\tID=GOI_gene|ambig;Name=GOI_gene;SynVoy_Parent=GOI_gene;SynVoyRole=goi;Confidence=LOW;GOIClass=ambiguous_goi_family_member;EvidenceType=fallback_hit_span;Identity=55.0;Exons=1",
                 ]
             ) + "\n",
         )

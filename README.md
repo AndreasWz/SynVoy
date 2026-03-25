@@ -1,8 +1,11 @@
-# SynTerra
+# SynVoy - Synteny Voyager
 
-SynTerra is a Nextflow pipeline for finding orthologous genes across evolutionary distances using genomic synteny.
+*Navigating synteny. Discovering orthology.*  
+*Mapping evolutionary pathways through syntenic navigation.*
 
-Standard sequence-similarity searches often fail when orthologs are highly divergent or consist of short, complex micro-exons. SynTerra addresses this by leveraging the conservation of gene order (macro-synteny): it identifies the conserved flanking genes around a Gene of Interest (GOI) in a reference species, locates the homologous genomic neighborhood in target species, and then runs a localized sequence search to find the GOI candidate.
+SynVoy is a Nextflow pipeline for finding orthologous genes across evolutionary distances using genomic synteny.
+
+Standard sequence-similarity searches often fail when orthologs are highly divergent or consist of short, complex micro-exons. SynVoy addresses this by leveraging the conservation of gene order (macro-synteny): it identifies the conserved flanking genes around a Gene of Interest (GOI) in a reference species, locates the homologous genomic neighborhood in target species, and then runs a localized sequence search to find the GOI candidate.
 
 > **Status:** Early development. Expect breaking changes between versions.
 
@@ -27,7 +30,7 @@ Standard sequence-similarity searches often fail when orthologs are highly diver
 
 ## How It Works
 
-1. **Input Resolution** — Accepts a UniProt/NCBI accession (Easy Mode) or a local FASTA (Pro Mode) and resolves it to a protein query.
+1. **Input Resolution** — Accepts a UniProt/NCBI accession, a local FASTA, or an inline FASTA sequence (Easy Mode) and resolves it to a protein query.
 2. **Genome Staging** — In Easy Mode, automatically fetches the reference ("home") genome and related target assemblies from NCBI. In Pro Mode, the user supplies local files.
 3. **Gene Localization** — Maps the GOI onto the home genome with tblastn + MMseqs2 and annotates its exon structure (from GFF or *de novo* via Prodigal).
 4. **Flanking Gene Extraction** — Extracts the *n* genes immediately upstream and downstream of the GOI locus.
@@ -53,8 +56,8 @@ Standard sequence-similarity searches often fail when orthologs are highly diver
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/AndreasWz/SynTerra.git
-cd SynTerra
+git clone https://github.com/AndreasWz/SynVoy.git
+cd SynVoy
 ```
 
 ### 2. Install Nextflow
@@ -91,10 +94,10 @@ conda env create -f environment.yml
 # or: mamba env create -f environment.yml
 
 # Activate it
-conda activate synterra_env
+conda activate synvoy_env
 ```
 
-> The environment is named `synterra_env` (defined in `environment.yml`). You must activate it every time you open a new terminal before running the pipeline.
+> The environment is named `synvoy_env` (defined in `environment.yml`). You must activate it every time you open a new terminal before running the pipeline.
 
 ### 4. Verify the Installation
 
@@ -113,7 +116,7 @@ python -c "import Bio; import plotly; import ete3; import taxopy; import parasai
 If any tool is missing, re-create the environment:
 
 ```bash
-conda env remove -n synterra_env
+conda env remove -n synvoy_env
 conda env create -f environment.yml
 ```
 
@@ -123,7 +126,7 @@ If you prefer containers over Conda:
 
 ```bash
 # Build the image (all tools are baked in)
-docker build -t synterra-local:latest .
+docker build -t synvoy-local:latest .
 
 # Run with the docker profile (no Conda needed)
 nextflow run main.nf -profile docker --query_id Q16553 --outdir results
@@ -141,7 +144,7 @@ nextflow run main.nf -profile singularity --query_id Q16553 --outdir results
 
 ### Easy Mode (automated genome retrieval)
 
-Provide a UniProt or NCBI protein accession. SynTerra fetches the reference genome, downloads related target assemblies, and runs the full analysis:
+Provide a UniProt/NCBI protein accession, a local FASTA (`--query`), or an inline sequence (`--query_seq`). SynVoy fetches the reference genome, downloads related target assemblies, and runs the full analysis:
 
 ```bash
 nextflow run main.nf \
@@ -156,6 +159,7 @@ Optional flags:
 
 - `--home_species "Homo sapiens"` — override auto-detected species.
 - `--target_species "Gallus gallus,Mus musculus"` — specify target species instead of auto-selecting.
+- `--query_seq "MKT..."` — inline protein sequence; requires `--home_species`.
 
 ### Pro Mode (local files)
 
@@ -187,7 +191,7 @@ Results are written to the directory specified by `--outdir`:
 | `*_synteny_plot.html` | Interactive HTML visualization of syntenic blocks across species |
 | `*_tree.nwk` | Newick phylogenetic tree of discovered GOI sequences |
 | `regions/*.regions.bed` | BED files with genomic coordinates of candidate syntenic blocks |
-| `synterra_report.json` | Machine-readable run summary (parameters, genome QC, exit codes) |
+| `synvoy_report.json` | Machine-readable run summary (parameters, genome QC, exit codes) |
 | `intermediate/` | Per-phase artifacts (flanking genes, MMseqs2 hits, GFFs, etc.) |
 
 ---
@@ -199,4 +203,4 @@ Results are written to the directory specified by `--outdir`:
 
 ## License
 
-SynTerra is distributed under the [GNU AGPLv3](LICENSE) License.
+SynVoy is distributed under the [GNU AGPLv3](LICENSE) License.

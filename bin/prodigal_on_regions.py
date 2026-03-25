@@ -202,7 +202,7 @@ def main():
         print("No valid regions after merging; skipping Prodigal.", file=sys.stderr)
         return
 
-    tmp_dir = tempfile.mkdtemp(prefix="synterra_prodigal_")
+    tmp_dir = tempfile.mkdtemp(prefix="synvoy_prodigal_")
     try:
         regions_fa = os.path.join(tmp_dir, "regions.fna")
         tmp_faa = os.path.join(tmp_dir, "prodigal.faa")

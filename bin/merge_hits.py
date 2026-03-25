@@ -75,7 +75,9 @@ def main():
         for next_hit in hits[1:]:
             # Check overlap
             # Same chrom and start within range of end (allow gaps)
-            if next_hit['chrom'] == curr['chrom'] and next_hit['start'] < curr['end'] + 1000:
+            if (next_hit['chrom'] == curr['chrom'] and
+                    next_hit['start'] < curr['end'] + 1000 and
+                    next_hit['strand'] == curr['strand']):
                 # Merge
                 curr['end'] = max(curr['end'], next_hit['end'])
                 # Keep better score (min evalue logic or max bitscore - assume evalue here from module)

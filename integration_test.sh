@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# SynTerra Integration Test
+# SynVoy Integration Test
 # Run with: ./integration_test.sh [QUERY_FILE] [TARGET_DIR] [HOME_GENOME]
 
 QUERY=${1:-"test_data/query.fasta"}
@@ -9,7 +9,7 @@ TARGET_DIR=${2:-"test_data/targets/"}
 HOME_GENOME=${3:-"test_data/home.fasta"}
 OUTDIR="results_test"
 
-echo "=== SynTerra Integration Test ==="
+echo "=== SynVoy Integration Test ==="
 echo "Query: $QUERY"
 echo "Targets: $TARGET_DIR"
 echo "Output: $OUTDIR"
@@ -52,7 +52,7 @@ else
 fi
 
 # 3. Check Report
-REPORT="$OUTDIR/synterra_report.html"
+REPORT="$OUTDIR/synvoy_report.html"
 if [ -f "$REPORT" ]; then
     echo "  [PASS] Report generated."
     

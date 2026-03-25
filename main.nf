@@ -86,13 +86,45 @@ def uiPhase(int idx, String title) {
 def printHeader() {
     log.info ""
     log.info uiRule()
-    log.info "${c_cyan}${c_bold}SynTerra${c_reset} ${c_dim}v2.0${c_reset}"
+    log.info "${c_cyan}${c_bold}SynVoy${c_reset} ${c_dim}v2.0${c_reset}"
     log.info "${c_dim}Phylogenetically-informed syntenic ortholog discovery${c_reset}"
     log.info uiRule()
 }
 
+def looksLikeInlineSequence(value) {
+    if (!value) {
+        return false
+    }
+    def text = value.toString().trim()
+    if (!text) {
+        return false
+    }
+    if (text.contains('\n') || text.contains('\r')) {
+        return true
+    }
+    if (text.startsWith('>')) {
+        return true
+    }
+    if (text.size() >= 30 && (text ==~ /[A-Za-z\\*\\-]+/)) {
+        return true
+    }
+    return false
+}
+
 def printParams() {
-    def query_display = params.mode == 'easy' ? params.query_id : (params.query ? new File(params.query).name : 'N/A')
+    def inline_query = params.query_seq ?: (looksLikeInlineSequence(params.query_id) ? params.query_id : null)
+    def query_display = 'N/A'
+    if (params.mode == 'easy') {
+        if (inline_query) {
+            query_display = 'inline_sequence'
+        } else if (params.query) {
+            query_display = new File(params.query).name
+        } else {
+            query_display = params.query_id ?: 'N/A'
+        }
+    } else {
+        query_display = params.query ? new File(params.query).name : 'N/A'
+    }
     def home_display = params.mode == 'easy' ? params.home_species : (params.home_genome ? new File(params.home_genome).name : 'N/A')
     def target_display = params.target_species ?: 'auto (taxonomic search)'
     
@@ -119,6 +151,7 @@ printParams()
 // Stable sentinel files for optional path inputs.
 def no_gff_file = file("${projectDir}/assets/sentinels/NO_GFF")
 def no_species_map_file = file("${projectDir}/assets/sentinels/NO_SPECIES_MAP")
+def inline_query_mode = false
 
 workflow {
     log.info ""
@@ -127,12 +160,22 @@ workflow {
     
     // Mode-specific validation
     if (params.mode == 'easy') {
-        if (!params.query_id) {
-            log.error "${c_red}Easy mode requires --query_id (UniProt or NCBI ID)${c_reset}"
+        def query_id_is_inline = looksLikeInlineSequence(params.query_id)
+        def has_query = params.query_id || params.query || params.query_seq
+        if (!has_query) {
+            log.error "${c_red}Easy mode requires --query_id, --query, or --query_seq${c_reset}"
             exit 1
         }
-        if (params.query) {
-            uiStatus('WARN', 'INPUT', 'Pro mode flag --query was provided but ignored in easy mode; using --query_id.')
+        if ((params.query_seq || query_id_is_inline) && !params.home_species) {
+            log.error "${c_red}Easy mode with inline sequence requires --home_species${c_reset}"
+            exit 1
+        }
+        if (params.query_seq && params.query) {
+            uiStatus('WARN', 'INPUT', 'Both --query_seq and --query were provided; using --query_seq.')
+        } else if (params.query && params.query_id && !params.query_seq && !query_id_is_inline) {
+            uiStatus('WARN', 'INPUT', 'Both --query and --query_id were provided; using --query.')
+        } else if (params.query_id && query_id_is_inline) {
+            uiStatus('WARN', 'INPUT', 'Inline sequence detected in --query_id; treating as inline FASTA input.')
         }
     } else if (params.mode == 'pro') {
         if (!params.query) {
@@ -160,12 +203,24 @@ workflow {
     
     // Channel setup — depends on mode
     if (params.mode == 'easy') {
-        // ID/symbol mode: resolve input via resolver process.
+        // ID/symbol/file/inline mode: resolve input via resolver process.
+        def query_id_is_inline = looksLikeInlineSequence(params.query_id)
         def gene_input = params.query_id
+        inline_query_mode = false
+        if (params.query_seq) {
+            gene_input = params.query_seq
+            inline_query_mode = true
+        } else if (params.query) {
+            gene_input = params.query
+        } else if (query_id_is_inline) {
+            gene_input = params.query_id
+            inline_query_mode = true
+        }
         def species_override = params.home_species ?: ''
         
-        uiStatus('RUN ', 'RESOLVE_QUERY', 'Easy mode: resolving query_id input')
-        RESOLVE_GENE_INPUT(gene_input, species_override)
+        def resolve_label = inline_query_mode ? 'Easy mode: resolving inline FASTA input' : (params.query ? 'Easy mode: resolving local FASTA' : 'Easy mode: resolving query_id input')
+        uiStatus('RUN ', 'RESOLVE_QUERY', resolve_label)
+        RESOLVE_GENE_INPUT(gene_input, species_override, inline_query_mode)
         
         // Use resolved FASTA as query
         raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
@@ -265,7 +320,7 @@ workflow {
     uiStatus('RUN ', 'ANNOTATE_GOI', 'Annotating GOI exons')
     
     // Determine query_id for name-based GFF matching
-    def effective_query_id = params.query_id ?: ''
+    def effective_query_id = inline_query_mode ? '' : (params.query_id ?: '')
     
     ANNOTATE_GOI(
         normalized_gene_ch.first(),
@@ -605,34 +660,34 @@ workflow {
         ITERATIVE_SEARCH.out.region_genes
             .map { it[1] } 
             .flatten()
-            .collect()
             .ifEmpty(no_regions_sentinel)
+            .collect()
             .set { collected_regions }
 
         ITERATIVE_SEARCH.out.gff
             .map { it[1] }
             .flatten()
-            .collect()
             .ifEmpty(no_gffs_sentinel)
+            .collect()
             .set { collected_region_gffs }
 
         ITERATIVE_SEARCH.out.homology
             .map { it[1] }
             .flatten()
-            .collect()
             .ifEmpty(no_homology_sentinel)
+            .collect()
             .set { collected_homology }
             
         ITERATIVE_SEARCH.out.hits
             .map { it[1] } 
-            .collect()
             .ifEmpty(no_hits_sentinel)
+            .collect()
             .set { collected_hits }
 
         CLUSTER_REGIONS.out.scores
             .map { it[1] }
-            .collect()
             .ifEmpty(no_scores_sentinel)
+            .collect()
             .set { collected_scores }
             
         // No standalone augmented proteins - pass sentinel file
@@ -667,11 +722,11 @@ workflow.onComplete {
         log.info "${c_dim}Key outputs:${c_reset}"
 
         // Check report existence before listing it
-        def report_file = file("${params.outdir}/synterra_report.json")
+        def report_file = file("${params.outdir}/synvoy_report.json")
         if (report_file.exists()) {
-            log.info "${c_dim}- synterra_report.json          (analysis summary)${c_reset}"
+            log.info "${c_dim}- synvoy_report.json          (analysis summary)${c_reset}"
         } else {
-            log.info "${c_yellow}- synterra_report.json          (NOT GENERATED)${c_reset}"
+            log.info "${c_yellow}- synvoy_report.json          (NOT GENERATED)${c_reset}"
         }
 
         log.info "${c_dim}- *_synteny_plot.html           (interactive visualization)${c_reset}"

@@ -172,9 +172,9 @@ def summarize_annotations(gff_files):
                         continue
                     attrs = _parse_gff_attrs(parts[8])
                     model_id = attrs.get("ID", "")
-                    role = (attrs.get("SynTerraRole") or "").strip().lower()
+                    role = (attrs.get("SynVoyRole") or "").strip().lower()
                     if not role:
-                        role = "goi" if model_id.startswith("GOI_") or attrs.get("SynTerra_Parent", "").startswith("GOI_") else "flanking"
+                        role = "goi" if model_id.startswith("GOI_") or attrs.get("SynVoy_Parent", "").startswith("GOI_") else "flanking"
                     confidence = (attrs.get("Confidence", "") or "UNKNOWN").upper()
                     goi_class = attrs.get("GOIClass", "")
                     evidence_type = attrs.get("EvidenceType", attrs.get("Type", "")) or "unknown"
@@ -368,7 +368,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate SynTerra final evidence report")
+    parser = argparse.ArgumentParser(description="Generate SynVoy final evidence report")
     parser.add_argument("--results_dir", required=True)
     parser.add_argument("--qc_json", help="Path to QC summary JSON")
     parser.add_argument("--qc_policy", default="unspecified", help="QC handling policy used in the workflow")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Robust genome downloader for SynTerra.
+Robust genome downloader for SynVoy.
 
 Strategy (best-of-both-worlds hybrid):
   1. Use `datasets summary` to resolve accession → direct NCBI FTP/HTTPS URL.

@@ -1,0 +1,2 @@
+after having located GOI in home genome, inspect length of gene and lenght of exons -> from this info, also taking flanking genes into account (distance between them, lenght, exon counts etc) -> figure out parameters for the pipeline (sensitivity, more sentitive to fublications etc)
+what if goi is part of a gene cluster? (of e.g. very similar genes?) -> add them as secondary gois? and make sure we have flanking genes that are not similar to goi? -> expanding flanking gene acount if needed for that
