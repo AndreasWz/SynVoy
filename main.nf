@@ -400,12 +400,13 @@ workflow {
     uiStatus('RUN ', 'EXTRACT_FLANKING', "Extracting flanking genes (n=${params.n_flanking_genes})")
     
     EXTRACT_FLANKING(
-        distinct_loci_ch, 
-        effective_home_gff_ch, 
+        distinct_loci_ch,
+        effective_home_gff_ch,
         home_genome_ch.first(),
         params.n_flanking_genes,
         params.min_flanking_size,
-        params.prefer_large_genes
+        params.prefer_large_genes,
+        normalized_gene_ch.first()  // GOI protein for similarity-based flanking filter
     )
     
     // 6b. CRITICAL FIX: Prepare Initial Database with GOI included

@@ -10,14 +10,16 @@ process EXTRACT_FLANKING {
     val n_flank
     val min_size
     val prefer_large
+    path goi_faa
 
     output:
     tuple val(locus_id), path("synteny_block_${locus_id}.bed"), emit: bed
     tuple val(locus_id), path("flanking_proteins_${locus_id}.faa"), emit: faa
 
     script:
+    def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --max_goi_similarity ${params.max_flanking_goi_similarity}" : ""
     """
-    # v3: GOI overlap re-injection + fallback pseudo-gene (force re-run)
+    # v4: GOI-similarity filter + expanded window
     extract_flanking_genes.py \\
         --bed $bed \\
         --gff $gff \\
@@ -28,6 +30,7 @@ process EXTRACT_FLANKING {
         --exon_mode ${params.exon_level_search} \\
         --pred_flank_window ${params.pred_flank_window} \\
         --pred_keep_pct ${params.pred_keep_pct} \\
+        $goi_arg \\
         --out_bed synteny_block_${locus_id}.bed \\
         --out_faa flanking_proteins_${locus_id}.faa
     """
