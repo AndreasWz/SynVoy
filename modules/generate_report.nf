@@ -22,7 +22,7 @@ process GENERATE_REPORT {
     mkdir -p staged_results/regions staged_results/hits staged_results/scores
 
     # Stage region outputs (.faa / .gff / .homology.tsv) from numbered subdirs
-    for f in \$(find region_genes region_gffs homology -type f 2>/dev/null); do
+    for f in \$(find -L region_genes region_gffs homology -type f 2>/dev/null); do
         fname=\$(basename "\$f")
         case "\$fname" in
             NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
@@ -31,7 +31,7 @@ process GENERATE_REPORT {
     done
 
     # Stage hits directories (containing .m8 files)
-    for d in \$(find hits -mindepth 1 -maxdepth 1 -type d 2>/dev/null); do
+    for d in \$(find -L hits -mindepth 1 -maxdepth 1 -type d 2>/dev/null); do
         dname=\$(basename "\$d")
         case "\$dname" in
             NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_SPECIES_MAP|NO_SCORES) continue ;;
@@ -41,12 +41,12 @@ process GENERATE_REPORT {
         fi
     done
     # Also pick up any plain .m8 files staged directly under hits/
-    for f in \$(find hits -maxdepth 2 -name '*.m8' -type f 2>/dev/null); do
+    for f in \$(find -L hits -maxdepth 2 -name '*.m8' -type f 2>/dev/null); do
         cp "\$f" staged_results/hits/ 2>/dev/null || true
     done
 
     # Stage structured region scores
-    for f in \$(find scores -type f 2>/dev/null); do
+    for f in \$(find -L scores -type f 2>/dev/null); do
         fname=\$(basename "\$f")
         case "\$fname" in
             NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_SPECIES_MAP|NO_SCORES) continue ;;

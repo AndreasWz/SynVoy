@@ -47,6 +47,11 @@ def genome_id(name):
     if m:
         parts = m.group(1).split('_')          # ['GCF','012345','6']
         return f'{parts[0]}_{parts[1]}.{parts[2]}'
+    # Non-GCF genomes: extract the genome name encoded between '|' and '_b<N>_'
+    # e.g. 'GOI_Melt|Colletes_gigas_fa_b0_l1_fallback' -> 'Colletes_gigas_fa'
+    m2 = re.search(r'[|](.+?)_b[0-9]+_', name)
+    if m2:
+        return m2.group(1)
     return 'home'
 
 # ---- Keep longest representative per genome ----
