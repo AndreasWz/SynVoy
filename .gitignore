@@ -45,11 +45,4 @@ queries/
 easy_mode_genomes/
 
 # Ground truth: large genome data (FASTA, GFF3, zips) and absolute-path symlinks
-ground_truth/*/targets/*.fa
-ground_truth/*/targets/*.fna
-ground_truth/*/targets/*.fna.gz
-ground_truth/*/targets/*.fa.gz
-ground_truth/*/targets/*.gff3
-ground_truth/*/home/
-ground_truth/**/*.zip
-ground_truth/**/*.pdf
+ground_truth/*
