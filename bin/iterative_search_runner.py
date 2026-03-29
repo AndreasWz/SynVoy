@@ -552,6 +552,12 @@ def _classify_goi_evidence(
     if evidence_type == "fallback_hit_span":
         if flanking_support >= 2 and qcov >= 0.75 and identity >= 60.0:
             return "MEDIUM", "probable_goi", "fallback_span_supported_by_flanking_context"
+        # Strong syntenic evidence (≥5 flanking genes) upgrades even low-qcov hits.
+        # Short secreted peptides (e.g. melittin, ~70 aa) can only reach ~45% qcov
+        # because the signal peptide exon is too diverged to align; the flanking
+        # gene context provides orthology evidence beyond per-alignment statistics.
+        if flanking_support >= 5 and (qcov >= 0.25 or identity >= 35.0):
+            return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
         return "LOW", "ambiguous_goi_family_member", "fallback_span_only"
 
     if evidence_type == "rescued_exon":
@@ -2246,9 +2252,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                     if not exons:
                         if work_hits:
-                            strand_votes = {'+': 0, '-': 0}
+                            strand_votes = {'+': 0.0, '-': 0.0}
                             for h in work_hits:
-                                strand_votes[h.get('strand', '+')] += 1
+                                strand_votes[h.get('strand', '+')] += float(h.get('bits', 1))
                             strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
 
                             ordered_hits = sorted(
@@ -3125,6 +3131,31 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 base_db_sequences[base] = {'id': clean_id, 'seq': seq, 'header': header}
             query_lengths.setdefault(base, len(seq))
 
+        # Identify flanking proteins that are proxies for the GOI query
+        # (e.g., gene-LY6E is a proxy for GOI_LY6E — same gene, different prefix).
+        # Proxy blocks seeded by these genes will bypass the min_block_genes filter.
+        _goi_bare_names: set = set()
+        for _rid in list(base_db_sequences.keys()):
+            if is_goi_query_id(_rid) and '|' not in _rid:
+                _bare = _rid
+                if _bare.startswith('GOI_copy_'):
+                    _bare = _bare[9:]
+                elif _bare.startswith('GOI_'):
+                    _bare = _bare[4:]
+                _goi_bare_names.add(_bare)
+        goi_proxy_flanking_parents: set = set()
+        for _rid in list(base_db_sequences.keys()):
+            if is_goi_query_id(_rid) or '|' in _rid:
+                continue
+            _bare = _rid[5:] if _rid.startswith('gene-') else _rid
+            if _bare in _goi_bare_names:
+                goi_proxy_flanking_parents.add(_rid)
+        if goi_proxy_flanking_parents:
+            logger.info(
+                f"[{genome_name}] GOI proxy flanking parents: "
+                f"{sorted(goi_proxy_flanking_parents)}"
+            )
+
         c_dist = args.cluster_distance
         if c_dist <= 0:
             c_dist = estimate_cluster_distance(genome_path)
@@ -3193,12 +3224,24 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         # Keep only blocks with enough anchor genes to avoid spending hours
         # on singleton/noise loci in fragmented genomes.
+        # Exception: single-gene blocks seeded by a GOI proxy (e.g., gene-LY6E)
+        # are retained so the full GOI search runs on the correct scaffold.
         if args.min_block_genes > 1:
             pre_filter_count = len(synteny_blocks)
-            synteny_blocks = [b for b in synteny_blocks if b.get('genes_count', 0) >= args.min_block_genes]
+            filtered_blocks = []
+            proxy_blocks = []
+            for _b in synteny_blocks:
+                if _b.get('genes_count', 0) >= args.min_block_genes:
+                    filtered_blocks.append(_b)
+                elif goi_proxy_flanking_parents and any(
+                    _g in goi_proxy_flanking_parents for _g in _b.get('genes', [])
+                ):
+                    proxy_blocks.append(_b)
+            synteny_blocks = filtered_blocks + proxy_blocks
             logger.info(
                 f"[{genome_name}] Block filter (min_block_genes={args.min_block_genes}): "
-                f"{len(synteny_blocks)}/{pre_filter_count} blocks retained."
+                f"{len(filtered_blocks)} standard + {len(proxy_blocks)} GOI-proxy "
+                f"= {len(synteny_blocks)}/{pre_filter_count} retained."
             )
 
         # Fallback: if filtering removed everything, still keep top blocks by score.
@@ -3387,6 +3430,42 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     # Build a local region around the off-chrom hits
                     off_start = min(h.get('start', 0) for h in best_locus)
                     off_end = max(h.get('end', 0) for h in best_locus)
+
+                    # If this off-chrom hit is a GOI proxy (e.g., gene-LY6E),
+                    # run a full GOI block search instead of just annotating it
+                    # as rearranged_flanking.
+                    if parent_id in goi_proxy_flanking_parents:
+                        _proxy_block = {
+                            'chrom': off_chrom,
+                            'start': off_start,
+                            'end': off_end,
+                            'genes_count': 1,
+                            'loci_count': len(best_locus),
+                            'genes': [parent_id],
+                        }
+                        logger.info(
+                            f"[{genome_name}] Cross-chrom GOI proxy {parent_id} on "
+                            f"{off_chrom}:{off_start}-{off_end} "
+                            f"({best_bits:.0f} bits) — running full GOI search."
+                        )
+                        _proxy_idx = len(synteny_blocks) + 1000 + len(all_genes)
+                        _p_genes, _p_gff = process_region_block(
+                            _proxy_idx,
+                            _proxy_block,
+                            hits,
+                            genome_seqs,
+                            base_db_sequences,
+                            genome_name,
+                            args,
+                            unique_id,
+                            threads_per_job,
+                            native_annot_index=native_annot_index,
+                        )
+                        all_genes.extend(_p_genes)
+                        all_gff_lines.extend(_p_gff)
+                        found_flanking_parents.add(parent_id)
+                        continue
+
                     off_slen = len(genome_seqs[off_chrom])
                     off_pad = min(args.region_padding, 50000)
                     off_w_start = max(0, off_start - off_pad)
@@ -3557,6 +3636,78 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                     f"[{genome_name}] Recovered rearranged flanking gene "
                                     f"{parent_id} on {off_chrom} (fallback, {avg_pident:.1f}% identity)."
                                 )
+
+        # --- GOI proxy sweep on block chromosomes (Step 3b) ---
+        # Some GOI proxies (e.g., gene-LY6E) may have hits on block chromosomes
+        # that fall OUTSIDE the padded regions already processed.  This happens
+        # when the proxy hit is on the same large scaffold as another flanking
+        # gene (e.g., CYP11B on the same NW_ contig) but far from that anchor.
+        # We sweep all such loci and run a full GOI block search on each one.
+        if goi_proxy_flanking_parents:
+            _proxy_gap = max(5000, min(100000, args.max_intron * 2))
+            # Build rough coverage set from already-processed blocks
+            _covered: list = []
+            for _b in synteny_blocks:
+                _pad = args.region_padding
+                _covered.append((_b['chrom'], _b['start'] - _pad, _b['end'] + _pad))
+
+            for _proxy_id in goi_proxy_flanking_parents:
+                if _proxy_id in found_flanking_parents:
+                    continue
+                _proxy_on_block = [
+                    h for h in hits
+                    if extract_base_gene_id(h.get('query', '')) == _proxy_id
+                    and h['chrom'] in block_chroms
+                ]
+                if not _proxy_on_block:
+                    continue
+                _proxy_loci = split_hits_into_loci(_proxy_on_block, max_gap=_proxy_gap)
+                for _lh in _proxy_loci:
+                    _lbits = max(h.get('bits', 0) for h in _lh)
+                    if _lbits < 40:
+                        continue
+                    _lchrom = _lh[0]['chrom']
+                    _lstart = min(h.get('start', 0) for h in _lh)
+                    _lend = max(h.get('end', 0) for h in _lh)
+                    # Skip if already covered by a processed block
+                    if any(
+                        _cc == _lchrom and _lstart < _ce and _lend > _cs
+                        for _cc, _cs, _ce in _covered
+                    ):
+                        continue
+                    _sweep_block = {
+                        'chrom': _lchrom,
+                        'start': _lstart,
+                        'end': _lend,
+                        'genes_count': 1,
+                        'loci_count': len(_lh),
+                        'genes': [_proxy_id],
+                    }
+                    logger.info(
+                        f"[{genome_name}] On-block GOI proxy sweep: {_proxy_id} on "
+                        f"{_lchrom}:{_lstart}-{_lend} ({_lbits:.0f} bits) outside "
+                        f"processed regions — running full GOI search."
+                    )
+                    _sw_idx = len(synteny_blocks) + 2000 + len(all_genes)
+                    _sw_genes, _sw_gff = process_region_block(
+                        _sw_idx,
+                        _sweep_block,
+                        hits,
+                        genome_seqs,
+                        base_db_sequences,
+                        genome_name,
+                        args,
+                        unique_id,
+                        threads_per_job,
+                        native_annot_index=native_annot_index,
+                    )
+                    all_genes.extend(_sw_genes)
+                    all_gff_lines.extend(_sw_gff)
+                    if any(is_goi_query_id(_g.get('id', '')) for _g in _sw_genes):
+                        found_flanking_parents.add(_proxy_id)
+                    # Add to covered so we don't re-run overlapping loci
+                    _covered.append((_lchrom, _lstart - args.region_padding,
+                                     _lend + args.region_padding))
 
         # --- Flanking gene tracking summary (Step 4) ---
         still_missing = all_db_flanking_parents - found_flanking_parents
