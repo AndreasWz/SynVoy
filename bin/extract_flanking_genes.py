@@ -109,10 +109,14 @@ def parse_gff_for_genes(gff_file):
                 gene['cds_parts'] = cds_by_parent[gid]
             gene['transcript_attrs'] = {}
         else:
-            # Pick first transcript (or longest)
-            # Just take the first one for now
-            # TODO: Improve isoform selection
-            best_t = transcripts[0]
+            # Prefer a transcript that has CDS features (skips misc_RNA / lncRNA
+            # isoforms listed first, which would leave cds_parts empty for
+            # protein-coding genes like THEM6 that have both misc_RNA and mRNA
+            # transcripts in NCBI RefSeq GFFs).
+            best_t = next(
+                (t for t in transcripts if t in cds_by_parent),
+                transcripts[0]
+            )
             gene['transcript_attrs'] = transcript_attrs.get(best_t, {})
             if best_t in cds_by_parent:
                 gene['cds_parts'] = cds_by_parent[best_t]
@@ -219,6 +223,76 @@ def _preferred_gene_label(gene):
 
 # load_genome now imported from sequence_utils
 
+
+def _lcs_similarity(seq_a: str, seq_b: str) -> float:
+    """
+    Longest Common Subsequence (LCS) similarity (0-100), normalized by the
+    longer sequence length.  More sensitive than k-mer Jaccard for detecting
+    distant protein family relationships (e.g. LY6/3FTx members vs LY6E).
+    O(m*n) — fast enough for typical flanking gene protein lengths (<1 kb aa).
+    """
+    m, n = len(seq_a), len(seq_b)
+    if not m or not n:
+        return 0.0
+    prev = [0] * (n + 1)
+    for c in seq_a:
+        curr = [0] * (n + 1)
+        for j, d in enumerate(seq_b, 1):
+            curr[j] = prev[j - 1] + 1 if c == d else max(prev[j], curr[j - 1])
+        prev = curr
+    return 100.0 * prev[n] / max(m, n)
+
+
+def _gene_protein(gene: dict, genome_seqs: dict) -> str:
+    """
+    Translate the CDS of a gene dict to a protein string.
+    Returns empty string if CDS parts are unavailable or too short.
+    """
+    cds_parts = gene.get('cds_parts', [])
+    if not cds_parts:
+        return ''
+    chrom = gene.get('chrom', '')
+    if chrom not in genome_seqs:
+        return ''
+    strand = gene.get('strand', '+')
+    parts_sorted = sorted(cds_parts, key=lambda p: p['start'])
+    cds_dna = ''
+    for part in parts_sorted:
+        seg = genome_seqs[chrom][part['start']:part['end']]
+        cds_dna += seg
+    if not cds_dna:
+        return ''
+    if strand == '-':
+        cds_dna = reverse_complement(cds_dna)
+    cds_dna = cds_dna[:len(cds_dna) - (len(cds_dna) % 3)]
+    if len(cds_dna) < 30:
+        return ''
+    protein = translate(cds_dna)
+    # Take longest ORF (drop stop codons)
+    return protein.split('*')[0]
+
+
+def _load_goi_sequences(goi_faa: str) -> list:
+    """Parse a FASTA file and return list of protein sequences."""
+    seqs = []
+    current = []
+    with open(goi_faa) as fh:
+        for line in fh:
+            line = line.strip()
+            if line.startswith('>'):
+                if current:
+                    seqs.append(''.join(current))
+                    current = []
+            else:
+                current.append(line)
+    if current:
+        seqs.append(''.join(current))
+    # Keep only full-length sequences; exon fragments (<50 aa) cause false-positive
+    # similarity matches against unrelated proteins.
+    full_seqs = [s for s in seqs if len(s) >= 50]
+    return full_seqs if full_seqs else [s for s in seqs if s]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Extract flanking genes")
     parser.add_argument("--bed", required=True, help="Input BED file with gene location")
@@ -233,15 +307,28 @@ def main():
                         help="Flanking window around GOI hits for Prodigal prediction")
     parser.add_argument("--pred_keep_pct", type=float, default=0.10,
                         help="Fraction of longest Prodigal predictions to keep")
+    parser.add_argument("--goi_faa", default=None,
+                        help="GOI protein FASTA — flanking candidates too similar to the GOI "
+                             "will be filtered out (avoids picking LY6/3FTx family members as anchors)")
+    parser.add_argument("--max_goi_similarity", type=float, default=35.0,
+                        help="Max allowed LCS similarity (0-100) to GOI; genes above this threshold "
+                             "are excluded from the flanking set (default: 35.0)")
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
     args = parser.parse_args()
     prefer_large = args.prefer_large.lower() == 'true'
     exon_mode = args.exon_mode.lower() == 'true'
-    
+
     if exon_mode:
         print("Exon mode enabled: extracting individual CDS exon sequences")
+
+    # Load GOI sequences for similarity filtering
+    goi_seqs = []
+    if args.goi_faa and args.goi_faa != 'NO_GOI' and os.path.exists(args.goi_faa):
+        goi_seqs = _load_goi_sequences(args.goi_faa)
+        print(f"Loaded {len(goi_seqs)} GOI sequence(s) for flanking similarity filter "
+              f"(max_similarity={args.max_goi_similarity}%)")
 
     # Load INPUT Genes
     target_regions = []
@@ -412,11 +499,74 @@ def main():
             if center_idx == -1: continue
                 
             # Window selection logic
-            start_idx = max(0, center_idx - args.n_flank)
-            end_idx = min(len(chrom_genes), center_idx + args.n_flank + 1)
-            
+            # If GOI-similarity filtering is active, expand the window until we
+            # collect n_flank non-similar genes on each side.  This prevents
+            # the flanking set being filled entirely with GOI-family members
+            # (e.g. LY6/3FTx proteins) that are useless as synteny anchors.
+            if goi_seqs:
+                def _is_goi_similar(g: dict) -> bool:
+                    seq = _gene_protein(g, genome_seqs)
+                    if not seq:
+                        return False
+                    return any(
+                        _lcs_similarity(seq, gs) >= args.max_goi_similarity
+                        for gs in goi_seqs
+                    )
+
+                # Walk outward from the GOI center collecting genes into the window.
+                # - GOI-similar genes are always skipped (never added to BED/FAA).
+                # - Non-coding genes (no CDS) are added to the window for BED
+                #   visualization but do NOT count toward the n_flank protein-coding
+                #   quota — this prevents lncRNAs and pseudogenes from pushing
+                #   useful synteny anchors (e.g. TOP1MT) out of the flanking set.
+                upstream_all = []   # all non-GOI-similar genes visited (closest→farthest)
+                upstream_slots = 0  # count of protein-coding genes (toward n_flank limit)
+                max_expand = min(len(chrom_genes), args.n_flank * 5)
+                for offset in range(1, max_expand + 1):
+                    if upstream_slots >= args.n_flank:
+                        break
+                    idx = center_idx - offset
+                    if idx < 0:
+                        break
+                    g = chrom_genes[idx]
+                    if _is_goi_similar(g):
+                        name = _preferred_gene_label(g)
+                        print(f"  [flank-filter] Skipping GOI-similar upstream gene: {name}")
+                        continue
+                    upstream_all.append(g)
+                    if g.get('cds_parts'):
+                        upstream_slots += 1
+
+                downstream_all = []
+                downstream_slots = 0
+                for offset in range(1, max_expand + 1):
+                    if downstream_slots >= args.n_flank:
+                        break
+                    idx = center_idx + offset
+                    if idx >= len(chrom_genes):
+                        break
+                    g = chrom_genes[idx]
+                    if _is_goi_similar(g):
+                        name = _preferred_gene_label(g)
+                        print(f"  [flank-filter] Skipping GOI-similar downstream gene: {name}")
+                        continue
+                    downstream_all.append(g)
+                    if g.get('cds_parts'):
+                        downstream_slots += 1
+
+                window_genes = list(reversed(upstream_all)) + downstream_all
+                print(
+                    f"  [flank-filter] Selected {upstream_slots} upstream + "
+                    f"{downstream_slots} downstream protein-coding flanking genes "
+                    f"(+{len(upstream_all)-upstream_slots+len(downstream_all)-downstream_slots} "
+                    f"non-coding neighbours; expanded up to {max_expand} candidates per side)."
+                )
+            else:
+                start_idx = max(0, center_idx - args.n_flank)
+                end_idx = min(len(chrom_genes), center_idx + args.n_flank + 1)
+                window_genes = chrom_genes[start_idx:end_idx]
+
             # Add genes from window
-            window_genes = chrom_genes[start_idx:end_idx]
             extracted_genes.extend(window_genes)
             
             # Ensure genes overlapping the target region are included
@@ -573,17 +723,11 @@ def main():
                             all_fasta_records.append((seq_header, prot_seq))
                         
                 else:
-                    # NAIVE FALLBACK (No CDS parts, use full genomic)
-                    feature_seq = seq_record[gene['start']:gene['end']]
-                    if gene['strand'] == '-':
-                        feature_seq = reverse_complement(feature_seq)
-                    prot_seq = translate(feature_seq)
-                    # Stop at first stop codon
-                    if '*' in prot_seq:
-                        prot_seq = prot_seq.split('*')[0]
-                    
-                    if len(prot_seq) * 3 >= args.min_size:
-                        all_fasta_records.append((seq_header, prot_seq))
+                    # No CDS parts — non-coding gene (lncRNA, pseudogene, etc.).
+                    # Include in BED (already written above) but do NOT emit a
+                    # protein sequence: translating genomic DNA in frame 0 would
+                    # produce junk that pollutes the MMseqs2 search DB.
+                    pass
     
     # Write all FASTA records at once
     write_fasta(all_fasta_records, args.out_faa)
