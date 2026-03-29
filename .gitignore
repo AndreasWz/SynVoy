@@ -43,3 +43,10 @@ docs/
 conf/
 queries/
 easy_mode_genomes/
+
+# Ground truth: large genome data and absolute-path symlinks — not portable
+ground_truth/ly6_3ftx/targets/
+ground_truth/ly6_3ftx/home/
+
+# PDFs (copyright / large binaries)
+ground_truth/**/*.pdf
