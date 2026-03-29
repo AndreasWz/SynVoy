@@ -1102,16 +1102,16 @@ def add_ribbon(fig, g_upper, g_lower, off_u, off_l, y_u_bot, y_l_top, colour, al
     ))
 
 
-def add_label(fig, gene, x_off, y_base, h, text, fsize=8, fcolour="black",
+def add_label(fig, gene, x_off, y_base, h, text, fsize=9, fcolour="black",
               is_goi_flag=False):
     g_start, g_end = _get_coords(gene)
     xc = (g_start + g_end) / 2 - x_off
     if is_goi_flag:
         text = "* " + text
         fcolour = GOI_BORDER
-        fsize = max(fsize, 10)
+        fsize = max(fsize, 13)
     fig.add_annotation(
-        x=xc, y=y_base + h + h * 0.25,
+        x=xc, y=y_base + h + h * 0.20,
         text=text, showarrow=False,
         font=dict(size=fsize, color=fcolour),
         textangle=-35,
@@ -1800,14 +1800,61 @@ def main():
 
     # -- 5. Layout geometry -----------------------------------------------
 
-    GENE_H      = 0.22          # gene arrow height  (flatter = gggenomes-like)
-    TRACK_SPACE = 1.1           # vertical pitch between tracks
-    RIBBON_GAP  = 0.08          # gap between gene arrow and ribbon edge
+    GENE_H        = 0.45   # gene arrow height — larger for readability
+    SUB_TRACK_GAP = 0.12   # vertical gap between overlapping-gene sub-tracks
+    TRACK_MARGIN  = 1.20   # vertical space between adjacent genome tracks
+    RIBBON_GAP    = 0.12   # gap between gene arrow edge and ribbon end
 
+    # ---- Sub-track assignment (bumping algorithm) ----------------------
+    # Genes that overlap in x-space within the same track are assigned to
+    # separate sub-tracks so they don't visually collide.  We use a greedy
+    # interval-scheduling algorithm (earliest-deadline-first style).
+
+    def _assign_sub_tracks(genes, x_off, min_gap=800):
+        """Greedy interval scheduling: writes gene['_sub_track'] in-place."""
+        sorted_genes = sorted(genes, key=lambda g: g["start_plot"] - x_off)
+        sub_ends = []  # rightmost x used by each sub-track so far
+        for gene in sorted_genes:
+            x0 = gene["start_plot"] - x_off
+            x1 = gene["end_plot"]   - x_off
+            placed = False
+            for i, end_x in enumerate(sub_ends):
+                if end_x + min_gap <= x0:
+                    gene["_sub_track"] = i
+                    sub_ends[i] = x1
+                    placed = True
+                    break
+            if not placed:
+                gene["_sub_track"] = len(sub_ends)
+                sub_ends.append(x1)
+
+    def _track_visual_h(n_sub):
+        return n_sub * GENE_H + max(0, n_sub - 1) * SUB_TRACK_GAP
+
+    def _gene_yb(ti, gene):
+        """Y baseline for a specific gene given its sub-track assignment."""
+        return track_y[ti] + gene.get("_sub_track", 0) * (GENE_H + SUB_TRACK_GAP)
+
+    # Assign sub-tracks and compute per-track visual heights
+    n_sub_per_track = []
+    for track in all_tracks:
+        _assign_sub_tracks(track["genes"], track["offset"])
+        if track["genes"]:
+            n_sub = max(g.get("_sub_track", 0) for g in track["genes"]) + 1
+        else:
+            n_sub = 1
+        n_sub_per_track.append(n_sub)
+
+    track_heights = [_track_visual_h(n) for n in n_sub_per_track]
+
+    # Build Y positions: bottom track (highest index) at y=0, stacking upward
     fig = go.Figure()
-
-    # Simple Y positions: uniform spacing, top to bottom.
-    track_y = [(n_tracks - 1 - ti) * TRACK_SPACE for ti in range(n_tracks)]
+    track_y = [0.0] * n_tracks
+    y_cursor = 0.0
+    for ti in range(n_tracks - 1, -1, -1):
+        track_y[ti] = y_cursor
+        if ti > 0:
+            y_cursor += track_heights[ti] + TRACK_MARGIN
 
     # -- 5a. Track background bands --------------------------------------
     # Split the background bar at chromosome breaks so each chromosome
@@ -1825,13 +1872,14 @@ def main():
             if brk.get("is_chrom_break")
         )
 
+        th = track_heights[ti]
         if not chrom_break_xs:
             # No chromosome breaks — single background rectangle
             x_min = min(g["start_plot"] for g in track["genes"]) - x_off - 1000
             x_max = max(g["end_plot"]   for g in track["genes"]) - x_off + 1000
             fig.add_shape(
                 type="rect",
-                x0=x_min, x1=x_max, y0=yb - 0.02, y1=yb + GENE_H + 0.02,
+                x0=x_min, x1=x_max, y0=yb - 0.04, y1=yb + th + 0.04,
                 fillcolor=TRACK_BG_CLR, line=dict(width=0), layer="below",
             )
         else:
@@ -1854,26 +1902,25 @@ def main():
                     fig.add_shape(
                         type="rect",
                         x0=seg_x0, x1=seg_x1,
-                        y0=yb - 0.02, y1=yb + GENE_H + 0.02,
+                        y0=yb - 0.04, y1=yb + th + 0.04,
                         fillcolor=TRACK_BG_CLR, line=dict(width=0),
                         layer="below",
                     )
 
     # -- 5b. Ribbons (draw first so they sit behind genes) ---------------
     # Ribbons connect consecutive tracks (one genome per track).
+    # Each ribbon endpoint is anchored to the specific sub-track of the gene.
     for ti in range(len(all_tracks) - 1):
         upper = all_tracks[ti]
         lower = all_tracks[ti + 1]
-        y_u = track_y[ti]
-        y_l = track_y[ti + 1]
-        y_ribbon_top = y_u - RIBBON_GAP
-        y_ribbon_bot = y_l + GENE_H + RIBBON_GAP
 
         for lg in lower["genes"]:
             home_id = lg.get("home_gene_id", "")
             if not home_id:
                 continue
             ribbon_alpha = args.ribbon_alpha_dense
+            # Compute the Y top of the lower gene's sub-track
+            y_lg_top = _gene_yb(ti + 1, lg) + GENE_H + RIBBON_GAP
             for ug in upper["genes"]:
                 u_name = ug["name"]
                 u_home = ug.get("home_gene_id", u_name)
@@ -1888,25 +1935,26 @@ def main():
                             lower["genome_id"], goi_genome_colours)
                         if _is_goi_target_gene(lg) and not _is_resolved_goi_target_gene(lg):
                             ribbon_alpha = 0.10
+                    # Compute the Y bottom of the upper gene's sub-track
+                    y_ug_bot = _gene_yb(ti, ug) - RIBBON_GAP
                     add_ribbon(fig, ug, lg,
                                upper["offset"], lower["offset"],
-                               y_ribbon_top, y_ribbon_bot,
+                               y_ug_bot, y_lg_top,
                                colour, alpha=ribbon_alpha)
 
     # -- 5c. Gene arrows -------------------------------------------------
     legend_shown = set()
 
     for ti, track in enumerate(all_tracks):
-        yb    = track_y[ti]
         x_off = track["offset"]
 
         # Draw large genes first so small genes render on top
-        # Use plot coordinates for size sorting? Yes.
         sorted_genes = sorted(track["genes"],
                                key=lambda g: g["end_plot"] - g["start_plot"],
                                reverse=True)
 
         for gene in sorted_genes:
+            yb = _gene_yb(ti, gene)  # sub-track-adjusted Y baseline
             name = gene["name"]
             home_id = gene.get("home_gene_id", name)
             target_label = _preferred_target_label(gene)
@@ -2005,7 +2053,7 @@ def main():
         if track["is_home"]:
             continue
         if track.get("goi_status") == "absent" and track["genes"]:
-            yb = track_y[ti]
+            yb = track_y[ti]  # baseline of track (sub-track 0)
             # Draw a dashed-outline "?" box at x=0 (GOI center)
             dash_w = 2000
             fig.add_shape(
@@ -2019,14 +2067,13 @@ def main():
                 x=0, y=yb + GENE_H / 2,
                 text="<b>?</b>",
                 showarrow=False,
-                font=dict(size=12, color=GOI_COLOUR),
+                font=dict(size=14, color=GOI_COLOUR),
                 xanchor="center", yanchor="middle",
                 hovertext=f"<b>GOI not found</b><br>{track['label']}",
             )
 
     # -- 5d. Gene labels -------------------------------------------------
     for ti, track in enumerate(all_tracks):
-        yb    = track_y[ti]
         x_off = track["offset"]
         genes_in_track = track["genes"]
         n_genes = len(genes_in_track)
@@ -2068,29 +2115,24 @@ def main():
         # Sort by priority (highest first), then by x position
         label_candidates.sort(key=lambda c: (c[4], c[0]))
 
-        # Collision detection: skip labels that would overlap with already-placed ones
-        # Estimate label width in x-data units.
-        # For rotated labels (-35°), the horizontal footprint is
-        #   w_proj = w * cos(35°) ≈ 0.82 * w, but the diagonal sweep
-        # still causes visual collisions — use a 70% factor as effective width.
-        fsize = max(6, 11 - (n_genes // 6))
-        char_width = 300 + (fsize * 25)
-        import math
+        # Collision detection: skip labels that would overlap with already-placed ones.
+        # Labels are separated per-sub-track so sub-tracks have independent placed_ranges.
+        fsize = max(9, 14 - (n_genes // 6))
+        char_width = 350 + (fsize * 28)
         rotation_factor = 0.70  # accounts for diagonal sweep of -35° text
-        placed_ranges = []  # list of (x_left, x_right) of placed labels
+        # Separate collision tracking per sub-track index
+        placed_ranges_by_sub: dict = {}
 
         for xc, label, gene, goi_f, priority in label_candidates:
             g_start, g_end = _get_coords(gene)
-            gw = g_end - g_start
-            is_rotated = True  # labels always rotated
             est_width = int(len(label) * char_width * rotation_factor)
             lbl_left  = xc - est_width / 2
             lbl_right = xc + est_width / 2
+            margin = 400
 
-            # Minimum clearance between labels
-            margin = 350 if is_rotated else 450
+            sub_idx = gene.get("_sub_track", 0)
+            placed_ranges = placed_ranges_by_sub.setdefault(sub_idx, [])
 
-            # Check if this label overlaps with any already placed
             overlaps = any(
                 lbl_left < pr + margin and lbl_right > pl - margin
                 for pl, pr in placed_ranges
@@ -2099,22 +2141,24 @@ def main():
                 continue  # skip non-GOI labels that overlap
 
             placed_ranges.append((lbl_left, lbl_right))
-            add_label(fig, gene, x_off, yb, GENE_H, label,
+            gene_yb = _gene_yb(ti, gene)
+            add_label(fig, gene, x_off, gene_yb, GENE_H, label,
                       fsize=fsize, is_goi_flag=goi_f)
 
     # -- 5e. Track labels (left margin) ----------------------------------
     for ti, track in enumerate(all_tracks):
         yb = track_y[ti]
+        th = track_heights[ti]
         track_label = f"<b>{track['label']}</b>"
         if not track["is_home"] and track.get("goi_status") == "absent":
-            track_label += "<br><span style='color:#d32f2f;font-size:9px'>✗ GOI absent</span>"
+            track_label += "<br><span style='color:#d32f2f;font-size:10px'>✗ GOI absent</span>"
         elif not track["is_home"] and track.get("goi_status") == "ambiguous":
-            track_label += "<br><span style='color:#d97706;font-size:9px'>~ GOI ambiguous</span>"
+            track_label += "<br><span style='color:#d97706;font-size:10px'>~ GOI ambiguous</span>"
         fig.add_annotation(
-            x=-0.01, y=yb + GENE_H / 2,
+            x=-0.01, y=yb + th / 2,
             text=track_label,
             showarrow=False,
-            font=dict(size=11, color="black"),
+            font=dict(size=14, color="black"),
             xref="paper", yref="y",
             xanchor="right", yanchor="middle",
         )
@@ -2123,11 +2167,12 @@ def main():
     for ti, track in enumerate(all_tracks):
         yb    = track_y[ti]
         x_off = track["offset"]
+        th    = track_heights[ti]
         for brk in track.get("breaks", []):
-            draw_gap_break(fig, brk["x"] - x_off, yb, GENE_H, brk["text"],
+            draw_gap_break(fig, brk["x"] - x_off, yb, th, brk["text"],
                            is_chrom_break=brk.get("is_chrom_break", False))
         # Draw chromosome labels below each segment
-        _draw_chrom_labels(fig, track, ti, track_y, x_off, GENE_H)
+        _draw_chrom_labels(fig, track, ti, track_y, x_off, th)
 
     # -- 6. Figure styling -----------------------------------------------
 
@@ -2148,11 +2193,11 @@ def main():
     pad = (x_max - x_min) * 0.05 + 5000
     x_range = [x_min - pad, x_max + pad]
 
-    fig_height = max(400, n_tracks * 140 + 60)
-
-    # Compute Y range from actual track positions
+    # Compute Y range from actual track positions + heights
     y_min_pos = min(track_y) if track_y else 0
-    y_max_pos = max(track_y) if track_y else 0
+    y_max_pos = (max(track_y[ti] + track_heights[ti]
+                     for ti in range(n_tracks)) if n_tracks else 0)
+
     subtitle_bits = [
         "Genes coloured by homology group",
         "* = resolved GOI",
@@ -2169,42 +2214,44 @@ def main():
     if args.plot_height > 0:
         fig_height = args.plot_height
     else:
-        fig_height = max(450, n_tracks * 140 + 80)
-        
+        # Height scales with total Y span: roughly 200px per unit of Y space
+        y_span = y_max_pos - y_min_pos
+        fig_height = max(600, int(y_span * 200) + 200)
+
     if args.plot_width > 0:
         fig_width = args.plot_width
     else:
-        # Scale dynamically between 1800 and 5000 based on window width
-        estimated_needed = max(2000, int((x_max - x_min) / 450))
-        fig_width = min(5000, estimated_needed)
+        # Scale dynamically: minimum 3000, up to 8000 for wide loci
+        estimated_needed = max(3000, int((x_max - x_min) / 350))
+        fig_width = min(8000, estimated_needed)
 
     fig.update_layout(
         title=dict(
             text=("<b>SynVoy Synteny Plot</b>"
                   f"<br><sup>{' | '.join(subtitle_bits)}</sup>"),
-            x=0.5, font=dict(size=15),
+            x=0.5, font=dict(size=17),
         ),
         height=fig_height,
         width=fig_width,
         xaxis=dict(
-            title="", # No title since numbers are relative/discontinuous
-            showgrid=False, 
+            title="",
+            showgrid=False,
             zeroline=False,
-            showticklabels=False, # Hide ticks as they are discontinuous
+            showticklabels=False,
             range=x_range,
         ),
         yaxis=dict(
             showticklabels=False, showgrid=False, zeroline=False,
-            range=[y_min_pos - 0.6,
-                   y_max_pos + GENE_H + 1.0],
+            range=[y_min_pos - 0.8,
+                   y_max_pos + 1.2],
         ),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=260, r=60, t=85, b=55), # Increased left margin
+        margin=dict(l=290, r=80, t=100, b=70),
         legend=dict(
             title="<b>Gene (home ID)</b>",
             orientation="v", x=1.01, y=1.0,
-            font=dict(size=9),
+            font=dict(size=11),
             tracegroupgap=2,
         ),
         hovermode="closest",
@@ -2224,10 +2271,10 @@ def main():
         line=dict(color="black", width=3),
     )
     fig.add_annotation(
-        x=(sb_x0 + sb_x1)/2, y=sb_y - 0.1,
+        x=(sb_x0 + sb_x1)/2, y=sb_y - 0.15,
         text=f"<b>{_format_bp_label(scale_len)}</b>",
         showarrow=False,
-        font=dict(size=10, color="black"),
+        font=dict(size=13, color="black"),
         yanchor="top"
     )
 
