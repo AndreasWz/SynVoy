@@ -313,12 +313,25 @@ def main():
     parser.add_argument("--max_goi_similarity", type=float, default=35.0,
                         help="Max allowed LCS similarity (0-100) to GOI; genes above this threshold "
                              "are excluded from the flanking set (default: 35.0)")
+    parser.add_argument("--max_flanking_distance", type=int, default=0,
+                        help="Max distance (bp) from GOI center to walk for flanking genes. "
+                             "0 = unlimited (legacy). Prevents reaching into gene deserts when "
+                             "the GOI neighbours a tandem array that fills one side (default: 0)")
+    parser.add_argument("--expand_goi_similar", type=str, default="false",
+                        help="If true, GOI-similar genes within --expand_goi_similar_distance "
+                             "are emitted as additional GOI queries (GOI_NEIGHBOR_ prefix) so "
+                             "all paralogs/copies are searched and end up in the IQ-TREE "
+                             "(default: false)")
+    parser.add_argument("--expand_goi_similar_distance", type=int, default=300000,
+                        help="Max bp from GOI center for GOI-similar genes to be treated as "
+                             "additional GOI queries when --expand_goi_similar is set (default: 300000)")
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
     args = parser.parse_args()
     prefer_large = args.prefer_large.lower() == 'true'
     exon_mode = args.exon_mode.lower() == 'true'
+    expand_goi_similar = args.expand_goi_similar.lower() == 'true'
 
     if exon_mode:
         print("Exon mode enabled: extracting individual CDS exon sequences")
@@ -349,8 +362,9 @@ def main():
         return
 
     genome_seqs = load_genome(args.genome)
-    
+
     extracted_genes = []
+    goi_similar_neighbors = []  # populated in the GFF path when expand_goi_similar is on
     
     # MODE SWITCH
     if args.gff == "NO_GFF" or not os.path.exists(args.gff):
@@ -514,11 +528,20 @@ def main():
                     )
 
                 # Walk outward from the GOI center collecting genes into the window.
-                # - GOI-similar genes are always skipped (never added to BED/FAA).
+                # - GOI-similar genes are skipped as flanking anchors (useless for synteny).
+                #   When --expand_goi_similar is set AND the gene is within
+                #   --expand_goi_similar_distance, it is instead queued as an additional
+                #   GOI query (GOI_NEIGHBOR_ prefix in FAA) so all paralogs/copies are
+                #   searched in target genomes and end up in IQ-TREE.
                 # - Non-coding genes (no CDS) are added to the window for BED
                 #   visualization but do NOT count toward the n_flank protein-coding
                 #   quota — this prevents lncRNAs and pseudogenes from pushing
                 #   useful synteny anchors (e.g. TOP1MT) out of the flanking set.
+                # - When --max_flanking_distance > 0, the walk stops once the gene
+                #   is beyond that many bp from the GOI center (prevents reaching
+                #   1Mb+ away when the GOI neighbours a tandem array that eats one side).
+                goi_similar_neighbors = []  # genes to emit as GOI_NEIGHBOR_ queries
+
                 upstream_all = []   # all non-GOI-similar genes visited (closest→farthest)
                 upstream_slots = 0  # count of protein-coding genes (toward n_flank limit)
                 max_expand = min(len(chrom_genes), args.n_flank * 5)
@@ -529,9 +552,24 @@ def main():
                     if idx < 0:
                         break
                     g = chrom_genes[idx]
+                    # Distance cap: chrom_genes is sorted by position; upstream genes
+                    # move monotonically farther from GOI as offset increases.
+                    if args.max_flanking_distance > 0:
+                        gene_center = (g['start'] + g['end']) / 2
+                        if abs(gene_center - reg_center) > args.max_flanking_distance:
+                            print(f"  [flank-dist] Upstream walk stopped at offset {offset}: "
+                                  f"gene {_preferred_gene_label(g)} is "
+                                  f"{abs(gene_center - reg_center)/1000:.0f}kb away "
+                                  f"(limit {args.max_flanking_distance/1000:.0f}kb)")
+                            break
                     if _is_goi_similar(g):
                         name = _preferred_gene_label(g)
-                        print(f"  [flank-filter] Skipping GOI-similar upstream gene: {name}")
+                        gene_center = (g['start'] + g['end']) / 2
+                        if expand_goi_similar and abs(gene_center - reg_center) <= args.expand_goi_similar_distance:
+                            goi_similar_neighbors.append(g)
+                            print(f"  [goi-expand] Upstream GOI-similar gene queued as additional GOI: {name}")
+                        else:
+                            print(f"  [flank-filter] Skipping GOI-similar upstream gene: {name}")
                         continue
                     upstream_all.append(g)
                     if g.get('cds_parts'):
@@ -546,9 +584,22 @@ def main():
                     if idx >= len(chrom_genes):
                         break
                     g = chrom_genes[idx]
+                    if args.max_flanking_distance > 0:
+                        gene_center = (g['start'] + g['end']) / 2
+                        if abs(gene_center - reg_center) > args.max_flanking_distance:
+                            print(f"  [flank-dist] Downstream walk stopped at offset {offset}: "
+                                  f"gene {_preferred_gene_label(g)} is "
+                                  f"{abs(gene_center - reg_center)/1000:.0f}kb away "
+                                  f"(limit {args.max_flanking_distance/1000:.0f}kb)")
+                            break
                     if _is_goi_similar(g):
                         name = _preferred_gene_label(g)
-                        print(f"  [flank-filter] Skipping GOI-similar downstream gene: {name}")
+                        gene_center = (g['start'] + g['end']) / 2
+                        if expand_goi_similar and abs(gene_center - reg_center) <= args.expand_goi_similar_distance:
+                            goi_similar_neighbors.append(g)
+                            print(f"  [goi-expand] Downstream GOI-similar gene queued as additional GOI: {name}")
+                        else:
+                            print(f"  [flank-filter] Skipping GOI-similar downstream gene: {name}")
                         continue
                     downstream_all.append(g)
                     if g.get('cds_parts'):
@@ -561,6 +612,9 @@ def main():
                     f"(+{len(upstream_all)-upstream_slots+len(downstream_all)-downstream_slots} "
                     f"non-coding neighbours; expanded up to {max_expand} candidates per side)."
                 )
+                if goi_similar_neighbors:
+                    print(f"  [goi-expand] {len(goi_similar_neighbors)} GOI-similar neighbor(s) "
+                          f"will be emitted as additional GOI queries in FAA.")
             else:
                 start_idx = max(0, center_idx - args.n_flank)
                 end_idx = min(len(chrom_genes), center_idx + args.n_flank + 1)
@@ -568,14 +622,21 @@ def main():
 
             # Add genes from window
             extracted_genes.extend(window_genes)
-            
-            # Ensure genes overlapping the target region are included
+
+            # Ensure genes overlapping the target region are included,
+            # but respect the GOI-similarity filter: do NOT re-inject genes
+            # that would have been excluded by _is_goi_similar(). Without
+            # this gate the overlap injection undoes the walking-loop filter.
             overlap_genes = [
                 g for g in chrom_genes
                 if g['start'] < region['end'] and g['end'] > region['start']
             ]
             for g in overlap_genes:
                 if g not in extracted_genes:
+                    if goi_seqs and _is_goi_similar(g):
+                        name = _preferred_gene_label(g)
+                        print(f"  [overlap-filter] NOT re-injecting GOI-similar overlap gene: {name}")
+                        continue
                     extracted_genes.append(g)
             
             # If no overlap genes found, inject a GOI pseudo-gene from the region
@@ -729,6 +790,79 @@ def main():
                     # produce junk that pollutes the MMseqs2 search DB.
                     pass
     
+    # Emit GOI-similar neighbors as additional GOI queries (GOI_NEIGHBOR_ prefix).
+    # These are NOT in the BED (don't affect synteny denominator), but ARE in the
+    # FAA so they are searched in target genomes and end up in IQ-TREE alongside the
+    # main GOI, allowing paralogs vs orthologs to be resolved by the tree.
+    if expand_goi_similar and goi_similar_neighbors:
+        genome_seqs_loaded = genome_seqs  # already loaded above
+        emitted = 0
+        for g in goi_similar_neighbors:
+            raw_id = g['attrs'].get('ID', '') or f"{g['chrom']}_{g['start']}"
+            neighbor_id = f"GOI_NEIGHBOR_{raw_id}"
+
+            if g.get('cds_parts'):
+                cds_parts = sorted(g['cds_parts'], key=lambda x: x['start'])
+                if exon_mode:
+                    for exon_idx, part in enumerate(cds_parts, start=1):
+                        exon_id = f"{neighbor_id}|exon_{exon_idx}"
+                        exon_dna = genome_seqs_loaded[g['chrom']][part['start']:part['end']]
+                        if g['strand'] == '-':
+                            exon_dna = reverse_complement(exon_dna)
+                        phase = int(part.get('phase', 0)) if part.get('phase', '.') != '.' else 0
+                        if phase > 0:
+                            exon_dna = exon_dna[phase:]
+                        remainder = len(exon_dna) % 3
+                        if remainder:
+                            exon_dna = exon_dna[:-remainder]
+                        if len(exon_dna) < 9:
+                            continue
+                        exon_prot = translate(exon_dna).replace('*', '')
+                        exon_header = (f"{exon_id} parent={neighbor_id} "
+                                       f"exon={exon_idx}/{len(cds_parts)} "
+                                       f"coords={part['start']}-{part['end']} "
+                                       f"strand={g['strand']}")
+                        all_fasta_records.append((exon_header, exon_prot))
+                    # Full-length protein
+                    full_dna = ""
+                    for part in cds_parts:
+                        full_dna += genome_seqs_loaded[g['chrom']][part['start']:part['end']]
+                    if g['strand'] == '-':
+                        full_dna = reverse_complement(full_dna)
+                    remainder = len(full_dna) % 3
+                    if remainder:
+                        full_dna = full_dna[:-remainder]
+                    full_prot = translate(full_dna)
+                    if '*' in full_prot:
+                        full_prot = full_prot.split('*')[0]
+                    if len(full_prot) >= 10:
+                        all_fasta_records.append((
+                            f"{neighbor_id} full_length_protein exons={len(cds_parts)} strand={g['strand']}",
+                            full_prot
+                        ))
+                else:
+                    coding_first_phase = int(cds_parts[0].get('phase', 0) or 0) \
+                        if g['strand'] == '+' \
+                        else int(cds_parts[-1].get('phase', 0) or 0)
+                    dna_seq = ""
+                    for part in cds_parts:
+                        dna_seq += genome_seqs_loaded[g['chrom']][part['start']:part['end']]
+                    if g['strand'] == '-':
+                        dna_seq = reverse_complement(dna_seq)
+                    if coding_first_phase > 0:
+                        dna_seq = dna_seq[coding_first_phase:]
+                    remainder = len(dna_seq) % 3
+                    if remainder:
+                        dna_seq = dna_seq[:-remainder]
+                    prot_seq = translate(dna_seq)
+                    if '*' in prot_seq:
+                        prot_seq = prot_seq.split('*')[0]
+                    if prot_seq:
+                        all_fasta_records.append((neighbor_id, prot_seq))
+                emitted += 1
+        if emitted:
+            print(f"  [goi-expand] Emitted {emitted} GOI-similar neighbor(s) as GOI_NEIGHBOR_ sequences in FAA.")
+
     # Write all FASTA records at once
     write_fasta(all_fasta_records, args.out_faa)
 
