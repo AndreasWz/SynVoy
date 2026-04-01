@@ -1,5 +1,7 @@
 process FETCH_RELATED_GENOMES {
     tag "easy_mode"
+    time   { 2.h * Math.ceil(max_genomes / 10.0) as int }  // ~2h per 10 genomes
+    memory '4 GB'
     publishDir "${params.outdir}/downloaded_genomes", mode: 'copy'
     
     input:

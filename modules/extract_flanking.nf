@@ -18,8 +18,10 @@ process EXTRACT_FLANKING {
 
     script:
     def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --max_goi_similarity ${params.max_flanking_goi_similarity}" : ""
+    def dist_arg = params.max_flanking_distance > 0 ? "--max_flanking_distance ${params.max_flanking_distance}" : ""
+    def expand_arg = params.expand_goi_similar ? "--expand_goi_similar true --expand_goi_similar_distance ${params.expand_goi_similar_distance}" : ""
     """
-    # v4: GOI-similarity filter + expanded window
+    # v4: GOI-similarity filter + expanded window + distance cap + GOI-neighbor expansion
     extract_flanking_genes.py \\
         --bed $bed \\
         --gff $gff \\
@@ -31,6 +33,8 @@ process EXTRACT_FLANKING {
         --pred_flank_window ${params.pred_flank_window} \\
         --pred_keep_pct ${params.pred_keep_pct} \\
         $goi_arg \\
+        $dist_arg \\
+        $expand_arg \\
         --out_bed synteny_block_${locus_id}.bed \\
         --out_faa flanking_proteins_${locus_id}.faa
     """
