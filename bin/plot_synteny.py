@@ -539,6 +539,7 @@ def parse_target_gff(gff_file):
                 "confidence":   (attrs.get("Confidence", "") or "").upper(),
                 "goi_class":    attrs.get("GOIClass", ""),
                 "evidence_type": attrs.get("EvidenceType", attrs.get("Type", "")),
+                "model_status": attrs.get("ModelStatus", ""),
                 "synteny_context": attrs.get("SyntenyContext", ""),
                 "query_coverage": query_coverage,
                 "inference_reason": attrs.get("InferenceReason", ""),
@@ -2026,6 +2027,8 @@ def main():
                     hover += f"<br>GOI class: {gene['goi_class'].replace('_', ' ')}"
                 if gene.get("evidence_type"):
                     hover += f"<br>Evidence: {gene['evidence_type'].replace('_', ' ')}"
+                if gene.get("model_status"):
+                    hover += f"<br>Model: {gene['model_status']}"
                 if gene.get("synteny_context"):
                     hover += f"<br>Synteny: {gene['synteny_context'].replace('_', ' ')}"
                 if gene.get("query_coverage") is not None:

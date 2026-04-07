@@ -14,12 +14,11 @@ process COMPUTE_TREE {
     # Concatenate all fasta files
     cat ${fasta_files} > all_sequences.faa
     
-    # CRITICAL: Filter to GOI sequences, then keep ONE representative per genome.
-    # The tree is only used for genome-level ordering & colouring, so we do not
-    # need hundreds of GOI copies – one longest rep per genome is sufficient.
+    # Filter to GOI sequences: keep ALL GOI hits across all genomes (multiple
+    # per genome are expected when expand_goi_similar finds paralogs).  Only
+    # exon fragments and exact-header duplicates are removed.
     python3 -c "
-import sys, re
-from collections import OrderedDict
+import sys
 
 # ---- Parse FASTA ----
 entries = []
@@ -40,34 +39,21 @@ if current_name and current_seq:
 goi_entries = [(n, s) for n, s in entries
                if ('GOI_' in n or 'GOI|' in n) and '|exon_' not in n]
 
-# ---- Extract genome_id from header ----
-_gcf_re = re.compile(r'(GC[FA]_[0-9]+_[0-9]+)')
-def genome_id(name):
-    m = _gcf_re.search(name)
-    if m:
-        parts = m.group(1).split('_')          # ['GCF','012345','6']
-        return f'{parts[0]}_{parts[1]}.{parts[2]}'
-    # Non-GCF genomes: extract the genome name encoded between '|' and '_b<N>_'
-    # e.g. 'GOI_Melt|Colletes_gigas_fa_b0_l1_fallback' -> 'Colletes_gigas_fa'
-    m2 = re.search(r'[|](.+?)_b[0-9]+_', name)
-    if m2:
-        return m2.group(1)
-    return 'home'
-
-# ---- Keep longest representative per genome ----
-best = {}  # genome_id -> (name, seq)
+# ---- Deduplicate by exact header (keep first occurrence) ----
+seen = set()
+unique = []
 for name, seq in goi_entries:
-    gid = genome_id(name)
-    if gid not in best or len(seq) > len(best[gid][1]):
-        best[gid] = (name, seq)
+    if name not in seen:
+        seen.add(name)
+        unique.append((name, seq))
 
 # ---- Write output ----
-for gid, (name, seq) in best.items():
+for name, seq in unique:
     sys.stdout.write('>' + name + chr(10))
     for i in range(0, len(seq), 80):
         sys.stdout.write(seq[i:i+80] + chr(10))
 
-print(f'Tree filter: {len(entries)} total -> {len(goi_entries)} GOI -> {len(best)} representative seqs (1 per genome)', file=sys.stderr)
+print(f'Tree filter: {len(entries)} total -> {len(goi_entries)} GOI -> {len(unique)} unique seqs (all per genome)', file=sys.stderr)
 " > goi_only.faa 2> goi_dedup.log
     head -5 goi_dedup.log || true
     

@@ -65,6 +65,11 @@ process ITERATIVE_SEARCH {
         --min_block_genes ${params.min_block_genes} \\
         --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
+        --classify_high_min_identity ${params.classify_high_min_identity} \\
+        --classify_medium_min_identity ${params.classify_medium_min_identity} \\
+        --classify_tandem_min_identity ${params.classify_tandem_min_identity} \\
+        --classify_fragment_max_qcov ${params.classify_fragment_max_qcov} \\
+        --classify_complete_min_qcov ${params.classify_complete_min_qcov} \\
         --prefix ${locus_id} \\
         --resume
     """

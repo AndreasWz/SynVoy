@@ -106,6 +106,33 @@ try:
 except ImportError:
     FRAGMENT_SUPPORT = False
 
+# Classification thresholds for GOI confidence assignment.  Populated from
+# CLI args in main() so that they can be tuned per-run via nextflow.config.
+CLASSIFY_THRESHOLDS = {
+    # exon_annotation -> HIGH
+    "high_min_exons": 2,
+    "high_min_identity": 60.0,
+    "high_min_flanking": 2,
+    # exon_annotation -> MEDIUM
+    "medium_min_identity": 45.0,
+    "medium_min_flanking": 1,
+    "medium_min_qcov": 0.65,
+    # fallback_hit_span -> MEDIUM (flanking-supported)
+    "fallback_med_min_flanking": 2,
+    "fallback_med_min_qcov": 0.75,
+    "fallback_med_min_identity": 60.0,
+    # fallback_hit_span -> MEDIUM (strong flanking context)
+    "fallback_strong_min_flanking": 5,
+    "fallback_strong_min_qcov": 0.25,
+    "fallback_strong_min_identity": 35.0,
+    # tandem_copy -> MEDIUM vs LOW
+    "tandem_min_identity": 40.0,
+    # model_status thresholds
+    "fragment_max_qcov": 0.4,
+    "complete_min_qcov": 0.7,
+}
+
+
 def run_command(cmd):
     subprocess.check_call(cmd)
 
@@ -521,6 +548,35 @@ def _synteny_context_label(flanking_support: int) -> str:
     return "no_flanking_support"
 
 
+def _model_status(
+    query_cov: float,
+    exon_count: int = 1,
+    evidence_type: str = "",
+) -> str:
+    """
+    Label a gene model's completeness independent of confidence.
+
+    Returns one of:
+      - ``complete``  — query coverage >= complete_min_qcov and multi-exon
+        (or single-exon gene that is expected to be single-exon, e.g.
+        tandem_copy)
+      - ``partial``   — between fragment and complete
+      - ``fragment``  — query coverage < fragment_max_qcov or rescued_exon /
+        raw_hit
+    """
+    ct = CLASSIFY_THRESHOLDS
+    qcov = float(query_cov or 0.0)
+    exons = max(1, int(exon_count or 1))
+
+    if evidence_type in {"rescued_exon", "raw_hit"}:
+        return "fragment"
+    if qcov < ct["fragment_max_qcov"]:
+        return "fragment"
+    if qcov >= ct["complete_min_qcov"] and (exons >= 2 or evidence_type == "tandem_copy"):
+        return "complete"
+    return "partial"
+
+
 def _classify_goi_evidence(
     evidence_type: str,
     identity: float = 0.0,
@@ -539,24 +595,36 @@ def _classify_goi_evidence(
     qcov = float(query_cov or 0.0)
     context = _synteny_context_label(flanking_support)
 
+    ct = CLASSIFY_THRESHOLDS
+
     if evidence_type == "tandem_copy":
-        return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
+        if identity >= ct["tandem_min_identity"]:
+            return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
+        return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_identity"
 
     if evidence_type == "exon_annotation":
-        if exon_count >= 2 and identity >= 60.0 and flanking_support >= 2:
+        if (exon_count >= ct["high_min_exons"]
+                and identity >= ct["high_min_identity"]
+                and flanking_support >= ct["high_min_flanking"]):
             return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
-        if identity >= 45.0 and (flanking_support >= 1 or qcov >= 0.65):
+        if identity >= ct["medium_min_identity"] and (
+                flanking_support >= ct["medium_min_flanking"]
+                or qcov >= ct["medium_min_qcov"]):
             return "MEDIUM", "probable_goi", "modeled_goi_with_partial_support"
         return "LOW", "ambiguous_goi_family_member", "modeled_goi_but_family_context_is_weak"
 
     if evidence_type == "fallback_hit_span":
-        if flanking_support >= 2 and qcov >= 0.75 and identity >= 60.0:
+        if (flanking_support >= ct["fallback_med_min_flanking"]
+                and qcov >= ct["fallback_med_min_qcov"]
+                and identity >= ct["fallback_med_min_identity"]):
             return "MEDIUM", "probable_goi", "fallback_span_supported_by_flanking_context"
-        # Strong syntenic evidence (≥5 flanking genes) upgrades even low-qcov hits.
+        # Strong syntenic evidence upgrades even low-qcov hits.
         # Short secreted peptides (e.g. melittin, ~70 aa) can only reach ~45% qcov
         # because the signal peptide exon is too diverged to align; the flanking
         # gene context provides orthology evidence beyond per-alignment statistics.
-        if flanking_support >= 5 and (qcov >= 0.25 or identity >= 35.0):
+        if (flanking_support >= ct["fallback_strong_min_flanking"]
+                and (qcov >= ct["fallback_strong_min_qcov"]
+                     or identity >= ct["fallback_strong_min_identity"])):
             return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
         return "LOW", "ambiguous_goi_family_member", "fallback_span_only"
 
@@ -613,6 +681,7 @@ def _goi_feature_attrs(
     attrs["EvidenceType"] = evidence_type
     attrs["Confidence"] = confidence
     attrs["GOIClass"] = goi_class
+    attrs["ModelStatus"] = _model_status(query_cov, exon_count, evidence_type)
     attrs["SyntenyContext"] = _synteny_context_label(flanking_support)
     attrs["BlockFlankingSupport"] = str(max(0, int(flanking_support or 0)))
     attrs["InferenceReason"] = reason
@@ -642,6 +711,7 @@ def _flanking_feature_attrs(
     attrs["SynVoyRole"] = "flanking"
     attrs["EvidenceType"] = evidence_type
     attrs["Confidence"] = confidence
+    attrs["ModelStatus"] = _model_status(query_cov, exon_count, evidence_type)
     attrs["InferenceReason"] = reason
     if context:
         attrs["SyntenyContext"] = context
@@ -3768,6 +3838,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "role": attrs.get("SynVoyRole", "goi" if is_goi_query_id(model_id) else "flanking"),
                      "confidence": attrs.get("Confidence", ""),
                      "goi_class": attrs.get("GOIClass", ""),
+                     "model_status": attrs.get("ModelStatus", ""),
                      "evidence_type": attrs.get("EvidenceType", attrs.get("Type", "")),
                      "identity": attrs.get("Identity", ""),
                      "n_exons": attrs.get("Exons", ""),
@@ -3780,9 +3851,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
              with open(tsv_out, 'w') as tf:
                  tf.write(
-                     "target_id\thome_id\trole\tconfidence\tgoi_class\tevidence_type\t"
-                     "identity\tn_exons\tsynteny_context\tblock_flanking_support\t"
-                     "query_coverage\ttarget_gene\ttarget_product\n"
+                     "target_id\thome_id\trole\tconfidence\tgoi_class\tmodel_status\t"
+                     "evidence_type\tidentity\tn_exons\tsynteny_context\t"
+                     "block_flanking_support\tquery_coverage\ttarget_gene\ttarget_product\n"
                  )
                  for rec in all_genes:
                      meta = feature_meta.get(rec['id'], {})
@@ -3794,6 +3865,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                              meta.get("role", "goi" if is_goi_query_id(rec['id']) else "flanking"),
                              meta.get("confidence", ""),
                              meta.get("goi_class", ""),
+                             meta.get("model_status", ""),
                              meta.get("evidence_type", ""),
                              meta.get("identity", ""),
                              meta.get("n_exons", ""),
@@ -3912,9 +3984,28 @@ def main():
     )
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
-    
+
+    # Classification thresholds (GOI confidence / model status)
+    parser.add_argument("--classify_high_min_identity", type=float, default=60.0,
+                        help="Min identity for HIGH confidence exon_annotation")
+    parser.add_argument("--classify_medium_min_identity", type=float, default=45.0,
+                        help="Min identity for MEDIUM confidence exon_annotation")
+    parser.add_argument("--classify_tandem_min_identity", type=float, default=40.0,
+                        help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
+    parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
+                        help="Query coverage below this marks model as fragment")
+    parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
+                        help="Query coverage above this (with multi-exon) marks model as complete")
+
     args = parser.parse_args()
-    
+
+    # Populate classification thresholds from CLI args
+    CLASSIFY_THRESHOLDS["high_min_identity"] = args.classify_high_min_identity
+    CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
+    CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
+    CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
+    CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
+
     # INPUT VALIDATION
     # 1. Validate required files exist
     if not os.path.exists(args.initial_db):

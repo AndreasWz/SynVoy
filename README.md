@@ -33,11 +33,11 @@ Standard sequence-similarity searches often fail when orthologs are highly diver
 1. **Input Resolution** — Accepts a UniProt/NCBI accession, a local FASTA, or an inline FASTA sequence (Easy Mode) and resolves it to a protein query.
 2. **Genome Staging** — In Easy Mode, automatically fetches the reference ("home") genome and related target assemblies from NCBI. In Pro Mode, the user supplies local files.
 3. **Gene Localization** — Maps the GOI onto the home genome with tblastn + MMseqs2 and annotates its exon structure (from GFF or *de novo* via Prodigal).
-4. **Flanking Gene Extraction** — Extracts the *n* genes immediately upstream and downstream of the GOI locus.
+4. **Flanking Gene Extraction** — Extracts the *n* genes immediately upstream and downstream of the GOI locus. Genes that are similar to the GOI (e.g. tandem duplicates) are filtered out of the flanking set to avoid inflating synteny scores. Optionally, those GOI-similar neighbors are emitted as additional GOI queries (`--expand_goi_similar`), so that paralogs in other genomes are also discovered.
 5. **Phylogenetic Ordering** — Sorts target genomes by evolutionary distance to the reference so that the iterative search proceeds from closest to most distant relatives.
-6. **Iterative Synteny Search** — For each target genome, maps flanking genes with MMseqs2, clusters hits into candidate syntenic blocks, and runs localized tblastn + miniprot + Smith-Waterman searches inside those blocks to find the GOI.
+6. **Iterative Synteny Search** — For each target genome, maps flanking genes with MMseqs2, clusters hits into candidate syntenic blocks, and runs localized tblastn + miniprot + Smith-Waterman searches inside those blocks to find the GOI (and any GOI-similar neighbor queries).
 7. **Region Clustering & Scoring** — Filters and ranks candidate blocks by synteny score (fraction of conserved flanking genes).
-8. **Phylogenetic Tree & Visualization** — Computes a GOI phylogeny (MAFFT + IQ-TREE) and generates an interactive HTML synteny plot (Plotly).
+8. **Phylogenetic Tree & Visualization** — Aligns all discovered GOI sequences across all genomes (MAFFT) and infers a phylogenetic tree (IQ-TREE with ultrafast bootstrap). When `--expand_goi_similar` is enabled, the tree includes paralogs and orthologs together, enabling resolution of duplication vs. speciation events. An interactive HTML synteny plot (Plotly) is generated alongside the tree.
 
 ---
 
@@ -189,7 +189,7 @@ Results are written to the directory specified by `--outdir`:
 | File | Description |
 |---|---|
 | `*_synteny_plot.html` | Interactive HTML visualization of syntenic blocks across species |
-| `*_tree.nwk` | Newick phylogenetic tree of discovered GOI sequences |
+| `*_tree.nwk` | Newick phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes |
 | `regions/*.regions.bed` | BED files with genomic coordinates of candidate syntenic blocks |
 | `synvoy_report.json` | Machine-readable run summary (parameters, genome QC, exit codes) |
 | `intermediate/` | Per-phase artifacts (flanking genes, MMseqs2 hits, GFFs, etc.) |
