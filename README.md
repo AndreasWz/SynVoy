@@ -1,5 +1,9 @@
 # SynVoy - Synteny Voyager
 
+<p align="center">
+  <img src="logo.png" alt="SynVoy logo" width="220"/>
+</p>
+
 *Navigating synteny. Discovering orthology.*  
 *Mapping evolutionary pathways through syntenic navigation.*
 
