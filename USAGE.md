@@ -123,8 +123,9 @@ The pipeline proceeds through five phases:
 2. **Locate GOI:** The query protein is aligned against the home genome using tblastn and MMseqs2 to establish coordinates.
 3. **Annotate GOI Exons:** If a GFF is available, the GOI is matched to an annotated gene and individual CDS/exons are extracted. Otherwise, exon boundaries are inferred from alignment hits.
 4. **Split Loci:** If the GOI maps to multiple genomic locations (e.g. tandem duplicates), each locus is processed independently.
-5. **Extract Flanking Genes:** The *n* genes upstream and downstream of each locus are identified from GFF or Prodigal prediction.
-6. **Borrow Annotations:** When the home genome lacks a GFF, annotations can be borrowed from annotated target genomes via reciprocal best hits.
+5. **Extract Flanking Genes:** The *n* genes upstream and downstream of each locus are identified from GFF or Prodigal prediction. Flanking candidates that are similar to the GOI (above `--max_flanking_goi_similarity`) are excluded to avoid inflating synteny scores. A `--max_flanking_distance` cap can prevent walking into distant gene deserts.
+6. **Expand GOI-Similar Neighbors** *(optional, on by default)*: When `--expand_goi_similar` is enabled, genes near the GOI that resemble it (e.g. tandem duplicates like MRJPs near Yellow-e3) are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These are searched in all target genomes alongside the original GOI, and included in the phylogenetic tree — enabling resolution of paralogs vs. orthologs.
+7. **Borrow Annotations:** When the home genome lacks a GFF, annotations can be borrowed from annotated target genomes via reciprocal best hits.
 
 ### Phase 2 — Phylogenetic Ordering & Iterative Search
 
@@ -138,7 +139,7 @@ The pipeline proceeds through five phases:
 
 ### Phase 4 — Phylogenetics & Visualization
 
-11. **Compute Tree:** Discovered GOI sequences are aligned (MAFFT) and a phylogenetic tree is inferred (IQ-TREE).
+11. **Compute Tree:** All discovered GOI and GOI-similar sequences across all genomes are aligned (MAFFT) and a phylogenetic tree is inferred (IQ-TREE with automatic model selection and ultrafast bootstrap). Multiple hits per genome are preserved, so the tree can resolve paralogs from orthologs.
 12. **Plot Synteny:** An interactive HTML plot shows the syntenic context of each hit, colored by homology, with the phylogenetic tree alongside.
 
 ### Phase 5 — Reporting
@@ -155,9 +156,13 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--n_flanking_genes` | `10` | Number of flanking genes to extract on each side of the GOI |
+| `--n_flanking_genes` | `10` | Number of non-GOI-similar flanking genes to extract on each side of the GOI |
 | `--prefer_large_genes` | `true` | Prefer larger flanking genes (more informative for homology search) |
 | `--min_flanking_size` | `500` | Minimum size (bp) for a flanking gene to be included |
+| `--max_flanking_goi_similarity` | `35.0` | Exclude flanking genes with k-mer similarity (%) to the GOI above this threshold. Prevents GOI paralogs (e.g. tandem duplicates) from being used as synteny anchors. Set to `100` to disable. |
+| `--max_flanking_distance` | `0` | Max distance (bp) from GOI center to walk for flanking genes. `0` = unlimited. Useful when the GOI neighbours a large tandem array. |
+| `--expand_goi_similar` | `true` | Emit GOI-similar flanking genes as additional GOI queries (`GOI_NEIGHBOR_` prefix). Enables paralog discovery and phylogenetic resolution across genomes. |
+| `--expand_goi_similar_distance` | `300000` | Max distance (bp) from GOI to search for GOI-similar neighbor genes |
 | `--exon_level_search` | `true` | Search at exon level for better divergent-gene detection |
 | `--cluster_distance` | `150000` | Max gap (bp) between flanking-gene hits to merge into one syntenic block |
 | `--min_synteny_score` | `0.6` | Fraction of flanking genes that must map to a target to trigger local search |
@@ -178,8 +183,8 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 |---|---|---|
 | `--enable_smith_waterman` | `true` | Use rigorous Smith-Waterman alignment (parasail) for GOI search |
 | `--sw_method` | `auto` | Implementation: `auto`, `parasail`, or `ssearch36` |
-| `--sw_min_score` | `50` | Minimum SW alignment score to report a hit |
-| `--sw_min_identity` | `20.0` | Minimum identity (%) for SW hits |
+| `--sw_min_score` | `20` | Minimum SW alignment score to report a hit |
+| `--sw_min_identity` | `10.0` | Minimum identity (%) for SW hits |
 | `--sw_timeout_seconds` | `300` | Timeout per SW search invocation |
 
 ### Relaxed / Augmented Search
@@ -221,6 +226,23 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--pred_flank_window` | `50000` | Prodigal prediction window around locus |
 | `--pred_keep_pct` | `0.10` | Fraction of Prodigal predictions to keep |
 | `--prodigal_full_genome_fallback` | `false` | Run Prodigal on entire genome if windowed prediction fails |
+
+### Gene Model Classification
+
+Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (complete/partial/fragment) assigned to gene models in GFF output.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--classify_high_min_identity` | `60.0` | Min identity (%) for HIGH-confidence exon_annotation models |
+| `--classify_medium_min_identity` | `45.0` | Min identity (%) for MEDIUM-confidence exon_annotation models |
+| `--classify_tandem_min_identity` | `40.0` | Min identity (%) for MEDIUM-confidence tandem copies. Below this, tandem copies are labeled LOW. |
+| `--classify_fragment_max_qcov` | `0.4` | Query coverage below this marks a gene model as `fragment` in the ModelStatus field |
+| `--classify_complete_min_qcov` | `0.7` | Query coverage above this (with multi-exon evidence) marks a model as `complete` |
+
+**ModelStatus** is a GFF attribute independent of confidence that labels the completeness of a gene model:
+- `complete` — query coverage >= 0.7 and multi-exon (or tandem copy)
+- `partial` — between fragment and complete thresholds
+- `fragment` — query coverage < 0.4, or evidence from rescued_exon / raw_hit only
 
 ### Synteny Scoring Weights
 
@@ -306,7 +328,7 @@ All output goes into `--outdir` (default: `results/`):
 | Path | Description |
 |---|---|
 | `*_synteny_plot.html` | Interactive HTML visualization. Open in a browser — shows syntenic blocks, gene arrows, homology links, and a phylogenetic tree. |
-| `*_tree.nwk` | Newick-format phylogenetic tree of discovered GOI sequences. |
+| `*_tree.nwk` | Newick-format phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes (multiple per genome when paralogs are found). |
 | `regions/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome. |
 | `synvoy_report.json` | Machine-readable JSON report: input parameters, genome QC metrics, per-target results, internal exit codes. |
 | `intermediate/` | Per-phase artifacts — flanking gene FASTAs, MMseqs2 hit tables, per-target GFFs, miniprot alignments, etc. Only kept if `--keep_intermediate true`. |

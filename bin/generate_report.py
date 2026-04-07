@@ -140,6 +140,7 @@ def summarize_annotations(gff_files):
     goi_confidence_counts = Counter()
     goi_class_counts = Counter()
     evidence_type_counts = Counter()
+    model_status_counts = Counter()
     goi_evidence_counts = Counter()
     fallback_goi_annotations = 0
     total_annotations = 0
@@ -158,6 +159,7 @@ def summarize_annotations(gff_files):
                 "goi_confidence_counts": Counter(),
                 "goi_class_counts": Counter(),
                 "evidence_type_counts": Counter(),
+                "model_status_counts": Counter(),
             },
         )
 
@@ -178,10 +180,14 @@ def summarize_annotations(gff_files):
                     confidence = (attrs.get("Confidence", "") or "UNKNOWN").upper()
                     goi_class = attrs.get("GOIClass", "")
                     evidence_type = attrs.get("EvidenceType", attrs.get("Type", "")) or "unknown"
+                    model_status = attrs.get("ModelStatus", "")
 
                     stats["total_annotations"] += 1
                     stats["role_counts"][role] += 1
                     stats["evidence_type_counts"][evidence_type] += 1
+                    if model_status:
+                        stats["model_status_counts"][model_status] += 1
+                        model_status_counts[model_status] += 1
                     stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
                     if role == "goi" and goi_class:
                         stats["goi_class_counts"][goi_class] += 1
@@ -220,6 +226,7 @@ def summarize_annotations(gff_files):
             "goi_confidence_counts": dict(stats["goi_confidence_counts"]),
             "goi_class_counts": dict(stats["goi_class_counts"]),
             "evidence_type_counts": dict(stats["evidence_type_counts"]),
+            "model_status_counts": dict(stats["model_status_counts"]),
         }
         per_genome_list.append(row)
         if stats["goi_annotations"] == 0:
@@ -235,6 +242,7 @@ def summarize_annotations(gff_files):
         "goi_class_counts": dict(goi_class_counts),
         "goi_evidence_counts": dict(goi_evidence_counts),
         "evidence_type_counts": dict(evidence_type_counts),
+        "model_status_counts": dict(model_status_counts),
         "fallback_goi_annotations": fallback_goi_annotations,
         "genomes_without_goi": genomes_without_goi,
         "genomes_with_only_ambiguous_goi": genomes_with_only_ambiguous_goi,
