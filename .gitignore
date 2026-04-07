@@ -37,12 +37,16 @@ ref/Homo_sapiens.fna.gz
 docs/
 local_runs/
 queries/
-legacy_source/
-bin_backup_pre_unconstrained.tar.gz
-docs/
-conf/
-queries/
 easy_mode_genomes/
 
 # Ground truth: large genome data (FASTA, GFF3, zips) and absolute-path symlinks
 ground_truth/
+
+# Test outputs (generated, not source)
+tests/ground_truth_test/output/
+tests/ground_truth_test/output_recheck/
+tests/ground_truth_test/output_unified/
+
+# Personal / binary files
+melettin_paper.pdf
+ideas_from_human_user.txt
