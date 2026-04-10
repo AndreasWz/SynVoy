@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-plot_synteny.py  –  Interactive synteny visualization for SynVoy
+plot_synteny.py  –  SVG-based synteny visualization for SynVoy
 
 Layout
 ──────
   •  Home genome at top, target genomes below (ordered by phylogenetic distance)
-  •  Gene arrows (pentagons) coloured by homology group
-  •  Connecting ribbons between homologous genes in adjacent tracks
+  •  Gene models: exon blocks connected by intron lines, with directional arrows
+  •  Smooth bezier-curve ribbons between homologous genes in adjacent tracks
   •  GOI highlighted with warm/red clade colours from the phylogenetic tree
   •  Flanking genes share a consistent colour derived from the home-genome name
+  •  Interactive: hover tooltips, click-to-highlight orthologs, zoom controls
 
 Inputs
 ──────
@@ -23,19 +24,19 @@ Inputs
 
 Output
 ──────
-  --output          Interactive HTML file (Plotly)
+  --output          Self-contained interactive HTML file (SVG)
 """
 
 import argparse
 import colorsys
 import json
+import math
 import os
 import re
 import sys
 from collections import defaultdict
+from html import escape as _html_escape
 from urllib.parse import unquote
-
-import plotly.graph_objects as go
 
 try:
     from ete3 import Tree
@@ -77,7 +78,6 @@ class _SimpleNode:
 
     def get_distance(self, other):
         """Compute patristic distance via LCA (simple BFS approach)."""
-        # Build path-to-root for both nodes
         def _path_to_root(node):
             path = {}
             d = 0.0
@@ -158,7 +158,7 @@ GENE_PALETTE = [
 GOI_COLOUR    = "#e31a1c"   # bright red (default for GOI)
 GOI_BORDER    = "#8b0000"   # dark red
 UNMATCHED_CLR = "#d9d9d9"   # light gray
-TRACK_BG_CLR  = "#f5f5f5"   # very light gray track background
+TRACK_BG_CLR  = "#f3f5f8"   # very light blue-gray track background
 
 
 # ======================================================================
@@ -618,7 +618,6 @@ def parse_home_gff_products(gff_file):
     if not gff_file or not os.path.exists(gff_file) or gff_file == "NO_GFF":
         return products
     try:
-        from urllib.parse import unquote
         with open(gff_file) as fh:
             for line in fh:
                 if line.startswith("#"):
@@ -662,8 +661,6 @@ def parse_home_gff_exons(gff_file, gene_names):
     if not gff_file or not os.path.exists(gff_file) or gff_file == "NO_GFF":
         return exons_by_gene
     try:
-        from urllib.parse import unquote
-
         # Step 1: map gene-ID -> gene-name, mRNA-ID -> gene-name
         gene_id_to_name = {}  # gene ID -> gene name from BED
         mrna_to_gene = {}     # mRNA ID -> gene name
@@ -938,11 +935,10 @@ def clean_gene_label(name, keep_goi_prefix=False):
         if keep_goi_prefix:
             # For target tracks: translate 'GOI_copy_3' -> 'GOI #3'
             suffix = name[4:]
-            import re as _re
-            m = _re.match(r'copy_(\d+)', suffix)
+            m = re.match(r'copy_(\d+)', suffix)
             if m:
                 return f"GOI #{m.group(1)}"
-            m = _re.match(r'(.*?)_copy_(\d+)', suffix)
+            m = re.match(r'(.*?)_copy_(\d+)', suffix)
             if m:
                 return f"GOI #{m.group(2)}"
             return f"GOI {suffix}" if suffix else "GOI"
@@ -951,83 +947,8 @@ def clean_gene_label(name, keep_goi_prefix=False):
 
 
 # ======================================================================
-# Drawing primitives
+# Drawing helpers (shared)
 # ======================================================================
-
-
-def _arrow_xy(x0, x1, y_base, height, strand, junctions=None):
-    """Pentagon vertices for a gene arrow, optionally with V-notch
-    indentations at exon-boundary *junctions* (list of x-positions)."""
-    w = x1 - x0
-    aw = min(w * 0.18, height * 3.5)       # arrow-head width (prominent)
-    if aw < 1:
-        aw = min(w * 0.5, 1)
-    ym = y_base + height / 2
-    yt = y_base + height
-    yb = y_base
-
-    # ---- notch geometry ------------------------------------------------
-    if junctions:
-        notch_depth = height * 0.35          # how far the V cuts into the body
-        notch_hw = max(abs(w) * 0.018, 120)  # half-width of the V at the edge
-        # keep only junctions that fit between the body edges (not in the
-        # arrowhead or too close to the blunt end)
-        if strand == "+":
-            valid = sorted(j for j in junctions
-                           if x0 + notch_hw * 1.5 < j < x1 - aw - notch_hw)
-        else:
-            valid = sorted(j for j in junctions
-                           if x0 + aw + notch_hw < j < x1 - notch_hw * 1.5)
-    else:
-        valid = []
-
-    if not valid:
-        # simple pentagon (no notches)
-        if strand == "+":
-            xs = [x0, x1 - aw, x1, x1 - aw, x0, x0]
-            ys = [yb, yb, ym, yt, yt, yb]
-        else:
-            xs = [x0, x0 + aw, x1, x1, x0 + aw, x0]
-            ys = [ym, yb, yb, yt, yt, ym]
-        return xs, ys
-
-    # ---- build polygon with V-notches ----------------------------------
-    xs, ys = [], []
-    if strand == "+":
-        # bottom edge  left → right  (notches point *up* into body)
-        xs.append(x0); ys.append(yb)
-        for jx in valid:
-            xs.extend([jx - notch_hw, jx, jx + notch_hw])
-            ys.extend([yb, yb + notch_depth, yb])
-        xs.append(x1 - aw); ys.append(yb)
-        # arrowhead
-        xs.append(x1); ys.append(ym)
-        # top edge  right → left  (notches point *down* into body)
-        xs.append(x1 - aw); ys.append(yt)
-        for jx in reversed(valid):
-            xs.extend([jx + notch_hw, jx, jx - notch_hw])
-            ys.extend([yt, yt - notch_depth, yt])
-        xs.append(x0); ys.append(yt)
-        xs.append(x0); ys.append(yb)          # close
-    else:  # strand "-"
-        # arrowhead tip
-        xs.append(x0); ys.append(ym)
-        # bottom edge  arrowhead → right
-        xs.append(x0 + aw); ys.append(yb)
-        for jx in valid:
-            xs.extend([jx - notch_hw, jx, jx + notch_hw])
-            ys.extend([yb, yb + notch_depth, yb])
-        xs.append(x1); ys.append(yb)
-        # right side
-        xs.append(x1); ys.append(yt)
-        # top edge  right → arrowhead
-        for jx in reversed(valid):
-            xs.extend([jx + notch_hw, jx, jx - notch_hw])
-            ys.extend([yt, yt - notch_depth, yt])
-        xs.append(x0 + aw); ys.append(yt)
-        xs.append(x0); ys.append(ym)          # close
-    return xs, ys
-
 
 def _hex_to_rgba(hexc, alpha):
     hexc = hexc.lstrip("#")
@@ -1035,148 +956,70 @@ def _hex_to_rgba(hexc, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def _darken_hex(hexc, factor=0.7):
+    """Darken a hex colour by the given factor."""
+    hexc = hexc.lstrip("#")
+    r = int(int(hexc[0:2], 16) * factor)
+    g = int(int(hexc[2:4], 16) * factor)
+    b = int(int(hexc[4:6], 16) * factor)
+    return f"#{min(r,255):02x}{min(g,255):02x}{min(b,255):02x}"
+
+
 def _get_coords(gene):
     return gene.get("start_plot", gene["start"]), gene.get("end_plot", gene["end"])
 
 
-def add_gene(fig, gene, x_off, y_base, h, colour, border_clr, border_w,
-             hover, show_legend, legend_group, line_dash="solid"):
-    g_start, g_end = _get_coords(gene)
-    x0 = g_start - x_off
-    x1 = g_end - x_off
-
-    # Compute junction x-positions for V-notch polygon
-    junction_xs = None
-    exon_coords = gene.get("exon_coords", [])
-    n_exons_attr = gene.get("n_exons", 0)
-    if len(exon_coords) >= 2:
-        # Real exon boundaries available
-        gene_start_raw = gene["start"]
-        gene_end_raw = gene["end"]
-        gene_span_raw = max(1, gene_end_raw - gene_start_raw)
-        junction_xs = []
-        for i in range(len(exon_coords) - 1):
-            junction_genomic = (exon_coords[i][1] + exon_coords[i + 1][0]) / 2.0
-            frac = (junction_genomic - gene_start_raw) / gene_span_raw
-            frac = max(0.02, min(0.98, frac))
-            junction_xs.append(x0 + frac * (x1 - x0))
-    elif n_exons_attr and n_exons_attr >= 2:
-        # No real CDS boundaries; synthesize evenly-spaced notches from
-        # the Exons=N attribute (common for flanking_hit_span genes).
-        gene_w = x1 - x0
-        junction_xs = []
-        for k in range(1, n_exons_attr):
-            frac = k / n_exons_attr
-            junction_xs.append(x0 + frac * gene_w)
-
-    xs, ys = _arrow_xy(x0, x1, y_base, h, gene["strand"], junctions=junction_xs)
-    fig.add_trace(go.Scatter(
-        x=xs, y=ys,
-        fill="toself",
-        fillcolor=colour,
-        line=dict(color=border_clr, width=border_w, dash=line_dash),
-        mode="lines",
-        hoverinfo="text",
-        text=hover,
-        showlegend=show_legend,
-        legendgroup=legend_group,
-        name=clean_gene_label(legend_group),
-    ))
+def _goi_colour_for_genome(genome_id, goi_genome_colours):
+    """Look up GOI colour for a specific genome, with fuzzy matching."""
+    if not goi_genome_colours:
+        return GOI_COLOUR
+    # Exact match
+    if genome_id in goi_genome_colours:
+        return goi_genome_colours[genome_id]
+    # Prefix match  (e.g. "GCF_029169275.1" in "GCF_029169275.1.fna")
+    for key, clr in goi_genome_colours.items():
+        if key in genome_id or genome_id in key:
+            return clr
+    # Home fallback
+    return goi_genome_colours.get("home", GOI_COLOUR)
 
 
-def add_ribbon(fig, g_upper, g_lower, off_u, off_l, y_u_bot, y_l_top, colour, alpha=0.18):
-    u_start, u_end = _get_coords(g_upper)
-    l_start, l_end = _get_coords(g_lower)
-    
-    u0 = u_start - off_u
-    u1 = u_end   - off_u
-    l0 = l_start - off_l
-    l1 = l_end   - off_l
-    fill = _hex_to_rgba(colour, alpha)
-    edge = _hex_to_rgba(colour, alpha * 1.8)
-    fig.add_trace(go.Scatter(
-        x=[u0, u1, l1, l0, u0],
-        y=[y_u_bot, y_u_bot, y_l_top, y_l_top, y_u_bot],
-        fill="toself", fillcolor=fill,
-        line=dict(color=edge, width=0.5),
-        mode="lines", hoverinfo="skip", showlegend=False,
-    ))
+def _lookup_product(gene_name, products):
+    """Fuzzy product-name lookup."""
+    for candidate in (gene_name, gene_name.replace("gene-", ""),
+                      "gene-" + gene_name if not gene_name.startswith("gene-") else ""):
+        if candidate in products:
+            return products[candidate]
+    return ""
 
 
-def add_label(fig, gene, x_off, y_base, h, text, fsize=9, fcolour="black",
-              is_goi_flag=False):
-    g_start, g_end = _get_coords(gene)
-    xc = (g_start + g_end) / 2 - x_off
-    if is_goi_flag:
-        text = "* " + text
-        fcolour = GOI_BORDER
-        fsize = max(fsize, 13)
-    fig.add_annotation(
-        x=xc, y=y_base + h + h * 0.20,
-        text=text, showarrow=False,
-        font=dict(size=fsize, color=fcolour),
-        textangle=-35,
-        xanchor="center", yanchor="bottom",
-    )
+def _preferred_home_label(gene, home_products):
+    """
+    Prefer informative home labels:
+    gene symbol/name first, then product for generic locus-tag IDs.
+    """
+    display_name = gene.get("display_name", "")
+    cleaned_display = clean_gene_label(display_name)
+    if cleaned_display and not _is_generic_gene_label(cleaned_display):
+        return cleaned_display
+
+    name = gene.get("name", "")
+    cleaned = clean_gene_label(name)
+    if cleaned and not _is_generic_gene_label(cleaned):
+        return cleaned
+
+    product = _lookup_product(name, home_products)
+    if product and not _is_noninformative_product(product):
+        pretty = _format_product_label(product)
+        if pretty:
+            return pretty
+
+    return cleaned or name
 
 
-
-def draw_gap_break(fig, x_pos, y_pos, height, text, is_chrom_break=False):
-    """Draw a visual break mark and text label for a compressed gap or chromosome boundary."""
-    if is_chrom_break:
-        # Draw a prominent vertical dashed line for chromosome boundaries
-        fig.add_shape(
-            type="line",
-            x0=x_pos, x1=x_pos,
-            y0=y_pos - 0.08, y1=y_pos + height + 0.08,
-            line=dict(color="rgba(80,80,80,0.55)", width=2, dash="dot"),
-        )
-    else:
-        fig.add_annotation(
-            x=x_pos, y=y_pos + height / 2,
-            text=f"<b>//</b><br>{text}",
-            showarrow=False,
-            font=dict(size=9, color="black"),
-            xanchor="center", yanchor="middle",
-        )
-
-
-def _draw_chrom_labels(fig, track, ti, track_y, x_off, gene_h):
-    """Draw chromosome labels below each chromosome segment within a track."""
-    genes = track["genes"]
-    if not genes:
-        return
-    yb = track_y[ti]
-
-    # Group genes by chromosome (preserving plot order)
-    from collections import OrderedDict
-    chrom_segments = OrderedDict()
-    for g in genes:
-        ch = g["chrom"]
-        if ch not in chrom_segments:
-            chrom_segments[ch] = []
-        chrom_segments[ch].append(g)
-
-    if len(chrom_segments) <= 1:
-        return  # Only one chromosome — no need for labels
-
-    for ch, ch_genes in chrom_segments.items():
-        # Find the center of this chromosome segment in plot coords
-        xs = [g["start_plot"] - x_off for g in ch_genes] + \
-             [g["end_plot"] - x_off for g in ch_genes]
-        cx = (min(xs) + max(xs)) / 2
-        # Shorten chromosome name for display
-        short = ch
-        if len(ch) > 12:
-            short = ch[-10:]  # e.g. NC_045757.1 → _045757.1
-        fig.add_annotation(
-            x=cx, y=yb - 0.18,
-            text=f"<b>{short}</b>",
-            showarrow=False,
-            font=dict(size=11, color="#333333"),
-            xanchor="center", yanchor="top",
-        )
-
+# ======================================================================
+# Coordinate compression
+# ======================================================================
 
 def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
     """
@@ -1196,8 +1039,7 @@ def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
         return [], []
 
     # ---- Group by chromosome & order -----------------------------------
-    from collections import defaultdict as _dd
-    chrom_groups = _dd(list)
+    chrom_groups = defaultdict(list)
     for g in genes:
         chrom_groups[g["chrom"]].append(g)
 
@@ -1254,7 +1096,7 @@ def compress_track_coordinates(genes, threshold=50000, visual_gap=2000):
                 breaks.append({
                     "x": break_x,
                     "gap_size": 0,
-                    "text": f"⧫ {g['chrom'][:16]}",
+                    "text": f"◆ {g['chrom'][:16]}",
                     "is_chrom_break": True,
                 })
 
@@ -1274,10 +1116,10 @@ def get_anchor_center(genes):
     for g in genes:
         if _is_goi_target_gene(g) or is_goi(g.get("name")) or is_goi(g.get("home_gene_id")):
             goi_centers.append((g["start_plot"] + g["end_plot"]) / 2)
-            
+
     if goi_centers:
         return sum(goi_centers) / len(goi_centers)
-        
+
     # Fallback: center of the entire cluster
     if not genes:
         return 0
@@ -1285,65 +1127,698 @@ def get_anchor_center(genes):
     end   = max(g["end_plot"]   for g in genes)
     return (start + end) / 2
 
-def _goi_colour_for_genome(genome_id, goi_genome_colours):
-    """Look up GOI colour for a specific genome, with fuzzy matching."""
-    if not goi_genome_colours:
-        return GOI_COLOUR
-    # Exact match
-    if genome_id in goi_genome_colours:
-        return goi_genome_colours[genome_id]
-    # Prefix match  (e.g. "GCF_029169275.1" in "GCF_029169275.1.fna")
-    for key, clr in goi_genome_colours.items():
-        if key in genome_id or genome_id in key:
-            return clr
-    # Home fallback
-    return goi_genome_colours.get("home", GOI_COLOUR)
+
+def _assign_sub_tracks(genes, x_off, min_gap=800):
+    """Greedy interval scheduling: writes gene['_sub_track'] in-place."""
+    sorted_genes = sorted(genes, key=lambda g: g["start_plot"] - x_off)
+    sub_ends = []  # rightmost x used by each sub-track so far
+    for gene in sorted_genes:
+        x0 = gene["start_plot"] - x_off
+        x1 = gene["end_plot"]   - x_off
+        placed = False
+        for i, end_x in enumerate(sub_ends):
+            if end_x + min_gap <= x0:
+                gene["_sub_track"] = i
+                sub_ends[i] = x1
+                placed = True
+                break
+        if not placed:
+            gene["_sub_track"] = len(sub_ends)
+            sub_ends.append(x1)
 
 
-def _lookup_product(gene_name, products):
-    """Fuzzy product-name lookup."""
-    for candidate in (gene_name, gene_name.replace("gene-", ""),
-                      "gene-" + gene_name if not gene_name.startswith("gene-") else ""):
-        if candidate in products:
-            return products[candidate]
-    return ""
+# ======================================================================
+# SVG Rendering Engine
+# ======================================================================
+
+def _svg_esc(text):
+    """Escape text for safe embedding in SVG/HTML."""
+    return _html_escape(str(text), quote=True)
 
 
-def _preferred_home_label(gene, home_products):
-    """
-    Prefer informative home labels:
-    gene symbol/name first, then product for generic locus-tag IDs.
-    """
-    display_name = gene.get("display_name", "")
-    cleaned_display = clean_gene_label(display_name)
-    if cleaned_display and not _is_generic_gene_label(cleaned_display):
-        return cleaned_display
+def _svg_arrow_path(x0, x1, yb, h, strand, rx=3):
+    """Generate SVG path 'd' attribute for a pentagon gene arrow with rounded back."""
+    w = x1 - x0
+    aw = min(w * 0.18, h * 0.7)
+    if aw < 1:
+        aw = min(w * 0.5, 1)
+    ym = yb + h / 2
+    yt = yb + h
+    rx = min(rx, w * 0.3, h * 0.3)
 
+    if strand == "+":
+        # Rounded left edge, pointed right
+        return (
+            f"M{x0 + rx:.1f},{yb:.1f} "
+            f"L{x1 - aw:.1f},{yb:.1f} "
+            f"L{x1:.1f},{ym:.1f} "
+            f"L{x1 - aw:.1f},{yt:.1f} "
+            f"L{x0 + rx:.1f},{yt:.1f} "
+            f"Q{x0:.1f},{yt:.1f} {x0:.1f},{yt - rx:.1f} "
+            f"L{x0:.1f},{yb + rx:.1f} "
+            f"Q{x0:.1f},{yb:.1f} {x0 + rx:.1f},{yb:.1f} Z"
+        )
+    else:
+        # Pointed left, rounded right edge
+        return (
+            f"M{x0:.1f},{ym:.1f} "
+            f"L{x0 + aw:.1f},{yb:.1f} "
+            f"L{x1 - rx:.1f},{yb:.1f} "
+            f"Q{x1:.1f},{yb:.1f} {x1:.1f},{yb + rx:.1f} "
+            f"L{x1:.1f},{yt - rx:.1f} "
+            f"Q{x1:.1f},{yt:.1f} {x1 - rx:.1f},{yt:.1f} "
+            f"L{x0 + aw:.1f},{yt:.1f} Z"
+        )
+
+
+def _svg_ribbon_path(ux0, ux1, uy_bot, lx0, lx1, ly_top):
+    """Generate SVG path 'd' for a bezier-curve synteny ribbon."""
+    cy = (uy_bot + ly_top) / 2
+    return (
+        f"M{ux0:.1f},{uy_bot:.1f} "
+        f"C{ux0:.1f},{cy:.1f} {lx0:.1f},{cy:.1f} {lx0:.1f},{ly_top:.1f} "
+        f"L{lx1:.1f},{ly_top:.1f} "
+        f"C{lx1:.1f},{cy:.1f} {ux1:.1f},{cy:.1f} {ux1:.1f},{uy_bot:.1f} Z"
+    )
+
+
+def _build_tooltip_json(gene, track, home_products):
+    """Build tooltip data dict for a gene, returned as escaped JSON string."""
+    is_home = track.get("is_home", False)
     name = gene.get("name", "")
-    cleaned = clean_gene_label(name)
-    if cleaned and not _is_generic_gene_label(cleaned):
-        return cleaned
+    home_id = gene.get("home_gene_id", name)
+    goi_f = _is_goi_target_gene(gene) if not is_home else (is_goi(name) or is_goi(home_id))
+    resolved = _is_resolved_goi_target_gene(gene) if not is_home else goi_f
+    ambiguous = goi_f and not resolved if not is_home else False
 
-    product = _lookup_product(name, home_products)
-    if product and not _is_noninformative_product(product):
-        pretty = _format_product_label(product)
-        if pretty:
-            return pretty
+    if is_home:
+        cn = _preferred_home_label(gene, home_products)
+        product = _lookup_product(name, home_products)
+    else:
+        cn = clean_gene_label(_preferred_target_label(gene))
+        product = gene.get("target_product", "")
 
-    return cleaned or name
+    n_ex = len(gene.get("exon_coords", []))
+    if n_ex <= 1:
+        n_ex = gene.get("n_exons", 0)
+
+    data = {
+        "name": cn,
+        "product": product or "",
+        "coords": f"{gene['chrom']}:{gene['start']:,}-{gene['end']:,}",
+        "strand": gene.get("strand", "+"),
+        "exons": n_ex if n_ex and n_ex > 1 else 0,
+        "isHome": is_home,
+    }
+
+    if not is_home:
+        if home_id:
+            data["homolog"] = clean_gene_label(home_id)
+        if "identity" in gene:
+            data["identity"] = round(gene["identity"], 1)
+        conf = (gene.get("confidence") or "").upper()
+        if conf:
+            data["confidence"] = conf
+        gc = gene.get("goi_class", "")
+        if gc:
+            data["goiClass"] = gc.replace("_", " ")
+        et = gene.get("evidence_type", "")
+        if et:
+            data["evidence"] = et.replace("_", " ")
+        ms = gene.get("model_status", "")
+        if ms:
+            data["model"] = ms
+        sc = gene.get("synteny_context", "")
+        if sc:
+            data["synteny"] = sc.replace("_", " ")
+        qc = gene.get("query_coverage")
+        if qc is not None:
+            data["queryCov"] = round(qc * 100, 1)
+
+    if resolved:
+        data["goiTag"] = "GOI"
+    elif ambiguous:
+        data["goiTag"] = "GOI-like / ambiguous"
+    elif goi_f and is_home:
+        data["goiTag"] = "GOI"
+
+    return _svg_esc(json.dumps(data, ensure_ascii=True))
 
 
-# ======================================================================
-# Tree visualization
-# ======================================================================
+def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
+                        home_products, args,
+                        subtitle_bits, hidden_absent_tracks,
+                        ambiguous_track_count, resolved_track_count):
+    """Render synteny visualization as self-contained HTML with embedded SVG."""
 
-def _render_tree_html(tree_file, goi_genome_colours, output_path,
-                      species_map=None):
-    """
-    Render a horizontal dendrogram of the GOI phylogenetic tree as an
-    interactive Plotly HTML file.  Leaf nodes are coloured with the same
-    clade palette used in the synteny plot.
-    """
+    n_tracks = len(all_tracks)
+
+    # ---- Layout constants ----
+    GENE_H        = 28
+    SUB_TRACK_GAP = 8
+    TRACK_MARGIN  = 95
+    LEFT_MARGIN   = 280
+    RIGHT_MARGIN  = 50
+    TOP_MARGIN    = 72
+    BOTTOM_MARGIN = 65
+    TRACK_PAD     = 14
+    MIN_GENE_PX   = 4
+    EXON_RX       = 3
+    RIBBON_GAP    = 8
+
+    # ---- Compute x range ----
+    all_x_bp = []
+    for track in all_tracks:
+        x_off = track["offset"]
+        for g in track["genes"]:
+            all_x_bp.append(g["start_plot"] - x_off)
+            all_x_bp.append(g["end_plot"] - x_off)
+
+    if not all_x_bp:
+        x_min_bp, x_max_bp = -1000, 1000
+    else:
+        x_min_bp, x_max_bp = min(all_x_bp), max(all_x_bp)
+
+    pad_bp = (x_max_bp - x_min_bp) * 0.05 + 5000
+    x_min_bp -= pad_bp
+    x_max_bp += pad_bp
+
+    # ---- Plot dimensions ----
+    if args.plot_width > 0:
+        plot_w = max(800, args.plot_width)
+    else:
+        est = max(1200, int((x_max_bp - x_min_bp) / 350))
+        plot_w = min(6000, est)
+
+    available_w = plot_w - LEFT_MARGIN - RIGHT_MARGIN
+    bp_range = max(1, x_max_bp - x_min_bp)
+    scale = available_w / bp_range  # px per bp
+
+    # ---- Track heights & y positions ----
+    track_heights = []
+    for track in all_tracks:
+        genes = track["genes"]
+        n_sub = (max(g.get("_sub_track", 0) for g in genes) + 1) if genes else 1
+        th = n_sub * GENE_H + max(0, n_sub - 1) * SUB_TRACK_GAP
+        track_heights.append(th)
+
+    track_y = []
+    y_cursor = TOP_MARGIN
+    for i in range(n_tracks):
+        track_y.append(y_cursor)
+        y_cursor += track_heights[i] + TRACK_MARGIN
+
+    total_h = y_cursor - TRACK_MARGIN + BOTTOM_MARGIN
+    if args.plot_height > 0:
+        total_h = max(total_h, args.plot_height)
+
+    # ---- Coordinate helpers (closures) ----
+    def bp2px(bp_val):
+        return LEFT_MARGIN + (bp_val - x_min_bp) * scale
+
+    def gene_px(gene, track):
+        x_off = track["offset"]
+        x0 = bp2px(gene["start_plot"] - x_off)
+        x1 = bp2px(gene["end_plot"] - x_off)
+        if x1 - x0 < MIN_GENE_PX:
+            mid = (x0 + x1) / 2
+            x0, x1 = mid - MIN_GENE_PX / 2, mid + MIN_GENE_PX / 2
+        return x0, x1
+
+    def gene_yb(ti, gene):
+        sub = gene.get("_sub_track", 0)
+        return track_y[ti] + sub * (GENE_H + SUB_TRACK_GAP)
+
+    # ---- Build SVG elements ----
+    svg_parts = []
+
+    # ---- SVG defs (filters) ----
+    svg_parts.append('<defs>')
+    svg_parts.append("""
+    <filter id="geneShadow" x="-4%" y="-15%" width="108%" height="140%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-opacity="0.10" flood-color="#000"/>
+    </filter>
+    """)
+    svg_parts.append('</defs>')
+
+    # ---- Track backgrounds ----
+    for ti, track in enumerate(all_tracks):
+        if not track["genes"]:
+            continue
+        yb = track_y[ti]
+        th = track_heights[ti]
+        x_off = track["offset"]
+
+        gxs = []
+        for g in track["genes"]:
+            x0, x1 = gene_px(g, track)
+            gxs.extend([x0, x1])
+        if not gxs:
+            continue
+
+        x_left = min(gxs) - TRACK_PAD
+        x_right = max(gxs) + TRACK_PAD
+
+        chrom_break_xs = sorted(
+            bp2px(brk["x"] - x_off)
+            for brk in track.get("breaks", [])
+            if brk.get("is_chrom_break")
+        )
+
+        if not chrom_break_xs:
+            svg_parts.append(
+                f'<rect x="{x_left:.1f}" y="{yb - TRACK_PAD:.1f}" '
+                f'width="{x_right - x_left:.1f}" height="{th + 2*TRACK_PAD:.1f}" '
+                f'class="track-bg" rx="6"/>'
+            )
+        else:
+            boundaries = [x_left] + chrom_break_xs + [x_right]
+            for si in range(len(boundaries) - 1):
+                inset = 10
+                seg_x0 = boundaries[si] + (inset if si > 0 else 0)
+                seg_x1 = boundaries[si + 1] - (inset if si < len(boundaries) - 2 else 0)
+                if seg_x0 < seg_x1:
+                    svg_parts.append(
+                        f'<rect x="{seg_x0:.1f}" y="{yb - TRACK_PAD:.1f}" '
+                        f'width="{seg_x1 - seg_x0:.1f}" height="{th + 2*TRACK_PAD:.1f}" '
+                        f'class="track-bg" rx="6"/>'
+                    )
+
+    # ---- Ribbons (drawn first, behind genes) ----
+    svg_parts.append('<g class="ribbons">')
+    for ti in range(len(all_tracks) - 1):
+        upper = all_tracks[ti]
+        lower = all_tracks[ti + 1]
+        for lg in lower["genes"]:
+            home_id = lg.get("home_gene_id", "")
+            if not home_id:
+                continue
+            ribbon_alpha = args.ribbon_alpha_dense
+            y_lg_top = gene_yb(ti + 1, lg) + GENE_H + RIBBON_GAP
+            for ug in upper["genes"]:
+                u_name = ug["name"]
+                u_home = ug.get("home_gene_id", u_name)
+                match = (u_home == home_id or u_name == home_id
+                         or (is_goi(u_home) and is_goi(home_id))
+                         or (is_goi(u_name) and is_goi(home_id)))
+                if match:
+                    colour = gene_colours.get(home_id,
+                             gene_colours.get(u_name, UNMATCHED_CLR))
+                    if is_goi(home_id):
+                        colour = _goi_colour_for_genome(
+                            lower["genome_id"], goi_genome_colours)
+                        if _is_goi_target_gene(lg) and not _is_resolved_goi_target_gene(lg):
+                            ribbon_alpha = 0.10
+                    y_ug_bot = gene_yb(ti, ug) - RIBBON_GAP
+
+                    ux0, ux1 = gene_px(ug, upper)
+                    lx0, lx1 = gene_px(lg, lower)
+                    fill = _hex_to_rgba(colour, ribbon_alpha)
+                    edge = _hex_to_rgba(colour, min(1.0, ribbon_alpha * 1.8))
+                    path_d = _svg_ribbon_path(ux0, ux1, y_ug_bot, lx0, lx1, y_lg_top)
+                    svg_parts.append(
+                        f'<path d="{path_d}" fill="{fill}" stroke="{edge}" '
+                        f'stroke-width="0.5" class="ribbon" '
+                        f'data-homology="{_svg_esc(home_id)}"/>'
+                    )
+    svg_parts.append('</g>')
+
+    # ---- Gene models ----
+    svg_parts.append('<g class="genes">')
+    legend_shown = set()
+
+    for ti, track in enumerate(all_tracks):
+        x_off = track["offset"]
+        # Draw large genes first so small genes render on top
+        sorted_genes = sorted(track["genes"],
+                              key=lambda g: g["end_plot"] - g["start_plot"],
+                              reverse=True)
+
+        for gene in sorted_genes:
+            yb = gene_yb(ti, gene)
+            name = gene["name"]
+            home_id = gene.get("home_gene_id", name)
+            goi_like = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
+            resolved_goi = _is_resolved_goi_target_gene(gene) if not track["is_home"] else goi_like
+            ambiguous_goi = goi_like and not resolved_goi if not track["is_home"] else False
+            confidence = (gene.get("confidence") or "").upper()
+
+            # --- colour ---
+            if resolved_goi or (track["is_home"] and goi_like):
+                colour = _goi_colour_for_genome(track["genome_id"], goi_genome_colours)
+                bclr = GOI_BORDER
+                bw = 2.2 if confidence == "HIGH" or track["is_home"] else 1.8
+                dash = ""
+            elif ambiguous_goi:
+                colour = _hex_to_rgba(
+                    _goi_colour_for_genome(track["genome_id"], goi_genome_colours), 0.32)
+                bclr = GOI_BORDER
+                bw = 1.5
+                dash = ' stroke-dasharray="6,3"'
+            elif home_id in gene_colours:
+                colour = gene_colours[home_id]
+                bclr = _darken_hex(colour, 0.6)
+                bw = 1
+                dash = ' stroke-dasharray="2,2"' if confidence == "LOW" else ""
+            elif name in gene_colours:
+                colour = gene_colours[name]
+                bclr = _darken_hex(colour, 0.6)
+                bw = 1
+                dash = ' stroke-dasharray="2,2"' if confidence == "LOW" else ""
+            else:
+                colour = UNMATCHED_CLR
+                bclr = "#b0b0b0"
+                bw = 0.8
+                dash = ' stroke-dasharray="2,2"' if confidence == "LOW" else ""
+
+            x0, x1 = gene_px(gene, track)
+            w_px = x1 - x0
+            strand = gene.get("strand", "+")
+
+            tooltip_json = _build_tooltip_json(gene, track, home_products)
+            goi_attr = ' data-is-goi="true"' if goi_like else ''
+            hom_id_attr = _svg_esc(home_id)
+
+            svg_parts.append(
+                f'<g class="gene-group" data-homology="{hom_id_attr}" '
+                f'data-track="{ti}" data-tooltip=\'{tooltip_json}\'{goi_attr}>'
+            )
+
+            # Render gene body
+            exon_coords = gene.get("exon_coords", [])
+            n_exons_attr = gene.get("n_exons", 0)
+            has_real_exons = len(exon_coords) >= 2 and w_px > 25
+            has_synth_exons = (not has_real_exons and n_exons_attr
+                               and n_exons_attr >= 2 and w_px > 25)
+
+            if has_real_exons or has_synth_exons:
+                # --- Exon/intron model ---
+                mid_y = yb + GENE_H / 2
+
+                # Intron backbone line
+                svg_parts.append(
+                    f'<line x1="{x0:.1f}" y1="{mid_y:.1f}" '
+                    f'x2="{x1:.1f}" y2="{mid_y:.1f}" '
+                    f'class="intron-line"{dash}/>'
+                )
+
+                if has_real_exons:
+                    gene_s = gene["start"]
+                    gene_e = gene["end"]
+                    gene_span = max(1, gene_e - gene_s)
+                    for ei, (es, ee) in enumerate(exon_coords):
+                        frac_s = max(0, min(1, (es - gene_s) / gene_span))
+                        frac_e = max(0, min(1, (ee - gene_s) / gene_span))
+                        ex0 = x0 + frac_s * w_px
+                        ex1 = x0 + frac_e * w_px
+                        ew = max(2, ex1 - ex0)
+
+                        # Last/first exon gets arrow tip
+                        is_terminal = ((strand == "+" and ei == len(exon_coords) - 1) or
+                                       (strand == "-" and ei == 0))
+                        if is_terminal and ew > 10:
+                            aw = min(ew * 0.3, GENE_H * 0.5)
+                            if strand == "+":
+                                d = (f"M{ex0:.1f},{yb:.1f} L{ex0 + ew - aw:.1f},{yb:.1f} "
+                                     f"L{ex0 + ew:.1f},{mid_y:.1f} L{ex0 + ew - aw:.1f},{yb + GENE_H:.1f} "
+                                     f"L{ex0:.1f},{yb + GENE_H:.1f} Z")
+                            else:
+                                d = (f"M{ex0:.1f},{mid_y:.1f} L{ex0 + aw:.1f},{yb:.1f} "
+                                     f"L{ex0 + ew:.1f},{yb:.1f} L{ex0 + ew:.1f},{yb + GENE_H:.1f} "
+                                     f"L{ex0 + aw:.1f},{yb + GENE_H:.1f} Z")
+                            svg_parts.append(
+                                f'<path d="{d}" fill="{colour}" stroke="{bclr}" '
+                                f'stroke-width="{bw}" class="exon"{dash}/>'
+                            )
+                        else:
+                            svg_parts.append(
+                                f'<rect x="{ex0:.1f}" y="{yb:.1f}" width="{ew:.1f}" '
+                                f'height="{GENE_H}" rx="{EXON_RX}" fill="{colour}" '
+                                f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
+                            )
+                else:
+                    # Synthesized evenly-spaced exons
+                    for k in range(n_exons_attr):
+                        frac_s = k / n_exons_attr
+                        frac_e = (k + 0.65) / n_exons_attr
+                        ex0 = x0 + frac_s * w_px
+                        ex1 = x0 + frac_e * w_px
+                        ew = max(2, ex1 - ex0)
+
+                        is_terminal = ((strand == "+" and k == n_exons_attr - 1) or
+                                       (strand == "-" and k == 0))
+                        if is_terminal and ew > 10:
+                            aw = min(ew * 0.3, GENE_H * 0.5)
+                            if strand == "+":
+                                d = (f"M{ex0:.1f},{yb:.1f} L{ex0 + ew - aw:.1f},{yb:.1f} "
+                                     f"L{ex0 + ew:.1f},{mid_y:.1f} L{ex0 + ew - aw:.1f},{yb + GENE_H:.1f} "
+                                     f"L{ex0:.1f},{yb + GENE_H:.1f} Z")
+                            else:
+                                d = (f"M{ex0:.1f},{mid_y:.1f} L{ex0 + aw:.1f},{yb:.1f} "
+                                     f"L{ex0 + ew:.1f},{yb:.1f} L{ex0 + ew:.1f},{yb + GENE_H:.1f} "
+                                     f"L{ex0 + aw:.1f},{yb + GENE_H:.1f} Z")
+                            svg_parts.append(
+                                f'<path d="{d}" fill="{colour}" stroke="{bclr}" '
+                                f'stroke-width="{bw}" class="exon"{dash}/>'
+                            )
+                        else:
+                            svg_parts.append(
+                                f'<rect x="{ex0:.1f}" y="{yb:.1f}" width="{ew:.1f}" '
+                                f'height="{GENE_H}" rx="{EXON_RX}" fill="{colour}" '
+                                f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
+                            )
+            else:
+                # --- Single-block arrow gene ---
+                path_d = _svg_arrow_path(x0, x1, yb, GENE_H, strand, rx=EXON_RX)
+                svg_parts.append(
+                    f'<path d="{path_d}" fill="{colour}" stroke="{bclr}" '
+                    f'stroke-width="{bw}" class="exon"{dash}/>'
+                )
+
+            svg_parts.append('</g>')
+    svg_parts.append('</g>')
+
+    # ---- Absent-GOI placeholders ----
+    for ti, track in enumerate(all_tracks):
+        if track["is_home"]:
+            continue
+        if track.get("goi_status") == "absent" and track["genes"]:
+            yb = track_y[ti]
+            cx = bp2px(0)
+            dash_w = max(MIN_GENE_PX, 2000 * scale)
+            svg_parts.append(
+                f'<rect x="{cx - dash_w/2:.1f}" y="{yb:.1f}" '
+                f'width="{dash_w:.1f}" height="{GENE_H}" rx="4" '
+                f'fill="rgba(227,26,28,0.06)" stroke="{GOI_COLOUR}" '
+                f'stroke-width="1.5" stroke-dasharray="6,3"/>'
+            )
+            svg_parts.append(
+                f'<text x="{cx:.1f}" y="{yb + GENE_H/2 + 5:.1f}" '
+                f'text-anchor="middle" fill="{GOI_COLOUR}" font-size="14" '
+                f'font-weight="700">?</text>'
+            )
+
+    # ---- Gene labels ----
+    svg_parts.append('<g class="gene-labels">')
+    for ti, track in enumerate(all_tracks):
+        x_off = track["offset"]
+        genes_in_track = track["genes"]
+        n_genes = len(genes_in_track)
+
+        label_candidates = []
+        for gene in genes_in_track:
+            name = gene["name"]
+            home_id = gene.get("home_gene_id", name)
+            goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
+            resolved_goi_f = _is_resolved_goi_target_gene(gene) if not track["is_home"] else goi_f
+
+            has_colour = (home_id in gene_colours or name in gene_colours)
+            if n_genes > 12 and not goi_f and not has_colour:
+                continue
+
+            if not track["is_home"]:
+                if goi_f:
+                    label = clean_gene_label(name, keep_goi_prefix=True)
+                    if not label or label == 'GOI':
+                        label = clean_gene_label(home_id, keep_goi_prefix=True)
+                    if not resolved_goi_f:
+                        label = "~ " + label
+                else:
+                    label = clean_gene_label(_preferred_target_label(gene))
+                    if not label and home_id:
+                        label = clean_gene_label(home_id)
+            else:
+                label = _preferred_home_label(gene, home_products)
+
+            g_start, g_end = _get_coords(gene)
+            xc_bp = (g_start + g_end) / 2 - x_off
+            xc_px = bp2px(xc_bp)
+            priority = 0 if goi_f else (1 if has_colour else 2)
+            label_candidates.append((xc_px, label, gene, goi_f, priority))
+
+        label_candidates.sort(key=lambda c: (c[4], c[0]))
+
+        fsize = max(9, 13 - (n_genes // 6))
+        char_w_est = fsize * 4.2
+        rotation_factor = 0.70
+        placed_ranges_by_sub = {}
+
+        for xc_px, label, gene, goi_f, priority in label_candidates:
+            est_width = len(label) * char_w_est * rotation_factor
+            lbl_left = xc_px - est_width / 2
+            lbl_right = xc_px + est_width / 2
+            margin = fsize * 2
+
+            sub_idx = gene.get("_sub_track", 0)
+            placed_ranges = placed_ranges_by_sub.setdefault(sub_idx, [])
+
+            overlaps = any(
+                lbl_left < pr + margin and lbl_right > pl - margin
+                for pl, pr in placed_ranges
+            )
+            if overlaps and not goi_f:
+                continue
+
+            placed_ranges.append((lbl_left, lbl_right))
+            yb_px = gene_yb(ti, gene)
+            lbl_y = yb_px - 4
+
+            lbl_class = "gene-label"
+            if goi_f:
+                lbl_class += " goi"
+                label = "★ " + label
+
+            svg_parts.append(
+                f'<text x="{xc_px:.1f}" y="{lbl_y:.1f}" '
+                f'transform="rotate(-30 {xc_px:.1f} {lbl_y:.1f})" '
+                f'class="{lbl_class}" font-size="{fsize}">{_svg_esc(label)}</text>'
+            )
+    svg_parts.append('</g>')
+
+    # ---- Track labels (left margin) ----
+    svg_parts.append('<g class="track-labels">')
+    for ti, track in enumerate(all_tracks):
+        yb = track_y[ti]
+        th = track_heights[ti]
+        label_y = yb + th / 2
+
+        # Split label into name and status
+        track_label = track["label"]
+        # Strip HTML tags for SVG text
+        clean_lbl = re.sub(r"<[^>]+>", "", track_label)
+
+        svg_parts.append(
+            f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y:.1f}" '
+            f'class="track-label" text-anchor="end" '
+            f'dominant-baseline="central">{_svg_esc(clean_lbl)}</text>'
+        )
+
+        if not track["is_home"]:
+            status = track.get("goi_status", "")
+            if status == "absent":
+                svg_parts.append(
+                    f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y + 16:.1f}" '
+                    f'class="goi-status absent" text-anchor="end" '
+                    f'dominant-baseline="central">✗ GOI absent</text>'
+                )
+            elif status == "ambiguous":
+                svg_parts.append(
+                    f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y + 16:.1f}" '
+                    f'class="goi-status ambiguous" text-anchor="end" '
+                    f'dominant-baseline="central">~ GOI ambiguous</text>'
+                )
+    svg_parts.append('</g>')
+
+    # ---- Gap breaks & chromosome labels ----
+    for ti, track in enumerate(all_tracks):
+        yb = track_y[ti]
+        x_off = track["offset"]
+        th = track_heights[ti]
+
+        for brk in track.get("breaks", []):
+            brk_px = bp2px(brk["x"] - x_off)
+            if brk.get("is_chrom_break"):
+                svg_parts.append(
+                    f'<line x1="{brk_px:.1f}" y1="{yb - TRACK_PAD:.1f}" '
+                    f'x2="{brk_px:.1f}" y2="{yb + th + TRACK_PAD:.1f}" '
+                    f'class="chrom-break-line"/>'
+                )
+            else:
+                svg_parts.append(
+                    f'<text x="{brk_px:.1f}" y="{yb + th/2:.1f}" '
+                    f'text-anchor="middle" dominant-baseline="central" '
+                    f'class="break-label">// {_svg_esc(brk["text"])}</text>'
+                )
+
+        # Chromosome labels below segments
+        if track["genes"]:
+            from collections import OrderedDict
+            chrom_segs = OrderedDict()
+            for g in track["genes"]:
+                ch = g["chrom"]
+                if ch not in chrom_segs:
+                    chrom_segs[ch] = []
+                chrom_segs[ch].append(g)
+
+            if len(chrom_segs) > 1:
+                for ch, ch_genes in chrom_segs.items():
+                    xs = []
+                    for g in ch_genes:
+                        gx0, gx1 = gene_px(g, track)
+                        xs.extend([gx0, gx1])
+                    cx = (min(xs) + max(xs)) / 2
+                    short = ch if len(ch) <= 14 else ch[-12:]
+                    svg_parts.append(
+                        f'<text x="{cx:.1f}" y="{yb + th + TRACK_PAD + 10:.1f}" '
+                        f'text-anchor="middle" class="chrom-label">{_svg_esc(short)}</text>'
+                    )
+
+    # ---- Scale bar ----
+    scale_len_bp = args.scale_bar_len
+    sb_x1_px = bp2px(x_max_bp - pad_bp * 0.5)
+    sb_x0_px = sb_x1_px - scale_len_bp * scale
+    sb_y = total_h - BOTTOM_MARGIN + 20
+    svg_parts.append(
+        f'<line x1="{sb_x0_px:.1f}" y1="{sb_y:.1f}" '
+        f'x2="{sb_x1_px:.1f}" y2="{sb_y:.1f}" '
+        f'class="scale-bar-line"/>'
+    )
+    # Ticks at ends
+    svg_parts.append(
+        f'<line x1="{sb_x0_px:.1f}" y1="{sb_y - 4:.1f}" '
+        f'x2="{sb_x0_px:.1f}" y2="{sb_y + 4:.1f}" class="scale-bar-line"/>'
+    )
+    svg_parts.append(
+        f'<line x1="{sb_x1_px:.1f}" y1="{sb_y - 4:.1f}" '
+        f'x2="{sb_x1_px:.1f}" y2="{sb_y + 4:.1f}" class="scale-bar-line"/>'
+    )
+    svg_parts.append(
+        f'<text x="{(sb_x0_px + sb_x1_px) / 2:.1f}" y="{sb_y + 18:.1f}" '
+        f'text-anchor="middle" class="scale-bar-text">'
+        f'{_format_bp_label(scale_len_bp)}</text>'
+    )
+
+    # ---- Title & subtitle ----
+    title_x = plot_w / 2
+    svg_parts.append(
+        f'<text x="{title_x:.1f}" y="28" text-anchor="middle" '
+        f'class="plot-title">SynVoy Synteny Plot</text>'
+    )
+    if subtitle_bits:
+        sub_text = " · ".join(subtitle_bits)
+        svg_parts.append(
+            f'<text x="{title_x:.1f}" y="48" text-anchor="middle" '
+            f'class="plot-subtitle">{_svg_esc(sub_text)}</text>'
+        )
+
+    # ---- Assemble full HTML ----
+    svg_content = "\n".join(svg_parts)
+    html = _assemble_full_html(svg_content, plot_w, total_h)
+    return html
+
+
+def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=None):
+    """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML."""
     if not tree_file or not os.path.exists(tree_file):
         return
 
@@ -1362,10 +1837,9 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
     if len(leaves) < 2:
         return
 
-    # --- 1. Assign (x, y) coordinates via recursive DFS ----------------
-    # x = branch length (horizontal), y = leaf index (vertical)
-    node_coords = {}           # node -> (x, y)
-    leaf_counter = [0]         # mutable counter
+    # Assign coordinates via recursive DFS
+    node_coords = {}
+    leaf_counter = [0]
 
     def _layout(node, x_offset):
         if node.is_leaf():
@@ -1381,31 +1855,48 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
 
     _layout(t, 0)
 
-    # --- 2. Build Plotly traces ----------------------------------------
-    fig = go.Figure()
+    n_leaves = len(leaves)
+    max_x = max(c[0] for c in node_coords.values())
+    if max_x <= 0:
+        max_x = 1
 
-    # Branch lines (parent -> child: horizontal then vertical)
+    # Layout params
+    left_m = 40
+    right_m = 320
+    top_m = 60
+    leaf_h = 50
+    tree_w = 500
+    total_w = left_m + tree_w + right_m
+    total_h = top_m + n_leaves * leaf_h + 40
+    x_scale = tree_w / max_x
+
+    def tx(val):
+        return left_m + val * x_scale
+
+    def ty(val):
+        return top_m + val * leaf_h + leaf_h / 2
+
+    svg_parts = []
+
+    # Branch lines
     for node in t.traverse():
         if node.is_root():
             continue
         parent = node.up
         px, py = node_coords[parent]
         cx, cy = node_coords[node]
-        # Horizontal line from parent x to child x, at child y
-        fig.add_trace(go.Scatter(
-            x=[px, px, cx], y=[py, cy, cy],
-            mode="lines",
-            line=dict(color="black", width=1.5),
-            hoverinfo="skip", showlegend=False,
-        ))
+        svg_parts.append(
+            f'<polyline points="{tx(px):.1f},{ty(py):.1f} '
+            f'{tx(px):.1f},{ty(cy):.1f} {tx(cx):.1f},{ty(cy):.1f}" '
+            f'fill="none" stroke="#555" stroke-width="1.5"/>'
+        )
 
-    # Leaf dots + labels
+    # Leaf nodes
     for leaf in leaves:
         lx, ly = node_coords[leaf]
         gid = _genome_id_from_leaf(leaf.name)
         key = gid if gid else "home"
 
-        # Colour: try exact, then fuzzy
         colour = GOI_COLOUR
         if goi_genome_colours:
             if key in goi_genome_colours:
@@ -1422,7 +1913,6 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
             parts = label.split("|")
             goi_part = parts[0]
             genome_part = parts[1] if len(parts) > 1 else ""
-            # Prettify genome ID — use species name when available
             genome_pretty = genome_part.replace("_fna_exon_ann", "").replace("_fna", "")
             if species_map:
                 for acc, sp_name in species_map.items():
@@ -1433,43 +1923,437 @@ def _render_tree_html(tree_file, goi_genome_colours, output_path,
         else:
             label = f"{label} (home)"
 
-        fig.add_trace(go.Scatter(
-            x=[lx], y=[ly],
-            mode="markers+text",
-            marker=dict(size=14, color=colour, line=dict(color="black", width=1)),
-            text=[label],
-            textposition="middle right",
-            textfont=dict(size=11),
-            hovertext=f"<b>{leaf.name}</b><br>Branch length: {leaf.dist:.6f}",
-            hoverinfo="text",
-            showlegend=False,
-        ))
+        cpx, cpy = tx(lx), ty(ly)
+        svg_parts.append(
+            f'<circle cx="{cpx:.1f}" cy="{cpy:.1f}" r="7" '
+            f'fill="{colour}" stroke="#333" stroke-width="1"/>'
+        )
+        svg_parts.append(
+            f'<text x="{cpx + 14:.1f}" y="{cpy + 4:.1f}" '
+            f'font-size="11" fill="#333">{_svg_esc(label)}</text>'
+        )
 
-    # --- 3. Layout -----------------------------------------------------
-    n_leaves = len(leaves)
-    fig.update_layout(
-        title=dict(
-            text="<b>SynVoy GOI Phylogenetic Tree</b>",
-            x=0.5, font=dict(size=15),
-        ),
-        height=max(300, n_leaves * 60 + 100),
-        width=900,
-        xaxis=dict(
-            title="Evolutionary distance",
-            showgrid=True, gridcolor="rgba(200,200,200,0.3)",
-            zeroline=True,
-        ),
-        yaxis=dict(
-            showticklabels=False, showgrid=False, zeroline=False,
-            range=[-0.5, n_leaves - 0.5],
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(l=40, r=300, t=60, b=50),
+    # Title
+    svg_parts.append(
+        f'<text x="{total_w / 2:.1f}" y="30" text-anchor="middle" '
+        f'font-size="16" font-weight="700" fill="#1a1d26">'
+        f'SynVoy GOI Phylogenetic Tree</text>'
     )
 
-    fig.write_html(output_path)
+    # X-axis label
+    svg_parts.append(
+        f'<text x="{left_m + tree_w / 2:.1f}" y="{total_h - 10:.1f}" '
+        f'text-anchor="middle" font-size="12" fill="#6b7280">'
+        f'Evolutionary distance</text>'
+    )
+
+    svg_content = "\n".join(svg_parts)
+
+    tree_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SynVoy GOI Phylogenetic Tree</title>
+<style>
+  body {{
+    margin: 0; padding: 20px;
+    background: #f8f9fb;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }}
+  .tree-container {{
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    padding: 20px;
+    display: inline-block;
+  }}
+</style>
+</head>
+<body>
+<div class="tree-container">
+<svg width="{total_w}" height="{total_h}" xmlns="http://www.w3.org/2000/svg"
+     style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+{svg_content}
+</svg>
+</div>
+</body>
+</html>"""
+
+    with open(output_path, "w") as f:
+        f.write(tree_html)
     print(f"Tree plot saved to {output_path}")
+
+
+# ======================================================================
+# HTML + CSS + JS Templates
+# ======================================================================
+
+_CSS_TEMPLATE = """
+:root {
+  --bg: #f8f9fb;
+  --surface: #ffffff;
+  --track-bg: #f3f5f8;
+  --track-border: #e8eaef;
+  --text-primary: #1a1d26;
+  --text-secondary: #555d6e;
+  --text-muted: #8c95a6;
+  --goi-color: #e31a1c;
+  --goi-dark: #8b0000;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', Arial, sans-serif;
+  color: var(--text-primary);
+}
+.toolbar {
+  position: fixed; top: 12px; right: 16px; z-index: 100;
+  display: flex; gap: 6px;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--track-border);
+  border-radius: 8px; padding: 4px 6px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+}
+.toolbar button {
+  width: 32px; height: 32px; border: none;
+  background: transparent; border-radius: 6px;
+  font-size: 18px; color: var(--text-secondary);
+  cursor: pointer; display: flex; align-items: center;
+  justify-content: center; transition: all 0.15s ease;
+}
+.toolbar button:hover {
+  background: var(--track-bg); color: var(--text-primary);
+}
+.plot-wrapper {
+  width: 100%; overflow: auto; padding: 16px;
+}
+.zoom-container {
+  transform-origin: left top;
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+.synteny-svg {
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.04);
+  display: block;
+}
+
+/* Track backgrounds */
+.track-bg {
+  fill: var(--track-bg);
+  stroke: var(--track-border);
+  stroke-width: 0.5;
+}
+
+/* Gene groups */
+.gene-group {
+  cursor: pointer;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08));
+  transition: filter 0.15s ease, opacity 0.2s ease;
+}
+.gene-group:hover {
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.15)) brightness(1.06);
+}
+.gene-group .exon {
+  transition: filter 0.15s ease;
+}
+
+/* Intron lines */
+.intron-line {
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+}
+
+/* Ribbons */
+.ribbon {
+  transition: opacity 0.2s ease;
+}
+.ribbon:hover {
+  opacity: 0.45 !important;
+}
+
+/* Labels */
+.gene-label {
+  fill: var(--text-secondary);
+  font-weight: 500;
+  pointer-events: none;
+}
+.gene-label.goi {
+  fill: var(--goi-dark);
+  font-weight: 700;
+}
+
+/* Track labels */
+.track-label {
+  fill: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* GOI status indicators */
+.goi-status {
+  font-size: 10px;
+  font-weight: 500;
+}
+.goi-status.absent { fill: #dc2626; }
+.goi-status.ambiguous { fill: #d97706; }
+
+/* Chromosome labels & breaks */
+.chrom-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+.chrom-break-line {
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+  stroke-dasharray: 5,4;
+}
+.break-label {
+  fill: var(--text-muted);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* Scale bar */
+.scale-bar-line {
+  stroke: #6b7280;
+  stroke-width: 2;
+}
+.scale-bar-text {
+  fill: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Title */
+.plot-title {
+  fill: var(--text-primary);
+  font-size: 18px;
+  font-weight: 700;
+}
+.plot-subtitle {
+  fill: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Highlight states (click-to-highlight) */
+.gene-group.highlighted {
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,0.2)) brightness(1.1) !important;
+  opacity: 1 !important;
+}
+.gene-group.dimmed {
+  opacity: 0.18 !important;
+  filter: saturate(0.3) !important;
+}
+.ribbon.highlighted {
+  opacity: 0.5 !important;
+}
+.ribbon.dimmed {
+  opacity: 0.03 !important;
+}
+
+/* GOI pulse animation */
+@keyframes goi-pulse {
+  0%, 100% { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08)); }
+  50% { filter: drop-shadow(0 0 8px rgba(227,26,28,0.4)) brightness(1.1); }
+}
+.gene-group[data-is-goi="true"] {
+  animation: goi-pulse 1.8s ease-in-out 3;
+}
+
+/* Tooltip */
+.tooltip {
+  position: fixed;
+  padding: 10px 14px;
+  background: rgba(26,29,38,0.95);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+  color: #e8eaef;
+  font-size: 12px;
+  line-height: 1.6;
+  pointer-events: none;
+  z-index: 1000;
+  max-width: 360px;
+  display: none;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.tooltip .tt-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+.tooltip .tt-product {
+  font-style: italic;
+  color: #a5b4c8;
+  margin-bottom: 6px;
+}
+.tooltip .tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.tooltip .tt-label {
+  color: #8c95a6;
+  white-space: nowrap;
+}
+.tooltip .tt-value {
+  color: #e8eaef;
+  text-align: right;
+  font-weight: 500;
+}
+.tooltip .tt-goi {
+  color: #ff6b6b;
+  font-weight: 700;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255,255,255,0.12);
+}
+"""
+
+_JS_TEMPLATE = """
+document.addEventListener('DOMContentLoaded', () => {
+  const tooltip = document.getElementById('tooltip');
+  const svg = document.querySelector('.synteny-svg');
+  if (!svg) return;
+
+  // ---- Zoom controls ----
+  let zoom = 1;
+  const container = document.querySelector('.zoom-container');
+  const zoomIn = document.getElementById('zoom-in');
+  const zoomOut = document.getElementById('zoom-out');
+  const zoomReset = document.getElementById('zoom-reset');
+
+  function applyZoom() {
+    container.style.transform = 'scale(' + zoom + ')';
+  }
+  if (zoomIn) zoomIn.addEventListener('click', () => { zoom = Math.min(5, zoom * 1.25); applyZoom(); });
+  if (zoomOut) zoomOut.addEventListener('click', () => { zoom = Math.max(0.2, zoom / 1.25); applyZoom(); });
+  if (zoomReset) zoomReset.addEventListener('click', () => { zoom = 1; applyZoom(); });
+
+  // ---- Hover tooltips ----
+  svg.querySelectorAll('.gene-group').forEach(el => {
+    el.addEventListener('mouseenter', (e) => {
+      try {
+        const data = JSON.parse(el.dataset.tooltip);
+        let html = '<div class="tt-name">' + esc(data.name) + '</div>';
+        if (data.product) html += '<div class="tt-product">' + esc(data.product) + '</div>';
+        if (data.coords) html += row('Coords', data.coords);
+        if (data.strand) html += row('Strand', data.strand);
+        if (data.exons) html += row('Exons', data.exons);
+        if (data.homolog) html += row('Homolog', data.homolog);
+        if (data.identity !== undefined) html += row('Identity', data.identity + '%');
+        if (data.confidence) html += row('Confidence', data.confidence);
+        if (data.goiClass) html += row('GOI class', data.goiClass);
+        if (data.evidence) html += row('Evidence', data.evidence);
+        if (data.model) html += row('Model', data.model);
+        if (data.synteny) html += row('Synteny', data.synteny);
+        if (data.queryCov !== undefined) html += row('Query cov', data.queryCov + '%');
+        if (data.goiTag) html += '<div class="tt-goi">' + esc(data.goiTag) + '</div>';
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        positionTooltip(e);
+      } catch(err) {}
+    });
+    el.addEventListener('mousemove', positionTooltip);
+    el.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+  });
+
+  function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function row(label, value) {
+    return '<div class="tt-row"><span class="tt-label">' + label +
+           '</span><span class="tt-value">' + esc(String(value)) + '</span></div>';
+  }
+  function positionTooltip(e) {
+    let x = e.clientX + 16, y = e.clientY + 16;
+    const r = tooltip.getBoundingClientRect();
+    if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - 16;
+    if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - 16;
+    tooltip.style.left = Math.max(4, x) + 'px';
+    tooltip.style.top = Math.max(4, y) + 'px';
+  }
+
+  // ---- Click-to-highlight orthologs ----
+  let selectedHom = null;
+  svg.querySelectorAll('.gene-group').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const hom = el.dataset.homology;
+      if (selectedHom === hom) { clearHighlight(); return; }
+      selectedHom = hom;
+      highlightHomology(hom);
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.gene-group')) clearHighlight();
+  });
+
+  function highlightHomology(homId) {
+    svg.querySelectorAll('.gene-group').forEach(g => {
+      if (g.dataset.homology === homId) {
+        g.classList.add('highlighted'); g.classList.remove('dimmed');
+      } else {
+        g.classList.add('dimmed'); g.classList.remove('highlighted');
+      }
+    });
+    svg.querySelectorAll('.ribbon').forEach(r => {
+      if (r.dataset.homology === homId) {
+        r.classList.add('highlighted'); r.classList.remove('dimmed');
+      } else {
+        r.classList.add('dimmed'); r.classList.remove('highlighted');
+      }
+    });
+  }
+
+  function clearHighlight() {
+    selectedHom = null;
+    svg.querySelectorAll('.highlighted, .dimmed').forEach(el => {
+      el.classList.remove('highlighted', 'dimmed');
+    });
+  }
+});
+"""
+
+
+def _assemble_full_html(svg_content, width, height):
+    """Wrap SVG content in a complete self-contained HTML document."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SynVoy Synteny Plot</title>
+<style>{_CSS_TEMPLATE}</style>
+</head>
+<body>
+<div class="toolbar">
+  <button id="zoom-in" title="Zoom in">+</button>
+  <button id="zoom-out" title="Zoom out">−</button>
+  <button id="zoom-reset" title="Reset zoom">⟲</button>
+</div>
+<div class="plot-wrapper">
+<div class="zoom-container">
+<svg class="synteny-svg" width="{width}" height="{height}"
+     xmlns="http://www.w3.org/2000/svg"
+     style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+{svg_content}
+</svg>
+</div>
+</div>
+<div id="tooltip" class="tooltip"></div>
+<script>{_JS_TEMPLATE}</script>
+</body>
+</html>"""
 
 
 # ======================================================================
@@ -1509,9 +2393,6 @@ def main():
             for line in fh:
                 parts = line.strip().split('\t')
                 if len(parts) >= 2:
-                    # Format can be:
-                    # 2 columns: accession<TAB>species
-                    # 3 columns: accession<TAB>species<TAB>tax_level
                     species_map[parts[0]] = parts[1]
         print(f"[plot] Loaded species mapping for {len(species_map)} genomes")
 
@@ -1521,19 +2402,14 @@ def main():
     if not home_genes:
         msg = f"ERROR: empty home BED: {args.home_bed}"
         print(msg, file=sys.stderr)
-        fig = go.Figure()
-        fig.add_annotation(
-            text=msg,
-            x=0.5, y=0.5, xref="paper", yref="paper",
-            showarrow=False,
-            font=dict(size=14, color="crimson"),
-        )
-        fig.update_layout(
-            title="SynVoy Synteny Plot (Failed: empty home BED)",
-            plot_bgcolor="white",
-            paper_bgcolor="white",
-        )
-        fig.write_html(args.output)
+        error_html = f"""<!DOCTYPE html>
+<html><head><title>SynVoy Error</title></head>
+<body style="font-family:sans-serif;padding:40px;background:#f8f9fb;">
+<h1 style="color:#dc2626;">SynVoy Synteny Plot Failed</h1>
+<p style="color:#555;">{_html_escape(msg)}</p>
+</body></html>"""
+        with open(args.output, "w") as f:
+            f.write(error_html)
         sys.exit(2)
     home_genes.sort(key=lambda g: g["start"])
 
@@ -1610,13 +2486,12 @@ def main():
         # a GOI gene with the most flanking genes, or fall back to the globally
         # richest block.
         if len(genes) <= 2 and len(genes_all) > len(genes):
-            import re as _re
             from collections import Counter
             block_counter = Counter()
             block_genes = defaultdict(list)
             for g in genes_all:
                 gname = g.get("name", "")
-                m = _re.search(r'_b(\d+)_', gname)
+                m = re.search(r'_b(\d+)_', gname)
                 if m:
                     bid = m.group(1)
                     block_counter[bid] += 1
@@ -1627,7 +2502,7 @@ def main():
                 goi_bids = set()
                 for g in genes_all:
                     if _is_goi_target_gene(g):
-                        m = _re.search(r'_b(\d+)_', g.get("name", ""))
+                        m = re.search(r'_b(\d+)_', g.get("name", ""))
                         if m:
                             goi_bids.add(m.group(1))
 
@@ -1661,8 +2536,7 @@ def main():
 
             # ── Synteny-aware GOI filter ──────────────────────────────
             # GOI hits on chromosomes without ANY flanking gene support
-            # are almost certainly low-complexity/spurious matches (e.g.
-            # proline-repeat hits matching the pro-peptide region).
+            # are almost certainly low-complexity/spurious matches.
             # Without synteny context, orthology cannot be established.
             # Drop them unless they are the ONLY GOI hits in this genome.
             unsupported_goi_chroms = {
@@ -1672,8 +2546,6 @@ def main():
             supported_goi_chroms = goi_chroms - unsupported_goi_chroms
 
             if unsupported_goi_chroms and supported_goi_chroms:
-                # There are GOI hits with synteny support elsewhere —
-                # safe to drop the unsupported ones.
                 n_dropped = sum(
                     1 for g in genes
                     if g["chrom"] in unsupported_goi_chroms
@@ -1691,7 +2563,6 @@ def main():
                 goi_chroms = supported_goi_chroms
 
             # Keep GOI chromosome(s) + any chromosome with >=3 flanking genes
-            # (i.e. chromosomes with real synteny evidence)
             important_chroms = set(goi_chroms)
             for ch, cnt in chrom_flank_counts.items():
                 if cnt >= 3:
@@ -1714,7 +2585,7 @@ def main():
         display = genome_id
         for acc, sp_name in species_map.items():
             if acc in genome_id:
-                display = f"<i>{sp_name}</i> ({genome_id})"
+                display = f"{sp_name} ({genome_id})"
                 break
         gene_chroms = sorted({g["chrom"] for g in genes}) if genes else []
         if len(gene_chroms) == 1:
@@ -1723,7 +2594,7 @@ def main():
             target_chrom = f"{len(gene_chroms)} chr"
         else:
             target_chrom = candidate_regions[0][0] if candidate_regions else "unknown"
-        
+
         target_tracks.append({
             "genome_id":    genome_id,
             "display_name": display,
@@ -1761,9 +2632,6 @@ def main():
     gene_colours = assign_gene_colours(home_genes, query_intervals)
 
     # -- 4. Assemble track list & Compress -------------------------------
-    # Each genome gets one horizontal track bar.  Genes from different
-    # chromosomes are placed side-by-side with clear visual separators
-    # (handled by compress_track_coordinates).
 
     home_chrom = home_genes[0]["chrom"]
 
@@ -1790,422 +2658,26 @@ def main():
         c_genes, breaks = compress_track_coordinates(track["genes"], threshold=args.gap_threshold, visual_gap=args.gap_visual_size)
         track["genes"]  = c_genes
         track["breaks"] = breaks
-        
+
         # 2. Find Anchor (GOI center) to align at x=0
         anchor = get_anchor_center(c_genes)
         track["offset"] = anchor  # This effectively centers the plot on the GOI
-        
+
         all_tracks.append(track)
 
     n_tracks = len(all_tracks)
 
-    # -- 5. Layout geometry -----------------------------------------------
-
-    GENE_H        = 0.45   # gene arrow height — larger for readability
-    SUB_TRACK_GAP = 0.12   # vertical gap between overlapping-gene sub-tracks
-    TRACK_MARGIN  = 1.20   # vertical space between adjacent genome tracks
-    RIBBON_GAP    = 0.12   # gap between gene arrow edge and ribbon end
-
-    # ---- Sub-track assignment (bumping algorithm) ----------------------
-    # Genes that overlap in x-space within the same track are assigned to
-    # separate sub-tracks so they don't visually collide.  We use a greedy
-    # interval-scheduling algorithm (earliest-deadline-first style).
-
-    def _assign_sub_tracks(genes, x_off, min_gap=800):
-        """Greedy interval scheduling: writes gene['_sub_track'] in-place."""
-        sorted_genes = sorted(genes, key=lambda g: g["start_plot"] - x_off)
-        sub_ends = []  # rightmost x used by each sub-track so far
-        for gene in sorted_genes:
-            x0 = gene["start_plot"] - x_off
-            x1 = gene["end_plot"]   - x_off
-            placed = False
-            for i, end_x in enumerate(sub_ends):
-                if end_x + min_gap <= x0:
-                    gene["_sub_track"] = i
-                    sub_ends[i] = x1
-                    placed = True
-                    break
-            if not placed:
-                gene["_sub_track"] = len(sub_ends)
-                sub_ends.append(x1)
-
-    def _track_visual_h(n_sub):
-        return n_sub * GENE_H + max(0, n_sub - 1) * SUB_TRACK_GAP
-
-    def _gene_yb(ti, gene):
-        """Y baseline for a specific gene given its sub-track assignment."""
-        return track_y[ti] + gene.get("_sub_track", 0) * (GENE_H + SUB_TRACK_GAP)
-
-    # Assign sub-tracks and compute per-track visual heights
-    n_sub_per_track = []
+    # -- 5. Sub-track assignment -----------------------------------------
     for track in all_tracks:
         _assign_sub_tracks(track["genes"], track["offset"])
-        if track["genes"]:
-            n_sub = max(g.get("_sub_track", 0) for g in track["genes"]) + 1
-        else:
-            n_sub = 1
-        n_sub_per_track.append(n_sub)
 
-    track_heights = [_track_visual_h(n) for n in n_sub_per_track]
-
-    # Build Y positions: bottom track (highest index) at y=0, stacking upward
-    fig = go.Figure()
-    track_y = [0.0] * n_tracks
-    y_cursor = 0.0
-    for ti in range(n_tracks - 1, -1, -1):
-        track_y[ti] = y_cursor
-        if ti > 0:
-            y_cursor += track_heights[ti] + TRACK_MARGIN
-
-    # -- 5a. Track background bands --------------------------------------
-    # Split the background bar at chromosome breaks so each chromosome
-    # gets its own distinct background rectangle.
-
-    for ti, track in enumerate(all_tracks):
-        yb = track_y[ti]
-        x_off = track["offset"]
-        if not track["genes"]:
-            continue
-
-        # Collect chromosome break x positions (in plot-offset coords)
-        chrom_break_xs = sorted(
-            brk["x"] - x_off for brk in track.get("breaks", [])
-            if brk.get("is_chrom_break")
-        )
-
-        th = track_heights[ti]
-        if not chrom_break_xs:
-            # No chromosome breaks — single background rectangle
-            x_min = min(g["start_plot"] for g in track["genes"]) - x_off - 1000
-            x_max = max(g["end_plot"]   for g in track["genes"]) - x_off + 1000
-            fig.add_shape(
-                type="rect",
-                x0=x_min, x1=x_max, y0=yb - 0.04, y1=yb + th + 0.04,
-                fillcolor=TRACK_BG_CLR, line=dict(width=0), layer="below",
-            )
-        else:
-            # Draw a separate background rectangle for each chromosome segment
-            all_gene_xs = [(g["start_plot"] - x_off, g["end_plot"] - x_off)
-                           for g in track["genes"]]
-            # Create segment boundaries: [start, brk1, brk2, ..., end]
-            boundaries = [min(s for s, e in all_gene_xs) - 1000]
-            boundaries.extend(chrom_break_xs)
-            boundaries.append(max(e for s, e in all_gene_xs) + 1000)
-
-            for si in range(len(boundaries) - 1):
-                seg_left  = boundaries[si]
-                seg_right = boundaries[si + 1]
-                # Inset from break positions to create visible gap
-                inset = 2500
-                seg_x0 = seg_left  + (inset if si > 0 else 0)
-                seg_x1 = seg_right - (inset if si < len(boundaries) - 2 else 0)
-                if seg_x0 < seg_x1:
-                    fig.add_shape(
-                        type="rect",
-                        x0=seg_x0, x1=seg_x1,
-                        y0=yb - 0.04, y1=yb + th + 0.04,
-                        fillcolor=TRACK_BG_CLR, line=dict(width=0),
-                        layer="below",
-                    )
-
-    # -- 5b. Ribbons (draw first so they sit behind genes) ---------------
-    # Ribbons connect consecutive tracks (one genome per track).
-    # Each ribbon endpoint is anchored to the specific sub-track of the gene.
-    for ti in range(len(all_tracks) - 1):
-        upper = all_tracks[ti]
-        lower = all_tracks[ti + 1]
-
-        for lg in lower["genes"]:
-            home_id = lg.get("home_gene_id", "")
-            if not home_id:
-                continue
-            ribbon_alpha = args.ribbon_alpha_dense
-            # Compute the Y top of the lower gene's sub-track
-            y_lg_top = _gene_yb(ti + 1, lg) + GENE_H + RIBBON_GAP
-            for ug in upper["genes"]:
-                u_name = ug["name"]
-                u_home = ug.get("home_gene_id", u_name)
-                match = (u_home == home_id or u_name == home_id
-                         or (is_goi(u_home) and is_goi(home_id))
-                         or (is_goi(u_name) and is_goi(home_id)))
-                if match:
-                    colour = gene_colours.get(home_id,
-                             gene_colours.get(u_name, UNMATCHED_CLR))
-                    if is_goi(home_id):
-                        colour = _goi_colour_for_genome(
-                            lower["genome_id"], goi_genome_colours)
-                        if _is_goi_target_gene(lg) and not _is_resolved_goi_target_gene(lg):
-                            ribbon_alpha = 0.10
-                    # Compute the Y bottom of the upper gene's sub-track
-                    y_ug_bot = _gene_yb(ti, ug) - RIBBON_GAP
-                    add_ribbon(fig, ug, lg,
-                               upper["offset"], lower["offset"],
-                               y_ug_bot, y_lg_top,
-                               colour, alpha=ribbon_alpha)
-
-    # -- 5c. Gene arrows -------------------------------------------------
-    legend_shown = set()
-
-    for ti, track in enumerate(all_tracks):
-        x_off = track["offset"]
-
-        # Draw large genes first so small genes render on top
-        sorted_genes = sorted(track["genes"],
-                               key=lambda g: g["end_plot"] - g["start_plot"],
-                               reverse=True)
-
-        for gene in sorted_genes:
-            yb = _gene_yb(ti, gene)  # sub-track-adjusted Y baseline
-            name = gene["name"]
-            home_id = gene.get("home_gene_id", name)
-            target_label = _preferred_target_label(gene)
-            goi_like = _is_goi_target_gene(gene)
-            resolved_goi = _is_resolved_goi_target_gene(gene)
-            ambiguous_goi = goi_like and not resolved_goi
-            confidence = (gene.get("confidence") or "").upper()
-            goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
-
-            # --- colour ---
-            if resolved_goi:
-                colour = _goi_colour_for_genome(track["genome_id"], goi_genome_colours)
-                bclr = GOI_BORDER
-                bw = 2.8 if confidence == "HIGH" else 2.2
-                dash = "solid"
-            elif ambiguous_goi:
-                base_goi = _goi_colour_for_genome(track["genome_id"], goi_genome_colours)
-                colour = _hex_to_rgba(base_goi, 0.32)
-                bclr, bw, dash = GOI_BORDER, 1.8, "dash"
-            elif home_id in gene_colours:
-                colour = gene_colours[home_id]
-                bclr, bw = "rgba(0,0,0,0.35)", 1
-                dash = "dot" if confidence == "LOW" else "solid"
-            elif name in gene_colours:
-                colour = gene_colours[name]
-                bclr, bw = "rgba(0,0,0,0.35)", 1
-                dash = "dot" if confidence == "LOW" else "solid"
-            else:
-                colour = UNMATCHED_CLR
-                bclr, bw = "rgba(0,0,0,0.15)", 0.5
-                dash = "dot" if confidence == "LOW" else "solid"
-
-            # --- hover text ---
-            if track["is_home"]:
-                cn = _preferred_home_label(gene, home_products)
-            else:
-                cn = clean_gene_label(target_label)
-            if track["is_home"]:
-                product = _lookup_product(name, home_products)
-                hover = f"<b>{cn}</b>"
-                if product:
-                    hover += f"<br><i>{product}</i>"
-                # Use raw coords for hover
-                n_ex_home = len(gene.get("exon_coords", []))
-                if n_ex_home <= 1:
-                    n_ex_home = gene.get("n_exons", 0)
-                if n_ex_home and n_ex_home > 1:
-                    hover += f"<br>Exons: {n_ex_home}"
-                hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
-                          f"<br>Strand: {gene['strand']}")
-                if goi_f:
-                    hover += "<br><b>GENE OF INTEREST</b>"
-            else:
-                hover = f"<b>{cn}</b>"
-                if gene.get("target_product"):
-                    hover += f"<br><i>{gene['target_product']}</i>"
-                if home_id:
-                    hover += f"<br>Homolog: {clean_gene_label(home_id)}"
-                if "identity" in gene:
-                    hover += f"<br>Identity: {gene['identity']:.1f}%"
-                n_ex = len(gene.get("exon_coords", []))
-                if n_ex <= 1:
-                    n_ex = gene.get("n_exons", 0)
-                if n_ex and n_ex > 1:
-                    hover += f"<br>Exons: {n_ex}"
-                if confidence:
-                    hover += f"<br>Confidence: {confidence}"
-                if gene.get("goi_class"):
-                    hover += f"<br>GOI class: {gene['goi_class'].replace('_', ' ')}"
-                if gene.get("evidence_type"):
-                    hover += f"<br>Evidence: {gene['evidence_type'].replace('_', ' ')}"
-                if gene.get("model_status"):
-                    hover += f"<br>Model: {gene['model_status']}"
-                if gene.get("synteny_context"):
-                    hover += f"<br>Synteny: {gene['synteny_context'].replace('_', ' ')}"
-                if gene.get("query_coverage") is not None:
-                    hover += f"<br>Query coverage: {gene['query_coverage'] * 100:.1f}%"
-                hover += (f"<br>{gene['chrom']}:{gene['start']:,}-{gene['end']:,}"
-                          f"<br>Strand: {gene['strand']}")
-                if resolved_goi:
-                    hover += "<br><b>GENE OF INTEREST</b>"
-                elif ambiguous_goi:
-                    hover += "<br><b>GOI-LIKE / AMBIGUOUS</b>"
-
-            # --- legend (one entry per home-gene name) ---
-            lg_key = home_id if home_id else name
-            show_leg = False
-            if lg_key not in legend_shown:
-                if goi_like or len(legend_shown) < args.max_legend_entries:
-                    show_leg = True
-                    legend_shown.add(lg_key)
-
-            add_gene(fig, gene, x_off, yb, GENE_H, colour, bclr, bw,
-                     hover, show_leg, lg_key, line_dash=dash)
-
-    # -- 5c2. Absent-GOI placeholder for targets without GOI gene --------
-    for ti, track in enumerate(all_tracks):
-        if track["is_home"]:
-            continue
-        if track.get("goi_status") == "absent" and track["genes"]:
-            yb = track_y[ti]  # baseline of track (sub-track 0)
-            # Draw a dashed-outline "?" box at x=0 (GOI center)
-            dash_w = 2000
-            fig.add_shape(
-                type="rect",
-                x0=-dash_w / 2, x1=dash_w / 2,
-                y0=yb, y1=yb + GENE_H,
-                fillcolor="rgba(227,26,28,0.08)",
-                line=dict(color=GOI_COLOUR, width=1.5, dash="dash"),
-            )
-            fig.add_annotation(
-                x=0, y=yb + GENE_H / 2,
-                text="<b>?</b>",
-                showarrow=False,
-                font=dict(size=14, color=GOI_COLOUR),
-                xanchor="center", yanchor="middle",
-                hovertext=f"<b>GOI not found</b><br>{track['label']}",
-            )
-
-    # -- 5d. Gene labels -------------------------------------------------
-    for ti, track in enumerate(all_tracks):
-        x_off = track["offset"]
-        genes_in_track = track["genes"]
-        n_genes = len(genes_in_track)
-
-        # Build candidate labels with their x positions, then filter overlaps
-        label_candidates = []  # [(x_center, label_text, gene, is_goi, priority)]
-        for gene in genes_in_track:
-            name    = gene["name"]
-            home_id = gene.get("home_gene_id", name)
-            goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
-            resolved_goi = _is_resolved_goi_target_gene(gene) if not track["is_home"] else goi_f
-
-            # In dense tracks, only label GOI and matched flanking genes
-            has_colour = (home_id in gene_colours or name in gene_colours)
-            if n_genes > 12 and not goi_f and not has_colour:
-                continue  # skip labels for unmatched genes in dense tracks
-
-            if not track["is_home"]:
-                if goi_f:
-                    # GOI on target: show 'GOI #N' instead of 'copy_N'
-                    label = clean_gene_label(name, keep_goi_prefix=True)
-                    if not label or label == 'GOI':
-                        label = clean_gene_label(home_id, keep_goi_prefix=True)
-                    if not resolved_goi:
-                        label = "~ " + label
-                else:
-                    label = clean_gene_label(_preferred_target_label(gene))
-                    if not label and home_id:
-                        label = clean_gene_label(home_id)
-            else:
-                label = _preferred_home_label(gene, home_products)
-
-            g_start, g_end = _get_coords(gene)
-            xc = (g_start + g_end) / 2 - x_off
-            # Priority: GOI=0 (always show), coloured flanking=1, other=2
-            priority = 0 if goi_f else (1 if has_colour else 2)
-            label_candidates.append((xc, label, gene, goi_f, priority))
-
-        # Sort by priority (highest first), then by x position
-        label_candidates.sort(key=lambda c: (c[4], c[0]))
-
-        # Collision detection: skip labels that would overlap with already-placed ones.
-        # Labels are separated per-sub-track so sub-tracks have independent placed_ranges.
-        fsize = max(9, 14 - (n_genes // 6))
-        char_width = 350 + (fsize * 28)
-        rotation_factor = 0.70  # accounts for diagonal sweep of -35° text
-        # Separate collision tracking per sub-track index
-        placed_ranges_by_sub: dict = {}
-
-        for xc, label, gene, goi_f, priority in label_candidates:
-            g_start, g_end = _get_coords(gene)
-            est_width = int(len(label) * char_width * rotation_factor)
-            lbl_left  = xc - est_width / 2
-            lbl_right = xc + est_width / 2
-            margin = 400
-
-            sub_idx = gene.get("_sub_track", 0)
-            placed_ranges = placed_ranges_by_sub.setdefault(sub_idx, [])
-
-            overlaps = any(
-                lbl_left < pr + margin and lbl_right > pl - margin
-                for pl, pr in placed_ranges
-            )
-            if overlaps and not goi_f:
-                continue  # skip non-GOI labels that overlap
-
-            placed_ranges.append((lbl_left, lbl_right))
-            gene_yb = _gene_yb(ti, gene)
-            add_label(fig, gene, x_off, gene_yb, GENE_H, label,
-                      fsize=fsize, is_goi_flag=goi_f)
-
-    # -- 5e. Track labels (left margin) ----------------------------------
-    for ti, track in enumerate(all_tracks):
-        yb = track_y[ti]
-        th = track_heights[ti]
-        track_label = f"<b>{track['label']}</b>"
-        if not track["is_home"] and track.get("goi_status") == "absent":
-            track_label += "<br><span style='color:#d32f2f;font-size:10px'>✗ GOI absent</span>"
-        elif not track["is_home"] and track.get("goi_status") == "ambiguous":
-            track_label += "<br><span style='color:#d97706;font-size:10px'>~ GOI ambiguous</span>"
-        fig.add_annotation(
-            x=-0.01, y=yb + th / 2,
-            text=track_label,
-            showarrow=False,
-            font=dict(size=14, color="black"),
-            xref="paper", yref="y",
-            xanchor="right", yanchor="middle",
-        )
-
-    # -- 5f. Gap breaks & chromosome labels ------------------------------
-    for ti, track in enumerate(all_tracks):
-        yb    = track_y[ti]
-        x_off = track["offset"]
-        th    = track_heights[ti]
-        for brk in track.get("breaks", []):
-            draw_gap_break(fig, brk["x"] - x_off, yb, th, brk["text"],
-                           is_chrom_break=brk.get("is_chrom_break", False))
-        # Draw chromosome labels below each segment
-        _draw_chrom_labels(fig, track, ti, track_y, x_off, th)
-
-    # -- 6. Figure styling -----------------------------------------------
-
-    # Compute plotted range
-    # Collect all plotted X coordinates
-    all_x = []
-    for track in all_tracks:
-        x_off = track["offset"]
-        for g in track["genes"]:
-            all_x.append(g["start_plot"] - x_off)
-            all_x.append(g["end_plot"]   - x_off)
-
-    if not all_x:
-        x_min, x_max = -1000, 1000
-    else:
-        x_min, x_max = min(all_x), max(all_x)
-        
-    pad = (x_max - x_min) * 0.05 + 5000
-    x_range = [x_min - pad, x_max + pad]
-
-    # Compute Y range from actual track positions + heights
-    y_min_pos = min(track_y) if track_y else 0
-    y_max_pos = (max(track_y[ti] + track_heights[ti]
-                     for ti in range(n_tracks)) if n_tracks else 0)
+    # -- 6. Build subtitle -----------------------------------------------
 
     subtitle_bits = [
         "Genes coloured by homology group",
-        "* = resolved GOI",
-        "dashed GOI = ambiguous/tandem family member",
-        "V-notches = exon boundaries",
+        "★ = resolved GOI",
+        "dashed = ambiguous",
+        "exon blocks + intron lines",
         "ribbons connect orthologs",
         "// = compressed gaps",
     ]
@@ -2214,74 +2686,17 @@ def main():
     if ambiguous_track_count:
         subtitle_bits.append(f"{ambiguous_track_count} ambiguous track(s)")
 
-    if args.plot_height > 0:
-        fig_height = args.plot_height
-    else:
-        # Height scales with total Y span: roughly 200px per unit of Y space
-        y_span = y_max_pos - y_min_pos
-        fig_height = max(600, int(y_span * 200) + 200)
+    # -- 7. Render SVG ---------------------------------------------------
 
-    if args.plot_width > 0:
-        fig_width = args.plot_width
-    else:
-        # Scale dynamically: minimum 3000, up to 8000 for wide loci
-        estimated_needed = max(3000, int((x_max - x_min) / 350))
-        fig_width = min(8000, estimated_needed)
-
-    fig.update_layout(
-        title=dict(
-            text=("<b>SynVoy Synteny Plot</b>"
-                  f"<br><sup>{' | '.join(subtitle_bits)}</sup>"),
-            x=0.5, font=dict(size=17),
-        ),
-        height=fig_height,
-        width=fig_width,
-        xaxis=dict(
-            title="",
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False,
-            range=x_range,
-        ),
-        yaxis=dict(
-            showticklabels=False, showgrid=False, zeroline=False,
-            range=[y_min_pos - 0.8,
-                   y_max_pos + 1.2],
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        margin=dict(l=290, r=80, t=100, b=70),
-        legend=dict(
-            title="<b>Gene (home ID)</b>",
-            orientation="v", x=1.01, y=1.0,
-            font=dict(size=11),
-            tracegroupgap=2,
-        ),
-        hovermode="closest",
-    )
-    
-    # Add Scale Bar
-    # Place it in bottom right? Or top left?
-    # Let's put it at bottom right
-    scale_len = args.scale_bar_len
-    sb_x1 = x_max
-    sb_x0 = x_max - scale_len
-    sb_y  = y_min_pos - 0.4
-    
-    fig.add_shape(
-        type="line",
-        x0=sb_x0, x1=sb_x1, y0=sb_y, y1=sb_y,
-        line=dict(color="black", width=3),
-    )
-    fig.add_annotation(
-        x=(sb_x0 + sb_x1)/2, y=sb_y - 0.15,
-        text=f"<b>{_format_bp_label(scale_len)}</b>",
-        showarrow=False,
-        font=dict(size=13, color="black"),
-        yanchor="top"
+    html = render_synteny_html(
+        all_tracks, gene_colours, goi_genome_colours,
+        home_products, args,
+        subtitle_bits, hidden_absent_tracks,
+        ambiguous_track_count, resolved_track_count,
     )
 
-    fig.write_html(args.output)
+    with open(args.output, "w") as f:
+        f.write(html)
     print(f"Synteny plot saved to {args.output}")
     print(f"  Tracks: {n_tracks} ({n_tracks - 1} target genomes)")
     print(f"  GOI tracks: {resolved_track_count} resolved, {ambiguous_track_count} ambiguous")
@@ -2289,12 +2704,12 @@ def main():
         print(f"  Hidden absent tracks: {hidden_absent_tracks}")
     print(f"  Gap compression: active (>{args.gap_threshold} bp -> {args.gap_visual_size} bp visual)")
 
-    # -- 7. Tree plot (separate HTML) ------------------------------------
+    # -- 8. Tree plot (separate HTML) ------------------------------------
     tree_output = args.output.replace("_synteny_plot.html", "_tree.html")
     if tree_output == args.output:
         tree_output = args.output.replace(".html", "_tree.html")
-    _render_tree_html(args.tree, goi_genome_colours, tree_output,
-                      species_map=species_map)
+    _render_tree_svg(args.tree, goi_genome_colours, tree_output,
+                     species_map=species_map)
 
 
 if __name__ == "__main__":
