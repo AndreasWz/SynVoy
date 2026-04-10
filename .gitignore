@@ -1,4 +1,4 @@
-# Nextflow files
+# Nextflow runtime
 work/
 .nextflow/
 .nextflow.log*
@@ -12,12 +12,13 @@ test_data/
 test_out/
 test_home_db/
 
+# Local data (genomes, caches, archives, queries, docs, etc.)
+local_data/
+
 # Environment and logs
-archive/
 *.log
 *.tmp
 tmp/
-cache/
 .synvoy_logs/
 .pytest_cache/
 
@@ -27,20 +28,6 @@ __pycache__/
 .ipynb_checkpoints/
 genomes/
 results_from_local_genomes/
-.synvoy_logs/
-test_out/
-ref/
-archive/
-test_home_db/
-
-ref/Homo_sapiens.fna.gz
-docs/
-local_runs/
-queries/
-easy_mode_genomes/
-
-# Ground truth: large genome data (FASTA, GFF3, zips) and absolute-path symlinks
-ground_truth/
 
 # Test outputs (generated, not source)
 tests/ground_truth_test/output/
