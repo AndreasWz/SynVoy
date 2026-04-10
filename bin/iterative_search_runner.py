@@ -12,6 +12,7 @@ import sys
 import json
 import logging
 import contextlib
+import time
 from bisect import bisect_right
 from collections import defaultdict
 from pathlib import Path
@@ -194,19 +195,25 @@ def parse_hits(
     hits = []
     if not os.path.exists(hits_file):
         return hits
-        
+
+    skipped_lines = 0
+    total_lines = 0
+    first_error = None
     with open(hits_file) as f:
         for line in f:
             parts = line.strip().split('\t')
+            total_lines += 1
             try:
                 # query, target, pident, alnlen, mismatch, gapopen, qstart, qend, tstart, tend, evalue, bits
                 # 0      1       2       3       4         5        6       7     8       9     10      11
-                if len(parts) < 11: continue
-                
+                if len(parts) < 11:
+                    skipped_lines += 1
+                    continue
+
                 pident = float(parts[2])
                 alnlen = int(parts[3])
                 evalue = float(parts[10])
-                
+
                 q_id = parts[0]
                 q_len = None
                 if query_lengths:
@@ -223,7 +230,7 @@ def parse_hits(
                 if (evalue <= evalue_thresh and
                     pident >= min_identity and
                     alnlen >= effective_min_length):
-                    
+
                     t_start = int(parts[8])
                     t_end = int(parts[9])
                     start, end = normalize_coordinates(t_start, t_end)
@@ -231,10 +238,10 @@ def parse_hits(
                     # for Python slicing: start-1 becomes 0-based, end stays (exclusive)
                     start -= 1
                     strand = '+' if t_start <= t_end else '-'
-                    
+
                     q_start = int(parts[6])
                     q_end = int(parts[7])
-                    
+
                     bits = float(parts[11]) if len(parts) > 11 else 0.0
 
                     hits.append({
@@ -251,8 +258,17 @@ def parse_hits(
                         'alnlen': alnlen,
                         'bits': bits
                     })
-            except Exception as e:
+            except (ValueError, IndexError) as e:
+                skipped_lines += 1
+                if first_error is None:
+                    first_error = f"line {total_lines}: {e}"
                 continue
+
+    if skipped_lines > 0:
+        logger.warning(
+            f"parse_hits({os.path.basename(hits_file)}): skipped {skipped_lines}/{total_lines} "
+            f"malformed lines (first: {first_error})"
+        )
     return hits
 
 def create_locus_object(query_id, hits):
@@ -781,7 +797,7 @@ def load_native_annotation_index(gff_path: Optional[str]) -> Dict[str, Dict[str,
         try:
             s = int(feat.get("start", 0))
             e = int(feat.get("end", 0))
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if e < s:
             s, e = e, s
@@ -1038,12 +1054,12 @@ def deduplicate_flanking_models(
             parent_id = _select_parent_id(attrs, model_id)
             try:
                 identity = float(parts[5]) if parts[5] != "." else 0.0
-            except Exception:
+            except (ValueError, TypeError):
                 identity = 0.0
             try:
                 start = int(parts[3])
                 end = int(parts[4])
-            except Exception:
+            except (ValueError, TypeError):
                 continue
             models[model_id] = {
                 "id": model_id,
@@ -1061,7 +1077,7 @@ def deduplicate_flanking_models(
                 continue
             try:
                 cds_by_model[parent_model].append((int(parts[3]), int(parts[4])))
-            except Exception:
+            except (ValueError, TypeError):
                 continue
 
     if not models:
@@ -1179,8 +1195,8 @@ def collapse_flanking_cds_to_gene_span(gff_lines: List[str]) -> List[str]:
                         "strand": parts[6],
                         "id": model_id,
                     })
-                except Exception:
-                    pass
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Skipping malformed GFF mRNA line for {model_id}: {e}")
             output.append(line)
         elif source in flanking_sources and ftype == "CDS":
             # Drop detailed flanking CDS entries; replaced by one span CDS below.
@@ -1408,9 +1424,9 @@ def estimate_cluster_distance(genome_file: str, gff_file: Optional[str] = None, 
             return 100000
         else:  # > 2GB: Plants, large genomes
             return 150000
-    except:
-        pass
-    
+    except Exception as e:
+        logger.warning(f"Could not auto-detect cluster distance from genome size ({genome_file}): {e}. Using default {default_dist} bp.")
+
     return default_dist
 
 def run_augmented_mmseqs_with_retries(
@@ -1649,13 +1665,12 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         tblastn_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_tblastn_hits.m8"
         blast_db_prefix = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_tblastn_db"
         try:
-            subprocess.run(
+            makedb_result = subprocess.run(
                 ["makeblastdb", "-in", region_fasta, "-dbtype", "nucl", "-out", blast_db_prefix],
                 check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                capture_output=True, text=True
             )
-            subprocess.run(
+            tblastn_result = subprocess.run(
                 [
                     "tblastn",
                     "-query", query_fasta,
@@ -1667,8 +1682,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     "-out", tblastn_hits_file
                 ],
                 check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                capture_output=True, text=True
             )
 
             tblastn_hits = parse_hits(
@@ -1684,10 +1698,13 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     hit['method'] = 'tblastn'
                 all_hits.extend(tblastn_hits)
         except FileNotFoundError:
-            print(f"[{genome_name}] tblastn/makeblastdb not available, skipping tblastn step.", flush=True)
-        except subprocess.CalledProcessError:
-            # Keep MMseqs/SW path active even when BLAST fails for a block.
-            print(f"[{genome_name}] tblastn step failed for this block, continuing.", flush=True)
+            logger.warning(f"[{genome_name}] tblastn/makeblastdb not found on PATH. Install BLAST+ to enable tblastn search.")
+        except subprocess.CalledProcessError as blast_err:
+            stderr_snippet = (blast_err.stderr or '')[:300].strip()
+            logger.warning(
+                f"[{genome_name}] tblastn failed (exit {blast_err.returncode}), continuing with MMseqs/SW only."
+                + (f" stderr: {stderr_snippet}" if stderr_snippet else "")
+            )
         
         # ========== 3. Smith-Waterman Search ==========
         # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2)
@@ -1792,7 +1809,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         return all_hits
         
     except Exception as e:
-        print(f"[{genome_name}] Augmented search failed: {e}", flush=True)
+        import traceback
+        logger.warning(
+            f"[{genome_name}] Augmented search failed: {e}\n"
+            f"  Traceback: {traceback.format_exc().strip().splitlines()[-3:]}"
+        )
         return []
 
 def batch_rbh_check(
@@ -2732,7 +2753,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             min_exon_alnlen=args.min_exon_alnlen,
                             sensitive=False
                         )
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"[{genome_name}] Flanking exon annotation failed for {parent_id} locus {locus_idx}: {e}")
                     exons = []
 
                 if not exons:
@@ -2883,7 +2905,12 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 })
 
     except Exception as e:
-        print(f"Block {block_idx} failed: {e}")
+        import traceback
+        logger.warning(
+            f"[{genome_name}] Block {block_idx} processing failed "
+            f"({chrom}:{block.get('start','?')}-{block.get('end','?')}): {e}\n"
+            f"  {traceback.format_exc().strip().splitlines()[-1]}"
+        )
 
     if os.path.exists(temp_fa):
         os.remove(temp_fa)
@@ -3587,7 +3614,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 min_exon_alnlen=args.min_exon_alnlen,
                                 sensitive=False
                             )
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"[{genome_name}] Off-block exon annotation failed at {off_chrom}:{off_w_start}-{off_w_end}: {e}")
                         exons = []
 
                     if exons:
@@ -4077,6 +4105,35 @@ def main():
         logger.error("aug_relaxed_length_div must be > 0")
         sys.exit(1)
 
+    # Classification threshold validation
+    for name in ['classify_high_min_identity', 'classify_medium_min_identity', 'classify_tandem_min_identity']:
+        val = getattr(args, name)
+        if val < 0 or val > 100:
+            logger.error(f"{name} must be between 0 and 100 (got {val})")
+            sys.exit(1)
+    for name in ['classify_fragment_max_qcov', 'classify_complete_min_qcov']:
+        val = getattr(args, name)
+        if val < 0 or val > 1:
+            logger.error(f"{name} must be between 0 and 1 (got {val})")
+            sys.exit(1)
+    if args.classify_fragment_max_qcov >= args.classify_complete_min_qcov:
+        logger.warning(
+            f"classify_fragment_max_qcov ({args.classify_fragment_max_qcov}) >= "
+            f"classify_complete_min_qcov ({args.classify_complete_min_qcov}); "
+            f"fragment and complete model status ranges overlap"
+        )
+
+    # Smith-Waterman validation
+    if args.sw_min_score < 0:
+        logger.error(f"sw_min_score must be >= 0 (got {args.sw_min_score})")
+        sys.exit(1)
+    if args.sw_min_identity < 0 or args.sw_min_identity > 100:
+        logger.error(f"sw_min_identity must be between 0 and 100 (got {args.sw_min_identity})")
+        sys.exit(1)
+    if args.sw_timeout_seconds < 1:
+        logger.error(f"sw_timeout_seconds must be >= 1 (got {args.sw_timeout_seconds})")
+        sys.exit(1)
+
     # In auto mode, only keep SW enabled when parasail is available.
     # This avoids per-block fallback overhead on very large block sets.
     if args.enable_smith_waterman and args.sw_method == "auto" and not has_parasail_available():
@@ -4086,12 +4143,20 @@ def main():
         )
         args.enable_smith_waterman = False
     
-    logger.info(f"Starting iterative search with {args.threads} threads")
-    logger.info(f"Parameters: identity>={args.min_identity}%, length>={args.min_length}, evalue<={args.evalue}")
-    logger.info(
-        f"MMseqs controls: split_memory_limit={args.mmseqs_split_memory_limit}, "
-        f"verbosity={args.mmseqs_verbosity}, quiet_subtools={args.quiet_subtools}"
-    )
+    logger.info("")
+    logger.info("═══ Iterative Search Configuration ═══")
+    logger.info(f"  Threads:          {args.threads}")
+    logger.info(f"  Min identity:     {args.min_identity}%")
+    logger.info(f"  Min length:       {args.min_length}")
+    logger.info(f"  E-value cutoff:   {args.evalue}")
+    logger.info(f"  MMseqs sens:      {args.mmseqs_sens}")
+    logger.info(f"  MMseqs mem limit: {args.mmseqs_split_memory_limit}")
+    logger.info(f"  Smith-Waterman:   {'enabled (' + args.sw_method + ')' if args.enable_smith_waterman else 'disabled'}")
+    logger.info(f"  Max blocks/genome:{args.max_blocks_per_genome}")
+    logger.info(f"  Region padding:   {args.padding_min}-{args.padding_max} bp")
+    if args.prefix:
+        logger.info(f"  Locus prefix:     {args.prefix}")
+    logger.info("══════════════════════════════════════")
     
     prefix = f"{args.prefix}_" if args.prefix else ""
     
@@ -4108,41 +4173,86 @@ def main():
         with open(checkpoint_file, 'r') as cf:
             checkpoint_data = json.loads(cf.read())
             start_wave = checkpoint_data.get('completed_waves', 0)
+            total_saved_waves = checkpoint_data.get('total_waves', '?')
             last_db = checkpoint_data.get('last_db', None)
-            
+
             if last_db and os.path.exists(last_db):
-                logger.info(f"Resuming from wave {start_wave + 1}, using DB: {last_db}")
+                logger.info(
+                    f"Resuming from checkpoint: {start_wave}/{total_saved_waves} waves already completed. "
+                    f"Continuing from wave {start_wave + 1}."
+                )
                 current_db = last_db
             else:
-                logger.warning("Checkpoint found but DB missing, starting from beginning")
+                logger.warning(
+                    f"Checkpoint found ({start_wave} waves completed) but database file is missing "
+                    f"(expected: {last_db}). Starting from beginning."
+                )
                 start_wave = 0
                 shutil.copyfile(args.initial_db, current_db)
     else:
+        if args.resume:
+            logger.info("No checkpoint found; starting fresh.")
         shutil.copyfile(args.initial_db, current_db)
     
     # Parse Genomes and Distances
     genome_entries = []
+    parse_warnings = []
     with open(args.sorted_genomes, 'r') as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.strip()
-            if not line: continue
+            if not line:
+                continue
             parts = line.split('\t')
             gname = parts[0]
-            dist = float(parts[1]) if len(parts) > 1 else 0.0
-            
+            if len(parts) < 2:
+                parse_warnings.append(
+                    f"  Line {line_num}: missing distance column (using 0.0): {line!r}"
+                )
+            try:
+                dist = float(parts[1]) if len(parts) > 1 else 0.0
+            except ValueError:
+                logger.error(
+                    f"sorted_genomes line {line_num}: cannot parse distance "
+                    f"from {parts[1]!r}. Expected tab-separated: genome_path<TAB>distance"
+                )
+                sys.exit(1)
+
             gpath = gname
             if args.genomes_dir:
-                if not os.path.isabs(gname): # If gname is not an absolute path, assume it's relative to genomes_dir
+                if not os.path.isabs(gname):
                     gpath = os.path.join(args.genomes_dir, os.path.basename(gname))
-            
+
             genome_entries.append({'name': gname, 'path': gpath, 'dist': dist})
-    
+
+    if parse_warnings:
+        for w in parse_warnings:
+            logger.warning(w)
+
     # Validate we loaded genomes
     if not genome_entries:
-        logger.error("No genomes found in sorted_genomes file")
+        logger.error(
+            f"No genomes found in sorted_genomes file: {args.sorted_genomes}\n"
+            f"  The file should contain one genome per line: genome_path<TAB>distance\n"
+            f"  Check that the upstream PHYLO_SORT step completed successfully."
+        )
         sys.exit(1)
-            
-    logger.info(f"Loaded {len(genome_entries)} genomes.")
+
+    # Pre-flight: verify all genome files are accessible before starting the search
+    missing_genomes = []
+    for entry in genome_entries:
+        if not os.path.exists(entry['path']):
+            missing_genomes.append(f"  {entry['name']} -> {entry['path']}")
+    if missing_genomes:
+        logger.error(
+            f"{len(missing_genomes)} of {len(genome_entries)} genome file(s) not found:\n"
+            + "\n".join(missing_genomes[:10])
+            + (f"\n  ... and {len(missing_genomes) - 10} more" if len(missing_genomes) > 10 else "")
+            + f"\n  genomes_dir={args.genomes_dir or '(not set)'}"
+            + "\n  Check that target genomes were downloaded/staged correctly."
+        )
+        sys.exit(1)
+
+    logger.info(f"Loaded {len(genome_entries)} genomes (all files accessible).")
 
     # Normalize phylogenetic distances if they are not in [0,1]
     finite_dists = [g['dist'] for g in genome_entries if g.get('dist') not in [None, float('inf')]]
@@ -4194,76 +4304,131 @@ def main():
             waves.append(wave)
     
     logger.info(f"Defined {len(waves)} waves of execution.")
-    
+
+    # Compute cumulative genome index for progress tracking
+    total_genomes = len(genome_entries)
+    cumulative_genome_idx = 0  # genomes completed so far
+
     latest_db = current_db
-    
+    total_new_genes = 0
+    genomes_with_hits = 0
+    genomes_without_hits = 0
+
     for i, wave in enumerate(waves):
         # Skip already completed waves
         if i < start_wave:
-            logger.info(f"Skipping wave {i+1}/{len(waves)} (already completed)")
+            cumulative_genome_idx += len(wave)
+            logger.info(f"Skipping wave {i+1}/{len(waves)} (already completed, resuming)")
             continue
-            
-        logger.info(f"=== Starting Wave {i+1}/{len(waves)} ({len(wave)} genomes, dist={wave[0]['dist']:.3f}) ===")
-        
+
+        wave_genome_names = [e['name'] for e in wave]
+        logger.info(
+            f"═══ Wave {i+1}/{len(waves)} "
+            f"[genomes {cumulative_genome_idx+1}-{cumulative_genome_idx+len(wave)}/{total_genomes}] "
+            f"({len(wave)} genome(s), dist≈{wave[0]['dist']:.3f}) ═══"
+        )
+        for entry in wave:
+            gbase = os.path.basename(entry['name'])
+            logger.info(f"  • {gbase} (dist={entry['dist']:.4f})")
+
         # Parallel Execution
         max_workers = min(len(wave), args.threads)
         threads_per_job = max(1, args.threads // max_workers)
-        
-        logger.info(f"  Running {len(wave)} jobs in parallel with {max_workers} workers, each using {threads_per_job} threads.")
-        
+
         wave_results = []
         wave_errors = []
+        wave_start_time = time.time()
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+            futures = {}
             for entry in wave:
-                futures.append(
-                    executor.submit(process_single_genome, 
-                                    entry['path'], latest_db, args, args.home_db_dir, prefix, threads_per_job)
+                future = executor.submit(
+                    process_single_genome,
+                    entry['path'], latest_db, args, args.home_db_dir, prefix, threads_per_job
                 )
-            
+                futures[future] = entry
+
+            completed = 0
             for future in concurrent.futures.as_completed(futures):
+                entry = futures[future]
+                completed += 1
+                cumulative_genome_idx += 1
+                gbase = os.path.basename(entry['name'])
                 try:
                     gname, new_genes, genome_error = future.result()
                     if genome_error:
                         wave_errors.append((gname, genome_error))
+                        logger.error(
+                            f"  ✗ {gbase} FAILED ({completed}/{len(wave)} in wave, "
+                            f"{cumulative_genome_idx}/{total_genomes} overall): {genome_error}"
+                        )
                         continue
+                    gene_count = len(new_genes) if new_genes else 0
+                    if gene_count > 0:
+                        genomes_with_hits += 1
+                        logger.info(
+                            f"  ✓ {gbase}: {gene_count} new gene(s) "
+                            f"({cumulative_genome_idx}/{total_genomes} overall)"
+                        )
+                    else:
+                        genomes_without_hits += 1
+                        logger.info(
+                            f"  – {gbase}: no new genes "
+                            f"({cumulative_genome_idx}/{total_genomes} overall)"
+                        )
                     if new_genes:
                         wave_results.extend(new_genes)
                 except Exception as exc:
-                    wave_errors.append(("unknown", str(exc)))
+                    wave_errors.append((entry.get('name', 'unknown'), str(exc)))
+                    logger.error(
+                        f"  ✗ {gbase} CRASHED ({cumulative_genome_idx}/{total_genomes}): {exc}"
+                    )
+
+        wave_elapsed = time.time() - wave_start_time
 
         if wave_errors:
+            logger.error(f"Wave {i+1} had {len(wave_errors)} error(s):")
             for gname, msg in wave_errors:
-                logger.error(f"Wave {i+1} failed for genome '{gname}': {msg}")
+                logger.error(f"  • {os.path.basename(gname)}: {msg}")
+            # Classify errors to give actionable advice
+            oom_errors = [m for _, m in wave_errors if 'memory' in m.lower() or 'killed' in m.lower() or 'oom' in m.lower()]
+            if oom_errors:
+                logger.error(
+                    "  Hint: some failures look like out-of-memory (OOM). Try:\n"
+                    "    --mmseqs_split_memory_limit <lower value>  or\n"
+                    "    increase the process memory in nextflow.config"
+                )
             logger.error("Aborting iterative search due to per-genome processing errors.")
             sys.exit(1)
 
         # Update DB after Wave
+        total_new_genes += len(wave_results)
         if wave_results:
-            logger.info(f"Wave {i+1} completed. Found {len(wave_results)} new genes. Updating DB.")
-            
+            logger.info(
+                f"Wave {i+1} complete: {len(wave_results)} new gene(s) in {wave_elapsed:.0f}s. "
+                f"Running total: {total_new_genes} gene(s) from {genomes_with_hits} genome(s)."
+            )
+
             new_genes_fasta = f"{args.output_dir}/iter_{i+1}_new_genes.faa"
-            # wave_results is list of {'id': ..., 'seq': ...}
             write_fasta([(g['id'], g['seq']) for g in wave_results], new_genes_fasta)
-            
+
             next_db = f"{args.output_dir}/db_iter_{i+1}.faa"
             with open(next_db, 'w') as ndb:
                 with open(latest_db, 'r') as old_db:
                     shutil.copyfileobj(old_db, ndb)
                 with open(new_genes_fasta, 'r') as new_g:
                     shutil.copyfileobj(new_g, ndb)
-            
+
             # Clean up previous DB if it's not the initial one
             if i > 0 and latest_db != current_db:
                 try:
                     os.remove(latest_db)
                 except OSError as e:
                     logger.warning(f"Could not remove old DB file {latest_db}: {e}")
-            
+
             latest_db = next_db
         else:
-            logger.info(f"Wave {i+1} completed. No new genes found.")
-        
+            logger.info(f"Wave {i+1} complete: no new genes ({wave_elapsed:.0f}s).")
+
         # CHECKPOINT: Save progress after each wave
         with open(checkpoint_file, 'w') as cf:
             json.dump({
@@ -4271,12 +4436,20 @@ def main():
                 'last_db': latest_db,
                 'total_waves': len(waves)
             }, cf)
-            
+
     expanded_db = f"{args.output_dir}/expanded_db.faa"
     if os.path.exists(latest_db):
         shutil.move(latest_db, expanded_db)
-        
-    logger.info(f"Iterative wavefront search complete. Final DB: {expanded_db}")
+
+    # Final summary
+    logger.info("")
+    logger.info("═══ Iterative Search Summary ═══")
+    logger.info(f"  Genomes searched:  {total_genomes}")
+    logger.info(f"  Genomes with hits: {genomes_with_hits}")
+    logger.info(f"  Genomes no hits:   {genomes_without_hits}")
+    logger.info(f"  Total new genes:   {total_new_genes}")
+    logger.info(f"  Final database:    {expanded_db}")
+    logger.info("════════════════════════════════")
 
 if __name__ == "__main__":
     main()
