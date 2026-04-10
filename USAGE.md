@@ -287,11 +287,11 @@ These control per-process resource allocation. Override them for your hardware.
 
 ## 5. Running on HPC / SLURM
 
-A ready-made submission script is provided in `slurm_submit.sh`. Edit the variables at the top and submit:
+A ready-made submission script is provided in `scripts/slurm_submit.sh`. Edit the variables at the top and submit:
 
 ```bash
-# Edit slurm_submit.sh to set your query, species, partition, and account
-sbatch slurm_submit.sh
+# Edit scripts/slurm_submit.sh to set your query, species, partition, and account
+sbatch scripts/slurm_submit.sh
 ```
 
 The script submits the Nextflow **controller** as a SLURM job. Nextflow then submits individual pipeline tasks as separate SLURM jobs via the `hpc_singularity` or `hpc_conda` profile.

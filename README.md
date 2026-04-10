@@ -1,7 +1,7 @@
 # SynVoy - Synteny Voyager
 
 <p align="center">
-  <img src="logo.png" alt="SynVoy logo" width="220"/>
+  <img src="assets/logo.png" alt="SynVoy logo" width="220"/>
 </p>
 
 *Navigating synteny. Discovering orthology.*  
