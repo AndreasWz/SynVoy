@@ -157,49 +157,163 @@ workflow {
     log.info ""
     
     // ========== INPUT VALIDATION ==========
-    
-    // Mode-specific validation
+    // Collect ALL errors so the user sees every problem at once, not one at a time.
+    def validationErrors = []
+    def validationWarnings = []
+
+    // --- Mode validation ---
+    if (!(params.mode in ['easy', 'pro'])) {
+        validationErrors << "Invalid --mode '${params.mode}'. Must be 'easy' or 'pro'."
+    }
+
+    // --- Mode-specific input validation ---
     if (params.mode == 'easy') {
         def query_id_is_inline = looksLikeInlineSequence(params.query_id)
         def has_query = params.query_id || params.query || params.query_seq
         if (!has_query) {
-            log.error "${c_red}Easy mode requires --query_id, --query, or --query_seq${c_reset}"
-            exit 1
+            validationErrors << "Easy mode requires at least one of: --query_id, --query, or --query_seq"
         }
         if ((params.query_seq || query_id_is_inline) && !params.home_species) {
-            log.error "${c_red}Easy mode with inline sequence requires --home_species${c_reset}"
-            exit 1
+            validationErrors << "Easy mode with inline sequence requires --home_species (cannot auto-detect from raw sequence)"
         }
         if (params.query_seq && params.query) {
-            uiStatus('WARN', 'INPUT', 'Both --query_seq and --query were provided; using --query_seq.')
+            validationWarnings << "Both --query_seq and --query provided; using --query_seq."
         } else if (params.query && params.query_id && !params.query_seq && !query_id_is_inline) {
-            uiStatus('WARN', 'INPUT', 'Both --query and --query_id were provided; using --query.')
+            validationWarnings << "Both --query and --query_id provided; using --query."
         } else if (params.query_id && query_id_is_inline) {
-            uiStatus('WARN', 'INPUT', 'Inline sequence detected in --query_id; treating as inline FASTA input.')
+            validationWarnings << "Inline sequence detected in --query_id; treating as inline FASTA input."
         }
+
+        // Easy-mode enum checks
+        if (!(params.assembly_ranking in ['hybrid', 'counts', 'nstats'])) {
+            validationErrors << "Invalid --assembly_ranking '${params.assembly_ranking}'. Must be: hybrid, counts, or nstats."
+        }
+        if (!(params.bad_quality_policy in ['ask', 'drop', 'keep'])) {
+            validationErrors << "Invalid --bad_quality_policy '${params.bad_quality_policy}'. Must be: ask, drop, or keep."
+        }
+
     } else if (params.mode == 'pro') {
         if (!params.query) {
-            log.error "${c_red}Pro mode requires --query (path to FASTA file)${c_reset}"
-            exit 1
+            validationErrors << "Pro mode requires --query (path to query FASTA file)"
+        } else if (!file(params.query).exists()) {
+            validationErrors << "Query FASTA not found: ${params.query}"
         }
-        if (!params.home_genome) { 
-            log.error "${c_red}Pro mode requires --home_genome (path to home FASTA)${c_reset}"
-            exit 1
+        if (!params.home_genome) {
+            validationErrors << "Pro mode requires --home_genome (path to home genome FASTA)"
+        } else if (!file(params.home_genome).exists()) {
+            validationErrors << "Home genome not found: ${params.home_genome}"
         }
-        if (!file(params.home_genome).exists()) {
-            log.error "${c_red}Home genome not found: ${params.home_genome}${c_reset}"
-            exit 1
+        if (params.home_gff && !file(params.home_gff).exists()) {
+            validationErrors << "Home GFF not found: ${params.home_gff}"
         }
-        if (!file(params.query).exists()) {
-            log.error "${c_red}Query FASTA not found: ${params.query}${c_reset}"
-            exit 1
+        if (!params.target_genomes) {
+            validationWarnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
         }
-    } else {
-        log.error "${c_red}Invalid mode: ${params.mode}. Expected 'easy' or 'pro'${c_reset}"
+    }
+
+    // --- Universal parameter range validation ---
+    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
+        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
+    }
+    if (params.n_flanking_genes < 1) {
+        validationErrors << "Invalid --n_flanking_genes (${params.n_flanking_genes}). Must be >= 1."
+    }
+    if (params.min_synteny_score < 0 || params.min_synteny_score > 1) {
+        validationErrors << "Invalid --min_synteny_score (${params.min_synteny_score}). Must be between 0 and 1."
+    }
+    if (params.min_hit_identity < 0 || params.min_hit_identity > 100) {
+        validationErrors << "Invalid --min_hit_identity (${params.min_hit_identity}). Must be between 0 and 100."
+    }
+    if (params.min_hit_length < 1) {
+        validationErrors << "Invalid --min_hit_length (${params.min_hit_length}). Must be >= 1."
+    }
+    if (params.search_evalue <= 0) {
+        validationErrors << "Invalid --search_evalue (${params.search_evalue}). Must be > 0."
+    }
+    if (params.max_intron < 0) {
+        validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
+    }
+    if (params.cluster_distance < 0 && params.cluster_distance != -1) {
+        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
+    }
+    if (params.mmseqs_sensitivity < 1 || params.mmseqs_sensitivity > 12) {
+        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
+    }
+    if (params.sw_timeout_seconds < 1) {
+        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
+    }
+    if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
+        validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
+    }
+    if (params.sw_min_identity < 0 || params.sw_min_identity > 100) {
+        validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
+    }
+    if (params.region_padding < 0 || params.padding_min < 0 || params.padding_max < 0) {
+        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
+    }
+    if (params.padding_max < params.padding_min) {
+        validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
+    }
+    if (params.max_blocks_per_genome < 0) {
+        validationErrors << "Invalid --max_blocks_per_genome (${params.max_blocks_per_genome}). Must be >= 0."
+    }
+    if (params.min_block_genes < 1) {
+        validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
+    }
+    if (params.max_flanking_goi_similarity < 0 || params.max_flanking_goi_similarity > 100) {
+        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
+    }
+    if (params.min_flanking_size < 0) {
+        validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
+    }
+    if (params.bad_quality_timeout < 0) {
+        validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
+    }
+
+    // Classification thresholds
+    if (params.classify_high_min_identity < 0 || params.classify_high_min_identity > 100) {
+        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
+    }
+    if (params.classify_medium_min_identity < 0 || params.classify_medium_min_identity > 100) {
+        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
+    }
+    if (params.classify_tandem_min_identity < 0 || params.classify_tandem_min_identity > 100) {
+        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
+    }
+    if (params.classify_fragment_max_qcov < 0 || params.classify_fragment_max_qcov > 1) {
+        validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
+    }
+    if (params.classify_complete_min_qcov < 0 || params.classify_complete_min_qcov > 1) {
+        validationErrors << "Invalid --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Must be between 0 and 1."
+    }
+    if (params.classify_fragment_max_qcov >= params.classify_complete_min_qcov) {
+        validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
+    }
+
+    // Synteny scoring weights should sum to ~1
+    def weightSum = (params.synteny_weight_base ?: 0) + (params.synteny_weight_consistency ?: 0) + (params.synteny_weight_strand ?: 0)
+    if (Math.abs(weightSum - 1.0) > 0.01) {
+        validationWarnings << "Synteny score weights sum to ${weightSum} (expected ~1.0). Scoring may behave unexpectedly."
+    }
+
+    // --- Print all warnings ---
+    validationWarnings.each { msg ->
+        uiStatus('WARN', 'INPUT', msg)
+    }
+
+    // --- Print all errors and abort ---
+    if (validationErrors) {
+        log.info ""
+        log.info "${c_red}${c_bold}Input validation failed with ${validationErrors.size()} error(s):${c_reset}"
+        validationErrors.eachWithIndex { msg, idx ->
+            log.info "${c_red}  ${idx + 1}. ${msg}${c_reset}"
+        }
+        log.info ""
+        log.info "${c_dim}Run with --help or see USAGE.md for parameter documentation.${c_reset}"
         exit 1
     }
-    
-    uiStatus('OK', 'INPUT', 'Validation passed')
+
+    uiStatus('OK', 'INPUT', 'All parameters validated')
     
     // Channel setup — depends on mode
     if (params.mode == 'easy') {
@@ -239,16 +353,26 @@ workflow {
         }
         
         // Fetch home genome automatically for easy mode
+        uiStatus('RUN ', 'FETCH_HOME', 'Downloading home genome from NCBI')
         FETCH_HOME_GENOME(home_species_ch)
         home_genome_ch = FETCH_HOME_GENOME.out.genome
+        FETCH_HOME_GENOME.out.genome.view { genome ->
+            def sizeMb = String.format("%.1f", genome.size() / (1024.0 * 1024.0))
+            "${c_green}[OK  ]${c_reset} ${c_white}${'FETCH_HOME'.padRight(24)}${c_reset} home genome ready (${sizeMb} MB)"
+        }
         // Use GFF if available, otherwise mark as missing
         home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(no_gff_file)
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
         def target_species = params.target_species ?: ''
+        uiStatus('RUN ', 'FETCH_RELATED', "Fetching related genomes${target_species ? ' (user-specified species)' : ' (auto-detect from taxonomy)'}")
         FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
+        FETCH_RELATED_GENOMES.out.genomes_dir.view { dir ->
+            def count = new File(dir.toString()).listFiles()?.findAll { it.name.endsWith('.fna') || it.name.endsWith('.fna.gz') || it.name.endsWith('.fa') || it.name.endsWith('.fasta') }?.size() ?: 0
+            "${c_green}[OK  ]${c_reset} ${c_white}${'FETCH_RELATED'.padRight(24)}${c_reset} downloaded ${count} target genome(s)"
+        }
         species_map_ch = FETCH_RELATED_GENOMES.out.species_map.first()
         // Species name for phylogenetic sorting
         home_species_for_sort_ch = home_species_ch
@@ -440,10 +564,29 @@ workflow {
         }
         
         // QC
-        uiStatus('RUN ', 'GENOME_QC', 'Assessing target genome quality')
-        
+        uiStatus('RUN ', 'GENOME_QC', "Assessing target genome quality (policy: ${params.qc_fail_policy})")
+
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
+
+        ASSESS_GENOME_QUALITY.out.json.view { qc_json ->
+            try {
+                def qc = new groovy.json.JsonSlurper().parse(qc_json)
+                def pass_count = qc.count { it.qc_status == 'PASS' }
+                def fail_count = qc.count { it.qc_status == 'FAIL' }
+                def total = qc.size()
+                def msg = "QC complete: ${pass_count}/${total} passed"
+                if (fail_count > 0) {
+                    def failed_names = qc.findAll { it.qc_status == 'FAIL' }.collect { it.genome_id ?: it.genome ?: 'unknown' }.take(3).join(', ')
+                    def suffix = fail_count > 3 ? " (+${fail_count - 3} more)" : ""
+                    msg += ", ${fail_count} failed [${failed_names}${suffix}]"
+                    if (params.qc_fail_policy == 'drop') msg += " (will be dropped)"
+                }
+                return "${c_green}[OK  ]${c_reset} ${c_white}${'GENOME_QC'.padRight(24)}${c_reset} ${msg}"
+            } catch (Exception e) {
+                return "${c_green}[OK  ]${c_reset} ${c_white}${'GENOME_QC'.padRight(24)}${c_reset} QC assessment complete"
+            }
+        }
 
         FILTER_SORTED_GENOMES(
             PHYLO_SORT.out.sorted_list,
@@ -452,7 +595,8 @@ workflow {
         )
 
         FILTER_SORTED_GENOMES.out.sorted_list.view { locus, sorted ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'QC_FILTER'.padRight(24)}${c_reset} filtered target list for ${locus}"
+            def count = sorted.readLines().findAll { it.trim() }.size()
+            "${c_green}[OK  ]${c_reset} ${c_white}${'QC_FILTER'.padRight(24)}${c_reset} ${count} target genome(s) passed QC filter for ${locus}"
         }
 
         // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
@@ -711,34 +855,182 @@ workflow {
     }
 }
 
+// Collect task logs from work/ into results/logs/ for easy debugging.
+// Structure: logs/<PROCESS_NAME>/stdout.log, stderr.log, script.sh
+// When a process runs multiple times (e.g. per-locus), the tag from .command.run
+// is used to disambiguate (e.g. logs/CLUSTER_REGIONS__GCA_001234/...).
+def collectTaskLogs(outdir) {
+    def logsDir = new File(outdir.toString(), 'logs')
+    logsDir.mkdirs()
+    def workDir = new File(workflow.workDir.toString())
+    if (!workDir.exists()) return
+
+    def seenNames = [:] as Map  // track duplicates
+    workDir.eachDirRecurse { taskDir ->
+        def cmdRun = new File(taskDir, '.command.run')
+        def cmdLog = new File(taskDir, '.command.log')
+        def cmdErr = new File(taskDir, '.command.err')
+        def cmdSh  = new File(taskDir, '.command.sh')
+        if (!cmdRun.exists()) return  // not a task directory
+
+        // Skip if no log content at all
+        if ((!cmdLog.exists() || cmdLog.length() == 0) && (!cmdErr.exists() || cmdErr.length() == 0)) return
+
+        // Extract process name and tag from .command.run header
+        def processName = 'unknown'
+        def tag = ''
+        try {
+            def lines = cmdRun.readLines().take(10)
+            for (line in lines) {
+                def m = (line =~ /name:\s*'([^']+)'/)
+                if (m.find()) {
+                    processName = m.group(1).replaceAll(/[^a-zA-Z0-9_.-]/, '_')
+                }
+                // Also extract Nextflow outputs for tag hints
+                def mOut = (line =~ /- '([^']+)'/)
+                if (mOut.find() && !tag) {
+                    tag = mOut.group(1).replaceAll(/.*\//, '').replaceAll(/[^a-zA-Z0-9_.-]/, '_')
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Build unique directory name
+        def dirName = processName
+        if (tag) {
+            dirName = "${processName}__${tag}".take(120)
+        }
+        // Handle duplicates by appending counter
+        def count = seenNames.getOrDefault(dirName, 0) + 1
+        seenNames[dirName] = count
+        if (count > 1) {
+            dirName = "${dirName}__${count}"
+        }
+
+        def destDir = new File(logsDir, dirName)
+        destDir.mkdirs()
+
+        // Copy files with actual content
+        [[cmdLog, 'stdout.log'], [cmdErr, 'stderr.log'], [cmdSh, 'script.sh']].each { entry ->
+            def src = entry[0]
+            def destName = entry[1]
+            if (src.exists() && src.length() > 0) {
+                try {
+                    new File(destDir, destName).text = src.text
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+}
+
 workflow.onComplete {
+    // Collect task logs into results/logs/ regardless of success/failure
+    try {
+        collectTaskLogs(params.outdir)
+    } catch (Exception e) {
+        log.info "${c_yellow}[WARN] Could not collect task logs: ${e.message}${c_reset}"
+    }
+
     log.info ""
     log.info uiRule()
     if (workflow.success) {
         uiStatus('OK  ', 'PIPELINE', 'Pipeline completed successfully')
-        log.info "${c_dim}Results Directory:${c_reset} ${c_cyan}${params.outdir}${c_reset}"
+        log.info uiRule()
+        log.info "${c_white}Run Summary${c_reset}"
+        log.info uiRule()
         log.info "${c_dim}Duration:         ${c_reset} ${workflow.duration}"
         log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
+        if (workflow.stats.cachedCount > 0) {
+            log.info "${c_dim}Tasks Cached:     ${c_reset} ${workflow.stats.cachedCount} (reused from previous run)"
+        }
+        log.info "${c_dim}Results Directory: ${c_reset} ${c_cyan}${params.outdir}${c_reset}"
         log.info uiRule()
-        log.info "${c_dim}Key outputs:${c_reset}"
 
-        // Check report existence before listing it
-        def report_file = file("${params.outdir}/synvoy_report.json")
+        // Scan for actual output files and report what was generated
+        log.info "${c_white}Generated Outputs${c_reset}"
+        def outdir = new File(params.outdir.toString())
+        def found_outputs = false
+
+        // Report
+        def report_file = new File(outdir, 'synvoy_report.json')
         if (report_file.exists()) {
-            log.info "${c_dim}- synvoy_report.json          (analysis summary)${c_reset}"
+            log.info "${c_green}  ✓${c_reset} synvoy_report.json          ${c_dim}(analysis summary)${c_reset}"
+            // Try to extract key stats from report
+            try {
+                def report = new groovy.json.JsonSlurper().parse(report_file)
+                def summary = report.summary
+                if (summary) {
+                    def goi_count = summary.total_goi_annotations ?: 0
+                    def genomes_hit = summary.genomes_with_annotations ?: 0
+                    def absent = summary.goi_absent_genomes?.size() ?: 0
+                    log.info "${c_dim}    → GOI found in ${genomes_hit} genome(s) (${goi_count} annotation(s) total)${c_reset}"
+                    if (absent > 0) {
+                        log.info "${c_yellow}    → GOI absent in ${absent} genome(s)${c_reset}"
+                    }
+                }
+            } catch (Exception ignored) {}
+            found_outputs = true
         } else {
-            log.info "${c_yellow}- synvoy_report.json          (NOT GENERATED)${c_reset}"
+            log.info "${c_yellow}  ✗${c_reset} synvoy_report.json          ${c_yellow}(not generated)${c_reset}"
         }
 
-        log.info "${c_dim}- *_synteny_plot.html           (interactive visualization)${c_reset}"
-        log.info "${c_dim}- *_tree.nwk                    (GOI phylogeny)${c_reset}"
-        log.info "${c_dim}- regions/*.regions.bed         (candidate regions)${c_reset}"
-        log.info "${c_dim}- intermediate/                 (per-phase artifacts)${c_reset}"
+        // Plots
+        def plots = outdir.listFiles()?.findAll { it.name.endsWith('_synteny_plot.html') } ?: []
+        if (plots) {
+            plots.each { p ->
+                log.info "${c_green}  ✓${c_reset} ${p.name.padRight(28)} ${c_dim}(interactive visualization)${c_reset}"
+            }
+            found_outputs = true
+        }
+
+        // Trees
+        def trees = outdir.listFiles()?.findAll { it.name.endsWith('_tree.nwk') } ?: []
+        if (trees) {
+            trees.each { t ->
+                log.info "${c_green}  ✓${c_reset} ${t.name.padRight(28)} ${c_dim}(GOI phylogeny)${c_reset}"
+            }
+            found_outputs = true
+        }
+
+        // Regions
+        def regions_dir = new File(outdir, 'regions')
+        if (regions_dir.exists()) {
+            def beds = regions_dir.listFiles()?.findAll { it.name.endsWith('.regions.bed') } ?: []
+            if (beds) {
+                log.info "${c_green}  ✓${c_reset} regions/                      ${c_dim}(${beds.size()} region BED file(s))${c_reset}"
+                found_outputs = true
+            }
+        }
+
+        if (!found_outputs) {
+            log.info "${c_yellow}  No output files found in ${params.outdir}${c_reset}"
+        }
+
+        // Logs
+        def logsDir = new File(params.outdir.toString(), 'logs')
+        if (logsDir.exists()) {
+            def logDirs = logsDir.listFiles()?.findAll { it.isDirectory() } ?: []
+            if (logDirs) {
+                log.info "${c_green}  ✓${c_reset} logs/                         ${c_dim}(task logs for ${logDirs.size()} process(es))${c_reset}"
+            }
+        }
+
         log.info uiRule()
     } else {
         uiStatus('FAIL', 'PIPELINE', 'Pipeline execution failed')
-        log.info "${c_dim}Duration:${c_reset} ${workflow.duration}"
-        log.info "${c_dim}Error:   ${c_reset} ${c_red}${workflow.errorMessage}${c_reset}"
+        log.info uiRule()
+        log.info "${c_dim}Duration:         ${c_reset} ${workflow.duration}"
+        log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
+        log.info "${c_dim}Tasks Failed:     ${c_reset} ${c_red}${workflow.stats.failedCount}${c_reset}"
+        log.info ""
+        log.info "${c_red}Error: ${workflow.errorMessage}${c_reset}"
+        log.info ""
+        log.info "${c_dim}Troubleshooting tips:${c_reset}"
+        log.info "${c_dim}  • Check task logs:            ${params.outdir}/logs/ (collected per process)${c_reset}"
+        log.info "${c_dim}  • Check the Nextflow log:     .nextflow.log${c_reset}"
+        log.info "${c_dim}  • Re-run with -resume to pick up from the last successful step${c_reset}"
+        if (workflow.stats.failedCount > 0) {
+            log.info "${c_dim}  • Common causes: missing tools (tblastn, mmseqs, miniprot), OOM, network timeout${c_reset}"
+        }
         log.info uiRule()
     }
 }
