@@ -13,6 +13,12 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import load_genome, write_fasta, parse_fasta
 
+try:
+    from gene_predictor import predict_genes, check_predictor_available
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from gene_predictor import predict_genes, check_predictor_available
+
 
 def str2bool(value: str) -> bool:
     if isinstance(value, bool):
@@ -158,28 +164,41 @@ def adjust_proteins(in_faa, out_faa, id_map):
     write_fasta(records, out_faa)
 
 
+def run_gene_prediction(fasta_in, faa_out, gff_out, predictor="auto",
+                        augustus_species="fly"):
+    """Run gene prediction using the unified gene_predictor dispatch."""
+    success = predict_genes(
+        fasta_in, faa_out, gff_out,
+        predictor=predictor,
+        augustus_species=augustus_species,
+    )
+    if not success:
+        raise RuntimeError(
+            f"Gene prediction failed (predictor={predictor}). "
+            f"Check that Augustus or Prodigal is installed."
+        )
+
+
 def run_prodigal(fasta_in, faa_out, gff_out):
-    cmd = [
-        "prodigal",
-        "-i", fasta_in,
-        "-a", faa_out,
-        "-f", "gff",
-        "-o", gff_out,
-        "-p", "meta",
-        "-q"
-    ]
-    subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+    """Legacy wrapper — dispatches through unified gene predictor."""
+    run_gene_prediction(fasta_in, faa_out, gff_out, predictor="prodigal")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Prodigal on GOI-flanking regions only")
+    parser = argparse.ArgumentParser(
+        description="Run gene prediction (Augustus/Prodigal) on GOI-flanking regions"
+    )
     parser.add_argument("--genome", required=True, help="Genome FASTA")
     parser.add_argument("--goi_bed", required=True, help="GOI bed file (hits)")
     parser.add_argument("--window", type=int, default=50000, help="Flanking window around hits")
     parser.add_argument("--output_faa", required=True, help="Output proteins FASTA")
     parser.add_argument("--output_gff", required=True, help="Output GFF")
     parser.add_argument("--fallback_full_genome", type=str2bool, default=False,
-                        help="Fallback to full-genome Prodigal if no regions found")
+                        help="Fallback to full-genome prediction if no regions found")
+    parser.add_argument("--gene_predictor", type=str, default="auto",
+                        help="Gene predictor: auto, augustus, or prodigal (default: auto)")
+    parser.add_argument("--augustus_species", type=str, default="fly",
+                        help="Augustus species model (default: fly)")
     args = parser.parse_args()
 
     genome_seqs = load_genome(args.genome)
@@ -193,13 +212,13 @@ def main():
         # No GOI regions and fallback disabled: produce empty outputs
         open(args.output_faa, "w").close()
         open(args.output_gff, "w").close()
-        print("No GOI regions found; skipping Prodigal.", file=sys.stderr)
+        print("No GOI regions found; skipping gene prediction.", file=sys.stderr)
         return
 
     if not regions:
         open(args.output_faa, "w").close()
         open(args.output_gff, "w").close()
-        print("No valid regions after merging; skipping Prodigal.", file=sys.stderr)
+        print("No valid regions after merging; skipping gene prediction.", file=sys.stderr)
         return
 
     tmp_dir = tempfile.mkdtemp(prefix="synvoy_prodigal_")
@@ -212,10 +231,14 @@ def main():
         if not id_map:
             open(args.output_faa, "w").close()
             open(args.output_gff, "w").close()
-            print("No regions produced for Prodigal.", file=sys.stderr)
+            print("No regions produced for gene prediction.", file=sys.stderr)
             return
 
-        run_prodigal(regions_fa, tmp_faa, tmp_gff)
+        run_gene_prediction(
+            regions_fa, tmp_faa, tmp_gff,
+            predictor=args.gene_predictor,
+            augustus_species=args.augustus_species,
+        )
 
         adjust_proteins(tmp_faa, args.output_faa, id_map)
         adjust_gff(tmp_gff, args.output_gff, id_map)

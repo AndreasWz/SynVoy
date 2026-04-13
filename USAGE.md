@@ -283,6 +283,42 @@ These control per-process resource allocation. Override them for your hardware.
 | `--outdir` | `results` | Directory for pipeline output |
 | `--keep_intermediate` | `false` | Keep intermediate files (useful for debugging) |
 
+### Automatic Parameter Estimation (LLM)
+
+SynVoy can automatically estimate optimal search parameters based on the biological context of your search. This is powered by Gemma 4 (Google's open-weight LLM) running locally via [Ollama](https://ollama.com), with Google Cloud Gemini API as a cloud fallback, and deterministic heuristics when no LLM is available.
+
+**Enabled by default.** Disable with `--auto_params false`.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--auto_params` | `true` | Enable automatic parameter estimation. When on, SynVoy analyzes your query gene, home species genome architecture, and target species distances to set optimal values for ~25 search parameters. |
+| `--llm_model` | `auto` | Ollama model name. `auto` selects based on system resources: `gemma4:e4b` (4B, laptops), `gemma4:26b` (26B MoE, workstations), `gemma4:31b` (31B, clusters). |
+| `--ollama_url` | `http://localhost:11434` | Ollama server URL |
+| `--google_api_key` | _(empty)_ | Google Cloud Gemini API key (optional cloud fallback). Also read from `GOOGLE_API_KEY` env var. |
+| `--multi_profile` | `true` | For small searches, run with multiple parameter profiles (sensitive/balanced/stringent) and automatically select the best result. |
+| `--multi_profile_max_jobs` | `30` | Max total jobs (`loci × targets × 3`) allowed for multi-profile. If exceeded, only the LLM-estimated profile runs. |
+
+**Setup (optional, for LLM-quality estimation):**
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the Gemma 4 model (choose based on your hardware)
+ollama pull gemma4:e4b    # 4B params, ~4GB, works on any modern laptop
+ollama pull gemma4:26b    # 26B MoE, ~16GB, recommended for workstations
+ollama pull gemma4:31b    # 31B dense, ~24GB, for servers/clusters
+```
+
+> **Note:** Without Ollama, SynVoy falls back to built-in heuristic rules that encode the same biological reasoning (kingdom-specific intron lengths, distance-adaptive sensitivity, query-size thresholds). The heuristic fallback is solid — the LLM just adds nuance for edge cases.
+
+**What gets estimated:**
+- **Genome architecture**: `max_intron`, `cluster_distance`, `region_padding` — adapted for plants (↑), bacteria (↓), vertebrates, fungi
+- **Search sensitivity**: `mmseqs_sensitivity`, `search_evalue`, `min_hit_identity` — relaxed for distant searches, tightened for close species
+- **Query-size tuning**: `sw_min_score`, `min_hit_length` — lowered for small peptides, raised for large proteins
+- **Gene family handling**: `max_flanking_goi_similarity`, `expand_goi_similar` — tuned for tandem arrays and gene families
+- **Advanced search**: `enable_plm_search`, `enable_structural_search` — auto-enabled for extreme evolutionary distances (>400 Mya)
+
 ---
 
 ## 5. Running on HPC / SLURM

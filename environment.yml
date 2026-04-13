@@ -11,7 +11,8 @@ dependencies:
   # Bioinformatics tools
   - mmseqs2 >=14.7e284
   - blast >=2.13.0        # tblastn / makeblastdb
-  - prodigal >=2.6.3
+  - prodigal >=2.6.3      # prokaryotic gene prediction (fallback)
+  - augustus >=3.4.0       # eukaryotic gene prediction (default)
   - mafft >=7.505
   - miniprot
   - iqtree >=2.2.0
@@ -22,9 +23,26 @@ dependencies:
 
   # Python packages
   - biopython
+  - plotly >=5.0.0
   - ete3                  # tree I/O in plot_synteny & phylo_sort
   - taxopy >=0.11.0       # phylogenetic sorting
   - parasail-python       # Smith-Waterman via parasail (GOI search)
+  - numpy
+  - psutil                # system resource detection for LLM model selection
 
   # Utilities
   - unzip
+
+  # Optional: PLM embedding search (--enable_plm_search true)
+  # Uncomment these or install separately:
+  #   pip install torch transformers sentencepiece
+  # - pytorch::pytorch >=2.0
+  # - transformers >=4.30
+  # - sentencepiece
+
+  # Optional: Structural search (--enable_structural_search true)
+  # Requires Foldseek binary + ESMFold (torch + transformers).
+  # ESMFold needs GPU with >=8GB VRAM for proteins up to ~400 aa.
+  #   conda install -c bioconda foldseek
+  #   pip install torch transformers
+  # - foldseek >=9

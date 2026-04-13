@@ -26,6 +26,7 @@ include { GENERATE_REPORT } from './modules/generate_report.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
+include { ESTIMATE_PARAMS } from './modules/estimate_params.nf'
 
 // ==============================================================================
 // ANSI Color Codes (Script-level variables)
@@ -290,6 +291,52 @@ workflow {
         validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
     }
 
+    // Gene predictor validation
+    if (!(params.gene_predictor in ['auto', 'augustus', 'prodigal'])) {
+        validationErrors << "Invalid --gene_predictor (${params.gene_predictor}). Must be 'auto', 'augustus', or 'prodigal'."
+    }
+
+    // PLM embedding search thresholds
+    if (params.enable_plm_search) {
+        if (!(params.plm_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
+        }
+        if (params.plm_similarity_threshold < 0 || params.plm_similarity_threshold > 1) {
+            validationErrors << "Invalid --plm_similarity_threshold (${params.plm_similarity_threshold}). Must be between 0 and 1."
+        }
+        if (params.plm_medium_threshold < 0 || params.plm_medium_threshold > 1) {
+            validationErrors << "Invalid --plm_medium_threshold (${params.plm_medium_threshold}). Must be between 0 and 1."
+        }
+        if (params.plm_high_threshold < 0 || params.plm_high_threshold > 1) {
+            validationErrors << "Invalid --plm_high_threshold (${params.plm_high_threshold}). Must be between 0 and 1."
+        }
+        if (params.plm_medium_threshold >= params.plm_high_threshold) {
+            validationWarnings << "PLM thresholds: --plm_medium_threshold (${params.plm_medium_threshold}) >= --plm_high_threshold (${params.plm_high_threshold})."
+        }
+    }
+
+    // Structural search (ESMFold + Foldseek) thresholds
+    if (params.enable_structural_search) {
+        if (!(params.structural_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
+        }
+        if (params.structural_tm_threshold < 0 || params.structural_tm_threshold > 1) {
+            validationErrors << "Invalid --structural_tm_threshold (${params.structural_tm_threshold}). Must be between 0 and 1."
+        }
+        if (params.structural_medium_threshold < 0 || params.structural_medium_threshold > 1) {
+            validationErrors << "Invalid --structural_medium_threshold (${params.structural_medium_threshold}). Must be between 0 and 1."
+        }
+        if (params.structural_high_threshold < 0 || params.structural_high_threshold > 1) {
+            validationErrors << "Invalid --structural_high_threshold (${params.structural_high_threshold}). Must be between 0 and 1."
+        }
+        if (params.structural_medium_threshold >= params.structural_high_threshold) {
+            validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
+        }
+        if (params.structural_max_length < 10) {
+            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
+        }
+    }
+
     // Synteny scoring weights should sum to ~1
     def weightSum = (params.synteny_weight_base ?: 0) + (params.synteny_weight_consistency ?: 0) + (params.synteny_weight_strand ?: 0)
     if (Math.abs(weightSum - 1.0) > 0.01) {
@@ -430,6 +477,91 @@ workflow {
     // to keep downstream search/annotation behavior consistent.
     NORMALIZE_QUERY(raw_gene_ch)
     normalized_gene_ch = NORMALIZE_QUERY.out.fasta
+
+    // ========== LLM PARAMETER ESTIMATION (Phase 0.5) ==========
+    // When auto_params is enabled, analyze the query/species context and
+    // estimate optimal pipeline parameters via Gemma 4 (or heuristic fallback).
+    if (params.auto_params) {
+        uiPhase(0, 'Automatic Parameter Estimation')
+        uiStatus('RUN ', 'ESTIMATE_PARAMS', 'Estimating optimal parameters for this search')
+
+        // Determine inputs for the estimator
+        def est_home_species = params.mode == 'easy' ? home_species_ch : Channel.value(params.home_species ?: '')
+        def est_target_species = Channel.value(params.target_species ?: '')
+
+        // Resolved metadata JSON is available in easy mode; create a stub for pro mode
+        if (params.mode == 'easy') {
+            est_metadata_ch = RESOLVE_GENE_INPUT.out.metadata
+        } else {
+            // Create a minimal resolved_input.json for pro mode
+            est_metadata_ch = normalized_gene_ch.map { fasta ->
+                def meta = file("${workDir}/resolved_input_stub.json")
+                meta.text = "{\"source\": \"file\", \"fasta_path\": \"${fasta}\", \"species\": \"${params.home_species ?: ''}\"}"
+                return meta
+            }
+        }
+
+        ESTIMATE_PARAMS(
+            est_metadata_ch,
+            est_home_species,
+            est_target_species,
+            normalized_gene_ch
+        )
+
+        // Apply estimated parameters synchronously via .map{} (not .view{})
+        // .view{} is asynchronous and can race with downstream processes.
+        params_applied_ch = ESTIMATE_PARAMS.out.params_json.map { json_file ->
+            try {
+                def est = new groovy.json.JsonSlurper().parse(json_file)
+                def overrides = est.get('parameters', [:])
+                def backend = est.get('backend', 'unknown')
+                def count = overrides.size()
+                def summary = est.get('context_summary', [:])
+
+                // Log what was estimated
+                def msg = "${count} parameter(s) estimated via ${backend}"
+                if (summary) {
+                    msg += " (kingdom=${summary.get('kingdom','?')}, genome=${summary.get('genome_size_mb',0)}Mb, query=${summary.get('query_length_aa',0)}aa)"
+                }
+
+                // Apply overrides to params
+                // Only allow known Tier 1+2 parameters to be overridden
+                def allowed = [
+                    'max_intron', 'cluster_distance', 'n_flanking_genes', 'min_synteny_score',
+                    'region_padding', 'padding_min', 'padding_max', 'search_evalue',
+                    'min_hit_identity', 'min_hit_length', 'mmseqs_sensitivity',
+                    'max_flanking_goi_similarity', 'max_flanking_distance',
+                    'expand_goi_similar', 'expand_goi_similar_distance',
+                    'min_gene_identity', 'enable_smith_waterman', 'sw_min_score',
+                    'sw_min_identity', 'enable_plm_search', 'enable_structural_search',
+                    'max_blocks_per_genome', 'min_block_genes', 'max_consecutive_empty_blocks',
+                    'aug_relaxed_evalue_mult', 'gap_search_window',
+                    'prefer_large_genes', 'min_flanking_size', 'exon_level_search'
+                ] as Set
+
+                overrides.each { key, value ->
+                    if (allowed.contains(key)) {
+                        def old_val = params.get(key)
+                        params.put(key, value)
+                        log.info "${c_dim}  [auto] ${key}: ${old_val} → ${value}${c_reset}"
+                    }
+                }
+
+                // Log any warnings/issues
+                def warnings = est.get('warnings', [])
+                warnings.each { w -> log.info "${c_yellow}  [auto-warn] ${w}${c_reset}" }
+                def issues = est.get('issues', [])
+                issues.each { iss -> log.info "${c_red}  [auto-issue] ${iss}${c_reset}" }
+
+                log.info "${c_green}[OK  ]${c_reset} ${c_white}${'ESTIMATE_PARAMS'.padRight(24)}${c_reset} ${msg}"
+            } catch (Exception e) {
+                log.warn "${c_yellow}[WARN]${c_reset} ${c_white}${'ESTIMATE_PARAMS'.padRight(24)}${c_reset} Could not apply estimated params: ${e.message}"
+            }
+            return true  // gate signal
+        }
+    } else {
+        uiStatus('SKIP', 'ESTIMATE_PARAMS', 'Auto parameter estimation disabled (--auto_params false)')
+    }
 
     // PHASE 1: Core Localization
     uiPhase(1, 'Gene Localization in Home Genome')

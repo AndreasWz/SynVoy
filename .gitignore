@@ -34,6 +34,12 @@ tests/ground_truth_test/output/
 tests/ground_truth_test/output_recheck/
 tests/ground_truth_test/output_unified/
 
+# Secrets / API keys — NEVER commit these
+.env
+.env.*
+*.key
+secrets/
+
 # Personal / binary files
 melettin_paper.pdf
 ideas_from_human_user.txt
