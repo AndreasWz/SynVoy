@@ -19,6 +19,12 @@ except ImportError:
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base
     )
 
+try:
+    from gene_predictor import predict_genes
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from gene_predictor import predict_genes
+
 def parse_gff_for_genes(gff_file):
     """
     Parse GFF3 file into a list of gene dictionaries.
@@ -304,9 +310,13 @@ def main():
     parser.add_argument("--exon_mode", type=str, default="false", 
                         help="If true, output individual exon CDS sequences instead of full protein")
     parser.add_argument("--pred_flank_window", type=int, default=50000,
-                        help="Flanking window around GOI hits for Prodigal prediction")
+                        help="Flanking window around GOI hits for gene prediction")
     parser.add_argument("--pred_keep_pct", type=float, default=0.10,
-                        help="Fraction of longest Prodigal predictions to keep")
+                        help="Fraction of longest gene predictions to keep")
+    parser.add_argument("--gene_predictor", type=str, default="auto",
+                        help="Gene predictor: auto, augustus, or prodigal (default: auto)")
+    parser.add_argument("--augustus_species", type=str, default="fly",
+                        help="Augustus species model (default: fly)")
     parser.add_argument("--goi_faa", default=None,
                         help="GOI protein FASTA — flanking candidates too similar to the GOI "
                              "will be filtered out (avoids picking LY6/3FTx family members as anchors)")
@@ -368,56 +378,65 @@ def main():
     
     # MODE SWITCH
     if args.gff == "NO_GFF" or not os.path.exists(args.gff):
-        print("No GFF provided. Running gene prediction on flanking regions...")
-        
+        predictor_name = getattr(args, 'gene_predictor', 'auto')
+        augustus_sp = getattr(args, 'augustus_species', 'fly')
+        print(f"No GFF provided. Running gene prediction on flanking regions "
+              f"(predictor={predictor_name}, augustus_species={augustus_sp})...")
+
         # For each target region, extract a window (e.g. +/- 50kb)
         FLANK_WINDOW = max(0, int(args.pred_flank_window))
-        
+
         for region in target_regions:
             chrom = region['chrom']
             if chrom not in genome_seqs:
                 continue
-                
+
             slen = len(genome_seqs[chrom])
-            
+
             # Define window
             center = (region['start'] + region['end']) // 2
             w_start = max(0, center - FLANK_WINDOW)
             w_end = min(slen, center + FLANK_WINDOW)
-            
+
             # Extract sequence - genome_seqs is now dict of strings
             subseq = genome_seqs[chrom][w_start:w_end]
             sub_id = f"{chrom}_{w_start}_{w_end}"
-            
+
             # Write temp fasta using our utility
             temp_fa = f"temp_{sub_id}.fasta"
             write_fasta([(sub_id, subseq)], temp_fa)
-                
-            # Run Prodigal
-            # prodigal -i inputs.fna -a proteins.faa -o coords.gff -p meta
+
+            # Run gene prediction (Augustus for eukaryotes, Prodigal for prokaryotes)
             temp_out_faa = f"temp_{sub_id}.faa"
-            cmd = ["prodigal", "-i", temp_fa, "-a", temp_out_faa, "-p", "meta", "-q"]
-            
+            temp_out_gff = f"temp_{sub_id}.gff"
+
             try:
-                subprocess.run(cmd, check=True)
-                
+                predict_genes(
+                    temp_fa, temp_out_faa, temp_out_gff,
+                    predictor=predictor_name,
+                    augustus_species=augustus_sp,
+                )
+
+                if not os.path.exists(temp_out_faa):
+                    continue
+
                 # Parse output FAA using our utility
+                # Both Augustus and Prodigal output Prodigal-style headers:
+                #   >id # start # end # strand # attrs
                 for header, clean_id, seq in parse_fasta(temp_out_faa):
-                    # Prodigal header: id_1 # start # end # strand # ...
-                    # We need to map back to genomic coordinates
                     parts = header.split(" # ")
                     if len(parts) >= 4:
                         local_start = int(parts[1]) # 1-based
                         local_end = int(parts[2])   # 1-based inclusive
-                        strand_code = parts[3] # 1 or -1
-                        strand = "+" if strand_code == "1" else "-"
-                        
+                        strand_code = parts[3].strip() # 1 or -1
+                        strand = "+" if strand_code in ("1", "+") else "-"
+
                         # Map to global and convert to 0-based BED
                         # global_start (0-based) = w_start (0-based) + (local_start - 1)
                         global_start = w_start + (local_start - 1)
                         # global_end (1-based half-open) = w_start (0-based) + local_end
                         global_end = w_start + local_end
-                        
+
                         extracted_genes.append({
                             'chrom': chrom,
                             'start': global_start,
@@ -426,16 +445,17 @@ def main():
                             'attrs': {'ID': f"pred_{chrom}_{global_start}"},
                             'seq': seq  # Store seq directly (string)
                         })
-                        
+
             except Exception as e:
                 print(f"Gene prediction failed: {e}")
             finally:
                 if os.path.exists(temp_fa): os.remove(temp_fa)
                 if os.path.exists(temp_out_faa): os.remove(temp_out_faa)
+                if os.path.exists(temp_out_gff): os.remove(temp_out_gff)
 
-        # FILTER: Keep only top 10% longest Prodigal predictions
-        # Prodigal on eukaryotic genomes greatly overpredicts tiny ORFs,
-        # drowning out real genes and inflating synteny denominators.
+        # FILTER: Keep only top N% longest gene predictions.
+        # Prodigal on eukaryotic genomes greatly overpredicts tiny ORFs;
+        # Augustus is better but may still predict partial genes.
         if extracted_genes:
             original_count = len(extracted_genes)
             extracted_genes.sort(key=lambda g: g['end'] - g['start'], reverse=True)

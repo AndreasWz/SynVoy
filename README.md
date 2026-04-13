@@ -29,6 +29,7 @@ Standard sequence-similarity searches often fail when orthologs are highly diver
 - [Output](#output)
 - [Further Reading](#further-reading)
 - [License](#license)
+- [Citation and Support](#citation-and-support)
 
 ---
 
@@ -208,3 +209,27 @@ Results are written to the directory specified by `--outdir`:
 ## License
 
 SynVoy is distributed under the [GNU AGPLv3](LICENSE) License.
+
+---
+
+## Citation and Support
+
+If SynVoy contributes to your research, please cite the software repository.
+
+Recommended software citation:
+
+> Weitz, F. A. SynVoy: Synteny-guided orthology discovery [Computer software]. GitHub. https://github.com/AndreasWz/SynVoy
+
+You can also use this BibTeX template:
+
+```bibtex
+@software{synvoy,
+  author  = {Weitz, Frank Andreas},
+  title   = {SynVoy: Synteny-guided orthology discovery},
+  year    = {2026},
+  url     = {https://github.com/AndreasWz/SynVoy},
+  note    = {GitHub repository. Accessed 2026}
+}
+```
+
+If SynVoy is useful for your work, please consider starring the repository: https://github.com/AndreasWz/SynVoy

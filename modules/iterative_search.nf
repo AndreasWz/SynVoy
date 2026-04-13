@@ -70,6 +70,19 @@ process ITERATIVE_SEARCH {
         --classify_tandem_min_identity ${params.classify_tandem_min_identity} \\
         --classify_fragment_max_qcov ${params.classify_fragment_max_qcov} \\
         --classify_complete_min_qcov ${params.classify_complete_min_qcov} \\
+        --gene_predictor ${params.gene_predictor} \\
+        --augustus_species ${params.augustus_species} \\
+        --enable_plm_search ${params.enable_plm_search} \\
+        --plm_device ${params.plm_device} \\
+        --plm_similarity_threshold ${params.plm_similarity_threshold} \\
+        --plm_medium_threshold ${params.plm_medium_threshold} \\
+        --plm_high_threshold ${params.plm_high_threshold} \\
+        --enable_structural_search ${params.enable_structural_search} \\
+        --structural_device ${params.structural_device} \\
+        --structural_tm_threshold ${params.structural_tm_threshold} \\
+        --structural_medium_threshold ${params.structural_medium_threshold} \\
+        --structural_high_threshold ${params.structural_high_threshold} \\
+        --structural_max_length ${params.structural_max_length} \\
         --prefix ${locus_id} \\
         --resume
     """

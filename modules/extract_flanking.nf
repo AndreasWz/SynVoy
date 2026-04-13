@@ -32,6 +32,8 @@ process EXTRACT_FLANKING {
         --exon_mode ${params.exon_level_search} \\
         --pred_flank_window ${params.pred_flank_window} \\
         --pred_keep_pct ${params.pred_keep_pct} \\
+        --gene_predictor ${params.gene_predictor} \\
+        --augustus_species ${params.augustus_species} \\
         $goi_arg \\
         $dist_arg \\
         $expand_arg \\

@@ -19,26 +19,30 @@ process PREPARE_HOME_PROTEOME {
         # No predicted GFF needed - use provided one
         touch home_predicted.gff.skip
     else
-        echo "No Home GFF provided. Predicting proteins with Prodigal (GOI regions only)..."
+        echo "No Home GFF provided. Predicting proteins (GOI regions only)..."
         prodigal_on_regions.py \\
             --genome $home_genome \\
             --goi_bed $goi_bed \\
             --window ${params.pred_flank_window} \\
             --output_faa home_proteome.faa \\
             --output_gff home_predicted.gff \\
-            --fallback_full_genome ${params.prodigal_full_genome_fallback}
+            --fallback_full_genome ${params.prodigal_full_genome_fallback} \\
+            --gene_predictor ${params.gene_predictor} \\
+            --augustus_species ${params.augustus_species}
     fi
-    
-    # Guard: if GFF extraction produced an empty file, fall back to Prodigal
+
+    # Guard: if GFF extraction produced an empty file, fall back to gene prediction
     if [ ! -s home_proteome.faa ]; then
-        echo "WARNING: home_proteome.faa is empty after GFF extraction; falling back to Prodigal..."
-        prodigal_on_regions.py \
-            --genome $home_genome \
-            --goi_bed $goi_bed \
-            --window ${params.pred_flank_window} \
-            --output_faa home_proteome.faa \
-            --output_gff home_predicted.gff \
-            --fallback_full_genome true
+        echo "WARNING: home_proteome.faa is empty after GFF extraction; falling back to gene prediction..."
+        prodigal_on_regions.py \\
+            --genome $home_genome \\
+            --goi_bed $goi_bed \\
+            --window ${params.pred_flank_window} \\
+            --output_faa home_proteome.faa \\
+            --output_gff home_predicted.gff \\
+            --fallback_full_genome true \\
+            --gene_predictor ${params.gene_predictor} \\
+            --augustus_species ${params.augustus_species}
     fi
 
     # Create MMseqs DB for fast searching

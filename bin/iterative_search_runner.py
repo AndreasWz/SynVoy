@@ -107,6 +107,48 @@ try:
 except ImportError:
     FRAGMENT_SUPPORT = False
 
+# Import PLM (Protein Language Model) search if available
+try:
+    from plm_search import (
+        check_plm_available,
+        plm_search_region,
+        compute_candidate_similarities,
+        precompute_goi_embeddings,
+        load_embeddings,
+        embed_proteins,
+    )
+    PLM_IMPORT_OK = True
+except ImportError:
+    PLM_IMPORT_OK = False
+
+    def check_plm_available():
+        return False
+
+# Import structural search (Foldseek + ESMFold) if available
+try:
+    from structural_search import (
+        check_structural_search_available,
+        check_esmfold_available,
+        check_foldseek_available,
+        structural_search_region,
+        compute_candidate_structural_similarities,
+        prefold_goi_structures,
+        save_structure_index,
+        load_structure_index,
+    )
+    STRUCTURAL_IMPORT_OK = True
+except ImportError:
+    STRUCTURAL_IMPORT_OK = False
+
+    def check_structural_search_available():
+        return False
+
+    def check_esmfold_available():
+        return False
+
+    def check_foldseek_available():
+        return False
+
 # Classification thresholds for GOI confidence assignment.  Populated from
 # CLI args in main() so that they can be tuned per-run via nextflow.config.
 CLASSIFY_THRESHOLDS = {
@@ -599,12 +641,21 @@ def _classify_goi_evidence(
     exon_count: int = 1,
     query_cov: Optional[float] = None,
     flanking_support: int = 0,
+    embedding_similarity: Optional[float] = None,
+    structural_similarity: Optional[float] = None,
 ) -> Tuple[str, str, str]:
     """
     Assign a conservative confidence/class label to GOI-derived candidates.
 
     The goal is not to prove orthology here, but to prevent fallback-heavy
     output from masquerading as confident GOI evidence downstream.
+
+    embedding_similarity (0-1 cosine) from ProtT5 can BOOST confidence when
+    the structural/functional signal is strong even if sequence identity is low.
+    structural_similarity (0-1 TM-score) from ESMFold+Foldseek can BOOST
+    confidence when 3D structure matches despite extreme sequence divergence.
+    Neither signal ever reduces confidence — sequence methods already confirmed
+    a match.
     """
     identity = float(identity or 0.0)
     exon_count = max(1, int(exon_count or 1))
@@ -626,8 +677,41 @@ def _classify_goi_evidence(
         if identity >= ct["medium_min_identity"] and (
                 flanking_support >= ct["medium_min_flanking"]
                 or qcov >= ct["medium_min_qcov"]):
-            return "MEDIUM", "probable_goi", "modeled_goi_with_partial_support"
-        return "LOW", "ambiguous_goi_family_member", "modeled_goi_but_family_context_is_weak"
+            confidence = "MEDIUM"
+            reason = "modeled_goi_with_partial_support"
+            # PLM boost: MEDIUM → HIGH when embedding strongly agrees
+            if (embedding_similarity is not None
+                    and embedding_similarity >= ct.get("plm_high_threshold", 0.85)
+                    and flanking_support >= ct["high_min_flanking"]):
+                confidence = "HIGH"
+                reason += "_plm_boosted"
+            # Structural boost: MEDIUM → HIGH when TM-score strongly agrees
+            if (confidence == "MEDIUM"
+                    and structural_similarity is not None
+                    and structural_similarity >= ct.get("structural_high_threshold", 0.7)
+                    and flanking_support >= ct["high_min_flanking"]):
+                confidence = "HIGH"
+                reason += "_structural_boosted"
+            return confidence, "probable_goi", reason
+        # LOW from sequence — but PLM may rescue
+        confidence = "LOW"
+        goi_class = "ambiguous_goi_family_member"
+        reason = "modeled_goi_but_family_context_is_weak"
+        if (embedding_similarity is not None
+                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
+                and flanking_support >= 1):
+            confidence = "MEDIUM"
+            goi_class = "probable_goi"
+            reason = "modeled_goi_plm_rescued"
+        # Structural rescue: LOW → MEDIUM when TM-score confirms structural match
+        if (confidence == "LOW"
+                and structural_similarity is not None
+                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
+                and flanking_support >= 1):
+            confidence = "MEDIUM"
+            goi_class = "probable_goi"
+            reason = "modeled_goi_structural_rescued"
+        return confidence, goi_class, reason
 
     if evidence_type == "fallback_hit_span":
         if (flanking_support >= ct["fallback_med_min_flanking"]
@@ -642,9 +726,29 @@ def _classify_goi_evidence(
                 and (qcov >= ct["fallback_strong_min_qcov"]
                      or identity >= ct["fallback_strong_min_identity"])):
             return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
+        # PLM rescue for fallback hits
+        if (embedding_similarity is not None
+                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
+                and flanking_support >= 1):
+            return "MEDIUM", "probable_goi", "fallback_span_plm_rescued"
+        # Structural rescue for fallback hits
+        if (structural_similarity is not None
+                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
+                and flanking_support >= 1):
+            return "MEDIUM", "probable_goi", "fallback_span_structural_rescued"
         return "LOW", "ambiguous_goi_family_member", "fallback_span_only"
 
     if evidence_type == "rescued_exon":
+        # PLM can rescue isolated exons when embedding strongly matches
+        if (embedding_similarity is not None
+                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
+                and flanking_support >= 1):
+            return "MEDIUM", "probable_goi", "rescued_exon_plm_boosted"
+        # Structural rescue for isolated exons
+        if (structural_similarity is not None
+                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
+                and flanking_support >= 1):
+            return "MEDIUM", "probable_goi", "rescued_exon_structural_boosted"
         return "LOW", "ambiguous_goi_family_member", "isolated_rescued_exon"
 
     if evidence_type == "raw_hit":
@@ -683,6 +787,8 @@ def _goi_feature_attrs(
     exon_count: int = 1,
     query_cov: Optional[float] = None,
     flanking_support: int = 0,
+    embedding_similarity: Optional[float] = None,
+    structural_similarity: Optional[float] = None,
 ) -> Dict[str, Any]:
     confidence, goi_class, reason = _classify_goi_evidence(
         evidence_type=evidence_type,
@@ -690,6 +796,8 @@ def _goi_feature_attrs(
         exon_count=exon_count,
         query_cov=query_cov,
         flanking_support=flanking_support,
+        embedding_similarity=embedding_similarity,
+        structural_similarity=structural_similarity,
     )
     attrs = dict(base_attrs)
     attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
@@ -705,6 +813,10 @@ def _goi_feature_attrs(
         attrs["QueryCoverage"] = _format_attr_float(query_cov)
     if exon_count:
         attrs.setdefault("Exons", str(int(exon_count)))
+    if embedding_similarity is not None:
+        attrs["EmbeddingSimilarity"] = f"{embedding_similarity:.3f}"
+    if structural_similarity is not None:
+        attrs["StructuralSimilarity"] = f"{structural_similarity:.3f}"
     return attrs
 
 
@@ -1751,6 +1863,83 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             except Exception as sw_err:
                 print(f"[{genome_name}] Smith-Waterman failed: {sw_err}, using MMseqs2 only.", flush=True)
         
+        # ========== 4. PLM Embedding Search ==========
+        # Use ProtT5 protein language model to find ORFs that are functionally
+        # similar to the GOI even when sequence identity is undetectable (<15%).
+        if getattr(args, 'enable_plm_search', False) and PLM_IMPORT_OK and check_plm_available():
+            try:
+                goi_emb_path = os.path.join(args.output_dir, "goi_embeddings.npz")
+                if os.path.exists(goi_emb_path):
+                    goi_embeddings = load_embeddings(goi_emb_path)
+                    if goi_embeddings:
+                        plm_tmp_dir = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_plm"
+                        os.makedirs(plm_tmp_dir, exist_ok=True)
+
+                        plm_hits = plm_search_region(
+                            goi_embeddings=goi_embeddings,
+                            region_fasta=region_fasta,
+                            output_dir=plm_tmp_dir,
+                            similarity_threshold=getattr(
+                                args, 'plm_similarity_threshold', 0.5
+                            ),
+                            device=getattr(args, 'plm_device', 'cpu'),
+                            predictor=getattr(args, 'gene_predictor', 'auto'),
+                            augustus_species=getattr(args, 'augustus_species', 'fly'),
+                        )
+
+                        if plm_hits:
+                            print(
+                                f"[{genome_name}] PLM embedding search found "
+                                f"{len(plm_hits)} candidate ORF(s).",
+                                flush=True,
+                            )
+                            all_hits.extend(plm_hits)
+
+                        if os.path.exists(plm_tmp_dir):
+                            shutil.rmtree(plm_tmp_dir, ignore_errors=True)
+            except Exception as plm_err:
+                logger.debug(f"[{genome_name}] PLM search failed: {plm_err}")
+
+        # ========== 5. Foldseek Structural Search ==========
+        # Use ESMFold to predict ORF structures and Foldseek 3Di alphabet to
+        # find structural homologs that have diverged beyond all sequence methods.
+        if (getattr(args, 'enable_structural_search', False)
+                and STRUCTURAL_IMPORT_OK and check_structural_search_available()):
+            try:
+                goi_struct_index = os.path.join(args.output_dir, "goi_structure_index.tsv")
+                if os.path.exists(goi_struct_index):
+                    goi_structures = load_structure_index(goi_struct_index)
+                    if goi_structures:
+                        struct_tmp_dir = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_struct"
+                        os.makedirs(struct_tmp_dir, exist_ok=True)
+
+                        struct_hits = structural_search_region(
+                            goi_structures=goi_structures,
+                            region_fasta=region_fasta,
+                            output_dir=struct_tmp_dir,
+                            tm_threshold=getattr(
+                                args, 'structural_tm_threshold', 0.3
+                            ),
+                            device=getattr(args, 'structural_device', 'cpu'),
+                            max_length=getattr(args, 'structural_max_length', 700),
+                            threads=getattr(args, 'threads', 1),
+                            predictor=getattr(args, 'gene_predictor', 'auto'),
+                            augustus_species=getattr(args, 'augustus_species', 'fly'),
+                        )
+
+                        if struct_hits:
+                            print(
+                                f"[{genome_name}] Foldseek structural search found "
+                                f"{len(struct_hits)} candidate ORF(s).",
+                                flush=True,
+                            )
+                            all_hits.extend(struct_hits)
+
+                        if os.path.exists(struct_tmp_dir):
+                            shutil.rmtree(struct_tmp_dir, ignore_errors=True)
+            except Exception as struct_err:
+                logger.debug(f"[{genome_name}] Structural search failed: {struct_err}")
+
         # Clean up temp files
         files_to_remove = [variants_fasta, query_fasta, aug_hits_file]
         if 'sw_hits_file' in locals():
@@ -2917,6 +3106,232 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     if os.path.exists(query_mini_fa):
         os.remove(query_mini_fa)
 
+    # ── PLM re-ranking: batch-embed GOI model proteins, compute embedding
+    #    similarity, re-run classification where PLM boost applies, and
+    #    update GFF attributes accordingly. ──
+    if (getattr(args, 'enable_plm_search', False)
+            and PLM_IMPORT_OK and check_plm_available()
+            and raw_candidates):
+        try:
+            goi_emb_path = os.path.join(args.output_dir, "goi_embeddings.npz")
+            if os.path.exists(goi_emb_path):
+                goi_embeddings = load_embeddings(goi_emb_path)
+                goi_cand_seqs = [
+                    (cand['record']['id'], cand['record']['seq'])
+                    for cand in raw_candidates
+                    if cand['record'].get('seq') and len(cand['record']['seq']) >= 5
+                ]
+                if goi_cand_seqs and goi_embeddings:
+                    cand_sims = compute_candidate_similarities(
+                        goi_cand_seqs, goi_embeddings,
+                        device=getattr(args, 'plm_device', 'cpu'),
+                    )
+                    boosted = 0
+                    for cand in raw_candidates:
+                        cid = cand['record']['id']
+                        sim = cand_sims.get(cid)
+                        if sim is None:
+                            continue
+                        cand['embedding_similarity'] = sim
+
+                        if not cand.get('gff'):
+                            continue
+                        mRNA_line = cand['gff'][0]
+
+                        # Parse existing classification from GFF attrs to re-run
+                        # with embedding_similarity.
+                        attrs_str = mRNA_line.split('\t')[-1] if '\t' in mRNA_line else ""
+                        attr_kv = {}
+                        for pair in attrs_str.split(';'):
+                            if '=' in pair:
+                                k, v = pair.split('=', 1)
+                                attr_kv[k.strip()] = v.strip()
+
+                        old_conf = attr_kv.get('Confidence', '')
+                        ev_type = attr_kv.get('EvidenceType', '')
+                        try:
+                            ident = float(attr_kv.get('Identity', 0))
+                        except (ValueError, TypeError):
+                            ident = 0.0
+                        try:
+                            exons = int(attr_kv.get('Exons', 1))
+                        except (ValueError, TypeError):
+                            exons = 1
+                        try:
+                            qcov = float(attr_kv.get('QueryCoverage', 0))
+                        except (ValueError, TypeError):
+                            qcov = None
+                        try:
+                            fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
+                        except (ValueError, TypeError):
+                            fl_sup = 0
+
+                        # Re-classify with embedding similarity
+                        new_conf, new_class, new_reason = _classify_goi_evidence(
+                            evidence_type=ev_type,
+                            identity=ident,
+                            exon_count=exons,
+                            query_cov=qcov,
+                            flanking_support=fl_sup,
+                            embedding_similarity=sim,
+                        )
+
+                        # Update GFF attrs if confidence was boosted
+                        updated_attrs = attrs_str + f";EmbeddingSimilarity={sim:.3f}"
+                        if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM'):
+                            updated_attrs = updated_attrs.replace(
+                                f"Confidence={old_conf}", f"Confidence={new_conf}"
+                            )
+                            old_reason = attr_kv.get('InferenceReason', '')
+                            if old_reason:
+                                updated_attrs = updated_attrs.replace(
+                                    f"InferenceReason={old_reason}",
+                                    f"InferenceReason={new_reason}",
+                                )
+                            old_class = attr_kv.get('GOIClass', '')
+                            if old_class:
+                                updated_attrs = updated_attrs.replace(
+                                    f"GOIClass={old_class}",
+                                    f"GOIClass={new_class}",
+                                )
+                            boosted += 1
+
+                        # Rebuild the mRNA line with updated attributes
+                        cols = mRNA_line.split('\t')
+                        if len(cols) >= 9:
+                            cols[8] = updated_attrs
+                            cand['gff'][0] = '\t'.join(cols)
+
+                    if boosted:
+                        print(
+                            f"[{genome_name}] PLM re-ranking: boosted {boosted}/{len(raw_candidates)} "
+                            f"candidate(s) via embedding similarity.",
+                            flush=True,
+                        )
+        except Exception as plm_rerank_err:
+            logger.debug(
+                f"[{genome_name}] PLM re-ranking failed: {plm_rerank_err}"
+            )
+
+    # ── Structural re-ranking: fold GOI candidate proteins with ESMFold,
+    #    compare against GOI structures via Foldseek, re-run classification
+    #    where structural boost applies, and update GFF attributes. ──
+    if (getattr(args, 'enable_structural_search', False)
+            and STRUCTURAL_IMPORT_OK and check_structural_search_available()
+            and raw_candidates):
+        try:
+            goi_struct_index = os.path.join(args.output_dir, "goi_structure_index.tsv")
+            if os.path.exists(goi_struct_index):
+                goi_structures = load_structure_index(goi_struct_index)
+                goi_cand_seqs = [
+                    (cand['record']['id'], cand['record']['seq'])
+                    for cand in raw_candidates
+                    if cand['record'].get('seq') and len(cand['record']['seq']) >= 10
+                ]
+                if goi_cand_seqs and goi_structures:
+                    struct_rerank_dir = os.path.join(
+                        args.output_dir, f"tmp_struct_rerank_{genome_name}"
+                    )
+                    os.makedirs(struct_rerank_dir, exist_ok=True)
+
+                    cand_tm_scores = compute_candidate_structural_similarities(
+                        goi_cand_seqs, goi_structures,
+                        output_dir=struct_rerank_dir,
+                        device=getattr(args, 'structural_device', 'cpu'),
+                        max_length=getattr(args, 'structural_max_length', 700),
+                        threads=getattr(args, 'threads', 1),
+                    )
+
+                    boosted = 0
+                    for cand in raw_candidates:
+                        cid = cand['record']['id']
+                        tm = cand_tm_scores.get(cid)
+                        if tm is None:
+                            continue
+                        cand['structural_similarity'] = tm
+
+                        if not cand.get('gff'):
+                            continue
+                        mRNA_line = cand['gff'][0]
+
+                        attrs_str = mRNA_line.split('\t')[-1] if '\t' in mRNA_line else ""
+                        attr_kv = {}
+                        for pair in attrs_str.split(';'):
+                            if '=' in pair:
+                                k, v = pair.split('=', 1)
+                                attr_kv[k.strip()] = v.strip()
+
+                        old_conf = attr_kv.get('Confidence', '')
+                        ev_type = attr_kv.get('EvidenceType', '')
+                        try:
+                            ident = float(attr_kv.get('Identity', 0))
+                        except (ValueError, TypeError):
+                            ident = 0.0
+                        try:
+                            exons = int(attr_kv.get('Exons', 1))
+                        except (ValueError, TypeError):
+                            exons = 1
+                        try:
+                            qcov = float(attr_kv.get('QueryCoverage', 0))
+                        except (ValueError, TypeError):
+                            qcov = None
+                        try:
+                            fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
+                        except (ValueError, TypeError):
+                            fl_sup = 0
+                        try:
+                            emb_sim = float(attr_kv.get('EmbeddingSimilarity', 0))
+                        except (ValueError, TypeError):
+                            emb_sim = None
+
+                        new_conf, new_class, new_reason = _classify_goi_evidence(
+                            evidence_type=ev_type,
+                            identity=ident,
+                            exon_count=exons,
+                            query_cov=qcov,
+                            flanking_support=fl_sup,
+                            embedding_similarity=emb_sim if emb_sim else None,
+                            structural_similarity=tm,
+                        )
+
+                        updated_attrs = attrs_str + f";StructuralSimilarity={tm:.3f}"
+                        if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM'):
+                            updated_attrs = updated_attrs.replace(
+                                f"Confidence={old_conf}", f"Confidence={new_conf}"
+                            )
+                            old_reason = attr_kv.get('InferenceReason', '')
+                            if old_reason:
+                                updated_attrs = updated_attrs.replace(
+                                    f"InferenceReason={old_reason}",
+                                    f"InferenceReason={new_reason}",
+                                )
+                            old_class = attr_kv.get('GOIClass', '')
+                            if old_class:
+                                updated_attrs = updated_attrs.replace(
+                                    f"GOIClass={old_class}",
+                                    f"GOIClass={new_class}",
+                                )
+                            boosted += 1
+
+                        cols = mRNA_line.split('\t')
+                        if len(cols) >= 9:
+                            cols[8] = updated_attrs
+                            cand['gff'][0] = '\t'.join(cols)
+
+                    if boosted:
+                        print(
+                            f"[{genome_name}] Structural re-ranking: boosted {boosted}/{len(raw_candidates)} "
+                            f"candidate(s) via TM-score.",
+                            flush=True,
+                        )
+
+                    if os.path.exists(struct_rerank_dir):
+                        shutil.rmtree(struct_rerank_dir, ignore_errors=True)
+        except Exception as struct_rerank_err:
+            logger.debug(
+                f"[{genome_name}] Structural re-ranking failed: {struct_rerank_err}"
+            )
+
     found_ids = set()
 
     # Greedy non-overlapping selection for GOI/tandem candidates.
@@ -3875,13 +4290,16 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "query_coverage": attrs.get("QueryCoverage", ""),
                      "target_gene": attrs.get("TargetGene", ""),
                      "target_product": attrs.get("TargetProduct", ""),
+                     "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
+                     "structural_similarity": attrs.get("StructuralSimilarity", ""),
                  }
 
              with open(tsv_out, 'w') as tf:
                  tf.write(
                      "target_id\thome_id\trole\tconfidence\tgoi_class\tmodel_status\t"
                      "evidence_type\tidentity\tn_exons\tsynteny_context\t"
-                     "block_flanking_support\tquery_coverage\ttarget_gene\ttarget_product\n"
+                     "block_flanking_support\tquery_coverage\ttarget_gene\ttarget_product\t"
+                     "embedding_similarity\tstructural_similarity\n"
                  )
                  for rec in all_genes:
                      meta = feature_meta.get(rec['id'], {})
@@ -3902,6 +4320,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                              meta.get("query_coverage", ""),
                              meta.get("target_gene", ""),
                              meta.get("target_product", ""),
+                             meta.get("embedding_similarity", ""),
+                             meta.get("structural_similarity", ""),
                          ]) + "\n"
                      )
         
@@ -4025,6 +4445,38 @@ def main():
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
                         help="Query coverage above this (with multi-exon) marks model as complete")
 
+    # PLM (Protein Language Model) embedding search
+    parser.add_argument("--enable_plm_search", type=str2bool, default=False,
+                        help="Enable ProtT5 embedding search for remote homolog detection")
+    parser.add_argument("--plm_device", type=str, default="cpu",
+                        help="Device for PLM inference (cpu or cuda)")
+    parser.add_argument("--plm_similarity_threshold", type=float, default=0.5,
+                        help="Minimum cosine similarity for PLM-discovered ORFs (0-1)")
+    parser.add_argument("--plm_medium_threshold", type=float, default=0.7,
+                        help="Embedding similarity above this can boost LOW → MEDIUM")
+    parser.add_argument("--plm_high_threshold", type=float, default=0.85,
+                        help="Embedding similarity above this can boost MEDIUM → HIGH")
+
+    # Gene predictor selection (Augustus for eukaryotes, Prodigal for prokaryotes)
+    parser.add_argument("--gene_predictor", type=str, default="auto",
+                        help="Gene predictor: auto (prefer Augustus), augustus, or prodigal")
+    parser.add_argument("--augustus_species", type=str, default="fly",
+                        help="Augustus species model (e.g. fly, human, honeybee1)")
+
+    # Structural search (ESMFold + Foldseek)
+    parser.add_argument("--enable_structural_search", type=str2bool, default=False,
+                        help="Enable ESMFold + Foldseek structural search for remote homologs")
+    parser.add_argument("--structural_device", type=str, default="cpu",
+                        help="Device for ESMFold inference (cpu or cuda)")
+    parser.add_argument("--structural_tm_threshold", type=float, default=0.3,
+                        help="Minimum TM-score for Foldseek-discovered ORFs (0-1)")
+    parser.add_argument("--structural_medium_threshold", type=float, default=0.5,
+                        help="TM-score above this can boost LOW → MEDIUM")
+    parser.add_argument("--structural_high_threshold", type=float, default=0.7,
+                        help="TM-score above this can boost MEDIUM → HIGH")
+    parser.add_argument("--structural_max_length", type=int, default=700,
+                        help="Max sequence length for ESMFold (VRAM safety, default 700)")
+
     args = parser.parse_args()
 
     # Populate classification thresholds from CLI args
@@ -4033,6 +4485,10 @@ def main():
     CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
+    CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
+    CLASSIFY_THRESHOLDS["plm_high_threshold"] = args.plm_high_threshold
+    CLASSIFY_THRESHOLDS["structural_medium_threshold"] = args.structural_medium_threshold
+    CLASSIFY_THRESHOLDS["structural_high_threshold"] = args.structural_high_threshold
 
     # INPUT VALIDATION
     # 1. Validate required files exist
@@ -4142,7 +4598,66 @@ def main():
             "Set --sw_method ssearch36 to force the slower fallback."
         )
         args.enable_smith_waterman = False
-    
+
+    # Gene predictor validation
+    if args.gene_predictor not in ("auto", "augustus", "prodigal"):
+        logger.error(f"gene_predictor must be 'auto', 'augustus', or 'prodigal' (got '{args.gene_predictor}')")
+        sys.exit(1)
+
+    # PLM search validation & availability check
+    if args.enable_plm_search:
+        if not PLM_IMPORT_OK:
+            logger.error(
+                "PLM search enabled but plm_search module could not be imported.\n"
+                "  Ensure bin/plm_search.py exists and torch/transformers are installed:\n"
+                "  pip install torch transformers sentencepiece"
+            )
+            sys.exit(1)
+        if not check_plm_available():
+            logger.error(
+                "PLM search enabled but PyTorch/Transformers not installed.\n"
+                "  Install with: pip install torch transformers sentencepiece"
+            )
+            sys.exit(1)
+        if args.plm_similarity_threshold < 0 or args.plm_similarity_threshold > 1:
+            logger.error("plm_similarity_threshold must be between 0 and 1")
+            sys.exit(1)
+        if args.plm_device not in ("cpu", "cuda"):
+            logger.error("plm_device must be 'cpu' or 'cuda'")
+            sys.exit(1)
+
+    # Structural search (ESMFold + Foldseek) validation & availability check
+    if args.enable_structural_search:
+        if not STRUCTURAL_IMPORT_OK:
+            logger.error(
+                "Structural search enabled but structural_search module could not be imported.\n"
+                "  Ensure bin/structural_search.py exists and dependencies are installed:\n"
+                "  pip install torch transformers\n"
+                "  conda install -c bioconda foldseek"
+            )
+            sys.exit(1)
+        if not check_esmfold_available():
+            logger.error(
+                "Structural search enabled but ESMFold not available.\n"
+                "  Install with: pip install torch transformers"
+            )
+            sys.exit(1)
+        if not check_foldseek_available():
+            logger.error(
+                "Structural search enabled but Foldseek binary not found.\n"
+                "  Install with: conda install -c bioconda foldseek"
+            )
+            sys.exit(1)
+        if args.structural_tm_threshold < 0 or args.structural_tm_threshold > 1:
+            logger.error("structural_tm_threshold must be between 0 and 1")
+            sys.exit(1)
+        if args.structural_device not in ("cpu", "cuda"):
+            logger.error("structural_device must be 'cpu' or 'cuda'")
+            sys.exit(1)
+        if args.structural_max_length < 10:
+            logger.error("structural_max_length must be >= 10")
+            sys.exit(1)
+
     logger.info("")
     logger.info("═══ Iterative Search Configuration ═══")
     logger.info(f"  Threads:          {args.threads}")
@@ -4151,7 +4666,21 @@ def main():
     logger.info(f"  E-value cutoff:   {args.evalue}")
     logger.info(f"  MMseqs sens:      {args.mmseqs_sens}")
     logger.info(f"  MMseqs mem limit: {args.mmseqs_split_memory_limit}")
+    logger.info(f"  Gene predictor:   {args.gene_predictor}" + (f" (species={args.augustus_species})" if args.gene_predictor != "prodigal" else ""))
     logger.info(f"  Smith-Waterman:   {'enabled (' + args.sw_method + ')' if args.enable_smith_waterman else 'disabled'}")
+    if args.enable_plm_search:
+        logger.info(f"  PLM search:       enabled (ProtT5, device={args.plm_device})")
+        logger.info(f"  PLM threshold:    {args.plm_similarity_threshold}")
+        logger.info(f"  PLM boost:        MEDIUM≥{args.plm_medium_threshold}, HIGH≥{args.plm_high_threshold}")
+    else:
+        logger.info(f"  PLM search:       disabled")
+    if args.enable_structural_search:
+        logger.info(f"  Structural search: enabled (ESMFold+Foldseek, device={args.structural_device})")
+        logger.info(f"  Struct TM thresh: {args.structural_tm_threshold}")
+        logger.info(f"  Struct boost:     MEDIUM≥{args.structural_medium_threshold}, HIGH≥{args.structural_high_threshold}")
+        logger.info(f"  Struct max len:   {args.structural_max_length}")
+    else:
+        logger.info(f"  Structural search: disabled")
     logger.info(f"  Max blocks/genome:{args.max_blocks_per_genome}")
     logger.info(f"  Region padding:   {args.padding_min}-{args.padding_max} bp")
     if args.prefix:
@@ -4304,6 +4833,54 @@ def main():
             waves.append(wave)
     
     logger.info(f"Defined {len(waves)} waves of execution.")
+
+    # ── PLM: Pre-compute GOI embeddings before waves start ──
+    if args.enable_plm_search:
+        goi_emb_path = os.path.join(args.output_dir, "goi_embeddings.npz")
+        if not os.path.exists(goi_emb_path):
+            logger.info("Pre-computing GOI embeddings with ProtT5 ...")
+            goi_embs = precompute_goi_embeddings(
+                db_fasta=args.initial_db,
+                output_path=goi_emb_path,
+                device=args.plm_device,
+            )
+            if not goi_embs:
+                logger.warning(
+                    "No GOI sequences found for PLM embedding. "
+                    "PLM search will be skipped."
+                )
+                args.enable_plm_search = False
+            else:
+                logger.info(
+                    f"GOI embeddings ready: {len(goi_embs)} sequence(s) → {goi_emb_path}"
+                )
+        else:
+            logger.info(f"Using cached GOI embeddings: {goi_emb_path}")
+
+    # ── Structural: Pre-fold GOI structures before waves start ──
+    if args.enable_structural_search:
+        goi_struct_index = os.path.join(args.output_dir, "goi_structure_index.tsv")
+        if not os.path.exists(goi_struct_index):
+            logger.info("Pre-folding GOI structures with ESMFold ...")
+            goi_structs = prefold_goi_structures(
+                db_fasta=args.initial_db,
+                output_dir=args.output_dir,
+                device=args.structural_device,
+                max_length=args.structural_max_length,
+            )
+            if not goi_structs:
+                logger.warning(
+                    "No GOI sequences found for structural folding. "
+                    "Structural search will be skipped."
+                )
+                args.enable_structural_search = False
+            else:
+                save_structure_index(goi_structs, goi_struct_index)
+                logger.info(
+                    f"GOI structures ready: {len(goi_structs)} structure(s) → {goi_struct_index}"
+                )
+        else:
+            logger.info(f"Using cached GOI structures: {goi_struct_index}")
 
     # Compute cumulative genome index for progress tracking
     total_genomes = len(genome_entries)
