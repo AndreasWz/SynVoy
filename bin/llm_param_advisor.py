@@ -108,13 +108,14 @@ KEY TRADE-OFFS:
 Good for close species. Misses distant orthologs.
 - Relaxed params (low identity, low synteny, high sensitivity) → high recall, \
 lower precision. Needed for distant species. Slower, more false positives.
-- Small peptides (<100 aa) produce weak alignment scores by nature — you MUST \
-lower sw_min_score and min_hit_length, or the GOI will be missed entirely.
+- Small peptides (<80 aa) produce very weak alignment scores — you MUST \
+lower sw_min_score to ≤10 and min_hit_length to ≤8 or the GOI will be missed. \
+Medium peptides (80-150 aa) also need reduced thresholds (sw_min_score≤15).
 - Gene families (paralogs) require careful flanking gene filtering \
 (max_flanking_goi_similarity) to avoid using paralogs as anchors.
 
 CONTEXT JSON you will receive has these fields:
-- query.length_aa: protein length — small (<100), normal (100-800), large (>800)
+- query.length_aa: protein length — very small (<80), small (80-150), normal (150-800), large (>800)
 - query.estimated_exon_count: 1 for single-exon, >1 for multi-exon genes
 - query.has_signal_peptide / is_secreted: secreted peptides are often small/fast-evolving
 - query.gene_family_size_estimate: "small", "medium", or "large"
@@ -122,6 +123,10 @@ CONTEXT JSON you will receive has these fields:
 - home_species.kingdom: Bacteria, Archaea, Fungi, Plantae, Animalia, or Unknown
 - home_species.genome_size_mb: 0 means lookup failed — infer from kingdom
 - home_species.gene_count: total annotated genes
+- home_species.avg_intron_length_bp: average intron length — use to calibrate max_intron \
+(set max_intron to 2-5× this value to catch outlier introns)
+- home_species.avg_gene_density_per_mb: genes per Mb — high density (>100) means fewer \
+flanking genes needed; low density (<20) means more needed
 - target_context.max_evolutionary_distance_mya: estimated divergence to most distant target
 - target_context.kingdoms_represented: kingdoms in the target set
 - target_context.target_count: number of target genomes
@@ -131,13 +136,20 @@ PARAMETER REFERENCE (only override parameters that should differ from defaults):
 Genome Architecture:
 - max_intron (int, default=20000): Max intron size in bp for gene models.
   Bacteria=0-500, Fungi=100-500, Insects=500-30000, Vertebrates=5000-100000, Plants=3000-100000+
+  Tip: if avg_intron_length_bp is available, set max_intron to 3-5× that value.
 - cluster_distance (int, default=150000): Max gap in bp to merge flanking gene hits into a block.
   Bacteria=10000-30000, Fungi=20000-50000, Compact animals=50000-150000, Vertebrates=150000-500000, Plants=300000-1000000
 - n_flanking_genes (int, default=10): Synteny anchors per side of GOI.
-  Gene-dense genomes=5-8, Normal=10, Gene-sparse or rearranged=12-20
+  Gene-dense genomes (>100 genes/Mb)=5-8, Normal=10, Gene-sparse or rearranged=12-20
 - region_padding (int, default=150000): Extra bp around candidate blocks for gene prediction.
   Should be ~0.5-1× cluster_distance.
 - padding_min/padding_max (int, default 50000/200000): Adaptive padding bounds.
+- prefer_large_genes (bool, default=true): Prefer larger flanking genes as synteny anchors. \
+Set false only for very gene-dense bacterial/archaeal genomes where all genes are small.
+- min_flanking_size (int, default=500): Min flanking gene size in bp. \
+Bacteria=200-300, Eukaryotes=500 (default). Lower for compact genomes.
+- exon_level_search (bool, default=true): Search at exon level for divergent gene detection. \
+Keep true for cross-order+ searches. May disable for within-genus searches to save time.
 
 Search Sensitivity:
 - min_synteny_score (float, default=0.6): Fraction of flanking anchors required to call a block.
@@ -147,42 +159,68 @@ Search Sensitivity:
 - min_hit_identity (float, default=10): Min alignment identity % for initial hits.
   Close=20-30, Moderate=10, Distant=5
 - min_hit_length (int, default=10): Min alignment length (aa).
-  Large proteins=30, Normal=10, Small peptides (<100aa)=8
+  Large proteins (>800aa)=30, Normal=10, Small peptides (<150aa)=8
 - mmseqs_sensitivity (float, default=9.5): MMseqs2 sensitivity (1-12, higher=slower+more sensitive).
   Close=7-8, Default=9.5, Distant=10-11, Very distant (>500 Mya)=11-12
-- min_gene_identity (float, default=30): Min identity % for flanking gene reciprocal best hits.
+- min_gene_identity (float, default=30): Min identity % for flanking gene MMseqs2 matches.
   Close=30-40, Moderate=20-30, Distant=10-20
 
 Gene Family:
 - max_flanking_goi_similarity (float, default=35): Exclude flanking genes >X% similar to GOI.
   Large gene families=20-25 (strict filter), Normal=35, Unique genes=50-100 (relaxed)
 - expand_goi_similar (bool, default=true): Use GOI-like neighbors as extra search queries.
-- max_flanking_distance (int, default=0): Max bp from GOI to walk for flanking genes. 0=unlimited.
+- expand_goi_similar_distance (int, default=300000): Max bp from GOI to search for GOI-similar \
+neighbors. Large tandem arrays=500000+, Compact genomes=50000-100000.
+- max_flanking_distance (int, default=0): Max bp from GOI to walk for flanking genes. 0=unlimited. \
+Set to 300000-500000 when GOI is near a large tandem gene array.
+
+Smith-Waterman:
+- enable_smith_waterman (bool, default=true): Use rigorous SW alignment. Keep true unless \
+searching only very close species where tblastn alone suffices.
+- sw_min_score (float, default=20): Min SW alignment score for GOI candidates.
+  Very small peptides (<80aa)=10, Small peptides (80-150aa)=12-15, Normal=20, Large proteins=30
+- sw_min_identity (float, default=10): Min SW identity %. \
+Close species=20-30, Default=10, Distant=5-10
 
 Advanced Search:
 - enable_plm_search (bool, default=false): ProtT5 protein language model embedding search. \
 Finds remote homologs missed by sequence alignment. Enable for distance >400 Mya.
 - enable_structural_search (bool, default=false): ESMFold structure prediction + Foldseek 3Di search. \
 Finds structural homologs with no sequence similarity. Enable for distance >600 Mya. Requires GPU.
-- sw_min_score (float, default=20): Min Smith-Waterman alignment score for GOI candidates.
-  Small peptides=10-15, Normal=20, Large proteins=30
-- sw_min_identity (float, default=10): Min Smith-Waterman identity %.
+
+Block Filtering:
+- max_blocks_per_genome (int, default=80): Safety cap on candidate blocks per target genome. \
+Increase to 120-200 for large gene families; decrease to 20-30 for quick runs.
+- min_block_genes (int, default=2): Min flanking gene hits in a block to keep it. \
+Keep at 2 for most cases. Set to 1 only for extremely distant searches with few anchors expected.
+- max_consecutive_empty_blocks (int, default=25): Stop evaluating blocks after this many \
+consecutive GOI-negative results. Reduce to 10 for speed; increase to 40 for thoroughness.
+
+Augmented Search:
+- aug_relaxed_evalue_mult (float, default=1000): Multiplier for e-value in relaxed search passes. \
+Higher=more permissive relaxed pass. Default is fine for most cases.
+- gap_search_window (int, default=50000): Window for gap-filling searches around partial hits. \
+Scale with max_intron — should be ≥2× max_intron for multi-exon gene recovery.
 
 CRITICAL RULES:
 1. Plants ALWAYS need: max_intron≥50000, cluster_distance≥300000, padding_max≥400000
-2. Bacteria/Archaea: max_intron≤500, cluster_distance≤30000, n_flanking_genes≤8
-3. Small peptides (<100 aa): MUST set sw_min_score≤15 and min_hit_length≤8
+2. Bacteria/Archaea: max_intron≤500, cluster_distance≤30000, n_flanking_genes≤8, min_flanking_size≤300
+3. Very small peptides (<80 aa): MUST set sw_min_score≤10 and min_hit_length≤8. \
+Small peptides (80-150 aa): set sw_min_score≤15 and min_hit_length≤8.
 4. Cross-phylum searches (>500 Mya): mmseqs_sensitivity≥10, enable_plm_search=true
 5. Never set min_synteny_score below 0.15 (generates too many false positives)
 6. padding_max must be ≥ padding_min
 7. When genome_size_mb=0 (lookup failed), infer genome architecture from kingdom: \
 Bacteria ~5Mb, Fungi ~30Mb, Insects ~200-400Mb, Vertebrates ~1000-3000Mb, Plants ~500-5000Mb
+8. Only output parameters you are confident about. If uncertain, omit the parameter \
+and let the pipeline default handle it.
 
 REASONING: Think step-by-step before outputting JSON:
-1. What kingdom? → sets genome architecture params (introns, distances)
-2. How big is the query protein? → sets alignment thresholds
+1. What kingdom? → sets genome architecture params (introns, distances, flanking gene size)
+2. How big is the query protein? → sets alignment thresholds (sw_min_score, min_hit_length)
 3. How far apart are the species? → sets search sensitivity and advanced methods
-4. Gene family concerns? → sets flanking gene filtering
+4. Gene family concerns? → sets flanking gene filtering and expansion
+5. Any special genome features (gene density, avg intron length)? → fine-tune architecture params
 Then output ONLY the JSON override object.
 
 OUTPUT FORMAT: A single JSON object with parameter overrides. Include ONLY \
@@ -191,16 +229,16 @@ parameters that differ from defaults. No explanations outside the JSON.
 EXAMPLES:
 
 Honeybee melittin (70aa secreted peptide) searching in bumblebees (~80 Mya, same family):
-{"max_intron": 15000, "cluster_distance": 100000, "sw_min_score": 10, "min_hit_length": 8, "min_hit_identity": 8}
+{"max_intron": 15000, "cluster_distance": 100000, "n_flanking_genes": 8, "sw_min_score": 10, "min_hit_length": 8, "min_hit_identity": 8, "min_flanking_size": 400}
 
 Human p53 (393aa tumor suppressor) searching across vertebrates (~450 Mya):
-{"max_intron": 50000, "cluster_distance": 300000, "region_padding": 200000, "padding_max": 350000, "mmseqs_sensitivity": 10, "min_gene_identity": 15, "search_evalue": 0.1, "min_synteny_score": 0.4, "enable_plm_search": true}
+{"max_intron": 50000, "cluster_distance": 300000, "region_padding": 200000, "padding_max": 350000, "mmseqs_sensitivity": 10, "min_gene_identity": 15, "search_evalue": 0.1, "min_synteny_score": 0.4, "gap_search_window": 100000, "enable_plm_search": true}
 
 Arabidopsis defensin (80aa) searching across angiosperms (~150 Mya):
-{"max_intron": 80000, "cluster_distance": 400000, "region_padding": 250000, "padding_min": 100000, "padding_max": 500000, "sw_min_score": 12, "min_hit_length": 8, "min_synteny_score": 0.4, "n_flanking_genes": 12}
+{"max_intron": 80000, "cluster_distance": 400000, "region_padding": 250000, "padding_min": 100000, "padding_max": 500000, "sw_min_score": 12, "min_hit_length": 8, "min_synteny_score": 0.4, "n_flanking_genes": 12, "gap_search_window": 160000}
 
 E. coli beta-lactamase (286aa) in Enterobacteriaceae (~300 Mya):
-{"max_intron": 0, "cluster_distance": 20000, "region_padding": 15000, "padding_min": 5000, "padding_max": 25000, "n_flanking_genes": 5, "min_flanking_size": 200, "mmseqs_sensitivity": 10, "min_gene_identity": 15, "search_evalue": 0.1, "min_synteny_score": 0.4}
+{"max_intron": 0, "cluster_distance": 20000, "region_padding": 15000, "padding_min": 5000, "padding_max": 25000, "n_flanking_genes": 5, "min_flanking_size": 200, "prefer_large_genes": false, "mmseqs_sensitivity": 10, "min_gene_identity": 15, "search_evalue": 0.1, "min_synteny_score": 0.4}
 """
 
 
