@@ -150,7 +150,7 @@ def embed_proteins(
         if not prepared:
             continue
 
-        encoded = tokenizer.batch_encode_plus(
+        encoded = tokenizer(
             prepared,
             add_special_tokens=True,
             padding="longest",

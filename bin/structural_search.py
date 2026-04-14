@@ -95,10 +95,10 @@ def _ensure_esmfold_loaded(device: str = "cpu") -> None:
     tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
     model = EsmForProteinFolding.from_pretrained("facebook/esmfold_v1")
 
-    if device == "cpu":
-        model = model.float()
-    else:
-        model = model.half()
+    # Always use float32 — half precision causes NaN in pTM score
+    # computation for short sequences (transformers ≥5.x bug in
+    # openfold_utils/loss.py compute_tm).
+    model = model.float()
 
     model = model.to(torch.device(device)).eval()
 
@@ -158,7 +158,7 @@ def fold_protein(
         return output_pdb
 
     except Exception as exc:
-        logger.debug(f"ESMFold failed for sequence (len={len(seq)}): {exc}")
+        logger.warning(f"ESMFold failed for sequence (len={len(seq)}): {exc}", exc_info=True)
         return None
 
 
@@ -166,12 +166,12 @@ def _output_to_pdb(output, sequence: str) -> str:
     """Convert ESMFold model output tensors to a PDB-format string."""
     import torch
 
-    # Extract coordinates: (1, L, 37, 3) atom37 representation
-    positions = output["positions"][-1]  # last layer, shape (1, L, 37, 3)
-    positions = positions[0].cpu().numpy()  # (L, 37, 3)
+    # Extract coordinates: (8, 1, L, 14, 3) — last recycling layer
+    positions = output["positions"][-1]  # (1, L, 14, 3)
+    positions = positions[0].cpu().numpy()  # (L, 14, 3)
 
-    # atom37 layout: 0=N, 1=CA, 2=C, 3=CB, 4=O
-    atom_names = ["N", "CA", "C", "CB", "O"]
+    # atom14 layout: 0=N, 1=CA, 2=C, 3=O, 4=CB
+    atom_names = ["N", "CA", "C", "O", "CB"]
     atom_indices = [0, 1, 2, 3, 4]
 
     aa_3letter = {
