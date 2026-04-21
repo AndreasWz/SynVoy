@@ -115,6 +115,29 @@ def _ensure_esmfold_loaded(device: str = "cpu") -> None:
 # Structure prediction
 # ---------------------------------------------------------------------------
 
+def _effective_max_length(device: str, requested: int) -> int:
+    """Cap max_length on CUDA devices with <20 GB VRAM. ESMFold at 700 aa
+    typically needs ~20 GB; smaller GPUs OOM mid-fold. Caps to 400 aa when
+    VRAM is insufficient, preserving user intent on well-provisioned GPUs."""
+    if device != "cuda":
+        return requested
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return requested
+        total_bytes = torch.cuda.get_device_properties(0).total_memory
+        total_gb = total_bytes / (1024 ** 3)
+        if total_gb < 20 and requested > 400:
+            logger.warning(
+                f"GPU has {total_gb:.1f} GB VRAM (<20 GB); capping "
+                f"structural_max_length from {requested} to 400 to avoid OOM."
+            )
+            return 400
+    except Exception as exc:
+        logger.debug(f"VRAM probe failed: {exc}")
+    return requested
+
+
 def fold_protein(
     sequence: str,
     output_pdb: str,
@@ -139,6 +162,7 @@ def fold_protein(
     tokenizer = _esmfold_cache["tokenizer"]
     model = _esmfold_cache["model"]
 
+    max_length = _effective_max_length(device, max_length)
     seq = sequence[:max_length]
     # Replace non-standard amino acids
     seq = re.sub(r"[UZOB]", "X", seq)

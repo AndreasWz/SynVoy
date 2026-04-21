@@ -1,9 +1,5 @@
 # SynVoy - Synteny Voyager
 
-<p align="center">
-  <img src="assets/logo.png" alt="SynVoy logo" width="220"/>
-</p>
-
 *Navigating synteny. Discovering orthology.*  
 *Mapping evolutionary pathways through syntenic navigation.*
 
@@ -203,7 +199,8 @@ Results are written to the directory specified by `--outdir`:
 
 ## Further Reading
 
-- **[USAGE.md](USAGE.md)** — Full parameter reference, execution profiles, algorithm details, HPC/SLURM setup, and troubleshooting.
+- **[docs/USAGE.md](docs/USAGE.md)** — Full parameter reference, execution profiles, algorithm details, HPC/SLURM setup, and troubleshooting.
+- **[docs/PARAMETERS.md](docs/PARAMETERS.md)** — Per-parameter tuning guide with recommended ranges and biological rationale.
 
 
 ## License

@@ -753,6 +753,12 @@ def estimate_params(
         if raw_params is not None:
             backend_used = f"ollama:{model}"
             logger.info(f"LLM estimation successful ({backend_used})")
+    else:
+        logger.warning(
+            f"Ollama unreachable at {ollama_url} — typical on HPC/cluster nodes "
+            f"without localhost Ollama. Falling back to Google Cloud (if API key "
+            f"provided) or heuristic estimation."
+        )
 
     # --- Try Google Cloud as fallback ---
     if raw_params is None and google_api_key:

@@ -28,7 +28,7 @@ process ESTIMATE_PARAMS {
         --model ${params.llm_model} \\
         --ollama_url ${params.ollama_url} \\
         --ollama_timeout ${params.ollama_timeout} \\
-        --google_api_key "\${GOOGLE_API_KEY:-}" \\
+        --google_api_key "${params.google_api_key ?: '\${GOOGLE_API_KEY:-}'}" \\
         --output estimated_params.json
     """
 }

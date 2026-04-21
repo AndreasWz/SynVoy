@@ -64,6 +64,8 @@ Specifies the reference organism whose genome will serve as the "home" genome �
 
 Controls how many related target genomes SynVoy fetches in Easy Mode. When set to `0` (the default), SynVoy uses an adaptive taxonomic sampling strategy: it walks up the taxonomic tree from the home species (genus → family → order → class → phylum) and selects approximately 3 representative species at each level, choosing those with the best available genome assemblies. This produces a phylogenetically balanced set that samples both close relatives (for high-confidence synteny) and distant relatives (for evolutionary reach). Setting a specific number (e.g., `--max_genomes 5`) caps the total number of target genomes fetched. Lower values speed up the pipeline and reduce downloads; higher values provide broader phylogenetic coverage but increase runtime linearly. For quick tests, `--max_genomes 1` with a specific `--target_species` is recommended.
 
+> **Warning — single-genome searches are under-powered.** Synteny scoring derives its signal from *consensus across species*: when 7 flanking genes appear in the same order across 3+ target genomes, fallback GOI hits can be classified as `probable_goi`. With a single target genome there is no cross-species conservation evidence, so fallback hits almost always end up labelled `ambiguous_goi_family_member` or `tandem_goi_copy`, even when the correct locus has been found. The pipeline logs a warning when `max_genomes < 3`. Prefer `max_genomes >= 3` for any analysis where orthology calls matter.
+
 ### `target_species`
 **Type:** String (comma-separated) | **Default:** `null` (auto-selected)
 
@@ -186,6 +188,11 @@ The minimum fraction of flanking gene anchors that must have hits in a candidate
 
 The minimum percent identity for an individual alignment hit to be retained during the initial flanking gene and GOI search phases. This is a coarse filter applied early in the pipeline to remove obvious noise from BLAST/MMseqs2 results. The default of 10% is intentionally very permissive, allowing even highly divergent homologs through the initial filter. Subsequent scoring (synteny score, Smith-Waterman, classification) provides the actual quality control. Raising this value (e.g., to 20–30%) speeds up the pipeline by discarding more hits early, but risks losing legitimate divergent orthologs in distant species searches. Lowering it below 10% is rarely useful because hits at <10% identity are typically random noise even for protein alignments. The LLM estimator may lower this for small peptides that naturally produce lower identity scores due to their short length.
 
+### `min_query_length`
+**Type:** Integer (amino acids) | **Default:** `30` | **Range:** 0–∞
+
+The minimum length (in amino acids) a query protein must have before the pipeline will proceed. Queries shorter than this threshold are rejected with a non-zero exit code during `NORMALIZE_QUERY`, with a message explaining why. This is a pre-flight safety check: MMseqs2 and tblastn produce unreliable noise on very short queries (<30 aa), and short peptides disproportionately confuse the iterative-search and synteny-scoring logic, which are both tuned around query-length heuristics. If you genuinely need to search with a short fragment (e.g. a conserved motif, or a micro-exon probe), override with `--min_query_length 0` to disable the check. The check runs once in `normalize_query.py`, *after* DNA-to-protein translation, so a 60-bp DNA query that translates to a 20-aa ORF is still caught. Typical threshold choices: 30 aa for conservative runs, 20 aa when searching defensins and small antimicrobial peptides, 0 to disable entirely.
+
 ### `min_hit_length`
 **Type:** Integer (amino acids) | **Default:** `10` | **Range:** 5–500
 
@@ -270,7 +277,7 @@ A secondary E-value multiplier used for parsing (post-filtering) relaxed search 
 The factor by which `min_hit_identity` is multiplied during relaxed search passes. With the default identity threshold of 10% and this factor of 0.6, the relaxed identity threshold becomes 6%. This allows hits with lower sequence identity through the initial filter during augmented search, which is necessary for finding highly divergent orthologs in distant species. The rationale is the same as for E-value relaxation: when synteny evidence already supports the presence of the GOI in a region, accepting lower-identity hits is justified because the spatial context reduces the false-positive risk. Lowering this factor (e.g., to 0.3) makes the relaxed pass even more permissive; raising it (e.g., to 0.8) keeps the relaxed pass closer to the standard thresholds. The absolute minimum identity is bounded by `aug_relaxed_identity_min`.
 
 ### `aug_relaxed_identity_min`
-**Type:** Float (%) | **Default:** `15.0`
+**Type:** Float (%) | **Default:** `15.0` | **Range:** 5–50
 
 The absolute minimum percent identity for hits in the relaxed search pass, regardless of how low `min_hit_identity * aug_relaxed_identity_factor` evaluates to. This hard floor prevents degenerate matches — even in the most permissive relaxed search, a hit must show at least this much sequence identity to be considered. The default of 15% is set to be above the "twilight zone" of protein sequence similarity (~20–35% for reliable homology inference) but below it, reflecting that within a synteny-validated region, lower-identity matches have higher prior probability of being real. Genuine distant orthologs at 15% identity are borderline but detectable with additional evidence (synteny, domain architecture, structural similarity). Setting this below 10% risks accepting random alignments; setting it above 25% defeats the purpose of the relaxed pass for distant searches.
 
@@ -314,7 +321,7 @@ Controls the iterative search early-stopping behavior. When evaluating candidate
 Controls the sensitivity of MMseqs2 prefilter and alignment stages, directly trading speed for detection power. MMseqs2 uses a k-mer-based prefilter to identify candidate target sequences before running full alignment; higher sensitivity values use more k-mers and longer seed matching, finding more distant homologs at the cost of slower execution. The scale runs from 1 (fastest, least sensitive — suitable for finding near-identical sequences) to 12 (slowest, most sensitive — comparable to BLAST with all optimizations). The default of 9.5 is already quite high, suitable for finding orthologs within the same class or order. For cross-phylum searches (>400 Mya), increase to 10–11. For very distant searches (>700 Mya, cross-kingdom), push to 11–12 and accept significant runtime increase. For within-genus searches, 7–8 is sufficient and much faster. This parameter has the largest single impact on runtime of any sensitivity control.
 
 ### `mmseqs_split_memory_limit`
-**Type:** String | **Default:** `'8G'`
+**Type:** String | **Default:** `'8G'` (config default)
 
 The memory limit for MMseqs2 database splitting. When the target database is larger than this limit, MMseqs2 splits it into chunks and processes each chunk sequentially, reducing peak memory usage at the cost of slightly increased runtime (due to repeated I/O). The default of 8 GB works well for most workstations. On memory-constrained systems (laptops with 8 GB RAM), reduce to `'3G'` or `'1G'` to prevent OOM kills — the `laptop_safe` profile already sets this to `'8G'`. On servers with ample RAM (32+ GB), you can increase to `'16G'` or higher to avoid splitting altogether, which slightly improves performance. If MMseqs2 processes crash with exit code 137 (SIGKILL from OOM killer), this is the first parameter to reduce. The value must include a unit suffix (`G` for gigabytes, `M` for megabytes).
 
@@ -411,14 +418,24 @@ When enabled, Prodigal runs on the entire target genome if the windowed predicti
 ## 11. Gene Model Classification
 
 ### `classify_high_min_identity`
-**Type:** Float (%) | **Default:** `60.0`
+**Type:** Float (%) | **Default:** `50.0`
 
-The minimum alignment identity percentage for a gene model discovered through exon annotation to receive a HIGH confidence classification. Gene models are classified into confidence tiers (HIGH/MEDIUM/LOW) based on the quality of their alignment evidence to the query protein. HIGH-confidence models at 60%+ identity represent clear, unambiguous orthologs where the protein sequence is well-conserved enough to be reliably identified without additional supporting evidence. These are typically found in closely related species (same family or order). The 60% threshold is chosen because it is well above the twilight zone of protein homology (~20–35%), providing very high confidence in the homology relationship. Lowering this threshold (e.g., to 45%) would promote more models to HIGH confidence, potentially including some false positives; raising it (e.g., to 75%) would restrict HIGH to only very close orthologs.
+Minimum alignment identity percentage for an exon_annotation gene model to receive HIGH confidence. Lowered from 60 → 50 in 2026-04 because the previous default systematically mis-classified genuine cross-vertebrate orthologs (e.g. human TP53 vs fish tp53 at ~52% identity) as MEDIUM. At 50% identity the hit is comfortably above the twilight zone (~20–35%) and, combined with the required multi-exon evidence and flanking support, represents a high-confidence ortholog call across Metazoa. Raise toward 60 for closely related clades; lower toward 40 for very deep phylogenies.
 
 ### `classify_medium_min_identity`
-**Type:** Float (%) | **Default:** `45.0`
+**Type:** Float (%) | **Default:** `35.0`
 
-The minimum alignment identity percentage for an exon-annotation gene model to receive MEDIUM confidence classification. Models between this threshold and `classify_high_min_identity` are classified as MEDIUM — they show clear homology but with enough sequence divergence that additional validation (synteny context, domain architecture, phylogenetic placement) is valuable. At 45% identity, protein sequences are above the twilight zone, making the homology relationship reliable but the exact orthology assignment less certain (paralogs within the same family might also reach this level). The gap between MEDIUM (45%) and HIGH (60%) captures the "moderate divergence" zone typical of orthologs separated by 100–300 Mya. Models below 45% identity receive LOW confidence, indicating that homology is plausible but uncertain based on sequence evidence alone. These thresholds are fixed and not adjusted by the LLM estimator.
+Minimum alignment identity for MEDIUM confidence exon_annotation models. Lowered from 45 → 35 in 2026-04 to avoid collapsing divergent but real orthologs (e.g. TP53/TP63/TP73 across fish) into LOW. 35% is the lower edge of reliable homology detection; below this, signal is indistinguishable from random family-member noise. Models between 35 and 50 are MEDIUM, models below 35 drop to LOW. This threshold is fixed and not adjusted by the LLM estimator.
+
+### `strict_goi_family`
+**Type:** Bool | **Default:** `false`
+
+Enables the family-consistency gate. When `true`, every GOI call with evidence_type in {`fallback_hit_span`, `rescued_exon`, `raw_hit`} that does **not** have a `TargetGene`/`TargetProduct` containing one of the expected family tokens is downgraded to LOW confidence / `ambiguous_goi_family_member`. Prevents fallback-heavy output from masquerading as probable GOI when the annotated locus is clearly a different gene (e.g. DNAH2 labelled as "probable TP53"). All GOI features also gain `GoiFamilyConsistent=true/false` and `GoiFamilyReason=...` attributes regardless of strict mode, which makes post-hoc filtering possible. Exon-annotation models (miniprot-supported multi-exon predictions) are never downgraded — their gene model is independent evidence.
+
+### `goi_family_tokens`
+**Type:** Comma-separated string | **Default:** `''` (auto)
+
+Family name tokens used by `--strict_goi_family`. When empty, SynVoy parses the query FASTA header: UniProt `GN=XYZ` → token `XYZ`; UniProt entry-name `sp|ACC|NAME_SPECIES` → token `NAME` (e.g. `P04637` → `{TP53, P53}`). For multi-paralog queries where the run should accept all paralog labels (e.g. running TP53 but accepting TP63/TP73 annotations), override explicitly: `--goi_family_tokens TP53,TP63,TP73,TRP53,TRP63,TRP73`. Matching is case-insensitive substring after normalization (strip non-alphanumeric). `P53` correctly matches `Trp53` (mouse ortholog) because `P53` is a substring of `TRP53` once normalized.
 
 ### `classify_tandem_min_identity`
 **Type:** Float (%) | **Default:** `40.0`
@@ -483,6 +500,8 @@ The device on which ProtT5 embeddings are computed. **`cpu`** works on any machi
 
 The minimum cosine similarity between the query protein embedding and a candidate ORF embedding for the ORF to be reported as a PLM hit and considered as a potential GOI ortholog. Cosine similarity of 1.0 means identical embedding vectors (essentially the same protein); 0.0 means orthogonal (completely unrelated). The default of 0.5 is a moderate threshold that captures proteins with significant structural/functional similarity while excluding clearly unrelated proteins. For highly conserved gene families, raise this to 0.6–0.7 to reduce false positives. For extremely divergent searches where you want maximum sensitivity, lower to 0.3–0.4 at the cost of more false positives. Unlike sequence identity, there is no well-established "twilight zone" for PLM similarity — the threshold should be calibrated empirically for your specific gene family and divergence level.
 
+**Short-query auto-adjustment:** when the longest GOI query is under 100 aa, the pipeline automatically raises this threshold to at least `0.75` per-genome. Mean-pooled ProtT5 embeddings are noisy for short peptides (few residues dominate the pooled vector), so the default of 0.5 lies below the noise floor and produces spurious hits for queries like melittin, defensins, and small venom peptides. The auto-raise is conservative and can be overridden by explicitly setting a higher `plm_similarity_threshold` on the command line.
+
 ### `plm_medium_threshold`
 **Type:** Float | **Default:** `0.7` | **Range:** 0–1
 
@@ -501,6 +520,8 @@ The PLM cosine similarity threshold above which a MEDIUM-confidence gene model c
 **Type:** Boolean | **Default:** `false`
 
 Enables 3D structure prediction and structural comparison for GOI candidate detection. When enabled, the pipeline predicts the 3D structure of the query protein and all candidate ORFs using ESMFold (Meta's efficient protein structure predictor), then compares structures using Foldseek's 3Di structural alphabet. Structural comparison is the ultimate method for detecting remote homologs: protein 3D structure is conserved approximately 10x longer than protein sequence during evolution. Proteins that share <15% sequence identity can still have near-identical folds. The tradeoff is extreme computational cost — ESMFold structure prediction requires significant GPU memory (4–16 GB depending on protein length) and takes seconds to minutes per protein. Enable this only for very distant cross-kingdom searches (>600 Mya) where both sequence alignment and PLM embeddings may fail. Requires both PyTorch and Foldseek to be installed.
+
+**Short-query auto-skip:** when the longest GOI query is under 50 aa, structural search is automatically skipped for that genome (a one-line log message is emitted). ESMFold produces degenerate structures for tiny peptides and TM-score is not meaningful for a single short amphipathic helix (e.g. melittin, defensins). Keeping the feature enabled for a mixed run is safe — only the sub-50-aa cases are bypassed.
 
 ### `structural_device`
 **Type:** String | **Default:** `'cpu'` | **Options:** `'cpu'`, `'cuda'`
@@ -526,6 +547,8 @@ The TM-score threshold above which structural evidence can boost a MEDIUM-confid
 **Type:** Integer (aa) | **Default:** `700` | **Range:** 50–2000
 
 The maximum protein length in residues for ESMFold structure prediction. Proteins longer than this threshold are skipped during structural search because ESMFold's memory requirements scale quadratically with sequence length — a 700-residue protein requires approximately 8–12 GB GPU VRAM, while a 1000-residue protein would require 20+ GB. The default of 700 provides a practical ceiling that works with most consumer and workstation GPUs (RTX 3090 with 24 GB, A100 with 40/80 GB). On GPUs with limited VRAM (6–8 GB), reduce to 400–500. On high-memory GPUs (A100 80 GB), increase to 1000+. Query proteins longer than this threshold still get structure-based analysis for their individual domains if domain boundaries are detected, but the full-length structural comparison is skipped.
+
+**Auto VRAM guard:** when `structural_device = cuda`, the pipeline probes the GPU at fold time. If the device has less than 20 GB total VRAM and `structural_max_length > 400`, the effective length is automatically capped to 400 aa to avoid mid-fold OOM, and a warning is logged. Explicit user settings below 400 are respected as-is; the guard only lowers values, never raises them.
 
 ---
 
