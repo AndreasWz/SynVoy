@@ -35,6 +35,10 @@ process CLUSTER_REGIONS {
         --weight_consistency ${params.synteny_weight_consistency} \\
         --weight_strand ${params.synteny_weight_strand} \\
         --goi_overlap_bonus ${params.synteny_goi_overlap_bonus} \\
-        --max_regions ${params.max_regions}
+        --max_regions ${params.max_regions} \\
+        --adaptive_score_floor_frac ${params.adaptive_score_floor_frac} \\
+        --adaptive_score_floor_abs ${params.adaptive_score_floor_abs} \\
+        --adaptive_max_regions ${params.adaptive_max_regions} \\
+        --adaptive_unique_gene_floor ${params.adaptive_unique_gene_floor}
     """
 }

@@ -168,6 +168,7 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 | `--min_synteny_score` | `0.6` | Fraction of flanking genes that must map to a target to trigger local search |
 | `--min_hit_identity` | `10` | Minimum alignment identity (%) for an individual hit |
 | `--min_hit_length` | `10` | Minimum alignment length for an individual hit |
+| `--min_query_length` | `30` | Reject queries shorter than this (aa) during `NORMALIZE_QUERY`. Set `0` to disable (e.g. searching a short motif or micro-exon). |
 | `--search_evalue` | `0.01` | E-value threshold for tblastn/MMseqs2 searches |
 | `--max_intron` | `20000` | Maximum intron length (bp) for miniprot gene models |
 | `--region_padding` | `150000` | Extra flanking sequence (bp) appended to each side of a candidate block |
@@ -196,7 +197,8 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--aug_relaxed_evalue_mult` | `1000` | Multiply base e-value by this factor in relaxed passes |
 | `--aug_relaxed_evalue_cap` | `10.0` | Maximum e-value allowed even in relaxed mode |
 | `--aug_relaxed_identity_factor` | `0.6` | Multiply normal identity threshold by this in relaxed mode |
-| `--aug_relaxed_identity_min` | `25.0` | Absolute minimum identity (%) in relaxed mode |
+| `--aug_relaxed_identity_min` | `15.0` | Absolute minimum identity (%) in relaxed mode |
+| `--aug_relaxed_parse_evalue_mult` | `10` | Secondary e-value multiplier used when parsing relaxed-pass hits |
 | `--aug_relaxed_length_div` | `2` | Divide normal length threshold by this in relaxed mode |
 | `--aug_relaxed_length_min` | `15` | Absolute minimum alignment length in relaxed mode |
 | `--aug_dedup_bin_bp` | `100` | Bin size (bp) for deduplicating overlapping relaxed hits |
@@ -206,7 +208,7 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | Parameter | Default | Description |
 |---|---|---|
 | `--mmseqs_sensitivity` | `9.5` | MMseqs2 sensitivity (1–10+). Higher = slower but more sensitive |
-| `--mmseqs_split_memory_limit` | `3G` | MMseqs2 memory limit for database splitting |
+| `--mmseqs_split_memory_limit` | `8G` | MMseqs2 memory limit for database splitting. Override to `3G` or `1G` on memory-constrained machines. |
 | `--mmseqs_verbosity` | `1` | MMseqs2 log verbosity (0 = silent) |
 | `--min_gene_identity` | `30` | Minimum identity (%) for flanking-gene MMseqs2 matches |
 
@@ -218,7 +220,7 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--gap_search_window` | `50000` | Window for gap-filling searches |
 | `--gap_min_size` | `10` | Minimum gap size (bp) to attempt fill |
 | `--gap_evalue` | `10` | E-value for gap search |
-| `--gap_min_identity` | `25.0` | Minimum identity (%) for gap hits |
+| `--gap_min_identity` | `15.0` | Minimum identity (%) for gap hits |
 | `--gap_min_alnlen` | `10` | Minimum alignment length for gap hits |
 | `--gap_max_hits` | `5` | Max gap hits to report |
 | `--min_exon_query_cov` | `0.25` | Minimum query coverage fraction for exon annotation |
@@ -233,8 +235,10 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--classify_high_min_identity` | `60.0` | Min identity (%) for HIGH-confidence exon_annotation models |
-| `--classify_medium_min_identity` | `45.0` | Min identity (%) for MEDIUM-confidence exon_annotation models |
+| `--classify_high_min_identity` | `50.0` | Min identity (%) for HIGH-confidence exon_annotation models (lowered from 60 for cross-vertebrate realism) |
+| `--classify_medium_min_identity` | `35.0` | Min identity (%) for MEDIUM-confidence exon_annotation models (lowered from 45 for divergent orthologs) |
+| `--strict_goi_family` | `false` | Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated `TargetGene`/`TargetProduct` does not contain a family token. Useful for multi-paralog queries (e.g. TP53 family). |
+| `--goi_family_tokens` | _(auto)_ | Comma-separated family name tokens for `--strict_goi_family`. If empty, auto-derived from query FASTA header (`GN=`, UniProt entry name). |
 | `--classify_tandem_min_identity` | `40.0` | Min identity (%) for MEDIUM-confidence tandem copies. Below this, tandem copies are labeled LOW. |
 | `--classify_fragment_max_qcov` | `0.4` | Query coverage below this marks a gene model as `fragment` in the ModelStatus field |
 | `--classify_complete_min_qcov` | `0.7` | Query coverage above this (with multi-exon evidence) marks a model as `complete` |
@@ -252,7 +256,11 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--synteny_weight_consistency` | `0.3` | Weight for gene-order consistency |
 | `--synteny_weight_strand` | `0.3` | Weight for strand conservation |
 | `--synteny_goi_overlap_bonus` | `0.15` | Bonus for blocks that overlap a GOI annotation |
-| `--max_regions` | `0` | Max regions to emit per locus. `0` = adaptive (all above threshold, capped at 6) |
+| `--max_regions` | `0` | Max regions to emit per locus. `0` = adaptive (all above threshold, capped at `adaptive_max_regions`) |
+| `--adaptive_score_floor_frac` | `0.30` | Adaptive mode: fraction of best_score used as score floor. Raise to tighten (e.g. `0.45` for paralog discrimination) |
+| `--adaptive_score_floor_abs` | `0.03` | Adaptive mode: absolute score floor. Permissive default preserves weak-synteny discovery for toxins/venoms/micro-exon peptides |
+| `--adaptive_max_regions` | `6` | Adaptive mode: hard cap on emitted regions |
+| `--adaptive_unique_gene_floor` | `3` | Adaptive mode: clusters with >= this many unique flanking hits are kept even below the score floor |
 
 ### Visualization
 
@@ -263,6 +271,7 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--gap_visual_size` | `20000` | Size (bp) used to represent compressed gaps |
 | `--flank_fallback_bp` | `1000000` | Maximum window (bp) rendered around distal targets |
 | `--scale_bar_len` | `10000` | Scale bar size (bp) |
+| `--hide_goi_absent_tracks` | `true` | Omit target tracks from plots when no GOI hit was found in that genome |
 
 ### Resource Tuning
 
@@ -271,7 +280,7 @@ These control per-process resource allocation. Override them for your hardware.
 | Parameter | Default | Description |
 |---|---|---|
 | `--iterative_search_cpus` | `2` | CPUs for ITERATIVE_SEARCH tasks |
-| `--iterative_search_memory` | `6 GB` | RAM for ITERATIVE_SEARCH tasks |
+| `--iterative_search_memory` | `10 GB` | RAM for ITERATIVE_SEARCH tasks (auto-raised to 12 GB on HPC profiles) |
 | `--iterative_search_max_forks` | `1` | Max parallel ITERATIVE_SEARCH tasks |
 | `--locate_gene_cpus` | `1` | CPUs for LOCATE_GENE |
 | `--locate_gene_memory` | `3 GB` | RAM for LOCATE_GENE |

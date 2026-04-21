@@ -412,6 +412,9 @@ workflow {
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
+        if (max_genomes < 3) {
+            log.warn("max_genomes=${max_genomes}: synteny scoring derives signal from consensus across species; with <3 target genomes, fallback GOI calls tend to be classified as 'ambiguous' (no multi-genome conservation evidence). Consider raising max_genomes to >=3.")
+        }
         def target_species = params.target_species ?: ''
         uiStatus('RUN ', 'FETCH_RELATED', "Fetching related genomes${target_species ? ' (user-specified species)' : ' (auto-detect from taxonomy)'}")
         FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
@@ -538,6 +541,12 @@ workflow {
                     'aug_relaxed_evalue_mult', 'gap_search_window',
                     'prefer_large_genes', 'min_flanking_size', 'exon_level_search'
                 ] as Set
+
+                // Safety lock: prevent LLM from auto-enabling advanced ML structural/PLM searches
+                if (params.force_disable_advanced_search) {
+                    allowed.remove('enable_plm_search')
+                    allowed.remove('enable_structural_search')
+                }
 
                 overrides.each { key, value ->
                     if (allowed.contains(key)) {
@@ -877,38 +886,46 @@ workflow {
 
         home_bed_by_locus_ch = EXTRACT_FLANKING.out.bed  // [locus_id, bed]
         tree_by_locus_ch = COMPUTE_TREE.out.tree         // [locus_id, tree]
+        // Per-locus GOI-only BED from SPLIT_LOCI (used as plot query_bed).
+        // Previously LOCATE_GENE.out.bed.first() was used for all loci, which
+        // mis-anchored multi-paralog plots (e.g. TP53/TP63/TP73 → same query
+        // shown on all three locus plots). Now each locus gets its own slice.
+        query_bed_by_locus_ch = distinct_loci_ch        // [locus_id, bed]
 
         plot_inputs = home_bed_by_locus_ch
-            .join(cluster_by_locus_ch)                    // [locus_id, home_bed, names, beds]
-            .join(tree_by_locus_ch)                       // [locus_id, home_bed, names, beds, tree]
-            .join(gffs_by_locus_ch, remainder: true)      // [locus_id, home_bed, names, beds, tree, gffs_or_null]
-            .join(tsvs_by_locus_ch, remainder: true)      // [locus_id, home_bed, names, beds, tree, gffs_or_null, tsvs_or_null]
+            .join(query_bed_by_locus_ch)                  // [locus_id, home_bed, query_bed]
+            .join(cluster_by_locus_ch)                    // [locus_id, home_bed, query_bed, names, beds]
+            .join(tree_by_locus_ch)                       // [..., tree]
+            .join(gffs_by_locus_ch, remainder: true)      // [..., tree, gffs_or_null]
+            .join(tsvs_by_locus_ch, remainder: true)      // [..., tree, gffs_or_null, tsvs_or_null]
             .map { entry ->
                 def locus_id = entry[0]
                 def home_bed = entry[1]
-                def names = entry[2]
-                def beds = entry[3]
-                def tree = entry[4]
-                def gffs = entry[5] ?: []
-                def tsvs = entry[6] ?: []
-                tuple(home_bed, names, beds, gffs, tsvs, tree)
+                def query_bed = entry[2]
+                def names = entry[3]
+                def beds = entry[4]
+                def tree = entry[5]
+                def gffs = entry[6] ?: []
+                def tsvs = entry[7] ?: []
+                tuple(home_bed, query_bed, names, beds, gffs, tsvs, tree)
             }
 
         plot_inputs.multiMap { item ->
             home_bed: item[0]
-            target_names: item[1]
-            candidate_beds: item[2]
-            target_gffs: item[3]
-            homology_tsvs: item[4]
-            tree: item[5]
+            query_bed: item[1]
+            target_names: item[2]
+            candidate_beds: item[3]
+            target_gffs: item[4]
+            homology_tsvs: item[5]
+            tree: item[6]
         }.set { plot_inputs_split }
 
         uiStatus('RUN ', 'PLOT_SYNTENY', 'Generating synteny visualizations')
-            
+
         PLOT_SYNTENY(
-            plot_inputs_split.home_bed,   // home_bed
-            LOCATE_GENE.out.bed.first(),  // query_bed
-            effective_home_gff_ch,        // home_gff (user-provided or Prodigal-predicted)
+            plot_inputs_split.home_bed,       // home_bed
+            plot_inputs_split.query_bed,      // query_bed (per-locus, was global)
+            effective_home_gff_ch,            // home_gff (user-provided or Prodigal-predicted)
             plot_inputs_split.target_gffs,    // target_gffs
             plot_inputs_split.target_names,   // target_names
             plot_inputs_split.candidate_beds, // candidate_beds

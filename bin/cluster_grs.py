@@ -51,7 +51,35 @@ def parse_args():
         "--max_regions",
         type=int,
         default=0,
-        help="Max regions to output (0 = adaptive: emit all above relative threshold, capped at 6)",
+        help="Max regions to output (0 = adaptive: emit all above relative threshold, capped at adaptive_max_regions)",
+    )
+    parser.add_argument(
+        "--adaptive_score_floor_frac",
+        type=float,
+        default=0.30,
+        help="Adaptive mode: score floor as fraction of best_score (raise to tighten)",
+    )
+    parser.add_argument(
+        "--adaptive_score_floor_abs",
+        type=float,
+        default=0.03,
+        help="Adaptive mode: absolute score floor (raise to drop low-score noise). "
+             "Conservative default 0.03 preserves weak-synteny discovery for rapidly-evolving "
+             "loci (toxins, venoms, micro-exon peptides). Raise to 0.08 for deep-time "
+             "paralog discrimination (e.g. TP53/63/73).",
+    )
+    parser.add_argument(
+        "--adaptive_max_regions",
+        type=int,
+        default=6,
+        help="Adaptive mode: hard cap on number of regions emitted",
+    )
+    parser.add_argument(
+        "--adaptive_unique_gene_floor",
+        type=int,
+        default=3,
+        help="Adaptive mode: a cluster with >= this many unique flanking hits is kept "
+             "even if it falls below the score floor",
     )
     return parser.parse_args()
 
@@ -596,19 +624,19 @@ def main():
             if args.max_regions > 0:
                 # User-specified hard cap
                 num_to_output = min(args.max_regions, len(ordered_clusters))
+                score_floor = max(args.adaptive_score_floor_abs, 0.0)
             else:
-                # Adaptive: emit all regions whose score is at least 30% of
-                # the best region's score OR that have >=3 unique genes,
-                # guaranteeing at least 1 and capping at 6.
                 best_score = ordered_clusters[0]['score'] if ordered_clusters else 0
-                score_floor = max(0.03, best_score * 0.3)
+                score_floor = max(args.adaptive_score_floor_abs,
+                                  best_score * args.adaptive_score_floor_frac)
                 num_to_output = 0
                 for cl in ordered_clusters:
-                    if cl['score'] >= score_floor or cl.get('unique', 0) >= 3:
+                    if (cl['score'] >= score_floor
+                            or cl.get('unique', 0) >= args.adaptive_unique_gene_floor):
                         num_to_output += 1
                     else:
                         break  # clusters are sorted by score desc
-                num_to_output = max(1, min(num_to_output, 6))
+                num_to_output = max(1, min(num_to_output, args.adaptive_max_regions))
 
             print(
                 f"INFO: Emitting {num_to_output}/{len(ordered_clusters)} regions "
@@ -641,7 +669,7 @@ def main():
                     selected_reason = "user_cap"
                 elif best['score'] >= score_floor:
                     selected_reason = "score_floor"
-                elif best.get('unique', 0) >= 3:
+                elif best.get('unique', 0) >= args.adaptive_unique_gene_floor:
                     selected_reason = "unique_gene_floor"
                 else:
                     selected_reason = "adaptive_backstop"

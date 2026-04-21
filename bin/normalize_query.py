@@ -65,6 +65,10 @@ def main():
     parser = argparse.ArgumentParser(description="Normalize query FASTA to protein")
     parser.add_argument("--input", required=True, help="Input FASTA (DNA or protein)")
     parser.add_argument("--output", required=True, help="Output protein FASTA")
+    parser.add_argument("--min_length", type=int, default=30,
+                        help="Minimum protein length (aa). Queries below this "
+                             "are rejected — searches on very short queries "
+                             "return noise. Set to 0 to disable.")
     args = parser.parse_args()
 
     records = list(parse_fasta(args.input))
@@ -83,11 +87,23 @@ def main():
         if not prot:
             print("ERROR: Could not translate nucleotide query into a protein ORF", file=sys.stderr)
             sys.exit(1)
-        write_fasta([(clean_id, prot)], args.output)
+        final_seq = prot
         print(f"[normalize_query] Translated query length: {len(prot)} aa", file=sys.stderr)
     else:
         print(f"[normalize_query] Detected protein query: {clean_id}", file=sys.stderr)
-        write_fasta([(clean_id, seq)], args.output)
+        final_seq = seq
+
+    if args.min_length > 0 and len(final_seq) < args.min_length:
+        print(
+            f"ERROR: Query '{clean_id}' is {len(final_seq)} aa, below the "
+            f"minimum of {args.min_length} aa. Short queries produce noisy "
+            f"MMseqs2 / tblastn hits. Override with --min_length 0 if you "
+            f"really want to search with a fragment this short.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    write_fasta([(clean_id, final_seq)], args.output)
 
 
 if __name__ == "__main__":

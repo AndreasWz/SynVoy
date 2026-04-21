@@ -154,10 +154,10 @@ except ImportError:
 CLASSIFY_THRESHOLDS = {
     # exon_annotation -> HIGH
     "high_min_exons": 2,
-    "high_min_identity": 60.0,
+    "high_min_identity": 50.0,
     "high_min_flanking": 2,
     # exon_annotation -> MEDIUM
-    "medium_min_identity": 45.0,
+    "medium_min_identity": 35.0,
     "medium_min_flanking": 1,
     "medium_min_qcov": 0.65,
     # fallback_hit_span -> MEDIUM (flanking-supported)
@@ -174,6 +174,121 @@ CLASSIFY_THRESHOLDS = {
     "fragment_max_qcov": 0.4,
     "complete_min_qcov": 0.7,
 }
+
+# Family-consistency config (Change A in TP53_IMPLEMENTATION_FIX_PLAN.md).
+# `tokens` is a set of uppercase-alphanum tokens derived from the query gene name.
+# When populated, every GOI annotation receives a GoiFamilyConsistent attribute.
+# When `strict` is True, family-inconsistent fallback/rescued_exon/raw_hit calls
+# are downgraded to LOW/ambiguous so they do not masquerade as probable GOI.
+FAMILY_CONFIG: Dict[str, Any] = {
+    "strict": False,
+    "tokens": set(),
+    "strict_evidence_types": {"fallback_hit_span", "rescued_exon", "raw_hit"},
+}
+
+# Weak-GOI emission filter. Drops LOW-confidence fallback/rescued_exon/raw_hit
+# calls whose (identity/100)*qcov is below `min_id_x_qcov`. Motivated by TP53
+# runs where ~70% of LOW fallback rows had id*qcov < 0.10 (pure noise) while
+# genuine MEDIUM/probable melittin fallback hits never fall below 0.12.
+# Default 0.05 drops obvious garbage without touching any validated toxin call.
+# Set to 0.0 to disable entirely.
+EMISSION_CONFIG: Dict[str, Any] = {
+    "min_id_x_qcov": 0.0,
+    "weak_evidence_types": {"fallback_hit_span", "rescued_exon", "raw_hit"},
+    "_dropped_counter": 0,
+}
+
+
+def _should_skip_weak_goi_emission(
+    evidence_type: str,
+    identity: float,
+    query_cov: Optional[float],
+    flanking_support: int = 0,
+    embedding_similarity: Optional[float] = None,
+    structural_similarity: Optional[float] = None,
+) -> bool:
+    """Return True if this GOI emission is weak enough to drop before GFF write.
+
+    Only fires on LOW-confidence fallback/rescued_exon/raw_hit. A hit that
+    would classify as MEDIUM/HIGH (strong flanking, PLM rescue, structural
+    rescue, or adequate qcov+identity) is always kept.
+    """
+    threshold = float(EMISSION_CONFIG.get("min_id_x_qcov") or 0.0)
+    if threshold <= 0.0:
+        return False
+    if evidence_type not in EMISSION_CONFIG.get("weak_evidence_types", set()):
+        return False
+    qcov = float(query_cov or 0.0)
+    ident = float(identity or 0.0)
+    # Safety: if qcov is missing (0), the emission lacks coverage info — keep.
+    # Prevents accidentally dropping tandem-copy-like rows that slip through.
+    if qcov <= 0.0 or ident <= 0.0:
+        return False
+    conf, _cls, _reason = _classify_goi_evidence(
+        evidence_type=evidence_type,
+        identity=ident,
+        exon_count=1,
+        query_cov=qcov,
+        flanking_support=flanking_support,
+        embedding_similarity=embedding_similarity,
+        structural_similarity=structural_similarity,
+    )
+    if conf != "LOW":
+        return False
+    return (ident / 100.0) * qcov < threshold
+
+
+def _normalize_family_token(value: Any) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
+
+
+def _auto_derive_family_tokens(fasta_path: Optional[str]) -> set:
+    """Extract likely gene-name tokens from a UniProt/NCBI FASTA header.
+
+    Looks for ``GN=XYZ`` (UniProt) or falls back to the accession's gene suffix.
+    Returns a set of normalized tokens. Empty set if nothing derivable.
+    """
+    tokens: set = set()
+    if not fasta_path or not os.path.exists(fasta_path):
+        return tokens
+    try:
+        with open(fasta_path, "r") as fh:
+            for line in fh:
+                if not line.startswith(">"):
+                    continue
+                header = line[1:].strip()
+                m = re.search(r"GN=([A-Za-z0-9_\-]+)", header)
+                if m:
+                    tokens.add(_normalize_family_token(m.group(1)))
+                # UniProt sp|ACC|NAME_SPECIES pattern
+                m2 = re.match(r"sp\|[^|]+\|([A-Za-z0-9]+)_", header)
+                if m2:
+                    tokens.add(_normalize_family_token(m2.group(1)))
+                break
+    except Exception:
+        return tokens
+    tokens.discard("")
+    return tokens
+
+
+def _check_family_consistency(target_gene: str, target_product: str) -> Tuple[bool, str]:
+    tokens = FAMILY_CONFIG.get("tokens") or set()
+    if not tokens:
+        return True, "family_tokens_unset"
+    gene_norm = _normalize_family_token(target_gene)
+    product_norm = _normalize_family_token(target_product)
+    if not gene_norm and not product_norm:
+        return False, "no_target_annotation"
+    for tok in tokens:
+        if not tok:
+            continue
+        if gene_norm and tok in gene_norm:
+            return True, f"matched_gene:{tok}"
+        if product_norm and tok in product_norm:
+            return True, f"matched_product:{tok}"
+    return False, "no_family_match"
 
 
 def run_command(cmd):
@@ -577,13 +692,37 @@ def _compose_gff_attrs(base_attrs: Dict[str, Any],
         if sval:
             merged[key] = sval
 
+    label = ""
+    product = ""
     if native_annot:
         if native_annot.get("label"):
             merged["TargetGene"] = _safe_gff_value(native_annot["label"])
+            label = native_annot["label"]
         if native_annot.get("product"):
             merged["TargetProduct"] = _safe_gff_value(native_annot["product"])
+            product = native_annot["product"]
         if native_annot.get("feature_id"):
             merged["TargetID"] = _safe_gff_value(native_annot["feature_id"])
+
+    if base_attrs.get("SynVoyRole") == "goi" and FAMILY_CONFIG.get("tokens"):
+        consistent, reason = _check_family_consistency(label, product)
+        merged["GoiFamilyConsistent"] = "true" if consistent else "false"
+        merged["GoiFamilyReason"] = reason
+        # Strict downgrade only fires on informative mismatches (annotated locus
+        # whose name disagrees with family tokens). Unannotated regions — common
+        # for novel toxin/venom discovery where orthologs are de novo — are NOT
+        # downgraded: synteny + sequence evidence must stand on their own there.
+        if (FAMILY_CONFIG.get("strict")
+                and not consistent
+                and reason == "no_family_match"):
+            ev = base_attrs.get("EvidenceType") or base_attrs.get("Type") or ""
+            if ev in FAMILY_CONFIG.get("strict_evidence_types", set()):
+                merged["Confidence"] = "LOW"
+                merged["GOIClass"] = "ambiguous_goi_family_member"
+                prev = merged.get("InferenceReason", "")
+                merged["InferenceReason"] = (
+                    f"{prev}|strict_family_downgrade" if prev else "strict_family_downgrade"
+                )
 
     return ";".join(f"{k}={v}" for k, v in merged.items())
 
@@ -1875,13 +2014,18 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                         plm_tmp_dir = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_plm"
                         os.makedirs(plm_tmp_dir, exist_ok=True)
 
+                        # Short queries produce noisy mean-pooled embeddings —
+                        # raise the similarity threshold to suppress false hits.
+                        max_goi_len = max(goi_query_lengths.values()) if goi_query_lengths else 0
+                        plm_thresh = getattr(args, 'plm_similarity_threshold', 0.5)
+                        if 0 < max_goi_len < 100:
+                            plm_thresh = max(plm_thresh, 0.75)
+
                         plm_hits = plm_search_region(
                             goi_embeddings=goi_embeddings,
                             region_fasta=region_fasta,
                             output_dir=plm_tmp_dir,
-                            similarity_threshold=getattr(
-                                args, 'plm_similarity_threshold', 0.5
-                            ),
+                            similarity_threshold=plm_thresh,
                             device=getattr(args, 'plm_device', 'cpu'),
                             predictor=getattr(args, 'gene_predictor', 'auto'),
                             augustus_species=getattr(args, 'augustus_species', 'fly'),
@@ -1903,8 +2047,23 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         # ========== 5. Foldseek Structural Search ==========
         # Use ESMFold to predict ORF structures and Foldseek 3Di alphabet to
         # find structural homologs that have diverged beyond all sequence methods.
+        # Skip structural search for very short queries — ESMFold produces
+        # degenerate structures below ~50 aa and TM-score is meaningless for
+        # single short helices (e.g. melittin, defensins).
+        _max_goi_len = max(goi_query_lengths.values()) if goi_query_lengths else 0
+        _struct_too_short = 0 < _max_goi_len < 50
         if (getattr(args, 'enable_structural_search', False)
-                and STRUCTURAL_IMPORT_OK and check_structural_search_available()):
+                and STRUCTURAL_IMPORT_OK and check_structural_search_available()
+                and _struct_too_short):
+            print(
+                f"[{genome_name}] Skipping structural search: "
+                f"longest GOI query is {_max_goi_len} aa (<50 aa threshold).",
+                flush=True,
+            )
+
+        if (getattr(args, 'enable_structural_search', False)
+                and STRUCTURAL_IMPORT_OK and check_structural_search_available()
+                and not _struct_too_short):
             try:
                 goi_struct_index = os.path.join(args.output_dir, "goi_structure_index.tsv")
                 if os.path.exists(goi_struct_index):
@@ -2563,12 +2722,22 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                                     # Span sanity check: reject fallback hits whose
                                     # genomic span is wildly disproportionate to the
-                                    # query protein length.  A gene spanning 50 kb for
-                                    # a 70-aa protein is clearly wrong.  Allow up to
-                                    # 30x the expected coding length (accounts for
-                                    # large introns in some lineages).
+                                    # query protein length. For short peptides
+                                    # (<150 aa) the intron:exon ratio is dominated
+                                    # by introns, so a flat 30x multiplier rejects
+                                    # valid multi-exon loci (e.g. melittin at 70 aa
+                                    # can span tens of kb in bee genomes).
                                     if valid_fallback:
-                                        max_span_nt = max(3000, query_len * 3 * 30)
+                                        # Short queries (<150 aa, e.g. melittin/toxin peptides):
+                                        #   genomic span is dominated by introns; allow up to
+                                        #   600x the CDS length so real multi-exon loci pass.
+                                        # Long queries (>=150 aa, e.g. TP53/TP63/TP73):
+                                        #   raised from 30x -> 50x after TP53 runs showed real
+                                        #   TP63/TP73 loci spanning >100 kb being rejected.
+                                        if query_len < 150:
+                                            max_span_nt = max(100_000, query_len * 3 * 200)
+                                        else:
+                                            max_span_nt = max(5000, query_len * 3 * 50)
                                         gspan_min = min(h.get('gstart', 0) for h in ordered_hits)
                                         gspan_max = max(h.get('gend', 0) for h in ordered_hits)
                                         actual_span = gspan_max - gspan_min
@@ -4434,16 +4603,24 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
 
     # Classification thresholds (GOI confidence / model status)
-    parser.add_argument("--classify_high_min_identity", type=float, default=60.0,
-                        help="Min identity for HIGH confidence exon_annotation")
-    parser.add_argument("--classify_medium_min_identity", type=float, default=45.0,
-                        help="Min identity for MEDIUM confidence exon_annotation")
+    parser.add_argument("--classify_high_min_identity", type=float, default=50.0,
+                        help="Min identity for HIGH confidence exon_annotation "
+                             "(lowered from 60 to accommodate cross-vertebrate orthologs)")
+    parser.add_argument("--classify_medium_min_identity", type=float, default=35.0,
+                        help="Min identity for MEDIUM confidence exon_annotation "
+                             "(lowered from 45 to accommodate divergent orthologs)")
     parser.add_argument("--classify_tandem_min_identity", type=float, default=40.0,
                         help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
                         help="Query coverage above this (with multi-exon) marks model as complete")
+    parser.add_argument("--strict_goi_family", type=str2bool, default=False,
+                        help="Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated "
+                             "TargetGene/TargetProduct does not match the family tokens")
+    parser.add_argument("--goi_family_tokens", type=str, default="",
+                        help="Comma-separated family name tokens for strict mode "
+                             "(default: auto-derive from query FASTA header GN=...)")
 
     # PLM (Protein Language Model) embedding search
     parser.add_argument("--enable_plm_search", type=str2bool, default=False,
@@ -4489,6 +4666,28 @@ def main():
     CLASSIFY_THRESHOLDS["plm_high_threshold"] = args.plm_high_threshold
     CLASSIFY_THRESHOLDS["structural_medium_threshold"] = args.structural_medium_threshold
     CLASSIFY_THRESHOLDS["structural_high_threshold"] = args.structural_high_threshold
+
+    # Family-consistency config (strict GOI mode)
+    FAMILY_CONFIG["strict"] = bool(args.strict_goi_family)
+    override_tokens = {
+        _normalize_family_token(t) for t in (args.goi_family_tokens or "").split(",")
+    }
+    override_tokens.discard("")
+    if override_tokens:
+        FAMILY_CONFIG["tokens"] = override_tokens
+    else:
+        FAMILY_CONFIG["tokens"] = _auto_derive_family_tokens(args.initial_db)
+    if FAMILY_CONFIG["strict"] and not FAMILY_CONFIG["tokens"]:
+        logger.warning(
+            "strict_goi_family=true but no family tokens derived from query FASTA; "
+            "strict downgrade will be disabled. Provide --goi_family_tokens explicitly."
+        )
+        FAMILY_CONFIG["strict"] = False
+    if FAMILY_CONFIG["tokens"]:
+        logger.info(
+            f"GOI family tokens: {sorted(FAMILY_CONFIG['tokens'])} "
+            f"(strict={FAMILY_CONFIG['strict']})"
+        )
 
     # INPUT VALIDATION
     # 1. Validate required files exist

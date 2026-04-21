@@ -70,6 +70,8 @@ process ITERATIVE_SEARCH {
         --classify_tandem_min_identity ${params.classify_tandem_min_identity} \\
         --classify_fragment_max_qcov ${params.classify_fragment_max_qcov} \\
         --classify_complete_min_qcov ${params.classify_complete_min_qcov} \\
+        --strict_goi_family ${params.strict_goi_family} \\
+        --goi_family_tokens "${params.goi_family_tokens}" \\
         --gene_predictor ${params.gene_predictor} \\
         --augustus_species ${params.augustus_species} \\
         --enable_plm_search ${params.enable_plm_search} \\

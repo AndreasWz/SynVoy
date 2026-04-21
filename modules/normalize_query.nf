@@ -11,7 +11,7 @@ process NORMALIZE_QUERY {
 
     script:
     """
-    normalize_query.py --input $gene --output tmp_query_out.faa
+    normalize_query.py --input $gene --output tmp_query_out.faa --min_length ${params.min_query_length}
     mv tmp_query_out.faa normalized_query.faa
     """
 }
