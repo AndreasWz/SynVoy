@@ -81,7 +81,95 @@ def parse_args():
         help="Adaptive mode: a cluster with >= this many unique flanking hits is kept "
              "even if it falls below the score floor",
     )
+    parser.add_argument(
+        "--species_map",
+        default=None,
+        help=(
+            "Optional TSV mapping genome accession/basename → species name "
+            "(produced by FETCH_RELATED_GENOMES or STAGE_GENOMES). When "
+            "supplied and a match is found, the BED name column is prefixed "
+            "with 'Species_name|' so downstream tools can surface species "
+            "without re-parsing the filename."
+        ),
+    )
+    parser.add_argument(
+        "--genome_name",
+        default=None,
+        help=(
+            "Genome identifier used as the lookup key in --species_map. "
+            "Defaults to the basename of --genome with common FASTA "
+            "extensions stripped."
+        ),
+    )
     return parser.parse_args()
+
+
+def _strip_fasta_exts(name):
+    for ext in (".fasta", ".fna.gz", ".fa.gz", ".fna", ".fa", ".gz"):
+        if name.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def resolve_species(species_map_path, genome_name):
+    """Return sanitized species name for genome_name, or None.
+
+    The species map is a TSV with columns <accession>\\t<species>[\\t...].
+    Lookup tries, in order:
+      1. genome_name verbatim
+      2. genome_name stripped of common FASTA extensions
+      3. the above stripped of trailing .N version suffix
+    Species names with whitespace are sanitized to underscores so the BED
+    name column stays tab-safe.
+    """
+    if not species_map_path or not os.path.exists(species_map_path):
+        return None
+    if os.path.basename(species_map_path) == "NO_SPECIES_MAP":
+        return None
+    mapping = {}
+    try:
+        with open(species_map_path) as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2:
+                    continue
+                acc, species = parts[0].strip(), parts[1].strip()
+                if acc and species:
+                    mapping[acc] = species
+    except OSError:
+        return None
+    if not mapping or not genome_name:
+        return None
+
+    candidates = [
+        genome_name,
+        _strip_fasta_exts(genome_name),
+    ]
+    # Walk dot-suffixes from the right. NCBI filenames embed dots in both the
+    # accession version (.1, .2) AND the assembly name (e.g. 'AnoCar2.0'),
+    # so a single rsplit doesn't reach the map key 'GCF_xxx' for assemblies
+    # with multi-dotted names. Keep stripping until we exhaust dots or hit a
+    # 'GCF_'/'GCA_' bare-accession prefix.
+    stripped = candidates[-1]
+    while "." in stripped:
+        stripped = stripped.rsplit(".", 1)[0]
+        candidates.append(stripped)
+    for key in candidates:
+        if key in mapping:
+            species = mapping[key]
+            sanitized = re.sub(r"\s+", "_", species).strip("._ >|\t")
+            # Defensive: reject obviously-bogus values (FASTA headers leaked in,
+            # bare scaffold IDs, control chars). Require a binomial-like
+            # 'Letters[_-]Letters' pattern so a leaked accession like
+            # 'WUUM01000001.1' falls back to None and the BED name stays bare.
+            if not sanitized:
+                return None
+            if any(c in sanitized for c in (">", "|", "\t", "\n")):
+                return None
+            if not re.search(r"[A-Za-z]+[_-][A-Za-z]+", sanitized):
+                return None
+            return sanitized
+    return None
 
 def load_synteny_map(bed_file):
     """
@@ -123,25 +211,52 @@ def parse_gff_attrs(attr_field):
     return attrs
 
 
+_CONF_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def _max_conf(a, b):
+    """Return the higher-confidence label of two strings (HIGH > MEDIUM > LOW > '')."""
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if _CONF_RANK.get(a.upper(), 0) >= _CONF_RANK.get(b.upper(), 0) else b
+
+
 def merge_intervals(intervals):
+    """Merge overlapping/adjacent intervals per chrom.
+
+    If input intervals carry a `confidence` key (HIGH/MEDIUM/LOW), the merged
+    interval inherits the maximum confidence of its inputs. Intervals without
+    the key are merged identically to legacy callers.
+    """
     if not intervals:
         return []
 
     by_chrom = defaultdict(list)
     for iv in intervals:
-        by_chrom[iv["chrom"]].append((iv["start"], iv["end"]))
+        by_chrom[iv["chrom"]].append(
+            (iv["start"], iv["end"], iv.get("confidence", ""))
+        )
 
     merged = []
     for chrom, spans in by_chrom.items():
         spans.sort()
-        cur_s, cur_e = spans[0]
-        for s, e in spans[1:]:
+        cur_s, cur_e, cur_c = spans[0]
+        for s, e, c in spans[1:]:
             if s <= cur_e + 1:
                 cur_e = max(cur_e, e)
+                cur_c = _max_conf(cur_c, c)
             else:
-                merged.append({"chrom": chrom, "start": cur_s, "end": cur_e})
-                cur_s, cur_e = s, e
-        merged.append({"chrom": chrom, "start": cur_s, "end": cur_e})
+                row = {"chrom": chrom, "start": cur_s, "end": cur_e}
+                if cur_c:
+                    row["confidence"] = cur_c
+                merged.append(row)
+                cur_s, cur_e, cur_c = s, e, c
+        row = {"chrom": chrom, "start": cur_s, "end": cur_e}
+        if cur_c:
+            row["confidence"] = cur_c
+        merged.append(row)
     return merged
 
 
@@ -149,12 +264,22 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
     """
     Parse GOI intervals from SynVoy iterative target GFF.
     GOI records are detected via Name/ID/SynVoy_Parent containing GOI_.
+
+    LOW-confidence GOI rows are skipped. The upstream classifier in
+    iterative_search_runner.py already labeled these as 'probably not a real
+    homolog' based on identity, query coverage, and flanking support. Treating
+    them as synteny anchors here would promote noise to HIGH-scoring regions
+    (see Melipona contig_140 case: 3 LOW hits at 29-36% identity with only
+    2/9 flanking → 2x HIGH/S1.00 anchor regions outranking the real syntenic
+    locus on contig_94 with 8/9 flanking). Honoring the upstream confidence
+    label keeps the two pipeline stages consistent.
     """
     if not gff_file or not os.path.exists(gff_file):
         return []
 
     goi_intervals = []
     accepted_types = {"mRNA", "gene", "tandem_copy", "transcript", "mrna"}
+    skipped_low = 0
 
     try:
         with open(gff_file) as fh:
@@ -178,6 +303,14 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
                 if "GOI_" not in marker:
                     continue
 
+                # Honor upstream classifier: skip LOW-confidence GOI rows.
+                # Missing/empty Confidence is treated as "not LOW" so legacy
+                # GFFs without the attribute keep the previous behavior.
+                confidence = (attrs.get("Confidence") or "").strip().upper()
+                if confidence == "LOW":
+                    skipped_low += 1
+                    continue
+
                 try:
                     s = int(parts[3])
                     e = int(parts[4])
@@ -188,10 +321,22 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
 
                 s = max(0, s - max(0, int(padding_bp)))
                 e = e + max(0, int(padding_bp))
-                goi_intervals.append({"chrom": parts[0], "start": s, "end": e})
+                # Carry confidence through merge so build_goi_anchor_clusters
+                # can scale anchor scores by upstream classification quality.
+                goi_intervals.append({
+                    "chrom": parts[0], "start": s, "end": e,
+                    "confidence": confidence or "",
+                })
     except Exception as exc:
         print(f"WARNING: Could not parse GOI intervals from target GFF: {exc}", file=sys.stderr)
         return []
+
+    if skipped_low:
+        print(
+            f"INFO: Dropped {skipped_low} LOW-confidence GOI row(s) from anchor "
+            f"candidates (upstream classifier flagged them as unlikely homologs).",
+            file=sys.stderr,
+        )
 
     return merge_intervals(goi_intervals)
 
@@ -257,9 +402,36 @@ def cluster_overlaps_goi(cluster, goi_intervals):
     return False
 
 
+def _anchor_score_for_confidence(confidence):
+    """Map upstream classifier confidence to an anchor cluster score.
+
+    The previous behavior was a hardcoded 1.0 — this caused single MEDIUM-
+    confidence GOI hits to outrank multi-gene synteny clusters scoring ~0.4
+    (see Colletes Reg1 vs Reg2 in the melittin v6 smoke). The new mapping
+    keeps anchors competitive with synteny clusters but not dominant:
+
+      HIGH    → 0.60   (a confident probable_goi w/o synteny support is still
+                        worth surfacing alongside the strongest synteny clusters)
+      MEDIUM  → 0.40   (matches the typical real syntenic-block score for
+                        divergent peptides — anchor and synteny tie naturally)
+      LOW     → 0.20   (defensive — LOW intervals are filtered upstream in
+                        load_goi_intervals_from_gff, so this branch shouldn't
+                        normally fire; kept as a safety net)
+      missing → 0.40   (legacy GFFs without Confidence default to MEDIUM)
+    """
+    return {
+        "HIGH": 0.60,
+        "MEDIUM": 0.40,
+        "LOW": 0.20,
+    }.get((confidence or "").strip().upper(), 0.40)
+
+
 def build_goi_anchor_clusters(goi_intervals, existing_clusters):
     """
     Inject GOI anchor regions when score-ranked clusters miss GOI loci entirely.
+
+    Anchor score is scaled by the underlying upstream Confidence label so a
+    lone MEDIUM hit cannot outrank a real multi-gene synteny block.
     """
     anchors = []
     for iv in goi_intervals:
@@ -270,21 +442,23 @@ def build_goi_anchor_clusters(goi_intervals, existing_clusters):
                 break
         if covered:
             continue
+        score = _anchor_score_for_confidence(iv.get("confidence"))
         anchors.append(
             {
                 "cluster": [],
                 "unique": 1,
                 "consistency": 1.0,
                 "strand_cons": 1.0,
-                "coverage_score": 1.0,
-                "quality_score": 1.0,
-                "score": 1.0,
+                "coverage_score": score,
+                "quality_score": score,
+                "score": score,
                 "p_value": 0.0,
                 "start": iv["start"],
                 "end": iv["end"],
                 "chrom": iv["chrom"],
                 "is_goi_anchor": True,
                 "goi_overlap": True,
+                "anchor_confidence": iv.get("confidence", ""),
             }
         )
     return anchors
@@ -461,7 +635,16 @@ def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_
 
 def main():
     args = parse_args()
-    
+
+    # Resolve species label once (may be None if no map or no match).
+    lookup_key = args.genome_name
+    if not lookup_key:
+        if args.genome:
+            lookup_key = _strip_fasta_exts(os.path.basename(args.genome))
+        elif args.output:
+            lookup_key = os.path.basename(args.output).split(".regions.bed")[0]
+    species_label = resolve_species(args.species_map, lookup_key)
+
     gene_map = load_synteny_map(args.synteny_bed)
     # gene_map contains alias keys (raw + cleaned IDs) that may point to the
     # same rank; coverage must use unique ranks, not raw key count.
@@ -661,9 +844,10 @@ def main():
                 region_strand = "-" if minus_cnt > plus_cnt else "+"
                 
                 if best.get("is_goi_anchor"):
-                    name = f"Reg{i+1}_GOI_anchor_C{confidence}_S{best['score']:.2f}"
+                    core_name = f"Reg{i+1}_GOI_anchor_C{confidence}_S{best['score']:.2f}"
                 else:
-                    name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
+                    core_name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
+                name = f"{species_label}|{core_name}" if species_label else core_name
 
                 if args.max_regions > 0:
                     selected_reason = "user_cap"
@@ -679,6 +863,7 @@ def main():
                 selected_rows.append({
                     "region_rank": i + 1,
                     "region_name": name,
+                    "species": species_label or "",
                     "chrom": best["chrom"],
                     "start": best["start"],
                     "end": best["end"],
@@ -718,6 +903,7 @@ def main():
         fieldnames = [
             "region_rank",
             "region_name",
+            "species",
             "chrom",
             "start",
             "end",
