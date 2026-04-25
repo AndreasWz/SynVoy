@@ -1,0 +1,2 @@
+region_rank	region_name	chrom	start	end	strand	score	quality_score	coverage_score	unique_genes	total_genes_expected	consistency	strand_consistency	p_value	goi_overlap	is_goi_anchor	confidence	selection_reason
+1	Reg1_G7_CMEDIUM_S0.47	WUUM01000001.1	9442884	9553353	-	0.47088965922585135	0.5042551787834807	0.6363636363636364	7	11	0.11538461538461539	0.7169811320754716	0.024875621890547265	True	False	MEDIUM	score_floor

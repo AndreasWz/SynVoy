@@ -1,0 +1,51 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Minimum set for tests/ — bioinformatics CLIs (mmseqs2, blast+,
+          # miniprot, augustus, etc.) are not exercised by pytest, so we skip
+          # the heavy conda env here. Keeps CI under a minute.
+          pip install pytest biopython parasail
+
+      - name: Run pytest
+        run: |
+          pytest tests/ -v --tb=short --durations=10
+
+      - name: Upload pytest cache on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-cache-py${{ matrix.python-version }}
+          path: .pytest_cache/
+          retention-days: 7

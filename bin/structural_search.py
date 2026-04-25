@@ -102,8 +102,12 @@ def _ensure_esmfold_loaded(device: str = "cpu") -> None:
 
     model = model.to(torch.device(device)).eval()
 
-    # ESMFold: disable chunk_size for full-precision folding
-    model.trunk.set_chunk_size(64)
+    # ESMFold chunk_size trades throughput for peak memory. Auto-size based on
+    # available VRAM so low-end GPUs (e.g. GTX 1650 / 4 GB) don't OOM mid-fold.
+    chunk_size = _recommended_chunk_size(device, default=64)
+    model.trunk.set_chunk_size(chunk_size)
+    if chunk_size != 64:
+        logger.info(f"ESMFold chunk_size set to {chunk_size} (VRAM-tuned)")
 
     _esmfold_cache["tokenizer"] = tokenizer
     _esmfold_cache["model"] = model
@@ -115,27 +119,77 @@ def _ensure_esmfold_loaded(device: str = "cpu") -> None:
 # Structure prediction
 # ---------------------------------------------------------------------------
 
-def _effective_max_length(device: str, requested: int) -> int:
-    """Cap max_length on CUDA devices with <20 GB VRAM. ESMFold at 700 aa
-    typically needs ~20 GB; smaller GPUs OOM mid-fold. Caps to 400 aa when
-    VRAM is insufficient, preserving user intent on well-provisioned GPUs."""
-    if device != "cuda":
-        return requested
+def _probe_vram_gb() -> Optional[float]:
+    """Return total VRAM (GB) on the first CUDA device, or None if unavailable."""
     try:
         import torch
         if not torch.cuda.is_available():
-            return requested
+            return None
         total_bytes = torch.cuda.get_device_properties(0).total_memory
-        total_gb = total_bytes / (1024 ** 3)
-        if total_gb < 20 and requested > 400:
-            logger.warning(
-                f"GPU has {total_gb:.1f} GB VRAM (<20 GB); capping "
-                f"structural_max_length from {requested} to 400 to avoid OOM."
-            )
-            return 400
+        return total_bytes / (1024 ** 3)
     except Exception as exc:
         logger.debug(f"VRAM probe failed: {exc}")
+        return None
+
+
+def _vram_tier_caps(vram_gb: float) -> Tuple[int, int]:
+    """Return (max_length_cap, chunk_size) for a given VRAM.
+
+    Tier table:
+      <6 GB   → 150 aa, chunk_size 32   (GTX 1650 / student laptops)
+      <10 GB  → 300 aa, chunk_size 48
+      <20 GB  → 400 aa, chunk_size 64   (prior default for non-large GPUs)
+      >=20 GB → no cap,  chunk_size 64
+    """
+    if vram_gb < 6:
+        return 150, 32
+    if vram_gb < 10:
+        return 300, 48
+    if vram_gb < 20:
+        return 400, 64
+    return 10_000, 64  # effectively uncapped
+
+
+def _effective_max_length(device: str, requested: int) -> int:
+    """Cap max_length based on available VRAM to avoid OOM at fold time.
+
+    ESMFold memory scales quadratically in sequence length. The tiered caps
+    in `_vram_tier_caps` match common consumer/student GPUs:
+      - 4 GB  (GTX 1650)        → 150 aa
+      - 8 GB  (RTX 3060/4060)   → 300 aa
+      - 16 GB (RTX 3090 desktop chunks) → 400 aa
+      - 24+ GB (A100/H100 slices)       → user's request honored.
+    """
+    if device != "cuda":
+        return requested
+    vram_gb = _probe_vram_gb()
+    if vram_gb is None:
+        return requested
+    cap, _ = _vram_tier_caps(vram_gb)
+    if requested > cap:
+        logger.warning(
+            f"GPU has {vram_gb:.1f} GB VRAM; capping structural_max_length "
+            f"from {requested} to {cap} to avoid OOM. Folding will truncate "
+            f"queries longer than {cap} aa."
+        )
+        return cap
     return requested
+
+
+def _recommended_chunk_size(device: str, default: int = 64) -> int:
+    """Return an ESMFold trunk chunk_size appropriate for the current GPU.
+
+    Smaller chunk_size lowers peak memory at the cost of throughput. On tight
+    VRAM (<6 GB) we drop to 32 which keeps the GTX 1650 class GPUs from OOM.
+    On CPU / well-provisioned GPUs we keep the default 64.
+    """
+    if device != "cuda":
+        return default
+    vram_gb = _probe_vram_gb()
+    if vram_gb is None:
+        return default
+    _, chunk = _vram_tier_caps(vram_gb)
+    return chunk
 
 
 def fold_protein(

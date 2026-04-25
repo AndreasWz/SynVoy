@@ -478,3 +478,166 @@ conda install -c conda-forge openjdk=17
 # Or via system package manager
 sudo apt install default-jdk   # Debian/Ubuntu
 ```
+
+### Pipeline finishes with `synvoy_report.json` showing 0 annotations / 0 regions
+
+**Symptom:** `GENERATE_REPORT` exits non-zero with a message like
+"zero annotation and zero region files under staged_results".
+
+**Cause:** Either `ITERATIVE_SEARCH` genuinely produced no hits, or the
+Nextflow channel wiring did not stage the expected files into
+`staged_results/`.
+
+**How to diagnose:**
+1. Open `synvoy_report.json` (it is still written even on failure). The
+   `staging_diagnostics` block lists per-directory entry counts and sample
+   filenames:
+   ```bash
+   jq '.staging_diagnostics' results/<run>/synvoy_report.json
+   ```
+2. If `match_counts` shows zero across the board **and** the sample
+   entries are empty or only contain sentinels like `NO_REGIONS`, the
+   upstream search truly found nothing. Inspect
+   `logs/iterative_search/*.log` for the per-genome hit counts.
+3. If the dirs contain files but none match the expected patterns
+   (`*.gff`, `*.scores.tsv`), the module's channel wiring is wrong —
+   check `modules/generate_report.nf` stageAs directives.
+
+**If zero-hit is genuinely expected** (e.g. you're deliberately testing
+a query with no orthologs in your targets), the Nextflow driver will
+still fail the `GENERATE_REPORT` process. Re-run the reporter manually
+against the staged output:
+```bash
+python3 bin/generate_report.py \
+    --results_dir work/<generate_report_hash>/staged_results \
+    --output synvoy_report.json \
+    --allow-empty
+```
+
+### `parasail` import error on startup
+
+**Symptom:** `ModuleNotFoundError: No module named 'parasail'` during
+`ITERATIVE_SEARCH` or `smith_waterman_search.py`.
+
+**Fix:** Activate the SynVoy conda environment (it ships parasail via
+`environment.yml`). If running outside conda:
+```bash
+pip install parasail
+```
+If `pip install parasail` fails to build, fall back to ssearch36:
+```bash
+conda install -c bioconda fasta3
+nextflow run main.nf ... --sw_method ssearch36
+```
+The pipeline auto-disables Smith-Waterman in `auto` mode when neither
+is installed — it doesn't crash, just prints a warning and continues
+with MMseqs2 + tblastn only.
+
+### Ollama parameter-advisor timeout / connection refused
+
+**Symptom:** `LLM_PARAM_ADVISOR` hangs for minutes, or errors out with
+`Connection refused` to `http://localhost:11434`.
+
+**Cause:** Ollama server is not running, the Gemma model is not pulled,
+or the model is too large for your RAM.
+
+**Fix (pick one):**
+- Disable LLM auto-params entirely (recommended for students):
+  ```
+  --auto_params false --multi_profile false
+  ```
+- Or use Google's hosted API instead of local Ollama:
+  ```
+  export GOOGLE_API_KEY=your_api_key
+  # When GOOGLE_API_KEY is set, llm_param_advisor.py routes to the
+  # Google Cloud Gemma endpoint instead of localhost:11434.
+  ```
+- Or start Ollama and pre-pull the model before the run:
+  ```
+  ollama serve &
+  ollama pull gemma3:4b
+  ```
+
+### GPU out-of-memory (OOM) during STRUCTURAL_SEARCH / ESMFold
+
+**Symptom:** `CUDA out of memory. Tried to allocate X GiB`.
+
+**Cause:** Your GPU's VRAM is smaller than what ESMFold needs for the
+current query length. ESMFold scales quadratically in sequence length.
+
+**Fix:**
+- Lower `--structural_max_length` to 200 or 150 for <6 GB GPUs.
+- For the 4 GB GTX 1650 class, the safe ceiling is ~150 aa.
+- If your query is longer than the cap, disable structural search
+  entirely — synteny + Smith-Waterman is usually enough:
+  ```
+  --enable_structural_search false
+  ```
+
+### `-resume` reruns every process instead of caching
+
+**Symptom:** You expected `-resume` to skip completed processes, but
+every task runs again from scratch.
+
+**Cause:** Nextflow caches by content hash. Any of these invalidates
+the cache for a given process and all downstream processes:
+1. An input file's path changed, even if its content is identical.
+2. A parameter changed (including defaults, if you touched
+   `nextflow.config`).
+3. You moved `work/` or deleted specific subdirectories.
+4. You switched profiles (`-profile laptop_safe` vs. `-profile standard`).
+
+**How to diagnose:**
+```bash
+# Show the cache-lookup result for each task
+nextflow run main.nf ... -resume -dump-hashes
+```
+Look for `CACHE FOUND` vs. `not found`. The first `not found` tells
+you which process's inputs changed; everything downstream is forced
+to re-run.
+
+**Fix:** Revert the path/parameter change, or accept the re-run. Never
+delete `work/` if you need `-resume` to work — delete it only when you
+genuinely want a clean slate.
+
+### Conda env build fails on macOS (Augustus)
+
+**Symptom:** `conda env create -f environment.yml` fails while building
+Augustus on macOS.
+
+**Cause:** Augustus does not have a maintained conda recipe for Apple
+Silicon / recent macOS.
+
+**Fix:** Use the Docker container instead:
+```bash
+docker build -t synvoy .
+nextflow run main.nf ... -profile docker
+```
+Or use `-profile singularity` on Linux systems where Docker is not
+available.
+
+### Tracking down a specific process failure
+
+Nextflow keeps every task's working directory under `work/<hash>/`.
+To find the directory for a failed task:
+```bash
+# From the error output, note the hash (e.g. "Work dir: /path/work/a7/8f3...")
+ls /path/work/a7/8f3*/
+# Inspect:
+cat .command.log    # stderr from the process
+cat .command.sh     # the exact command that was run
+cat .command.out    # stdout from the process
+```
+This is usually the fastest way to understand why a single genome's
+task failed without tripping the whole pipeline.
+
+### Still stuck?
+
+1. Run with `--help` for a full parameter reference:
+   `nextflow run main.nf --help`
+2. See [QUICKSTART.md](QUICKSTART.md) for a <15 min end-to-end worked
+   example on small bee genomes.
+3. Open an issue at https://github.com/AndreasWz/SynVoy/issues with
+   your `nextflow run` command, the contents of
+   `synvoy_report.json`'s `staging_diagnostics` block, and the
+   relevant `work/*/.command.log`.

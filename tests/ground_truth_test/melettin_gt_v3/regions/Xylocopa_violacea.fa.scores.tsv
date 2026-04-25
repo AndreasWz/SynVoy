@@ -1,0 +1,2 @@
+region_rank	region_name	chrom	start	end	strand	score	quality_score	coverage_score	unique_genes	total_genes_expected	consistency	strand_consistency	p_value	goi_overlap	is_goi_anchor	confidence	selection_reason
+1	Reg1_G7_CMEDIUM_S0.47	scaffold-133	10185276	10213543	+	0.4672876009068119	0.49859480142499013	0.6363636363636364	7	11	0.11538461538461539	0.6981132075471698	0.014925373134328358	True	False	MEDIUM	score_floor

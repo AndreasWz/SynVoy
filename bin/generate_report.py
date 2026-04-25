@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 
 
@@ -316,6 +317,52 @@ def summarize_region_scores(score_files):
     }
 
 
+def _dir_diagnostics(dir_path, patterns, sample_size=5):
+    exists = os.path.isdir(dir_path)
+    entries = []
+    matches = []
+    if exists:
+        try:
+            entries = sorted(os.listdir(dir_path))
+        except OSError as exc:
+            entries = []
+            return {
+                "path": dir_path,
+                "exists": True,
+                "readable": False,
+                "error": str(exc),
+                "entry_count": 0,
+                "pattern_match_count": 0,
+                "patterns": list(patterns),
+                "sample_entries": [],
+                "sample_matches": [],
+            }
+        for pat in patterns:
+            matches.extend(glob.glob(os.path.join(dir_path, pat)))
+    return {
+        "path": dir_path,
+        "exists": exists,
+        "readable": exists,
+        "entry_count": len(entries),
+        "pattern_match_count": len(matches),
+        "patterns": list(patterns),
+        "sample_entries": entries[:sample_size],
+        "sample_matches": [os.path.basename(m) for m in matches[:sample_size]],
+    }
+
+
+def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
+    diagnostics = {
+        "results_dir": results_dir,
+        "results_dir_exists": os.path.isdir(results_dir),
+        "dirs": {name: _dir_diagnostics(path, patterns) for name, (path, patterns) in dir_patterns.items()},
+        "match_counts": dict(match_counts),
+    }
+    diagnostics["total_matches"] = sum(match_counts.values())
+    diagnostics["empty"] = diagnostics["total_matches"] == 0
+    return diagnostics
+
+
 def build_report(results_dir, qc_json=None, qc_policy=None):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
@@ -328,6 +375,22 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
     gff_files = glob.glob(os.path.join(regions_dir, "*.gff")) + glob.glob(os.path.join(regions_dir, "*.gff3"))
     score_files = glob.glob(os.path.join(scores_dir, "*.scores.tsv"))
     hit_files = glob.glob(os.path.join(hits_dir, "*.m8"))
+
+    staging_diagnostics = build_staging_diagnostics(
+        results_dir,
+        dir_patterns={
+            "regions_fasta": (regions_dir, ["*.faa", "*.fna"]),
+            "regions_gff": (regions_dir, ["*.gff", "*.gff3"]),
+            "scores": (scores_dir, ["*.scores.tsv"]),
+            "hits": (hits_dir, ["*.m8"]),
+        },
+        match_counts={
+            "fasta_files": len(fasta_files),
+            "gff_files": len(gff_files),
+            "score_files": len(score_files),
+            "hit_files": len(hit_files),
+        },
+    )
 
     genes_added_per_genome = summarize_fasta_outputs(fasta_files)
     hits_per_genome = summarize_hits(hit_files)
@@ -357,6 +420,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
         },
         "annotations": annotation_summary,
         "regions": region_summary,
+        "staging_diagnostics": staging_diagnostics,
         "summary": {
             "total_new_genes": sum(genes_added_per_genome.values()),
             "genomes_with_hits": len(hits_per_genome),
@@ -370,9 +434,31 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
             "goi_absent_genomes": annotation_summary["genomes_without_goi"],
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
+            "staging_empty": staging_diagnostics["empty"],
         },
     }
     return report
+
+
+def format_empty_staging_message(diagnostics):
+    lines = [
+        "ERROR: generate_report found zero annotation and zero region files under staged_results.",
+        "This usually means ITERATIVE_SEARCH produced no hits, or the Nextflow channel wiring is broken.",
+        f"  results_dir: {diagnostics['results_dir']} (exists={diagnostics['results_dir_exists']})",
+    ]
+    for name, info in diagnostics["dirs"].items():
+        sample = ", ".join(info["sample_entries"]) if info["sample_entries"] else "(none)"
+        lines.append(
+            f"  {name}: path={info['path']} exists={info['exists']} "
+            f"entries={info['entry_count']} matches={info['pattern_match_count']} "
+            f"patterns={info['patterns']} sample={sample}"
+        )
+    lines.append(
+        "Try: inspect work/<hash>/iterative_results/ for the ITERATIVE_SEARCH process; "
+        "check logs/iterative_search/ for zero-hit reports; "
+        "rerun with --allow-empty if zero-hit is expected."
+    )
+    return "\n".join(lines)
 
 
 def main():
@@ -381,12 +467,25 @@ def main():
     parser.add_argument("--qc_json", help="Path to QC summary JSON")
     parser.add_argument("--qc_policy", default="unspecified", help="QC handling policy used in the workflow")
     parser.add_argument("--output", required=True, help="Report JSON")
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
+    )
     args = parser.parse_args()
 
     report = build_report(args.results_dir, qc_json=args.qc_json, qc_policy=args.qc_policy)
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)
     print(f"Report generated: {args.output}")
+
+    if report["staging_diagnostics"]["empty"]:
+        msg = format_empty_staging_message(report["staging_diagnostics"])
+        if args.allow_empty:
+            print(f"Warning (--allow-empty set): {msg}", file=sys.stderr)
+        else:
+            print(msg, file=sys.stderr)
+            sys.exit(2)
 
 
 if __name__ == "__main__":
