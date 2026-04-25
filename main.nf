@@ -174,6 +174,11 @@ workflow {
         if (!has_query) {
             validationErrors << "Easy mode requires at least one of: --query_id, --query, or --query_seq"
         }
+        // All three supplied → ambiguous intent, refuse rather than silently pick one.
+        // Allow --query_id when it's inline-sequence syntax (legacy path) paired with --query_seq.
+        if (params.query_id && params.query && params.query_seq && !query_id_is_inline) {
+            validationErrors << "Easy mode: --query_id, --query, and --query_seq are all set — choose one. Priority order if you insist on two: --query_seq > --query > --query_id."
+        }
         if ((params.query_seq || query_id_is_inline) && !params.home_species) {
             validationErrors << "Easy mode with inline sequence requires --home_species (cannot auto-detect from raw sequence)"
         }
@@ -198,6 +203,25 @@ workflow {
             validationErrors << "Pro mode requires --query (path to query FASTA file)"
         } else if (!file(params.query).exists()) {
             validationErrors << "Query FASTA not found: ${params.query}"
+        } else {
+            // Pre-flight query length check — normalize_query.py enforces this
+            // at runtime, but surfacing it here saves a full pipeline startup.
+            def q_seq_chars = 0
+            try {
+                file(params.query).readLines().each { line ->
+                    if (!line.startsWith('>')) {
+                        q_seq_chars += line.replaceAll('\\s', '').length()
+                    }
+                }
+            } catch (Exception e) {
+                validationWarnings << "Could not pre-read --query for length check: ${e.message}"
+            }
+            if (q_seq_chars > 0 && q_seq_chars < 30) {
+                // Warn (not error): the file may be DNA that normalize_query.py
+                // will translate, turning a 30 nt file into a ~10 aa protein, or
+                // vice versa. normalize_query.py issues the hard stop.
+                validationWarnings << "Query FASTA '${params.query}' contains only ${q_seq_chars} non-header chars. If protein: below SynVoy's 30 aa minimum — searches will be noisy. If DNA: fine (will be translated). normalize_query.py will enforce the final check."
+            }
         }
         if (!params.home_genome) {
             validationErrors << "Pro mode requires --home_genome (path to home genome FASTA)"
@@ -206,9 +230,37 @@ workflow {
         }
         if (params.home_gff && !file(params.home_gff).exists()) {
             validationErrors << "Home GFF not found: ${params.home_gff}"
+        } else if (!params.home_gff && params.home_genome) {
+            validationWarnings << "No --home_gff provided. Flanking-gene extraction will fall back to Prodigal gene prediction on the home genome, which is substantially less reliable than a curated GFF. Supply --home_gff if you have one."
         }
         if (!params.target_genomes) {
             validationWarnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
+        } else {
+            // Resolve the glob / list / comma-separated string up front so
+            // students don't see a silent "0 target genomes" downstream.
+            def tg = params.target_genomes
+            def matches = []
+            try {
+                if (tg instanceof List) {
+                    tg.each { p -> if (file(p).exists()) matches << p }
+                } else if (tg.toString().contains(',')) {
+                    tg.toString().split(',').collect { it.trim() }.each { p ->
+                        if (file(p).exists()) matches << p
+                    }
+                } else {
+                    def resolved = file(tg.toString())
+                    if (resolved instanceof List) {
+                        matches = resolved
+                    } else if (resolved.exists()) {
+                        matches = [resolved]
+                    }
+                }
+            } catch (Exception e) {
+                validationWarnings << "Could not pre-resolve --target_genomes pattern '${tg}': ${e.message}"
+            }
+            if (matches.isEmpty()) {
+                validationErrors << "Target genomes pattern '${tg}' matched zero files. Check the path (relative paths are resolved against the Nextflow launch dir), the glob (quote it to prevent shell expansion: --target_genomes \"path/to/*.fa\"), and that the files exist."
+            }
         }
     }
 
@@ -844,7 +896,8 @@ workflow {
             clustering_inputs.map { tuple(it[0], it[1], it[2], it[5], it[6]) }, // [genome, payload, hit, genomes_dir, target_gff]
             clustering_inputs.map { tuple(it[3], it[4]) }, // [locus_id, synteny_bed]
             params.n_flanking_genes,
-            params.min_synteny_score
+            params.min_synteny_score,
+            species_map_ch
         )
         CLUSTER_REGIONS.out.bed.count().view { count ->
             "${c_green}[OK  ]${c_reset} ${c_white}${'CLUSTER_REGIONS'.padRight(24)}${c_reset} generated ${count} clustered region set(s)"

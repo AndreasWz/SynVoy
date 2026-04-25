@@ -9,24 +9,27 @@ process CLUSTER_REGIONS {
     tuple val(locus_id), path(synteny_bed)
     val flanking_count
     val min_score
+    path species_map
 
     output:
     tuple val(genome_name), val(payload), val(locus_id), path("regions/${genome_name}.regions.bed"), emit: bed
     tuple val(genome_name), path("regions/${genome_name}.scores.tsv"), emit: scores
 
     script:
+    def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     """
     mkdir -p regions
-    
+
     # Resolve genome file
     target_genome=\$(find -L $genomes_dir -name "${genome_name}*" -type f | head -n 1)
-    
+
     cluster_grs.py \\
         --hits $hits_file \\
         --target_gff $target_gff \\
         --synteny_bed $synteny_bed \\
         --flanking_count $flanking_count \\
         --genome "\$target_genome" \\
+        --genome_name "${genome_name}" \\
         --output regions/${genome_name}.regions.bed \\
         --scores_output regions/${genome_name}.scores.tsv \\
         --min_score $min_score \\
@@ -39,6 +42,7 @@ process CLUSTER_REGIONS {
         --adaptive_score_floor_frac ${params.adaptive_score_floor_frac} \\
         --adaptive_score_floor_abs ${params.adaptive_score_floor_abs} \\
         --adaptive_max_regions ${params.adaptive_max_regions} \\
-        --adaptive_unique_gene_floor ${params.adaptive_unique_gene_floor}
+        --adaptive_unique_gene_floor ${params.adaptive_unique_gene_floor} \\
+        ${species_arg}
     """
 }

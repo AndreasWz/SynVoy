@@ -160,9 +160,17 @@ The maximum k-mer-based sequence similarity (as a percentage) that a flanking ge
 The maximum distance in base pairs from the GOI center that the flanking gene extractor will walk to find synteny anchors. When set to 0 (default), there is no distance limit — the extractor walks as far as needed along the chromosome to collect `n_flanking_genes` anchors per side. This can be problematic when the GOI sits adjacent to a large tandem gene array: one direction fills up entirely with GOI-similar genes (which are filtered out by `max_flanking_goi_similarity`), forcing the extractor to walk far into a distant genomic region to find enough non-similar anchors. These distant anchors may belong to a different synteny block entirely, confusing downstream analysis. Setting a distance cap (e.g., 500,000 bp) prevents this pathological case. If fewer than `n_flanking_genes` anchors are found within the distance window, the pipeline proceeds with whatever was found. This parameter is automatically adjusted by the LLM estimator for known gene family cases.
 
 ### `expand_goi_similar`
-**Type:** Boolean | **Default:** `true`
+**Type:** Boolean | **Default:** `false` (was `true` until 2026-04-25)
 
-When enabled, genes near the GOI that are similar to it (detected during flanking gene extraction) are not just excluded as anchors — they are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These neighbor queries are searched in all target genomes alongside the original GOI and included in the phylogenetic tree, enabling resolution of paralogs versus orthologs. This is essential for gene families and tandem arrays: if the GOI is Yellow-e3 and its neighbor is an MRJP gene, both are searched across all targets. The resulting phylogenetic tree shows which target hits are orthologous to the GOI versus orthologous to the neighbor, resolving a fundamentally ambiguous situation that single-query analysis cannot handle. The similarity threshold for detecting GOI-like neighbors reuses `max_flanking_goi_similarity`. Disable this only if you are certain your GOI has no nearby paralogs, or if you want to minimize computational cost.
+When enabled, genes near the GOI that are similar to it (detected during flanking gene extraction) are not just excluded as anchors — they are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These neighbor queries are searched in all target genomes alongside the original GOI and included in the phylogenetic tree.
+
+**Why default changed to `false`:** for paralog-rich gene families (e.g. LY6 with ~15 chr8 paralogs) the NEIGHBOR queries flood the per-target m8 hits with paralog matches. Every cluster picks up a GOI-overlap bonus from at least one paralog, so the bonus loses its discriminating power. The true ortholog scaffold drops out of `adaptive_max_regions=6`. Empirical: LY6 ground-truth scaffold recall went from **8/9 (off)** to **0/9 (on)**. Melittin (single-copy gene, no nearby paralogs) is unaffected either way.
+
+**When to turn it on:** you have a single-copy GOI sitting next to a small known tandem array, and you want the paralogs in the same tree to disambiguate. Examples: a Yellow gene with one Yellow-e3 paralog two genes away, a venom peptide flanked by 1–2 tandem duplicates. In these narrow cases the bonus does help.
+
+**When to leave it off:** any gene-family query (LY6, TP53, MRJP, 3FTx, defensins) — the paralog flood will swamp the synteny signal. The phylogenetic tree downstream still resolves paralogs from the iterative search's existing GOI-similarity classification; you don't need this flag to get a paralog-aware tree.
+
+The similarity threshold for detecting GOI-like neighbors reuses `max_flanking_goi_similarity`.
 
 ### `expand_goi_similar_distance`
 **Type:** Integer (bp) | **Default:** `300000` | **Range:** 10,000–2,000,000

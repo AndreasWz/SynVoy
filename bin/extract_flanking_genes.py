@@ -651,6 +651,7 @@ def main():
                 g for g in chrom_genes
                 if g['start'] < region['end'] and g['end'] > region['start']
             ]
+            overlap_added_count = 0
             for g in overlap_genes:
                 if g not in extracted_genes:
                     if goi_seqs and _is_goi_similar(g):
@@ -658,9 +659,17 @@ def main():
                         print(f"  [overlap-filter] NOT re-injecting GOI-similar overlap gene: {name}")
                         continue
                     extracted_genes.append(g)
-            
-            # If no overlap genes found, inject a GOI pseudo-gene from the region
-            if not overlap_genes and region['chrom'] in genome_seqs:
+                    overlap_added_count += 1
+                else:
+                    # Already in extracted_genes (e.g. it was a flanking neighbor).
+                    overlap_added_count += 1
+
+            # Inject a GOI pseudo-gene either when no overlap genes exist OR
+            # when every overlap gene was filtered out as GOI-similar (this is
+            # the home-locus case: the GOI itself looks like the GOI). Without
+            # this, the home BED ends up with only flanking anchors and the
+            # synteny plot's home track has no GOI marker.
+            if overlap_added_count == 0 and region['chrom'] in genome_seqs:
                 goi_start = region['start']
                 goi_end = region['end']
                 goi_dna = genome_seqs[region['chrom']][goi_start:goi_end]
