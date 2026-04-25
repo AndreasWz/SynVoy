@@ -1041,7 +1041,14 @@ def main():
     try:
         run_safe_command(["which", "esearch"])
     except Exception:
-        print("ERROR: NCBI E-utilities (esearch) not found!", file=sys.stderr)
+        print(
+            "ERROR: NCBI E-utilities (esearch) not found on PATH. SynVoy "
+            "uses entrez-direct to look up taxonomy and query the assembly "
+            "database. Try: activate the SynVoy conda environment "
+            "(`conda activate synvoy`), or install with "
+            "`conda install -c bioconda entrez-direct`.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     metadata_cache = {}
@@ -1091,7 +1098,19 @@ def main():
         assemblies = apply_bad_quality_policy(assemblies, args)
 
         if not assemblies:
-            print("ERROR: No acceptable assemblies found for specified species", file=sys.stderr)
+            print(
+                f"ERROR: No acceptable assemblies found for target species "
+                f"'{args.target_species}'. Either every species name failed "
+                f"taxonomy lookup, or all candidate assemblies were rejected "
+                f"by the low-quality policy ('{args.bad_quality_policy}', "
+                f"N50 >= {getattr(args, 'bad_min_n50', 'n/a')}). "
+                f"Try: (1) check each species name against NCBI Taxonomy; "
+                f"(2) relax the quality policy with "
+                f"--bad_quality_policy keep; "
+                f"(3) switch to Pro Mode and pass --target_genomes with "
+                f"local FASTA files.",
+                file=sys.stderr,
+            )
             output_path = Path(args.outdir)
             output_path.mkdir(parents=True, exist_ok=True)
             (output_path / "genomes_manifest.txt").touch()
@@ -1128,7 +1147,18 @@ def main():
     if not species_taxid:
         species_taxid = get_taxid_from_name(genus)
     if not species_taxid:
-        print(f"ERROR: Could not find taxonomy ID for '{args.home_species}'", file=sys.stderr)
+        print(
+            f"ERROR: NCBI Taxonomy has no entry for '{args.home_species}' "
+            f"(also tried genus '{genus}'). "
+            f"Try: (1) verify spelling at "
+            f"https://www.ncbi.nlm.nih.gov/taxonomy/ (search for "
+            f"'{args.home_species}'); "
+            f"(2) use the full scientific name, not a common name "
+            f"('Apis mellifera', not 'honey bee'); "
+            f"(3) specify target species directly via --target_species "
+            f"\"Species1,Species2\" to bypass home-species lookup.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(f"  Species TaxID: {species_taxid}")
 
@@ -1140,7 +1170,16 @@ def main():
     search_levels.extend(parent_ranks)
 
     if not search_levels:
-        print("ERROR: Could not determine taxonomy levels", file=sys.stderr)
+        print(
+            f"ERROR: Could not determine taxonomy search levels for "
+            f"'{args.home_species}' (TaxID {species_taxid}). The NCBI "
+            f"taxonomy lineage fetch returned no parent ranks, which "
+            f"usually means a transient NCBI error. "
+            f"Try: (1) retry in a minute; "
+            f"(2) specify target species directly via --target_species to "
+            f"skip the taxonomy walk.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(f"  Search levels: {', '.join(name for name, _ in search_levels)}")
 

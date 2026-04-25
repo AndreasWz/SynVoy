@@ -765,7 +765,17 @@ def main():
             selected_entry["species"] = actual_species
     
     if not accession:
-        print(f"ERROR: Could not find any genome for '{args.species}' or its relatives", file=sys.stderr)
+        print(
+            f"ERROR: NCBI has no assembly for species '{args.species}' or any "
+            f"of its closest relatives reachable via taxonomy walk. "
+            f"Try: (1) check the species name matches NCBI's scientific name "
+            f"exactly (e.g. 'Apis mellifera', not 'honey bee'); "
+            f"(2) verify on https://www.ncbi.nlm.nih.gov/datasets/genome/ "
+            f"that an assembly exists; "
+            f"(3) switch to Pro Mode and pass your own --home_genome FASTA "
+            f"directly, bypassing NCBI download entirely.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     
     surrogate = actual_species.lower().strip() != args.species.lower().strip()
@@ -813,7 +823,17 @@ def main():
         genome_path, gff_path = download_genome_with_annotation(accession, args.outdir)
 
     if not genome_path:
-        print("ERROR: Failed to download genome", file=sys.stderr)
+        print(
+            f"ERROR: Download of home genome {accession} for '{args.species}' "
+            f"failed after all retries. See the per-attempt log above for the "
+            f"underlying cause (common: network timeout, NCBI rate-limit, "
+            f"insufficient disk space in {args.outdir}). "
+            f"Try: (1) retry in a minute (NCBI sometimes throttles anonymous "
+            f"traffic); (2) set NCBI_API_KEY in your env to raise the rate "
+            f"limit; (3) switch to Pro Mode and pass --home_genome with a "
+            f"locally downloaded FASTA.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     
     print(f"\n{'='*60}")

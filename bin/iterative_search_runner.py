@@ -4692,16 +4692,39 @@ def main():
     # INPUT VALIDATION
     # 1. Validate required files exist
     if not os.path.exists(args.initial_db):
-        logger.error(f"Initial database file not found: {args.initial_db}")
+        logger.error(
+            f"Initial database file not found: {args.initial_db}. "
+            f"This FASTA is produced by EXTRACT_FLANKING_GENES and contains "
+            f"the flanking-gene proteins used as synteny parents. "
+            f"Try: (1) rerun without -resume to regenerate it; "
+            f"(2) check the Nextflow work dir for a failed EXTRACT_FLANKING_GENES "
+            f"process; (3) ensure the home GFF has protein-coding genes "
+            f"flanking the GOI."
+        )
         sys.exit(1)
-    
+
     if not os.path.exists(args.sorted_genomes):
-        logger.error(f"Sorted genomes file not found: {args.sorted_genomes}")
+        logger.error(
+            f"Sorted genomes file not found: {args.sorted_genomes}. "
+            f"This is the ranked target-genome list produced by "
+            f"RANK_BY_SIMILARITY. "
+            f"Try: rerun without -resume; if it still fails, check the "
+            f"upstream RANK_BY_SIMILARITY process logs in Nextflow's work/ dir."
+        )
         sys.exit(1)
-    
+
     # 2. Validate initial_db is not empty
     if os.path.getsize(args.initial_db) == 0:
-        logger.error("Initial database file is empty")
+        logger.error(
+            f"Initial database file is empty: {args.initial_db}. "
+            f"EXTRACT_FLANKING_GENES produced a zero-byte FASTA, which means "
+            f"no flanking genes were found. "
+            f"Try: (1) verify the home GFF has 'gene' and 'CDS' features "
+            f"around the GOI coordinates; "
+            f"(2) increase --n_flanking_genes; "
+            f"(3) check for GOI-vs-flanking similarity filtering being too "
+            f"aggressive (see EXTRACT_FLANKING_GENES logs)."
+        )
         sys.exit(1)
     
     # 3. Validate parameters are in valid ranges

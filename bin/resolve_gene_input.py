@@ -70,9 +70,30 @@ def fetch_uniprot(uniprot_id, output_dir):
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            print(f"  ERROR: UniProt ID '{uniprot_id}' not found", file=sys.stderr)
+            print(
+                f"  ERROR: UniProt ID '{uniprot_id}' not found (HTTP 404). "
+                f"Try: check for typos; note UniProt IDs are case-sensitive "
+                f"and include a trailing version (e.g. 'P01501' not "
+                f"'p01501'). If you meant an NCBI accession, it should start "
+                f"with XP_ / NP_ / YP_ / WP_.",
+                file=sys.stderr,
+            )
             return None
-        raise
+        print(
+            f"  ERROR: UniProt lookup for '{uniprot_id}' returned HTTP {e.code}. "
+            f"Try: retry in a minute (may be rate-limited); if it persists, "
+            f"check https://status.uniprot.org/.",
+            file=sys.stderr,
+        )
+        return None
+    except urllib.error.URLError as e:
+        print(
+            f"  ERROR: Network error contacting rest.uniprot.org: {e.reason}. "
+            f"Try: check your internet connection and proxy settings. "
+            f"To bypass UniProt, supply a local FASTA file instead of an ID.",
+            file=sys.stderr,
+        )
+        return None
     
     # Extract species
     organism = data.get('organism', {})
@@ -96,12 +117,31 @@ def fetch_uniprot(uniprot_id, output_dir):
     try:
         with urllib.request.urlopen(fasta_url, timeout=30) as resp:
             fasta_content = resp.read().decode()
-    except urllib.error.HTTPError:
-        print(f"  ERROR: Could not fetch FASTA for '{uniprot_id}'", file=sys.stderr)
+    except urllib.error.HTTPError as e:
+        print(
+            f"  ERROR: Could not fetch FASTA for '{uniprot_id}' (HTTP {e.code}). "
+            f"The metadata lookup succeeded, so the ID exists — the FASTA "
+            f"endpoint may be temporarily down. Try: retry in a minute, or "
+            f"manually download from {fasta_url} and pass it via --input.",
+            file=sys.stderr,
+        )
         return None
-    
+    except urllib.error.URLError as e:
+        print(
+            f"  ERROR: Network error fetching FASTA for '{uniprot_id}': {e.reason}. "
+            f"Try: check your internet connection.",
+            file=sys.stderr,
+        )
+        return None
+
     if not fasta_content.strip():
-        print(f"  ERROR: Empty FASTA for '{uniprot_id}'", file=sys.stderr)
+        print(
+            f"  ERROR: UniProt returned an empty FASTA body for '{uniprot_id}'. "
+            f"This is unusual — the entry may be obsolete. Try: verify at "
+            f"https://www.uniprot.org/uniprotkb/{uniprot_id} and use the "
+            f"replacement accession if one is listed.",
+            file=sys.stderr,
+        )
         return None
     
     # Write FASTA
@@ -158,7 +198,16 @@ def search_uniprot(gene_name, species, output_dir):
             pass
             
     if not results:
-        print(f"  ERROR: No results found for gene '{gene_name}' in '{species}'", file=sys.stderr)
+        print(
+            f"  ERROR: UniProt has no entry for gene '{gene_name}' in species "
+            f"'{species}' (tried Swiss-Prot + TrEMBL). "
+            f"Try: (1) check species spelling matches UniProt's organism name "
+            f"(e.g. 'Apis mellifera', not 'honey bee'); "
+            f"(2) try an alternative gene symbol or alias; "
+            f"(3) pass a specific UniProt accession via --input P12345 to "
+            f"skip the symbol search entirely.",
+            file=sys.stderr,
+        )
         return None
         
     # Take first hit
@@ -182,12 +231,45 @@ def fetch_ncbi(accession, output_dir):
             capture_output=True, text=True, check=True, timeout=30
         )
         fasta_content = result.stdout.strip()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"  ERROR: Could not fetch FASTA from NCBI: {e}", file=sys.stderr)
+    except FileNotFoundError:
+        print(
+            f"  ERROR: 'efetch' not found on PATH. SynVoy uses NCBI "
+            f"entrez-direct to fetch protein accessions. "
+            f"Try: activate the SynVoy conda environment "
+            f"(`conda activate synvoy`) which ships entrez-direct, or "
+            f"install it with `conda install -c bioconda entrez-direct`.",
+            file=sys.stderr,
+        )
         return None
-    
+    except subprocess.TimeoutExpired:
+        print(
+            f"  ERROR: NCBI efetch timed out for '{accession}' after 30s. "
+            f"Try: retry in a minute; NCBI rate-limits anonymous requests. "
+            f"Setting NCBI_API_KEY in your env raises the limit to 10/s.",
+            file=sys.stderr,
+        )
+        return None
+    except subprocess.CalledProcessError as e:
+        err_msg = (e.stderr or '').strip()
+        print(
+            f"  ERROR: NCBI efetch failed for '{accession}'"
+            f"{': ' + err_msg if err_msg else ''}. "
+            f"Try: (1) verify the accession at "
+            f"https://www.ncbi.nlm.nih.gov/protein/{accession}; "
+            f"(2) include the version suffix (e.g. '.1' or '.2'); "
+            f"(3) retry if NCBI is rate-limiting.",
+            file=sys.stderr,
+        )
+        return None
+
     if not fasta_content:
-        print(f"  ERROR: Empty FASTA for '{accession}'", file=sys.stderr)
+        print(
+            f"  ERROR: NCBI returned an empty FASTA for '{accession}'. "
+            f"The accession exists but has no protein sequence payload. "
+            f"Try: the entry may have been withdrawn or replaced; check "
+            f"https://www.ncbi.nlm.nih.gov/protein/{accession}.",
+            file=sys.stderr,
+        )
         return None
     
     # Fetch metadata (organism name)
@@ -323,14 +405,31 @@ Examples:
     elif input_type == 'symbol':
         # If it's a symbol, we need a species to search
         if not args.species:
-            # Fallback: Maybe it WAS a file but missing?
-            print(f"ERROR: Input '{clean_input}' is not a file and no species provided for search.", file=sys.stderr)
+            print(
+                f"ERROR: Input '{clean_input}' does not match any known pattern "
+                f"(UniProt ID, NCBI accession, or existing FASTA file), so it "
+                f"was treated as a gene symbol — but a gene symbol requires "
+                f"--species to search UniProt. "
+                f"Try: (1) if it is a file path, check the path exists "
+                f"(`ls {clean_input}`); "
+                f"(2) if it is a gene symbol, re-run with `--species \"<Scientific Name>\"`; "
+                f"(3) if it is an accession, verify the format (UniProt: "
+                f"P01501; NCBI RefSeq: XP_006565763.1).",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        
+
         result = search_uniprot(clean_input, args.species, args.outdir)
-    
+
     if result is None:
-        print("ERROR: Failed to resolve gene input", file=sys.stderr)
+        print(
+            f"ERROR: Failed to resolve gene input '{args.input}' "
+            f"(detected as: {input_type}). See the specific error above for "
+            f"what went wrong. Try: supply a local FASTA file with "
+            f"`--input /path/to/query.fasta --species \"<Name>\"` to bypass "
+            f"the online lookup entirely.",
+            file=sys.stderr,
+        )
         sys.exit(1)
     
     # Override species if provided on command line

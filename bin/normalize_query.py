@@ -73,7 +73,13 @@ def main():
 
     records = list(parse_fasta(args.input))
     if not records:
-        print("ERROR: No sequences found in query FASTA", file=sys.stderr)
+        print(
+            f"ERROR: No sequences found in query FASTA '{args.input}'. "
+            f"The file is either empty or does not contain a valid '>header' "
+            f"line. Try: verify the file with `head -2 {args.input}` and "
+            f"ensure the first non-empty line starts with '>'.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if len(records) > 1:
@@ -85,7 +91,16 @@ def main():
         print(f"[normalize_query] Detected nucleotide query: {clean_id}", file=sys.stderr)
         prot = translate_best_orf(seq)
         if not prot:
-            print("ERROR: Could not translate nucleotide query into a protein ORF", file=sys.stderr)
+            print(
+                f"ERROR: Could not translate nucleotide query '{clean_id}' "
+                f"(length {len(seq)} nt) into a protein ORF. Every 6-frame "
+                f"translation was empty, which usually means the sequence is "
+                f"shorter than 3 nt or consists only of stop codons. "
+                f"Try: supply the coding sequence (CDS) of your gene instead "
+                f"of a partial genomic region, or translate it manually and "
+                f"pass the protein FASTA directly.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         final_seq = prot
         print(f"[normalize_query] Translated query length: {len(prot)} aa", file=sys.stderr)

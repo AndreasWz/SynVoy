@@ -1,5 +1,8 @@
 # SynVoy - Synteny Voyager
 
+[![test](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml/badge.svg)](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 *Navigating synteny. Discovering orthology.*  
 *Mapping evolutionary pathways through syntenic navigation.*
 
@@ -142,6 +145,12 @@ nextflow run main.nf -profile singularity --query_id Q16553 --outdir results
 ---
 
 ## Quick Start
+
+> **New here?** Follow [docs/QUICKSTART.md](docs/QUICKSTART.md) for a
+> ~20–30 min end-to-end walkthrough — it runs melittin in Easy Mode
+> against NCBI-fetched bee genomes, so you don't need any local data.
+> Covers expected output shape and troubleshooting. If you already
+> know Nextflow, the two examples below are enough.
 
 ### Easy Mode (automated genome retrieval)
 
