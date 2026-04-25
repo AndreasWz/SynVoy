@@ -11,6 +11,11 @@ from Bio.Seq import Seq
 sys.path.append(os.path.abspath("bin"))
 from iterative_search_runner import batch_rbh_check
 
+
+@unittest.skipUnless(
+    shutil.which("mmseqs"),
+    "mmseqs2 binary not on PATH (CI installs only Python deps; full env via conda)",
+)
 class TestRBH(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
