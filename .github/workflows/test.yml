@@ -28,7 +28,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
+          # No `cache: pip` — that requires a requirements.txt/pyproject.toml
+          # to derive a cache key, and we install inline (3 small wheels)
+          # below. Pip caching is not worth the friction for ~10 s of installs.
 
       - name: Install test dependencies
         run: |
