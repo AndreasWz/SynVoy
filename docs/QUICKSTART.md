@@ -19,14 +19,14 @@ Before starting:
 
 1. **A working SynVoy installation.** See the
    [README](../README.md) for conda setup, and come back here.
-2. **Java 17+** and **Nextflow 23.04+** on PATH:
+2. **Java 17+** and **Nextflow 25.10+** on PATH:
    ```
    java -version   # expect 17 or higher
-   nextflow -v     # expect 23.04 or higher
+   nextflow -v     # expect 25.10 or higher; 26.04 is supported
    ```
 3. **The SynVoy conda environment activated:**
    ```
-   conda activate synvoy
+   conda activate synvoy_env
    ```
 4. **(Optional but recommended) an NCBI API key** to raise the download
    rate limit from 3/s to 10/s:
@@ -146,8 +146,8 @@ tooltips show gene names and identities.
   see [USAGE.md § 1](USAGE.md#pro-mode). Pro Mode is reproducible
   (no taxonomy walk) and is what the paper's benchmarks use.
 - **Enable the LLM parameter advisor** for harder queries:
-  `--auto_params true` (requires Ollama + `gemma3:4b` pulled locally,
-  or `GOOGLE_API_KEY` set for the hosted Gemma endpoint).
+  `--auto_params true` (optionally use Ollama with `gemma4:e4b`
+  pulled locally, or set `GOOGLE_API_KEY` for the hosted fallback).
 
 ## Troubleshooting
 
@@ -159,5 +159,6 @@ documented in [USAGE.md § 8](USAGE.md#8-troubleshooting), especially:
   [USAGE.md § Easy Mode fails to download genomes](USAGE.md#easy-mode-fails-to-download-genomes).
 - Pipeline finishes with `0 annotations` →
   [USAGE.md § Pipeline finishes with ...](USAGE.md#pipeline-finishes-with-synvoy_reportjson-showing-0-annotations--0-regions).
-- `parasail` import error → install parasail or use ssearch36.
+- `parasail` import error → re-create the `synvoy_env` environment;
+  Python must be `<3.13` because `ete3` is not Python 3.13-ready yet.
 - `-resume` reruns everything → check that paths and params didn't change.

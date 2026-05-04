@@ -100,7 +100,7 @@ Append a profile with `-profile <name>` to control how resources are allocated. 
 
 | Profile | Executor | Environment | Description |
 |---|---|---|---|
-| `standard` | local | Conda | Default. 2 CPUs / 6 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
+| `standard` | local | Conda | Default. 2 CPUs / 10 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
 | `laptop_safe` | local | Conda | Conservative. 1 CPU, single task at a time, high memory ceiling (12 GB) but strict fork limits. Prevents system freezes on machines with limited RAM. |
 | `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
@@ -123,8 +123,8 @@ The pipeline proceeds through five phases:
 2. **Locate GOI:** The query protein is aligned against the home genome using tblastn and MMseqs2 to establish coordinates.
 3. **Annotate GOI Exons:** If a GFF is available, the GOI is matched to an annotated gene and individual CDS/exons are extracted. Otherwise, exon boundaries are inferred from alignment hits.
 4. **Split Loci:** If the GOI maps to multiple genomic locations (e.g. tandem duplicates), each locus is processed independently.
-5. **Extract Flanking Genes:** The *n* genes upstream and downstream of each locus are identified from GFF or Prodigal prediction. Flanking candidates that are similar to the GOI (above `--max_flanking_goi_similarity`) are excluded to avoid inflating synteny scores. A `--max_flanking_distance` cap can prevent walking into distant gene deserts.
-6. **Expand GOI-Similar Neighbors** *(optional, on by default)*: When `--expand_goi_similar` is enabled, genes near the GOI that resemble it (e.g. tandem duplicates like MRJPs near Yellow-e3) are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These are searched in all target genomes alongside the original GOI, and included in the phylogenetic tree — enabling resolution of paralogs vs. orthologs.
+5. **Extract Flanking Genes:** The *n* genes upstream and downstream of each locus are identified from GFF or Augustus/Prodigal prediction. Flanking candidates that are similar to the GOI (above `--max_flanking_goi_similarity`) are excluded to avoid inflating synteny scores. A `--max_flanking_distance` cap can prevent walking into distant gene deserts.
+6. **Expand GOI-Similar Neighbors** *(optional, off by default)*: When `--expand_goi_similar` is enabled, genes near the GOI that resemble it (e.g. tandem duplicates like MRJPs near Yellow-e3) are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These are searched in all target genomes alongside the original GOI, and included in the phylogenetic tree — enabling resolution of paralogs vs. orthologs.
 7. **Borrow Annotations:** When the home genome lacks a GFF, annotations can be borrowed from annotated target genomes via reciprocal best hits.
 
 ### Phase 2 — Phylogenetic Ordering & Iterative Search
@@ -161,7 +161,7 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 | `--min_flanking_size` | `500` | Minimum size (bp) for a flanking gene to be included |
 | `--max_flanking_goi_similarity` | `35.0` | Exclude flanking genes with k-mer similarity (%) to the GOI above this threshold. Prevents GOI paralogs (e.g. tandem duplicates) from being used as synteny anchors. Set to `100` to disable. |
 | `--max_flanking_distance` | `0` | Max distance (bp) from GOI center to walk for flanking genes. `0` = unlimited. Useful when the GOI neighbours a large tandem array. |
-| `--expand_goi_similar` | `true` | Emit GOI-similar flanking genes as additional GOI queries (`GOI_NEIGHBOR_` prefix). Enables paralog discovery and phylogenetic resolution across genomes. |
+| `--expand_goi_similar` | `false` | Emit GOI-similar flanking genes as additional GOI queries (`GOI_NEIGHBOR_` prefix). Enables paralog discovery and phylogenetic resolution across genomes, but can flood paralog-rich searches; opt in deliberately. |
 | `--expand_goi_similar_distance` | `300000` | Max distance (bp) from GOI to search for GOI-similar neighbor genes |
 | `--exon_level_search` | `true` | Search at exon level for better divergent-gene detection |
 | `--cluster_distance` | `150000` | Max gap (bp) between flanking-gene hits to merge into one syntenic block |
@@ -212,7 +212,7 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--mmseqs_verbosity` | `1` | MMseqs2 log verbosity (0 = silent) |
 | `--min_gene_identity` | `30` | Minimum identity (%) for flanking-gene MMseqs2 matches |
 
-### Annotation & Prodigal
+### Annotation & Gene Prediction
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -228,6 +228,8 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--pred_flank_window` | `50000` | Prodigal prediction window around locus |
 | `--pred_keep_pct` | `0.10` | Fraction of Prodigal predictions to keep |
 | `--prodigal_full_genome_fallback` | `false` | Run Prodigal on entire genome if windowed prediction fails |
+| `--gene_predictor` | `auto` | Gene predictor for unannotated genomes: `auto`, `augustus`, or `prodigal` |
+| `--augustus_species` | `fly` | Augustus species model used when Augustus is selected |
 
 ### Gene Model Classification
 
@@ -443,8 +445,9 @@ nextflow clean -f
 **Cause:** Conda solver is slow.
 
 **Fix:**
-- Install [Mamba](https://github.com/mamba-org/mamba) — Nextflow will use it automatically (`conda.useMamba = true` is set in `nextflow.config`)
+- Install [Mamba](https://github.com/mamba-org/mamba) and create the environment with `mamba env create -f environment.yml`
 - Or increase the timeout: the config already sets `conda.createTimeout = '1 h'`
+- Re-create the environment if Python 3.13 was selected by an older environment file; SynVoy pins Python `<3.13` because `ete3` still imports the removed `cgi` module.
 
 ### Easy Mode fails to download genomes
 
@@ -473,10 +476,40 @@ nextflow clean -f
 java -version
 
 # If missing, install via Conda
-conda install -c conda-forge openjdk=17
+mamba install -n synvoy_env -c conda-forge 'openjdk>=17'
 
 # Or via system package manager
 sudo apt install default-jdk   # Debian/Ubuntu
+```
+
+Current Nextflow releases require Java 17 or newer. The SynVoy Conda
+environment includes OpenJDK, so `mamba run -n synvoy_env nextflow ...`
+is a good fallback when your login shell does not have Java on `PATH`.
+
+### `ete3` / `cgi` import error
+
+**Symptom:** Python fails with `ModuleNotFoundError: No module named 'cgi'`
+while importing `ete3`.
+
+**Cause:** The environment was solved with Python 3.13. `cgi` was removed
+from the Python standard library, and current `ete3` still imports it.
+
+**Fix:**
+```bash
+mamba env remove -n synvoy_env
+mamba env create -f environment.yml
+conda activate synvoy_env
+python -V   # should be >=3.10 and <3.13
+```
+
+### `iqtree2` not found
+
+Some current IQ-TREE packages install the binary as `iqtree` instead of
+`iqtree2`. SynVoy tries `iqtree2` first and falls back to `iqtree`, so this
+is only a problem if neither command exists.
+
+```bash
+iqtree2 --version || iqtree --version
 ```
 
 ### Pipeline finishes with `synvoy_report.json` showing 0 annotations / 0 regions
@@ -555,7 +588,7 @@ or the model is too large for your RAM.
 - Or start Ollama and pre-pull the model before the run:
   ```
   ollama serve &
-  ollama pull gemma3:4b
+  ollama pull gemma4:e4b
   ```
 
 ### GPU out-of-memory (OOM) during STRUCTURAL_SEARCH / ESMFold

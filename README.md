@@ -52,7 +52,7 @@ Standard sequence-similarity searches often fail when orthologs are highly diver
 | Requirement | Notes |
 |---|---|
 | **OS** | Linux (tested) or macOS |
-| **Java** | 11 or 17 (required by Nextflow) |
+| **Java** | 17 or newer (required by current Nextflow; the Conda env includes OpenJDK) |
 | **Conda or Mamba** | [Miniforge](https://github.com/conda-forge/miniforge) recommended. Miniconda/Anaconda also work. |
 | **Git** | To clone the repository |
 | **Internet** | Easy Mode needs access to NCBI/UniProt for genome downloads |
@@ -86,16 +86,16 @@ export PATH="$HOME/bin:$PATH"
 # (add the line above to ~/.bashrc to make it permanent)
 ```
 
-Nextflow requires **Java ≥11**. Verify with `java -version`. If missing, install via your system package manager (`sudo apt install default-jdk` on Debian/Ubuntu) or let Conda pull it in with the environment below.
+Current Nextflow requires **Java ≥17**. Verify with `java -version`. If missing, let Conda pull OpenJDK in with the environment below, or install Java 17+ via your system package manager.
 
 ### 3. Set Up the Conda Environment
 
 The environment bundles Nextflow, all bioinformatics tools (MMseqs2, BLAST, Prodigal, miniprot, MAFFT, IQ-TREE), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
 
 ```bash
-# Create the environment (use mamba for speed if available)
-conda env create -f environment.yml
-# or: mamba env create -f environment.yml
+# Create the environment (mamba is faster if available)
+mamba env create -f environment.yml
+# or: conda env create -f environment.yml
 
 # Activate it
 conda activate synvoy_env
@@ -108,13 +108,17 @@ conda activate synvoy_env
 ```bash
 # All of these should print version info without errors:
 nextflow -version
+java -version
 mmseqs version
 tblastn -version
 miniprot --version
 prodigal -v
 mafft --version
-iqtree2 --version
-python -c "import Bio; import plotly; import ete3; import taxopy; import parasail; print('Python deps OK')"
+augustus --version
+iqtree2 --version || iqtree --version
+datasets version
+esearch -version
+python -c "import Bio; import plotly; import ete3; import taxopy; import parasail; import psutil; print('Python deps OK')"
 ```
 
 If any tool is missing, re-create the environment:
@@ -133,13 +137,13 @@ If you prefer containers over Conda:
 docker build -t synvoy-local:latest .
 
 # Run with the docker profile (no Conda needed)
-nextflow run main.nf -profile docker --query_id Q16553 --outdir results
+nextflow run main.nf -profile docker --mode easy --query_id Q16553 --outdir results
 ```
 
 For Singularity (common on HPC):
 
 ```bash
-nextflow run main.nf -profile singularity --query_id Q16553 --outdir results
+nextflow run main.nf -profile singularity --mode easy --query_id Q16553 --outdir results
 ```
 
 ---
