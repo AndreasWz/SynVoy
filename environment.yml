@@ -5,8 +5,12 @@ channels:
   - defaults
 dependencies:
   # Core
-  - python >=3.8
-  - nextflow >=22.10.1
+  # Python 3.13 removed stdlib cgi, which ete3 still imports.
+  - python >=3.10,<3.13
+  # Nextflow 24.11+ requires Java 17+. Keep Java in the env so `mamba run`
+  # works even when the login shell has no system Java.
+  - openjdk >=17,<26
+  - nextflow >=25.10.0
 
   # Bioinformatics tools
   - mmseqs2 >=14.7e284
@@ -15,7 +19,7 @@ dependencies:
   - augustus >=3.4.0       # eukaryotic gene prediction (default)
   - mafft >=7.505
   - miniprot
-  - iqtree >=2.2.0
+  - iqtree >=2.2.0         # binary may be `iqtree2` or `iqtree` depending on package version
 
   # Genome fetching (easy mode)
   - ncbi-datasets-cli

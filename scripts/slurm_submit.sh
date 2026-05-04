@@ -15,8 +15,8 @@
 # Nextflow will then submit individual tasks to SLURM.
 # ============================================================
 
-# Load required modules (adjust for your cluster)
-module load java/17 2>/dev/null || module load java/11 2>/dev/null || true
+# Load required modules (adjust for your cluster). Current Nextflow requires Java 17+.
+module load java/21 2>/dev/null || module load java/17 2>/dev/null || true
 module load singularity 2>/dev/null || true
 module load conda 2>/dev/null || true
 
