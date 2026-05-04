@@ -29,43 +29,46 @@ include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
 include { ESTIMATE_PARAMS } from './modules/estimate_params.nf'
 
 // ==============================================================================
-// ANSI Color Codes (Script-level variables)
-// ==============================================================================
-
-c_reset = "\033[0m"
-c_bold = "\033[1m"
-c_dim = "\033[2m"
-c_black = "\033[0;30m"
-c_red = "\033[0;31m"
-c_green = "\033[0;32m"
-c_yellow = "\033[0;33m"
-c_blue = "\033[0;34m"
-c_purple = "\033[0;35m"
-c_cyan = "\033[0;36m"
-c_white = "\033[0;37m"
-
-// ==============================================================================
 // Console UI helpers
 // ==============================================================================
 
+// ANSI color codes as a function (NF 26.x forbids top-level variable declarations)
+def colors() {
+    return [
+        reset:  "\033[0m",
+        bold:   "\033[1m",
+        dim:    "\033[2m",
+        black:  "\033[0;30m",
+        red:    "\033[0;31m",
+        green:  "\033[0;32m",
+        yellow: "\033[0;33m",
+        blue:   "\033[0;34m",
+        purple: "\033[0;35m",
+        cyan:   "\033[0;36m",
+        white:  "\033[0;37m"
+    ]
+}
+
 def uiRule() {
-    return "${c_blue}${'═' * 63}${c_reset}"
+    def c = colors()
+    return "${c.blue}${'═' * 63}${c.reset}"
 }
 
 def uiStatus(String level, String task, String detail = '') {
+    def c = colors()
     def levelColors = [
-        'RUN ': c_blue,
-        'OK  ': c_green,
-        'INFO': c_cyan,
-        'WARN': c_yellow,
-        'SKIP': c_dim,
-        'FAIL': c_red
+        'RUN ': c.blue,
+        'OK  ': c.green,
+        'INFO': c.cyan,
+        'WARN': c.yellow,
+        'SKIP': c.dim,
+        'FAIL': c.red
     ]
     def key = (level ?: 'INFO').padRight(4).substring(0, 4)
-    def levelColor = levelColors.get(key, c_white)
-    def taskCol = task ? "${c_white}${task.padRight(24)}${c_reset}" : ''
+    def levelColor = levelColors.get(key, c.white)
+    def taskCol = task ? "${c.white}${task.padRight(24)}${c.reset}" : ''
     def detailCol = detail ?: ''
-    def prefix = "${levelColor}[${key}]${c_reset}"
+    def prefix = "${levelColor}[${key}]${c.reset}"
     if (taskCol && detailCol) {
         log.info "${prefix} ${taskCol} ${detailCol}"
     } else if (taskCol) {
@@ -78,17 +81,19 @@ def uiStatus(String level, String task, String detail = '') {
 }
 
 def uiPhase(int idx, String title) {
+    def c = colors()
     log.info ""
     log.info uiRule()
-    log.info "${c_white}Phase ${idx}${c_reset} ${c_dim}|${c_reset} ${c_cyan}${title}${c_reset}"
+    log.info "${c.white}Phase ${idx}${c.reset} ${c.dim}|${c.reset} ${c.cyan}${title}${c.reset}"
     log.info uiRule()
 }
 
 def printHeader() {
+    def c = colors()
     log.info ""
     log.info uiRule()
-    log.info "${c_cyan}${c_bold}SynVoy${c_reset} ${c_dim}v2.0${c_reset}"
-    log.info "${c_dim}Phylogenetically-informed syntenic ortholog discovery${c_reset}"
+    log.info "${c.cyan}${c.bold}SynVoy${c.reset} ${c.dim}v2.0${c.reset}"
+    log.info "${c.dim}Phylogenetically-informed syntenic ortholog discovery${c.reset}"
     log.info uiRule()
 }
 
@@ -112,7 +117,49 @@ def looksLikeInlineSequence(value) {
     return false
 }
 
+def paramBool(value) {
+    if (value instanceof Boolean) {
+        return value
+    }
+    if (value == null) {
+        return false
+    }
+    def text = value.toString().trim().toLowerCase()
+    return text in ['true', '1', 'yes', 'y', 'on']
+}
+
+def flattenNestedList(value) {
+    if (!(value instanceof List)) {
+        return [value]
+    }
+    def out = []
+    value.each { item ->
+        out.addAll(flattenNestedList(item))
+    }
+    return out
+}
+
+def normalizeCombineRecord(record, int leftWidth) {
+    if (!(record instanceof List)) {
+        return null
+    }
+    // Nextflow has changed combine tuple flattening behavior across versions.
+    // Accept both [left_tuple, right] and [left_tuple..., right] forms.
+    if (record.size() == 2 && record[0] instanceof List) {
+        def left = record[0]
+        if (left.size() < leftWidth) {
+            return null
+        }
+        return flattenNestedList(left) + [record[1]]
+    }
+    if (record.size() >= leftWidth + 1) {
+        return record
+    }
+    return null
+}
+
 def printParams() {
+    def c = colors()
     def inline_query = params.query_seq ?: (looksLikeInlineSequence(params.query_id) ? params.query_id : null)
     def query_display = 'N/A'
     if (params.mode == 'easy') {
@@ -130,31 +177,35 @@ def printParams() {
     def target_display = params.target_species ?: 'auto (taxonomic search)'
     
     log.info uiRule()
-    log.info "${c_white}Run Configuration${c_reset}"
+    log.info "${c.white}Run Configuration${c.reset}"
     log.info uiRule()
-    log.info "${c_dim}Query Gene     ${c_reset} ${c_green}${query_display}${c_reset}"
-    log.info "${c_dim}Home Genome    ${c_reset} ${c_green}${home_display}${c_reset}"
-    log.info "${c_dim}Mode           ${c_reset} ${c_yellow}${params.mode}${c_reset}"
-    log.info "${c_dim}Target Species ${c_reset} ${c_cyan}${target_display}${c_reset}"
-    log.info "${c_dim}Flanking Genes ${c_reset} ${params.n_flanking_genes}"
-    log.info "${c_dim}MMseqs Sens.   ${c_reset} ${params.mmseqs_sensitivity}"
+    log.info "${c.dim}Query Gene     ${c.reset} ${c.green}${query_display}${c.reset}"
+    log.info "${c.dim}Home Genome    ${c.reset} ${c.green}${home_display}${c.reset}"
+    log.info "${c.dim}Mode           ${c.reset} ${c.yellow}${params.mode}${c.reset}"
+    log.info "${c.dim}Target Species ${c.reset} ${c.cyan}${target_display}${c.reset}"
+    log.info "${c.dim}Flanking Genes ${c.reset} ${params.n_flanking_genes}"
+    log.info "${c.dim}MMseqs Sens.   ${c.reset} ${params.mmseqs_sensitivity}"
     if (params.mode == 'easy') {
-        log.info "${c_dim}Asm Ranking    ${c_reset} ${params.assembly_ranking}"
-        log.info "${c_dim}LowQ Policy    ${c_reset} ${params.bad_quality_policy} (timeout=${params.bad_quality_timeout}s)"
+        log.info "${c.dim}Asm Ranking    ${c.reset} ${params.assembly_ranking}"
+        log.info "${c.dim}LowQ Policy    ${c.reset} ${params.bad_quality_policy} (timeout=${params.bad_quality_timeout}s)"
     }
-    log.info "${c_dim}Output Dir     ${c_reset} ${params.outdir}"
+    log.info "${c.dim}Output Dir     ${c.reset} ${params.outdir}"
     log.info uiRule()
 }
 
-printHeader()
-printParams()
-
-// Stable sentinel files for optional path inputs.
-def no_gff_file = file("${projectDir}/assets/sentinels/NO_GFF")
-def no_species_map_file = file("${projectDir}/assets/sentinels/NO_SPECIES_MAP")
-def inline_query_mode = false
-
 workflow {
+    // Color codes for logging (defined once, used throughout workflow)
+    def c = colors()
+
+    // Print header and params at workflow start
+    printHeader()
+    printParams()
+
+    // Stable sentinel files for optional path inputs.
+    def no_gff_file = file("${projectDir}/assets/sentinels/NO_GFF")
+    def no_species_map_file = file("${projectDir}/assets/sentinels/NO_SPECIES_MAP")
+    def inline_query_mode = false
+
     log.info ""
     
     // ========== INPUT VALIDATION ==========
@@ -244,7 +295,7 @@ workflow {
                 if (tg instanceof List) {
                     tg.each { p -> if (file(p).exists()) matches << p }
                 } else if (tg.toString().contains(',')) {
-                    tg.toString().split(',').collect { it.trim() }.each { p ->
+                    tg.toString().split(',').collect { item -> item.trim() }.each { p ->
                         if (file(p).exists()) matches << p
                     }
                 } else {
@@ -349,7 +400,7 @@ workflow {
     }
 
     // PLM embedding search thresholds
-    if (params.enable_plm_search) {
+    if (paramBool(params.enable_plm_search)) {
         if (!(params.plm_device in ['cpu', 'cuda'])) {
             validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
         }
@@ -368,7 +419,7 @@ workflow {
     }
 
     // Structural search (ESMFold + Foldseek) thresholds
-    if (params.enable_structural_search) {
+    if (paramBool(params.enable_structural_search)) {
         if (!(params.structural_device in ['cpu', 'cuda'])) {
             validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
         }
@@ -403,12 +454,12 @@ workflow {
     // --- Print all errors and abort ---
     if (validationErrors) {
         log.info ""
-        log.info "${c_red}${c_bold}Input validation failed with ${validationErrors.size()} error(s):${c_reset}"
+        log.info "${c.red}${c.bold}Input validation failed with ${validationErrors.size()} error(s):${c.reset}"
         validationErrors.eachWithIndex { msg, idx ->
-            log.info "${c_red}  ${idx + 1}. ${msg}${c_reset}"
+            log.info "${c.red}  ${idx + 1}. ${msg}${c.reset}"
         }
         log.info ""
-        log.info "${c_dim}Run with --help or see USAGE.md for parameter documentation.${c_reset}"
+        log.info "${c.dim}Run with --help or see USAGE.md for parameter documentation.${c.reset}"
         exit 1
     }
 
@@ -439,13 +490,13 @@ workflow {
         raw_gene_ch = RESOLVE_GENE_INPUT.out.fasta
         
         // Get resolved species (auto-detected from ID, or user-provided)
-        resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { it.text.trim() }
+        resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { species_file -> species_file.text.trim() }
         
         // Determine home species: user-provided takes priority, else auto-detected
         home_species_ch = resolved_species_ch.map { resolved ->
             def species = params.home_species ?: resolved
             if (!species) {
-                log.error "${c_red}Could not detect species. Please provide --home_species${c_reset}"
+                log.error "${c.red}Could not detect species. Please provide --home_species${c.reset}"
                 exit 1
             }
             return species
@@ -457,7 +508,7 @@ workflow {
         home_genome_ch = FETCH_HOME_GENOME.out.genome
         FETCH_HOME_GENOME.out.genome.view { genome ->
             def sizeMb = String.format("%.1f", genome.size() / (1024.0 * 1024.0))
-            "${c_green}[OK  ]${c_reset} ${c_white}${'FETCH_HOME'.padRight(24)}${c_reset} home genome ready (${sizeMb} MB)"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'FETCH_HOME'.padRight(24)}${c.reset} home genome ready (${sizeMb} MB)"
         }
         // Use GFF if available, otherwise mark as missing
         home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(no_gff_file)
@@ -472,8 +523,8 @@ workflow {
         FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
         genomes_dir_ch = FETCH_RELATED_GENOMES.out.genomes_dir
         FETCH_RELATED_GENOMES.out.genomes_dir.view { dir ->
-            def count = new File(dir.toString()).listFiles()?.findAll { it.name.endsWith('.fna') || it.name.endsWith('.fna.gz') || it.name.endsWith('.fa') || it.name.endsWith('.fasta') }?.size() ?: 0
-            "${c_green}[OK  ]${c_reset} ${c_white}${'FETCH_RELATED'.padRight(24)}${c_reset} downloaded ${count} target genome(s)"
+            def count = new File(dir.toString()).listFiles()?.findAll { genome_file -> genome_file.name.endsWith('.fna') || genome_file.name.endsWith('.fna.gz') || genome_file.name.endsWith('.fa') || genome_file.name.endsWith('.fasta') }?.size() ?: 0
+            "${c.green}[OK  ]${c.reset} ${c.white}${'FETCH_RELATED'.padRight(24)}${c.reset} downloaded ${count} target genome(s)"
         }
         species_map_ch = FETCH_RELATED_GENOMES.out.species_map.first()
         // Species name for phylogenetic sorting
@@ -483,15 +534,15 @@ workflow {
         // --- Pro mode: User provides files directly ---
         
         // 1. Query Setup
-        raw_gene_ch = Channel.fromPath(params.query)
+        raw_gene_ch = channel.fromPath(params.query)
         
         // 2. Home Genome Setup
-        home_genome_ch = Channel.fromPath(params.home_genome)
+        home_genome_ch = channel.fromPath(params.home_genome)
         
         if (params.home_gff) {
-            home_gff_ch = Channel.value(file(params.home_gff, checkIfExists: true))
+            home_gff_ch = channel.value(file(params.home_gff, checkIfExists: true))
         } else {
-            home_gff_ch = Channel.value(no_gff_file)
+            home_gff_ch = channel.value(no_gff_file)
         }
         
         // 3. Target Genomes Setup
@@ -501,18 +552,18 @@ workflow {
             // lists ("a.fna,b.fna,c.fna") as well as Nextflow list syntax.
             def tg = params.target_genomes
             if (tg instanceof List) {
-                target_genomes_list = Channel.fromPath(tg).collect()
+                target_genomes_list = channel.fromPath(tg).collect()
             } else if (tg.toString().contains(',')) {
-                target_genomes_list = Channel
-                    .fromPath(tg.toString().split(',').collect { it.trim() })
+                target_genomes_list = channel
+                    .fromPath(tg.toString().split(',').collect { target_path -> target_path.trim() })
                     .collect()
             } else {
-                target_genomes_list = Channel.fromPath(tg).collect()
+                target_genomes_list = channel.fromPath(tg).collect()
             }
             
             // Show count
             target_genomes_list.view { genomes ->
-                "${c_green}[OK  ]${c_reset} ${c_white}${'STAGE_GENOMES'.padRight(24)}${c_reset} staged ${genomes.size()} target genomes"
+                "${c.green}[OK  ]${c.reset} ${c.white}${'STAGE_GENOMES'.padRight(24)}${c.reset} staged ${genomes.size()} target genomes"
             }
             
             STAGE_GENOMES(target_genomes_list)
@@ -521,11 +572,11 @@ workflow {
             
         } else {
             uiStatus('WARN', 'STAGE_GENOMES', 'No target genomes provided; running home-genome-only analysis')
-            genomes_dir_ch = Channel.empty()
-            species_map_ch = Channel.value(no_species_map_file)
+            genomes_dir_ch = channel.empty()
+            species_map_ch = channel.value(no_species_map_file)
         }
         // Species name for phylogenetic sorting (pro mode: use param or extract from filename)
-        home_species_for_sort_ch = Channel.value(params.home_species ?: params.home_genome)
+        home_species_for_sort_ch = channel.value(params.home_species ?: params.home_genome)
     }
 
     // Normalize query to protein space (DNA queries are translated to best ORF)
@@ -536,13 +587,13 @@ workflow {
     // ========== LLM PARAMETER ESTIMATION (Phase 0.5) ==========
     // When auto_params is enabled, analyze the query/species context and
     // estimate optimal pipeline parameters via Gemma 4 (or heuristic fallback).
-    if (params.auto_params) {
+    if (paramBool(params.auto_params)) {
         uiPhase(0, 'Automatic Parameter Estimation')
         uiStatus('RUN ', 'ESTIMATE_PARAMS', 'Estimating optimal parameters for this search')
 
         // Determine inputs for the estimator
-        def est_home_species = params.mode == 'easy' ? home_species_ch : Channel.value(params.home_species ?: '')
-        def est_target_species = Channel.value(params.target_species ?: '')
+        def est_home_species = params.mode == 'easy' ? home_species_ch : channel.value(params.home_species ?: '')
+        def est_target_species = channel.value(params.target_species ?: '')
 
         // Resolved metadata JSON is available in easy mode; create a stub for pro mode
         if (params.mode == 'easy') {
@@ -595,7 +646,7 @@ workflow {
                 ] as Set
 
                 // Safety lock: prevent LLM from auto-enabling advanced ML structural/PLM searches
-                if (params.force_disable_advanced_search) {
+                if (paramBool(params.force_disable_advanced_search)) {
                     allowed.remove('enable_plm_search')
                     allowed.remove('enable_structural_search')
                 }
@@ -604,31 +655,36 @@ workflow {
                     if (allowed.contains(key)) {
                         def old_val = params.get(key)
                         params.put(key, value)
-                        log.info "${c_dim}  [auto] ${key}: ${old_val} → ${value}${c_reset}"
+                        log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
                     }
                 }
 
                 // Log any warnings/issues
                 def warnings = est.get('warnings', [])
-                warnings.each { w -> log.info "${c_yellow}  [auto-warn] ${w}${c_reset}" }
+                warnings.each { w -> log.info "${c.yellow}  [auto-warn] ${w}${c.reset}" }
                 def issues = est.get('issues', [])
-                issues.each { iss -> log.info "${c_red}  [auto-issue] ${iss}${c_reset}" }
+                issues.each { iss -> log.info "${c.red}  [auto-issue] ${iss}${c.reset}" }
 
-                log.info "${c_green}[OK  ]${c_reset} ${c_white}${'ESTIMATE_PARAMS'.padRight(24)}${c_reset} ${msg}"
+                log.info "${c.green}[OK  ]${c.reset} ${c.white}${'ESTIMATE_PARAMS'.padRight(24)}${c.reset} ${msg}"
             } catch (Exception e) {
-                log.warn "${c_yellow}[WARN]${c_reset} ${c_white}${'ESTIMATE_PARAMS'.padRight(24)}${c_reset} Could not apply estimated params: ${e.message}"
+                log.warn "${c.yellow}[WARN]${c.reset} ${c.white}${'ESTIMATE_PARAMS'.padRight(24)}${c.reset} Could not apply estimated params: ${e.message}"
             }
             return true  // gate signal
         }
     } else {
         uiStatus('SKIP', 'ESTIMATE_PARAMS', 'Auto parameter estimation disabled (--auto_params false)')
+        params_applied_ch = channel.value(true)
     }
+
+    normalized_gene_ready_ch = normalized_gene_ch
+        .combine(params_applied_ch)
+        .map { fasta, _ready -> fasta }
 
     // PHASE 1: Core Localization
     uiPhase(1, 'Gene Localization in Home Genome')
     
     uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
-    LOCATE_GENE(normalized_gene_ch, home_genome_ch)
+    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch)
     
     // 4b. ANNOTATE GOI EXONS
     // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
@@ -640,7 +696,7 @@ workflow {
     def effective_query_id = inline_query_mode ? '' : (params.query_id ?: '')
     
     ANNOTATE_GOI(
-        normalized_gene_ch.first(),
+        normalized_gene_ready_ch.first(),
         home_genome_ch,
         home_gff_ch,
         LOCATE_GENE.out.blast_hits,
@@ -649,14 +705,14 @@ workflow {
     )
     
     ANNOTATE_GOI.out.info.view { info ->
-        "${c_green}[OK  ]${c_reset} ${c_white}${'ANNOTATE_GOI'.padRight(24)}${c_reset} GOI exon annotation complete"
+        "${c.green}[OK  ]${c.reset} ${c.white}${'ANNOTATE_GOI'.padRight(24)}${c.reset} GOI exon annotation complete"
     }
     
     // 5. SPLIT LOCI
     SPLIT_LOCI(LOCATE_GENE.out.bed)
     
     SPLIT_LOCI.out.beds.flatten().count().view { count ->
-        "${c_green}[OK  ]${c_reset} ${c_white}${'SPLIT_LOCI'.padRight(24)}${c_reset} identified ${count} locus/loci"
+        "${c.green}[OK  ]${c.reset} ${c.white}${'SPLIT_LOCI'.padRight(24)}${c.reset} identified ${count} locus/loci"
     }
     
     distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
@@ -675,12 +731,12 @@ workflow {
         PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first())
         home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
         PREPARE_HOME_PROTEOME.out.db.view { db ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'PREPARE_HOME'.padRight(24)}${c_reset} home proteome ready"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'PREPARE_HOME'.padRight(24)}${c.reset} home proteome ready"
         }
 
         // Borrow only when home genome has no usable GFF.
         gff_status.real.view { gff ->
-            "${c_dim}[SKIP]${c_reset} ${c_white}${'BORROW_ANNOT'.padRight(24)}${c_reset} home GFF found (${gff.name})"
+            "${c.dim}[SKIP]${c.reset} ${c.white}${'BORROW_ANNOT'.padRight(24)}${c.reset} home GFF found (${gff.name})"
         }
         uiStatus('RUN ', 'BORROW_ANNOT', 'Checking targets for annotation borrowing when home GFF is missing')
         BORROW_ANNOTATIONS(
@@ -692,7 +748,7 @@ workflow {
             gff_status.missing.map { true }
         )
         BORROW_ANNOTATIONS.out.gff.view { gff ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'BORROW_ANNOT'.padRight(24)}${c_reset} borrowed annotations generated"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'BORROW_ANNOT'.padRight(24)}${c.reset} borrowed annotations generated"
         }
 
         // Build effective GFF from all available sources:
@@ -706,7 +762,7 @@ workflow {
         
         effective_home_gff_ch = gff_status.real
             .concat(
-                gff_status.missing.combine(fallback_gff_ch).map { it[1] }
+                gff_status.missing.combine(fallback_gff_ch).map { pair -> pair[1] }
             )
             .first()
     } else {
@@ -723,7 +779,7 @@ workflow {
         params.n_flanking_genes,
         params.min_flanking_size,
         params.prefer_large_genes,
-        normalized_gene_ch.first()  // GOI protein for similarity-based flanking filter
+        normalized_gene_ready_ch.first()  // GOI protein for similarity-based flanking filter
     )
     
     // 6b. CRITICAL FIX: Prepare Initial Database with GOI included
@@ -742,6 +798,11 @@ workflow {
         EXTRACT_FLANKING.out.bed
             .map { locus_id, bed -> locus_id }
             .combine(home_genome_ch)
+            .map { rec ->
+                def norm = normalizeCombineRecord(rec, 1)
+                norm ? tuple(norm[0], norm[1]) : null
+            }
+            .filter { rec -> rec != null }
             .set { phylo_sort_inputs } // [locus_id, home_genome]
 
         uiStatus('RUN ', 'PHYLO_SORT', 'Sorting genomes by phylogenetic distance')
@@ -753,7 +814,7 @@ workflow {
         )
         
         PHYLO_SORT.out.sorted_list.view { locus, sorted ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'PHYLO_SORT'.padRight(24)}${c_reset} ordering complete for ${locus}"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'PHYLO_SORT'.padRight(24)}${c.reset} ordering complete for ${locus}"
         }
         
         // QC
@@ -765,19 +826,19 @@ workflow {
         ASSESS_GENOME_QUALITY.out.json.view { qc_json ->
             try {
                 def qc = new groovy.json.JsonSlurper().parse(qc_json)
-                def pass_count = qc.count { it.qc_status == 'PASS' }
-                def fail_count = qc.count { it.qc_status == 'FAIL' }
+                def pass_count = qc.count { genome_qc -> genome_qc.qc_status == 'PASS' }
+                def fail_count = qc.count { genome_qc -> genome_qc.qc_status == 'FAIL' }
                 def total = qc.size()
                 def msg = "QC complete: ${pass_count}/${total} passed"
                 if (fail_count > 0) {
-                    def failed_names = qc.findAll { it.qc_status == 'FAIL' }.collect { it.genome_id ?: it.genome ?: 'unknown' }.take(3).join(', ')
+                    def failed_names = qc.findAll { genome_qc -> genome_qc.qc_status == 'FAIL' }.collect { genome_qc -> genome_qc.genome_id ?: genome_qc.genome ?: 'unknown' }.take(3).join(', ')
                     def suffix = fail_count > 3 ? " (+${fail_count - 3} more)" : ""
                     msg += ", ${fail_count} failed [${failed_names}${suffix}]"
                     if (params.qc_fail_policy == 'drop') msg += " (will be dropped)"
                 }
-                return "${c_green}[OK  ]${c_reset} ${c_white}${'GENOME_QC'.padRight(24)}${c_reset} ${msg}"
+                return "${c.green}[OK  ]${c.reset} ${c.white}${'GENOME_QC'.padRight(24)}${c.reset} ${msg}"
             } catch (Exception e) {
-                return "${c_green}[OK  ]${c_reset} ${c_white}${'GENOME_QC'.padRight(24)}${c_reset} QC assessment complete"
+                return "${c.green}[OK  ]${c.reset} ${c.white}${'GENOME_QC'.padRight(24)}${c.reset} QC assessment complete"
             }
         }
 
@@ -788,8 +849,8 @@ workflow {
         )
 
         FILTER_SORTED_GENOMES.out.sorted_list.view { locus, sorted ->
-            def count = sorted.readLines().findAll { it.trim() }.size()
-            "${c_green}[OK  ]${c_reset} ${c_white}${'QC_FILTER'.padRight(24)}${c_reset} ${count} target genome(s) passed QC filter for ${locus}"
+            def count = sorted.readLines().findAll { line -> line.trim() }.size()
+            "${c.green}[OK  ]${c.reset} ${c.white}${'QC_FILTER'.padRight(24)}${c.reset} ${count} target genome(s) passed QC filter for ${locus}"
         }
 
         // 8. Iterative Search (FOR EACH LOCUS) - Using FIXED database with GOI
@@ -799,26 +860,36 @@ workflow {
             
         iterative_search_inputs_partial
             .combine(genomes_dir_ch)
+            .map { rec ->
+                def norm = normalizeCombineRecord(rec, 3)
+                norm ? tuple(norm[0], norm[1], norm[2], norm[3]) : null
+            }
+            .filter { rec -> rec != null }
             .set { iterative_search_inputs } // [locus_id, faa, sorted_list, genomes_dir]
 
         iterative_search_inputs
             .combine(home_proteome_db_ch)
+            .map { rec ->
+                def norm = normalizeCombineRecord(rec, 4)
+                norm ? tuple(norm[0], norm[1], norm[2], norm[3], norm[4]) : null
+            }
+            .filter { rec -> rec != null }
             .set { iterative_search_final_inputs } // [locus_id, faa, sorted_list, genomes_dir, home_db]
 
         uiStatus('RUN ', 'ITERATIVE_SEARCH', 'Running iterative phylogenetic search')
         
         ITERATIVE_SEARCH(
-            iterative_search_final_inputs.map { tuple(it[0], it[1]) }, // [locus, faa]
-            iterative_search_final_inputs.map { it[2] }, // sorted_list
-            iterative_search_final_inputs.map { it[3] }, // genomes_dir
-            iterative_search_final_inputs.map { it[4] }, // home_db
+            iterative_search_final_inputs.map { rec -> tuple(rec[0], rec[1]) }, // [locus, faa]
+            iterative_search_final_inputs.map { rec -> rec[2] }, // sorted_list
+            iterative_search_final_inputs.map { rec -> rec[3] }, // genomes_dir
+            iterative_search_final_inputs.map { rec -> rec[4] }, // home_db
             params.n_flanking_genes,
             params.min_synteny_score,
             params.mmseqs_sensitivity
         )
         
         ITERATIVE_SEARCH.out.expanded_db.view { locus, db ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'ITERATIVE_SEARCH'.padRight(24)}${c_reset} complete for ${locus}"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'ITERATIVE_SEARCH'.padRight(24)}${c.reset} complete for ${locus}"
         }
 
         // PHASE 3: Region Identification & Augmented Search
@@ -833,7 +904,7 @@ workflow {
                 def dir_file = new File(hits_dir.toString())
                 if (dir_file.exists() && dir_file.isDirectory()) {
                     (dir_file.listFiles() ?: [])
-                        .findAll { it.name.endsWith(".m8") }
+                        .findAll { hit_candidate -> hit_candidate.name.endsWith(".m8") }
                         .collect { hit_file ->
                             def genome_name = hit_file.name.replace(".m8", "").replace("${locus_id}_", "")
                             tuple(genome_name, faa_file, hit_file.toPath(), locus_id, bed_file)
@@ -845,20 +916,8 @@ workflow {
             .combine(genomes_dir_ch) // Combine with genomes_dir -> [..., genomes_dir]
             // Normalize combine output across Nextflow tuple-shape variants.
             .map { rec ->
-                if (!(rec instanceof List)) {
-                    return null
-                }
-                // Variant A: [left_tuple, genomes_dir]
-                if (rec.size() == 2 && rec[0] instanceof List) {
-                    def left = rec[0]
-                    if (left.size() < 5) return null
-                    return tuple(left[0], left[1], left[2], left[3], left[4], rec[1])
-                }
-                // Variant B: already flattened [genome, faa, hits, locus, bed, genomes_dir]
-                if (rec.size() >= 6) {
-                    return tuple(rec[0], rec[1], rec[2], rec[3], rec[4], rec[5])
-                }
-                return null
+                def norm = normalizeCombineRecord(rec, 5)
+                norm ? tuple(norm[0], norm[1], norm[2], norm[3], norm[4], norm[5]) : null
             }
             .filter { rec ->
                 rec != null && rec[2] != null && rec[4] != null && rec[5] != null
@@ -893,14 +952,14 @@ workflow {
             .set { clustering_inputs }
 
         CLUSTER_REGIONS(
-            clustering_inputs.map { tuple(it[0], it[1], it[2], it[5], it[6]) }, // [genome, payload, hit, genomes_dir, target_gff]
-            clustering_inputs.map { tuple(it[3], it[4]) }, // [locus_id, synteny_bed]
+            clustering_inputs.map { rec -> tuple(rec[0], rec[1], rec[2], rec[5], rec[6]) }, // [genome, payload, hit, genomes_dir, target_gff]
+            clustering_inputs.map { rec -> tuple(rec[3], rec[4]) }, // [locus_id, synteny_bed]
             params.n_flanking_genes,
             params.min_synteny_score,
             species_map_ch
         )
         CLUSTER_REGIONS.out.bed.count().view { count ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'CLUSTER_REGIONS'.padRight(24)}${c_reset} generated ${count} clustered region set(s)"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'CLUSTER_REGIONS'.padRight(24)}${c.reset} generated ${count} clustered region set(s)"
         }
 
         // --- PHYLOGENY & PLOTTING ---
@@ -917,7 +976,7 @@ workflow {
         )
         
         COMPUTE_TREE.out.tree.view { locus, tree ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'COMPUTE_TREE'.padRight(24)}${c_reset} tree computed for ${locus}"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'COMPUTE_TREE'.padRight(24)}${c.reset} tree computed for ${locus}"
         }
         
         // PHASE 4: Miniprot-based Annotation (Replacing Augustus/HomologySearch)
@@ -988,7 +1047,7 @@ workflow {
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'PLOT_SYNTENY'.padRight(24)}${c_reset} synteny visualization complete"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'PLOT_SYNTENY'.padRight(24)}${c.reset} synteny visualization complete"
         }
         
         // Final Reporting
@@ -1005,40 +1064,40 @@ workflow {
         def no_scores_sentinel = file("${projectDir}/assets/sentinels/NO_SCORES")
         
         ITERATIVE_SEARCH.out.region_genes
-            .map { it[1] } 
+            .map { rec -> rec[1] }
             .flatten()
             .ifEmpty(no_regions_sentinel)
             .collect()
             .set { collected_regions }
 
         ITERATIVE_SEARCH.out.gff
-            .map { it[1] }
+            .map { rec -> rec[1] }
             .flatten()
             .ifEmpty(no_gffs_sentinel)
             .collect()
             .set { collected_region_gffs }
 
         ITERATIVE_SEARCH.out.homology
-            .map { it[1] }
+            .map { rec -> rec[1] }
             .flatten()
             .ifEmpty(no_homology_sentinel)
             .collect()
             .set { collected_homology }
             
         ITERATIVE_SEARCH.out.hits
-            .map { it[1] } 
+            .map { rec -> rec[1] }
             .ifEmpty(no_hits_sentinel)
             .collect()
             .set { collected_hits }
 
         CLUSTER_REGIONS.out.scores
-            .map { it[1] }
+            .map { rec -> rec[1] }
             .ifEmpty(no_scores_sentinel)
             .collect()
             .set { collected_scores }
             
         // No standalone augmented proteins - pass sentinel file
-        collected_augmented = Channel.value(no_augmented_sentinel)
+        collected_augmented = channel.value(no_augmented_sentinel)
         
         GENERATE_REPORT(
             collected_regions,
@@ -1052,7 +1111,122 @@ workflow {
         )
         
         GENERATE_REPORT.out.report.view { report ->
-            "${c_green}[OK  ]${c_reset} ${c_white}${'GENERATE_REPORT'.padRight(24)}${c_reset} analysis report generated"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'GENERATE_REPORT'.padRight(24)}${c.reset} analysis report generated"
+        }
+    }
+
+    // --- Workflow completion handler (must be inside workflow block for NF 26.x) ---
+    workflow.onComplete = {
+        def done_c = colors()
+        // Collect task logs into results/logs/ regardless of success/failure
+        try {
+            collectTaskLogs(params.outdir)
+        } catch (Exception e) {
+            log.info "${done_c.yellow}[WARN] Could not collect task logs: ${e.message}${done_c.reset}"
+        }
+
+        log.info ""
+        log.info uiRule()
+        if (workflow.success) {
+            uiStatus('OK  ', 'PIPELINE', 'Pipeline completed successfully')
+            log.info uiRule()
+            log.info "${done_c.white}Run Summary${done_c.reset}"
+            log.info uiRule()
+            log.info "${done_c.dim}Duration:         ${done_c.reset} ${workflow.duration}"
+            log.info "${done_c.dim}Tasks Completed:  ${done_c.reset} ${workflow.stats.succeedCount}"
+            if (workflow.stats.cachedCount > 0) {
+                log.info "${done_c.dim}Tasks Cached:     ${done_c.reset} ${workflow.stats.cachedCount} (reused from previous run)"
+            }
+            log.info "${done_c.dim}Results Directory: ${done_c.reset} ${done_c.cyan}${params.outdir}${done_c.reset}"
+            log.info uiRule()
+
+            // Scan for actual output files and report what was generated
+            log.info "${done_c.white}Generated Outputs${done_c.reset}"
+            def outdir = new File(params.outdir.toString())
+            def found_outputs = false
+
+            // Report
+            def report_file = new File(outdir, 'synvoy_report.json')
+            if (report_file.exists()) {
+                log.info "${done_c.green}  ✓${done_c.reset} synvoy_report.json          ${done_c.dim}(analysis summary)${done_c.reset}"
+                // Try to extract key stats from report
+                try {
+                    def report = new groovy.json.JsonSlurper().parse(report_file)
+                    def summary = report.summary
+                    if (summary) {
+                        def goi_count = summary.total_goi_annotations ?: 0
+                        def genomes_hit = summary.genomes_with_annotations ?: 0
+                        def absent = summary.goi_absent_genomes?.size() ?: 0
+                        log.info "${done_c.dim}    → GOI found in ${genomes_hit} genome(s) (${goi_count} annotation(s) total)${done_c.reset}"
+                        if (absent > 0) {
+                            log.info "${done_c.yellow}    → GOI absent in ${absent} genome(s)${done_c.reset}"
+                        }
+                    }
+                } catch (Exception ignored) {}
+                found_outputs = true
+            } else {
+                log.info "${done_c.yellow}  ✗${done_c.reset} synvoy_report.json          ${done_c.yellow}(not generated)${done_c.reset}"
+            }
+
+            // Plots
+            def plots = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_synteny_plot.html') } ?: []
+            if (plots) {
+                plots.each { p ->
+                    log.info "${done_c.green}  ✓${done_c.reset} ${p.name.padRight(28)} ${done_c.dim}(interactive visualization)${done_c.reset}"
+                }
+                found_outputs = true
+            }
+
+            // Trees
+            def trees = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_tree.nwk') } ?: []
+            if (trees) {
+                trees.each { t ->
+                    log.info "${done_c.green}  ✓${done_c.reset} ${t.name.padRight(28)} ${done_c.dim}(GOI phylogeny)${done_c.reset}"
+                }
+                found_outputs = true
+            }
+
+            // Regions
+            def regions_dir = new File(outdir, 'regions')
+            if (regions_dir.exists()) {
+                def beds = regions_dir.listFiles()?.findAll { output_file -> output_file.name.endsWith('.regions.bed') } ?: []
+                if (beds) {
+                    log.info "${done_c.green}  ✓${done_c.reset} regions/                      ${done_c.dim}(${beds.size()} region BED file(s))${done_c.reset}"
+                    found_outputs = true
+                }
+            }
+
+            if (!found_outputs) {
+                log.info "${done_c.yellow}  No output files found in ${params.outdir}${done_c.reset}"
+            }
+
+            // Logs
+            def logsDir = new File(params.outdir.toString(), 'logs')
+            if (logsDir.exists()) {
+                def logDirs = logsDir.listFiles()?.findAll { output_file -> output_file.isDirectory() } ?: []
+                if (logDirs) {
+                    log.info "${done_c.green}  ✓${done_c.reset} logs/                         ${done_c.dim}(task logs for ${logDirs.size()} process(es))${done_c.reset}"
+                }
+            }
+
+            log.info uiRule()
+        } else {
+            uiStatus('FAIL', 'PIPELINE', 'Pipeline execution failed')
+            log.info uiRule()
+            log.info "${done_c.dim}Duration:         ${done_c.reset} ${workflow.duration}"
+            log.info "${done_c.dim}Tasks Completed:  ${done_c.reset} ${workflow.stats.succeedCount}"
+            log.info "${done_c.dim}Tasks Failed:     ${done_c.reset} ${done_c.red}${workflow.stats.failedCount}${done_c.reset}"
+            log.info ""
+            log.info "${done_c.red}Error: ${workflow.errorMessage}${done_c.reset}"
+            log.info ""
+            log.info "${done_c.dim}Troubleshooting tips:${done_c.reset}"
+            log.info "${done_c.dim}  • Check task logs:            ${params.outdir}/logs/ (collected per process)${done_c.reset}"
+            log.info "${done_c.dim}  • Check the Nextflow log:     .nextflow.log${done_c.reset}"
+            log.info "${done_c.dim}  • Re-run with -resume to pick up from the last successful step${done_c.reset}"
+            if (workflow.stats.failedCount > 0) {
+                log.info "${done_c.dim}  • Common causes: missing tools (tblastn, mmseqs, miniprot), OOM, network timeout${done_c.reset}"
+            }
+            log.info uiRule()
         }
     }
 }
@@ -1083,7 +1257,7 @@ def collectTaskLogs(outdir) {
         def tag = ''
         try {
             def lines = cmdRun.readLines().take(10)
-            for (line in lines) {
+            lines.each { line ->
                 def m = (line =~ /name:\s*'([^']+)'/)
                 if (m.find()) {
                     processName = m.group(1).replaceAll(/[^a-zA-Z0-9_.-]/, '_')
@@ -1121,118 +1295,5 @@ def collectTaskLogs(outdir) {
                 } catch (Exception ignored) {}
             }
         }
-    }
-}
-
-workflow.onComplete {
-    // Collect task logs into results/logs/ regardless of success/failure
-    try {
-        collectTaskLogs(params.outdir)
-    } catch (Exception e) {
-        log.info "${c_yellow}[WARN] Could not collect task logs: ${e.message}${c_reset}"
-    }
-
-    log.info ""
-    log.info uiRule()
-    if (workflow.success) {
-        uiStatus('OK  ', 'PIPELINE', 'Pipeline completed successfully')
-        log.info uiRule()
-        log.info "${c_white}Run Summary${c_reset}"
-        log.info uiRule()
-        log.info "${c_dim}Duration:         ${c_reset} ${workflow.duration}"
-        log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
-        if (workflow.stats.cachedCount > 0) {
-            log.info "${c_dim}Tasks Cached:     ${c_reset} ${workflow.stats.cachedCount} (reused from previous run)"
-        }
-        log.info "${c_dim}Results Directory: ${c_reset} ${c_cyan}${params.outdir}${c_reset}"
-        log.info uiRule()
-
-        // Scan for actual output files and report what was generated
-        log.info "${c_white}Generated Outputs${c_reset}"
-        def outdir = new File(params.outdir.toString())
-        def found_outputs = false
-
-        // Report
-        def report_file = new File(outdir, 'synvoy_report.json')
-        if (report_file.exists()) {
-            log.info "${c_green}  ✓${c_reset} synvoy_report.json          ${c_dim}(analysis summary)${c_reset}"
-            // Try to extract key stats from report
-            try {
-                def report = new groovy.json.JsonSlurper().parse(report_file)
-                def summary = report.summary
-                if (summary) {
-                    def goi_count = summary.total_goi_annotations ?: 0
-                    def genomes_hit = summary.genomes_with_annotations ?: 0
-                    def absent = summary.goi_absent_genomes?.size() ?: 0
-                    log.info "${c_dim}    → GOI found in ${genomes_hit} genome(s) (${goi_count} annotation(s) total)${c_reset}"
-                    if (absent > 0) {
-                        log.info "${c_yellow}    → GOI absent in ${absent} genome(s)${c_reset}"
-                    }
-                }
-            } catch (Exception ignored) {}
-            found_outputs = true
-        } else {
-            log.info "${c_yellow}  ✗${c_reset} synvoy_report.json          ${c_yellow}(not generated)${c_reset}"
-        }
-
-        // Plots
-        def plots = outdir.listFiles()?.findAll { it.name.endsWith('_synteny_plot.html') } ?: []
-        if (plots) {
-            plots.each { p ->
-                log.info "${c_green}  ✓${c_reset} ${p.name.padRight(28)} ${c_dim}(interactive visualization)${c_reset}"
-            }
-            found_outputs = true
-        }
-
-        // Trees
-        def trees = outdir.listFiles()?.findAll { it.name.endsWith('_tree.nwk') } ?: []
-        if (trees) {
-            trees.each { t ->
-                log.info "${c_green}  ✓${c_reset} ${t.name.padRight(28)} ${c_dim}(GOI phylogeny)${c_reset}"
-            }
-            found_outputs = true
-        }
-
-        // Regions
-        def regions_dir = new File(outdir, 'regions')
-        if (regions_dir.exists()) {
-            def beds = regions_dir.listFiles()?.findAll { it.name.endsWith('.regions.bed') } ?: []
-            if (beds) {
-                log.info "${c_green}  ✓${c_reset} regions/                      ${c_dim}(${beds.size()} region BED file(s))${c_reset}"
-                found_outputs = true
-            }
-        }
-
-        if (!found_outputs) {
-            log.info "${c_yellow}  No output files found in ${params.outdir}${c_reset}"
-        }
-
-        // Logs
-        def logsDir = new File(params.outdir.toString(), 'logs')
-        if (logsDir.exists()) {
-            def logDirs = logsDir.listFiles()?.findAll { it.isDirectory() } ?: []
-            if (logDirs) {
-                log.info "${c_green}  ✓${c_reset} logs/                         ${c_dim}(task logs for ${logDirs.size()} process(es))${c_reset}"
-            }
-        }
-
-        log.info uiRule()
-    } else {
-        uiStatus('FAIL', 'PIPELINE', 'Pipeline execution failed')
-        log.info uiRule()
-        log.info "${c_dim}Duration:         ${c_reset} ${workflow.duration}"
-        log.info "${c_dim}Tasks Completed:  ${c_reset} ${workflow.stats.succeedCount}"
-        log.info "${c_dim}Tasks Failed:     ${c_reset} ${c_red}${workflow.stats.failedCount}${c_reset}"
-        log.info ""
-        log.info "${c_red}Error: ${workflow.errorMessage}${c_reset}"
-        log.info ""
-        log.info "${c_dim}Troubleshooting tips:${c_reset}"
-        log.info "${c_dim}  • Check task logs:            ${params.outdir}/logs/ (collected per process)${c_reset}"
-        log.info "${c_dim}  • Check the Nextflow log:     .nextflow.log${c_reset}"
-        log.info "${c_dim}  • Re-run with -resume to pick up from the last successful step${c_reset}"
-        if (workflow.stats.failedCount > 0) {
-            log.info "${c_dim}  • Common causes: missing tools (tblastn, mmseqs, miniprot), OOM, network timeout${c_reset}"
-        }
-        log.info uiRule()
     }
 }
