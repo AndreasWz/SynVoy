@@ -1,0 +1,430 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 876 792" width="876" height="792" style="font-family: Helvetica, Arial, sans-serif; font-size: 11px; color: #222;">
+<defs><pattern id="lowConfFlank" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="6" height="6" fill="#FFFFFF"/><rect width="2" height="6" fill="#0072B2" opacity="0.40"/></pattern><pattern id="lowConfGoi" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)"><rect width="6" height="6" fill="#FFFFFF"/><rect width="2" height="6" fill="#D55E00" opacity="0.45"/></pattern></defs>
+<rect width="100%" height="100%" fill="white"/>
+<g class="headers">
+<g transform="translate(453.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC726817 —  (12,371,601–12,376,267)</title>LOC726817</text></g>
+<g transform="translate(491.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC409662 —  (12,375,659–12,377,603)</title>LOC409662</text></g>
+<g transform="translate(529.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC726827 —  (12,380,964–12,389,002)</title>LOC726827</text></g>
+<g transform="translate(567.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC726855 —  (12,392,149–12,393,980)</title>LOC726855</text></g>
+<rect x="586" y="24" width="38" height="678" fill="#FFE7DD" opacity="0.55"/>
+<g transform="translate(605.0,128) rotate(-55)"><text text-anchor="start" font-weight="700" fill="#D55E00"><title>Melt — melittin (12,397,547–12,399,076)</title>Melt</text></g>
+<g transform="translate(643.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC100578368 —  (12,412,156–12,428,068)</title>LOC100578368</text></g>
+<g transform="translate(681.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC113218734 —  (12,429,072–12,430,796)</title>LOC113218734</text></g>
+<g transform="translate(719.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC412898 —  (12,430,949–12,432,717)</title>LOC412898</text></g>
+<g transform="translate(757.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC102655466 —  (12,433,035–12,436,057)</title>LOC102655466</text></g>
+<g transform="translate(795.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC100578330 —  (12,433,716–12,435,620)</title>LOC100578330</text></g>
+<g transform="translate(833.0,128) rotate(-55)"><text text-anchor="start" font-weight="500" fill="#222"><title>LOC409659 —  (12,436,201–12,438,250)</title>LOC409659</text></g>
+</g>
+<g class="grid">
+<rect x="434" y="142" width="418" height="560" fill="#FAFAFA" stroke="#D9D9D9" stroke-width="1"/>
+<line x1="472" y1="142" x2="472" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="510" y1="142" x2="510" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="548" y1="142" x2="548" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="586" y1="142" x2="586" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="624" y1="142" x2="624" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="662" y1="142" x2="662" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="700" y1="142" x2="700" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="738" y1="142" x2="738" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="776" y1="142" x2="776" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="814" y1="142" x2="814" y2="702" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="170" x2="852" y2="170" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="198" x2="852" y2="198" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="226" x2="852" y2="226" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="254" x2="852" y2="254" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="282" x2="852" y2="282" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="310" x2="852" y2="310" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="338" x2="852" y2="338" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="366" x2="852" y2="366" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="394" x2="852" y2="394" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="422" x2="852" y2="422" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="450" x2="852" y2="450" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="478" x2="852" y2="478" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="506" x2="852" y2="506" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="534" x2="852" y2="534" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="562" x2="852" y2="562" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="590" x2="852" y2="590" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="618" x2="852" y2="618" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="646" x2="852" y2="646" stroke="#D9D9D9" stroke-width="0.5"/>
+<line x1="434" y1="674" x2="852" y2="674" stroke="#D9D9D9" stroke-width="0.5"/>
+</g>
+<g class="rows">
+<rect x="194" y="142" width="658" height="28" fill="#FFFBF2" opacity="1"/>
+<rect x="196" y="146" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="160.0" text-anchor="end" font-style="normal" font-weight="700" fill="#222">Apis mellifera  (home)</text>
+<polygon points="438,147 461,147 468,156.0 461,165 438,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 (home reference) — gene-LOC726817</title></polygon>
+<polygon points="506,147 483,147 476,156.0 483,165 506,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409662 (home reference) — gene-LOC409662</title></polygon>
+<polygon points="514,147 537,147 544,156.0 537,165 514,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 (home reference) — gene-LOC726827</title></polygon>
+<polygon points="552,147 575,147 582,156.0 575,165 552,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726855 (home reference) — gene-LOC726855</title></polygon>
+<polygon points="620,147 597,147 590,156.0 597,165 620,165" fill="#D55E00" opacity="1.00" stroke="#D55E00" stroke-width="0.9"><title>Melt (home reference) — melittin</title></polygon>
+<polygon points="658,147 635,147 628,156.0 635,165 658,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 (home reference) — gene-LOC100578368</title></polygon>
+<polygon points="666,147 689,147 696,156.0 689,165 666,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC113218734 (home reference) — gene-LOC113218734</title></polygon>
+<polygon points="734,147 711,147 704,156.0 711,165 734,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 (home reference) — gene-LOC412898</title></polygon>
+<polygon points="772,147 749,147 742,156.0 749,165 772,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 (home reference) — gene-LOC102655466</title></polygon>
+<polygon points="780,147 803,147 810,156.0 803,165 780,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578330 (home reference) — gene-LOC100578330</title></polygon>
+<polygon points="818,147 841,147 848,156.0 841,165 818,165" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 (home reference) — gene-LOC409659</title></polygon>
+<rect x="196" y="174" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="188.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Tetragonula carbonaria</text>
+<polygon points="514,175 537,175 544,184.0 537,193 514,193" fill="#2D8BC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 74.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="187.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">75</text>
+<polygon points="552,175 575,175 582,184.0 575,193 552,193" fill="#7CB7D7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726855 in target — identity 30.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="567.0" y="187.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">30</text>
+<polygon points="620,175 597,175 590,184.0 597,193 620,193" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 50.0%, confidence MEDIUM, role goi, evidence tandem_copy</title></polygon>
+<text x="605.0" y="187.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">50</text>
+<polygon points="658,175 635,175 628,184.0 635,193 658,193" fill="#3C93C4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 66.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="187.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">66</text>
+<polygon points="734,175 711,175 704,184.0 711,193 734,193" fill="#157DB8" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 88.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="187.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">88</text>
+<polygon points="772,175 749,175 742,184.0 749,193 772,193" fill="#0374B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 98.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="187.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<polygon points="818,175 841,175 848,184.0 841,193 818,193" fill="#1E83BB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 83.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="187.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">83</text>
+<rect x="196" y="202" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="216.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Melipona beecheii</text>
+<polygon points="544,203 521,203 514,212.0 521,221 544,221" fill="#2486BD" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 79.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="215.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">80</text>
+<polygon points="582,203 559,203 552,212.0 559,221 582,221" fill="#7BB6D7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726855 in target — identity 31.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="567.0" y="215.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">31</text>
+<polygon points="620,203 597,203 590,212.0 597,221 620,221" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 37.0%, confidence MEDIUM, role goi, evidence fallback_hit_span</title></polygon>
+<text x="605.0" y="215.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">37</text>
+<polygon points="628,203 651,203 658,212.0 651,221 628,221" fill="#3690C2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 69.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="215.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">70</text>
+<polygon points="704,203 727,203 734,212.0 727,221 704,221" fill="#177FB9" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 87.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="215.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">87</text>
+<polygon points="742,203 765,203 772,212.0 765,221 742,221" fill="#0374B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 98.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="215.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<polygon points="848,203 825,203 818,212.0 825,221 848,221" fill="#1F83BB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 82.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="215.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">83</text>
+<rect x="196" y="230" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="244.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Bombus impatiens</text>
+<polygon points="514,231 537,231 544,240.0 537,249 514,249" fill="#2687BE" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 78.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="243.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">79</text>
+<polygon points="620,231 597,231 590,240.0 597,249 620,249" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 59.6%, confidence MEDIUM, role goi, evidence fallback_hit_span, 2× copies</title></polygon>
+<text x="605.0" y="243.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">60</text>
+<text x="621.0" y="235.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×2</text>
+<polygon points="658,231 635,231 628,240.0 635,249 658,249" fill="#3D93C4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 66.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="243.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">66</text>
+<polygon points="734,231 711,231 704,240.0 711,249 734,249" fill="#1B81BA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 85.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="243.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">85</text>
+<polygon points="772,231 749,231 742,240.0 749,249 772,249" fill="#0575B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 97.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="243.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">97</text>
+<polygon points="818,231 841,231 848,240.0 841,249 818,249" fill="#1B81BA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 84.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="243.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">85</text>
+<rect x="196" y="258" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="272.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Bombus terrestris</text>
+<polygon points="514,259 537,259 544,268.0 537,277 514,277" fill="#2687BD" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 78.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="271.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">79</text>
+<polygon points="590,259 613,259 620,268.0 613,277 590,277" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 78.9%, confidence MEDIUM, role goi, evidence tandem_copy, 3× copies</title></polygon>
+<text x="605.0" y="271.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">79</text>
+<text x="621.0" y="263.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×3</text>
+<polygon points="658,259 635,259 628,268.0 635,277 658,277" fill="#3C93C4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 66.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="271.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">66</text>
+<polygon points="734,259 711,259 704,268.0 711,277 734,277" fill="#1D82BB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 83.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="271.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">84</text>
+<polygon points="772,259 749,259 742,268.0 749,277 772,277" fill="#0675B4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 96.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="271.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">97</text>
+<polygon points="818,259 841,259 848,268.0 841,277 818,277" fill="#1D82BB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 83.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="271.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">84</text>
+<rect x="196" y="286" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="300.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Apis cerana</text>
+<polygon points="438,287 461,287 468,296.0 461,305 438,305" fill="#0E7AB6" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 in target — identity 92.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="453.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">92</text>
+<polygon points="506,287 483,287 476,296.0 483,305 506,305" fill="#0172B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409662 in target — identity 99.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="491.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">100</text>
+<polygon points="514,287 537,287 544,296.0 537,305 514,305" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 94.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<polygon points="552,287 575,287 582,296.0 575,305 552,305" fill="#4297C6" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726855 in target — identity 62.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="567.0" y="299.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">63</text>
+<polygon points="620,287 597,287 590,296.0 597,305 620,305" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 100.0%, confidence MEDIUM, role goi, evidence tandem_copy, 2× copies</title></polygon>
+<text x="605.0" y="299.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">100</text>
+<text x="621.0" y="291.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×2</text>
+<polygon points="658,287 635,287 628,296.0 635,305 658,305" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 94.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<polygon points="734,287 711,287 704,296.0 711,305 734,305" fill="#0173B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 99.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">99</text>
+<polygon points="772,287 749,287 742,296.0 749,305 772,305" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 100.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">100</text>
+<polygon points="818,287 841,287 848,296.0 841,305 818,305" fill="#0575B4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 97.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="299.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">97</text>
+<rect x="196" y="314" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="328.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Apis florea</text>
+<polygon points="468,315 445,315 438,324.0 445,333 468,333" fill="#0F7AB7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 in target — identity 91.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="453.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">92</text>
+<polygon points="476,315 499,315 506,324.0 499,333 476,333" fill="#0173B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409662 in target — identity 99.3%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="491.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">99</text>
+<polygon points="544,315 521,315 514,324.0 521,333 544,333" fill="#117CB7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 90.3%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">90</text>
+<polygon points="582,315 559,315 552,324.0 559,333 582,333" fill="#73B1D5" opacity="0.95" stroke="#0072B2" stroke-width="0.9" stroke-dasharray="1,1.5"><title>LOC726855 in target — identity 70.4%, confidence MEDIUM, role flanking, evidence flanking_hit_span</title></polygon>
+<text x="567.0" y="327.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">70</text>
+<polygon points="590,315 613,315 620,324.0 613,333 590,333" fill="#DA701C" opacity="1.00" stroke="#D55E00" stroke-width="0.9"><title>Melt in target — identity 84.3%, confidence HIGH, role goi, evidence exon_annotation, 3× copies</title></polygon>
+<text x="605.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">84</text>
+<text x="621.0" y="319.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×3</text>
+<polygon points="628,315 651,315 658,324.0 651,333 628,333" fill="#137DB8" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 89.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">89</text>
+<polygon points="704,315 727,315 734,324.0 727,333 704,333" fill="#0374B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 98.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<polygon points="742,315 765,315 772,324.0 765,333 742,333" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 100.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">100</text>
+<polygon points="848,315 825,315 818,324.0 825,333 848,333" fill="#0977B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 95.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="327.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">95</text>
+<rect x="196" y="342" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="356.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Euglossa dilemma</text>
+<polygon points="514,343 537,343 544,352.0 537,361 514,361" fill="#2989BE" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 77.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="355.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">77</text>
+<polygon points="552,343 575,343 582,352.0 575,361 552,361" fill="url(#lowConfFlank)" opacity="0.85" stroke="#0072B2" stroke-width="0.9" stroke-dasharray="3,2"><title>LOC726855 in target — identity 48.7%, confidence LOW, role flanking, evidence flanking_hit_span</title></polygon>
+<text x="567.0" y="355.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">49</text>
+<polygon points="620,343 597,343 590,352.0 597,361 620,361" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 50.5%, confidence MEDIUM, role goi, evidence fallback_hit_span</title></polygon>
+<text x="605.0" y="355.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">50</text>
+<polygon points="658,343 635,343 628,352.0 635,361 658,361" fill="#4296C6" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 63.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="355.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">63</text>
+<polygon points="734,343 711,343 704,352.0 711,361 734,361" fill="#2184BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 81.3%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="355.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">81</text>
+<polygon points="772,343 749,343 742,352.0 749,361 772,361" fill="#0374B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 98.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="355.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<polygon points="818,343 841,343 848,352.0 841,361 818,361" fill="#2084BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 81.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="355.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">82</text>
+<rect x="196" y="370" width="6" height="20" fill="#0072B2" opacity="0.9"/>
+<text x="426" y="384.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Xylocopa violacea</text>
+<polygon points="514,371 537,371 544,380.0 537,389 514,389" fill="#318DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 72.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="383.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="658,371 635,371 628,380.0 635,389 658,389" fill="#4799C7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 60.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="383.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">60</text>
+<polygon points="734,371 711,371 704,380.0 711,389 734,389" fill="#1F83BB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 82.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="383.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">82</text>
+<polygon points="772,371 749,371 742,380.0 749,389 772,389" fill="#0575B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 97.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="383.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">97</text>
+<polygon points="818,371 841,371 848,380.0 841,389 818,389" fill="#2285BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 81.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="383.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">81</text>
+<rect x="196" y="398" width="6" height="20" fill="#D55E00" opacity="0.9"/>
+<text x="426" y="412.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Osmia bicornis</text>
+<polygon points="438,399 461,399 468,408.0 461,417 438,417" fill="url(#lowConfFlank)" opacity="0.85" stroke="#0072B2" stroke-width="0.9" stroke-dasharray="3,2"><title>LOC726817 in target — identity 37.9%, confidence LOW, role flanking, evidence flanking_hit_span</title></polygon>
+<text x="453.0" y="411.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">38</text>
+<polygon points="514,399 537,399 544,408.0 537,417 514,417" fill="#2D8BBF" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 75.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="411.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">75</text>
+<polygon points="620,399 597,399 590,408.0 597,417 620,417" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 72.7%, confidence MEDIUM, role goi, evidence tandem_copy, 2× copies</title></polygon>
+<text x="605.0" y="411.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">73</text>
+<text x="621.0" y="403.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×2</text>
+<polygon points="658,399 635,399 628,408.0 635,417 658,417" fill="#4598C7" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 61.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="411.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">62</text>
+<polygon points="734,399 711,399 704,408.0 711,417 734,417" fill="#1B81BA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 85.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="411.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">85</text>
+<polygon points="772,399 749,399 742,408.0 749,417 772,417" fill="#0374B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 98.4%, confidence HIGH, role flanking, evidence flanking_miniprot, 2× copies</title></polygon>
+<text x="757.0" y="411.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<text x="773.0" y="403.0" text-anchor="end" font-size="8" fill="#0072B2" font-weight="700" pointer-events="none">×2</text>
+<polygon points="818,399 841,399 848,408.0 841,417 818,417" fill="#2084BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 82.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="411.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">82</text>
+<rect x="196" y="426" width="6" height="20" fill="#D55E00" opacity="0.9"/>
+<text x="426" y="440.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Megachile rotundata</text>
+<polygon points="514,427 537,427 544,436.0 537,445 514,445" fill="#2E8BC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 74.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="439.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">74</text>
+<polygon points="590,427 613,427 620,436.0 613,445 590,445" fill="url(#lowConfGoi)" opacity="0.85" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="3,2"><title>Melt in target — identity 31.4%, confidence LOW, role goi, evidence tandem_copy</title></polygon>
+<text x="605.0" y="439.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">31</text>
+<polygon points="658,427 635,427 628,436.0 635,445 658,445" fill="#3F95C5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 64.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="439.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">65</text>
+<polygon points="734,427 711,427 704,436.0 711,445 734,445" fill="#2184BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 81.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="439.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">81</text>
+<polygon points="772,427 749,427 742,436.0 749,445 772,445" fill="#0474B3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 97.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="439.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">98</text>
+<polygon points="818,427 841,427 848,436.0 841,445 818,445" fill="#2586BD" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 79.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="439.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">80</text>
+<rect x="196" y="454" width="6" height="20" fill="#D55E00" opacity="0.9"/>
+<text x="426" y="468.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Colletes gigas</text>
+<polygon points="468,455 445,455 438,464.0 445,473 468,473" fill="#318DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 in target — identity 72.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="453.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">72</text>
+<polygon points="476,455 499,455 506,464.0 499,473 476,473" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409662 in target — identity 94.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="491.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<polygon points="544,455 521,455 514,464.0 521,473 544,473" fill="#2E8BC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 74.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">74</text>
+<polygon points="628,455 651,455 658,464.0 651,473 628,473" fill="#4397C6" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 62.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="467.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">62</text>
+<polygon points="704,455 727,455 734,464.0 727,473 704,473" fill="#2084BC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 82.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">82</text>
+<polygon points="742,455 765,455 772,464.0 765,473 742,473" fill="#0776B4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 95.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">96</text>
+<polygon points="848,455 825,455 818,464.0 825,473 848,473" fill="#2888BE" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 77.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="467.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">78</text>
+<rect x="196" y="482" width="6" height="20" fill="#D55E00" opacity="0.9"/>
+<text x="426" y="496.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Nomia melanderi</text>
+<polygon points="514,483 537,483 544,492.0 537,501 514,501" fill="#2D8BC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 74.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="495.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">75</text>
+<polygon points="658,483 635,483 628,492.0 635,501 658,501" fill="#56A2CC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 51.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="495.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">52</text>
+<polygon points="734,483 711,483 704,492.0 711,501 734,501" fill="#2386BD" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 80.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="495.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">80</text>
+<polygon points="772,483 749,483 742,492.0 749,501 772,501" fill="#0675B4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 96.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="495.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">97</text>
+<polygon points="818,483 841,483 848,492.0 841,501 818,501" fill="#2586BD" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 79.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="495.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">80</text>
+<rect x="196" y="510" width="6" height="20" fill="#009E73" opacity="0.9"/>
+<text x="426" y="524.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Vespa velutina</text>
+<polygon points="468,511 445,511 438,520.0 445,529 468,529" fill="#6DAED3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 in target — identity 39.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="453.0" y="523.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">39</text>
+<polygon points="514,511 537,511 544,520.0 537,529 514,529" fill="#308CC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 73.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="523.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="590,511 613,511 620,520.0 613,529 590,529" fill="url(#lowConfGoi)" opacity="0.85" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="3,2"><title>Melt in target — identity 30.3%, confidence LOW, role goi, evidence tandem_copy, 3× copies</title></polygon>
+<text x="605.0" y="523.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">30</text>
+<text x="621.0" y="515.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×3</text>
+<polygon points="628,511 651,511 658,520.0 651,529 628,529" fill="#56A2CC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 51.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="523.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">52</text>
+<polygon points="704,511 727,511 734,520.0 727,529 704,529" fill="#328EC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 71.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="523.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">72</text>
+<polygon points="742,511 765,511 772,520.0 765,529 742,529" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 93.7%, confidence HIGH, role flanking, evidence flanking_miniprot, 2× copies</title></polygon>
+<text x="757.0" y="523.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<text x="773.0" y="515.0" text-anchor="end" font-size="8" fill="#0072B2" font-weight="700" pointer-events="none">×2</text>
+<polygon points="848,511 825,511 818,520.0 825,529 848,529" fill="#308DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 72.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="523.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<rect x="196" y="538" width="6" height="20" fill="#009E73" opacity="0.9"/>
+<text x="426" y="552.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Polistes canadensis</text>
+<polygon points="468,539 445,539 438,548.0 445,557 468,557" fill="#69ACD2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726817 in target — identity 41.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="453.0" y="551.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">41</text>
+<polygon points="514,539 537,539 544,548.0 537,557 514,557" fill="#308DC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 73.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="551.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="620,539 597,539 590,548.0 597,557 620,557" fill="url(#lowConfGoi)" opacity="0.85" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="3,2"><title>Melt in target — identity 28.9%, confidence LOW, role goi, evidence tandem_copy, 3× copies</title></polygon>
+<text x="621.0" y="543.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×3</text>
+<polygon points="658,539 635,539 628,548.0 635,557 658,557" fill="#58A2CC" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 50.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="551.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">51</text>
+<polygon points="734,539 711,539 704,548.0 711,557 734,557" fill="#338EC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 71.4%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="551.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">71</text>
+<polygon points="772,539 749,539 742,548.0 749,557 772,557" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 93.7%, confidence HIGH, role flanking, evidence flanking_miniprot, 2× copies</title></polygon>
+<text x="757.0" y="551.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<text x="773.0" y="543.0" text-anchor="end" font-size="8" fill="#0072B2" font-weight="700" pointer-events="none">×2</text>
+<rect x="196" y="566" width="6" height="20" fill="#CC79A7" opacity="0.9"/>
+<text x="426" y="580.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Vollenhovia emeryi</text>
+<polygon points="514,567 537,567 544,576.0 537,585 514,585" fill="#308CC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 73.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="579.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="658,567 635,567 628,576.0 635,585 658,585" fill="#4F9DCA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 56.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="579.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">56</text>
+<polygon points="734,567 711,567 704,576.0 711,585 734,585" fill="#4296C6" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 63.1%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="579.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">63</text>
+<rect x="196" y="594" width="6" height="20" fill="#CC79A7" opacity="0.9"/>
+<text x="426" y="608.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Tetramorium bicarinatum</text>
+<polygon points="544,595 521,595 514,604.0 521,613 544,613" fill="#338EC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 71.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="607.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">72</text>
+<polygon points="620,595 597,595 590,604.0 597,613 620,613" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 47.6%, confidence MEDIUM, role goi, evidence fallback_hit_span</title></polygon>
+<text x="605.0" y="607.0" text-anchor="middle" font-size="9" fill="#222" font-weight="500" pointer-events="none">48</text>
+<polygon points="628,595 651,595 658,604.0 651,613 628,613" fill="#509ECA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 55.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="607.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">55</text>
+<polygon points="704,595 727,595 734,604.0 727,613 704,613" fill="#3991C3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 68.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="607.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">68</text>
+<polygon points="742,595 765,595 772,604.0 765,613 742,613" fill="#0B78B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 93.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="607.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">94</text>
+<polygon points="848,595 825,595 818,604.0 825,613 848,613" fill="#338EC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 71.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="607.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">72</text>
+<rect x="196" y="622" width="6" height="20" fill="#CC79A7" opacity="0.9"/>
+<text x="426" y="636.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Cardiocondyla obscurior</text>
+<polygon points="544,623 521,623 514,632.0 521,641 544,641" fill="#308DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 73.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="635.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="628,623 651,623 658,632.0 651,641 628,641" fill="#53A0CB" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 53.5%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="635.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">54</text>
+<polygon points="734,623 711,623 704,632.0 711,641 734,641" fill="#3B93C4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 66.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="635.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">67</text>
+<polygon points="742,623 765,623 772,632.0 765,641 742,641" fill="#0977B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 95.2%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="635.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">95</text>
+<rect x="196" y="650" width="6" height="20" fill="#CC79A7" opacity="0.9"/>
+<text x="426" y="664.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Solenopsis invicta</text>
+<polygon points="514,651 537,651 544,660.0 537,669 514,669" fill="#318DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 72.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="663.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="590,651 613,651 620,660.0 613,669 590,669" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 23.0%, confidence MEDIUM, role goi, evidence fallback_hit_span, 3× copies</title></polygon>
+<text x="621.0" y="655.0" text-anchor="end" font-size="8" fill="#D55E00" font-weight="700" pointer-events="none">×3</text>
+<polygon points="658,651 635,651 628,660.0 635,669 658,669" fill="#4F9ECA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 55.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="663.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">56</text>
+<polygon points="734,651 711,651 704,660.0 711,669 734,669" fill="#3B93C4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 66.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="663.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">67</text>
+<polygon points="772,651 749,651 742,660.0 749,669 772,669" fill="#0977B5" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 94.7%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="663.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">95</text>
+<polygon points="818,651 841,651 848,660.0 841,669 818,669" fill="#2D8BC0" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC409659 in target — identity 74.6%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="833.0" y="663.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">75</text>
+<rect x="196" y="678" width="6" height="20" fill="#CC79A7" opacity="0.9"/>
+<text x="426" y="692.0" text-anchor="end" font-style="italic" font-weight="500" fill="#222">Formica selysi</text>
+<polygon points="514,679 537,679 544,688.0 537,697 514,697" fill="#308DC1" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC726827 in target — identity 72.9%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="529.0" y="691.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">73</text>
+<polygon points="590,679 613,679 620,688.0 613,697 590,697" fill="#E8A673" opacity="0.95" stroke="#D55E00" stroke-width="0.9" stroke-dasharray="1,1.5"><title>Melt in target — identity 27.7%, confidence MEDIUM, role goi, evidence fallback_hit_span</title></polygon>
+<polygon points="658,679 635,679 628,688.0 635,697 658,697" fill="#509ECA" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC100578368 in target — identity 55.0%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="643.0" y="691.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">55</text>
+<polygon points="734,679 711,679 704,688.0 711,697 734,697" fill="#3790C3" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC412898 in target — identity 69.3%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="719.0" y="691.0" text-anchor="middle" font-size="9" fill="#222" font-weight="700" pointer-events="none">69</text>
+<polygon points="772,679 749,679 742,688.0 749,697 772,697" fill="#0776B4" opacity="1.00" stroke="#0072B2" stroke-width="0.9"><title>LOC102655466 in target — identity 95.8%, confidence HIGH, role flanking, evidence flanking_miniprot</title></polygon>
+<text x="757.0" y="691.0" text-anchor="middle" font-size="9" fill="#fff" font-weight="700" pointer-events="none">96</text>
+</g>
+<g class="tree" fill="none">
+<line x1="30.0" y1="324.0" x2="30.0" y2="604.0" stroke="#777" stroke-width="1.2"/>
+<line x1="30.0" y1="324.0" x2="60.0" y2="324.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="268.0" x2="60.0" y2="492.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="268.0" x2="90.0" y2="268.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="254.0" x2="90.0" y2="380.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="254.0" x2="120.0" y2="254.0" stroke="#777" stroke-width="1.2"/>
+<line x1="120.0" y1="198.0" x2="120.0" y2="352.0" stroke="#777" stroke-width="1.2"/>
+<line x1="120.0" y1="198.0" x2="150.0" y2="198.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="184.0" x2="150.0" y2="212.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="184.0" x2="180.0" y2="184.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="212.0" x2="180.0" y2="212.0" stroke="#777" stroke-width="1.2"/>
+<line x1="120.0" y1="254.0" x2="150.0" y2="254.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="240.0" x2="150.0" y2="268.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="240.0" x2="180.0" y2="240.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="268.0" x2="180.0" y2="268.0" stroke="#777" stroke-width="1.2"/>
+<line x1="120.0" y1="258.7" x2="150.0" y2="258.7" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="156.0" x2="150.0" y2="324.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="156.0" x2="180.0" y2="156.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="296.0" x2="180.0" y2="296.0" stroke="#777" stroke-width="1.2"/>
+<line x1="150.0" y1="324.0" x2="180.0" y2="324.0" stroke="#777" stroke-width="1.2"/>
+<line x1="120.0" y1="352.0" x2="150.0" y2="352.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="380.0" x2="120.0" y2="380.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="422.0" x2="90.0" y2="422.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="408.0" x2="90.0" y2="436.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="408.0" x2="120.0" y2="408.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="436.0" x2="120.0" y2="436.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="464.0" x2="90.0" y2="464.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="492.0" x2="90.0" y2="492.0" stroke="#777" stroke-width="1.2"/>
+<line x1="30.0" y1="604.0" x2="30.0" y2="604.0" stroke="#777" stroke-width="1.2"/>
+<line x1="30.0" y1="534.0" x2="30.0" y2="632.0" stroke="#777" stroke-width="1.2"/>
+<line x1="30.0" y1="534.0" x2="60.0" y2="534.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="520.0" x2="60.0" y2="548.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="520.0" x2="90.0" y2="520.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="548.0" x2="90.0" y2="548.0" stroke="#777" stroke-width="1.2"/>
+<line x1="30.0" y1="632.0" x2="60.0" y2="632.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="618.0" x2="60.0" y2="688.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="618.0" x2="90.0" y2="618.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="576.0" x2="90.0" y2="660.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="576.0" x2="120.0" y2="576.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="604.0" x2="120.0" y2="604.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="632.0" x2="120.0" y2="632.0" stroke="#777" stroke-width="1.2"/>
+<line x1="90.0" y1="660.0" x2="120.0" y2="660.0" stroke="#777" stroke-width="1.2"/>
+<line x1="60.0" y1="688.0" x2="90.0" y2="688.0" stroke="#777" stroke-width="1.2"/>
+</g>
+<g class="legend" font-size="10">
+<text x="24" y="734" font-weight="600">Confidence:</text>
+<polygon points="104,729 125,729 132,732.0 125,735 104,735" fill="#0072B2" opacity="1.00" stroke="#0072B2" stroke-width="0.9"/>
+<text x="142" y="735">HIGH</text>
+<polygon points="196,729 217,729 224,732.0 217,735 196,735" fill="#73B1D5" opacity="0.95" stroke="#0072B2" stroke-width="0.9" stroke-dasharray="1,1.5"/>
+<text x="234" y="735">MEDIUM</text>
+<polygon points="288,729 309,729 316,732.0 309,735 288,735" fill="url(#lowConfFlank)" opacity="0.85" stroke="#0072B2" stroke-width="0.9" stroke-dasharray="3,2"/>
+<text x="326" y="735">LOW</text>
+<rect x="24" y="752" width="18" height="12" fill="#D55E00" stroke="#888" stroke-width="0.5"/>
+<text x="48" y="762">GOI</text>
+<rect x="116" y="752" width="18" height="12" fill="#0072B2" stroke="#888" stroke-width="0.5"/>
+<text x="140" y="762">Flanking ortholog</text>
+<rect x="267" y="752" width="18" height="12" fill="#FAFAFA" stroke="#888" stroke-width="0.5"/>
+<text x="291" y="762">Absent</text>
+<rect x="371" y="751" width="6" height="14" fill="#8CC0DC"/>
+<rect x="377" y="751" width="6" height="14" fill="#8CC0DC"/>
+<rect x="383" y="751" width="6" height="14" fill="#8CC0DC"/>
+<rect x="389" y="751" width="6" height="14" fill="#8CC0DC"/>
+<rect x="395" y="751" width="6" height="14" fill="#8CC0DC"/>
+<rect x="401" y="751" width="6" height="14" fill="#84BBDA"/>
+<rect x="407" y="751" width="6" height="14" fill="#7AB6D7"/>
+<rect x="413" y="751" width="6" height="14" fill="#71B0D4"/>
+<rect x="419" y="751" width="6" height="14" fill="#67ABD1"/>
+<rect x="425" y="751" width="6" height="14" fill="#5EA6CE"/>
+<rect x="431" y="751" width="6" height="14" fill="#55A1CC"/>
+<rect x="437" y="751" width="6" height="14" fill="#4B9CC9"/>
+<rect x="443" y="751" width="6" height="14" fill="#4296C6"/>
+<rect x="449" y="751" width="6" height="14" fill="#3891C3"/>
+<rect x="455" y="751" width="6" height="14" fill="#2F8CC0"/>
+<rect x="461" y="751" width="6" height="14" fill="#2687BD"/>
+<rect x="467" y="751" width="6" height="14" fill="#1C82BB"/>
+<rect x="473" y="751" width="6" height="14" fill="#137CB8"/>
+<rect x="479" y="751" width="6" height="14" fill="#0977B5"/>
+<rect x="485" y="751" width="6" height="14" fill="#0072B2"/>
+<text x="367" y="778" font-size="9">30%</text>
+<text x="476" y="778" font-size="9">100% identity</text>
+</g>
+</svg>
