@@ -13,6 +13,7 @@ process ITERATIVE_SEARCH {
 
     output:
     tuple val(locus_id), path("iterative_results/expanded_db.faa"), emit: expanded_db
+    tuple val(locus_id), path("iterative_results/goi_for_tree.faa"), emit: goi_for_tree, optional: true
     tuple val(locus_id), path("iterative_results/hits"), emit: hits, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.faa"), emit: region_genes, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.gff"), emit: gff, optional: true

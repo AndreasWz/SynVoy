@@ -11,9 +11,13 @@ process PLOT_SYNTENY {
     path homology_tsvs
     path tree
     path species_map
+    val home_species
 
     output:
     path "*_synteny_plot.html", emit: plot
+    path "*_synteny_plot.svg", emit: pub_plot, optional: true
+    path "*_synteny_plot_view.svg", emit: view_plot, optional: true
+    path "*_synteny_matrix.svg", emit: matrix_plot, optional: true
     path "*_tree.html", emit: tree, optional: true
     path "plot_inputs_*", emit: inputs, optional: true
 
@@ -31,6 +35,7 @@ process PLOT_SYNTENY {
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     def hide_absent_arg = params.hide_goi_absent_tracks.toString().toBoolean() ? "--hide_goi_absent" : ""
+    def pub_svg_arg = params.pub_svg ? "--pub_svg --pub_width ${params.pub_width_mm} --pub_palette ${params.pub_palette}" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -86,12 +91,30 @@ process PLOT_SYNTENY {
         $homo_arg \\
         --tree $tree \\
         $species_arg \\
-        $hide_absent_arg \\
+        $hide_absent_arg \
+        $pub_svg_arg \\
         --gap_threshold ${params.gap_threshold} \\
         --gap_visual_size ${params.gap_visual_size} \\
         --flank_fallback_bp ${params.flank_fallback_bp} \\
         --scale_bar_len ${params.scale_bar_len} \\
         --plot_width ${params.plot_width} \\
         --output ${home_bed.baseName}_synteny_plot.html
+
+    # Phylogeny-anchored matrix view (paper-ready SVG). Runs offline so it
+    # cannot stall on NCBI common-name lookups inside the Nextflow task.
+    ${projectDir}/bin/plot_synteny_matrix.py \\
+        --home_bed $home_bed \\
+        --query_bed $query_bed \\
+        --home_gff "\$FINAL_HOME_GFF" \\
+        $gffs_arg \\
+        $names_arg \\
+        $homo_arg \\
+        $cands_arg \\
+        --tree $tree \\
+        $species_arg \\
+        --home_species "${home_species ?: 'Home'}" \\
+        --common_names scientific \\
+        --no_network \\
+        --output ${home_bed.baseName}_synteny_matrix.svg
     """
 }

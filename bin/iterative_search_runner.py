@@ -2027,7 +2027,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                             output_dir=plm_tmp_dir,
                             similarity_threshold=plm_thresh,
                             device=getattr(args, 'plm_device', 'cpu'),
-                            predictor=getattr(args, 'gene_predictor', 'auto'),
+                            predictor='augustus',  # Enforce Augustus for eukaryotic ORF prediction; no Prodigal fallback (loses multi-exon genes)
                             augustus_species=getattr(args, 'augustus_species', 'fly'),
                         )
 
@@ -2082,7 +2082,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                             device=getattr(args, 'structural_device', 'cpu'),
                             max_length=getattr(args, 'structural_max_length', 700),
                             threads=getattr(args, 'threads', 1),
-                            predictor=getattr(args, 'gene_predictor', 'auto'),
+                            predictor='augustus',  # Enforce Augustus for eukaryotic ORF prediction; no Prodigal fallback (loses multi-exon genes)
                             augustus_species=getattr(args, 'augustus_species', 'fly'),
                         )
 
@@ -3782,24 +3782,67 @@ def run_mmseqs_easy_search_with_retries(
     return False, last_details, last_resource_fail
 
 
+_SEED_QUALIFYING_CLASSES = {"confident_goi", "probable_goi"}
+_TREE_QUALIFYING_CONFIDENCE = {"HIGH", "MEDIUM"}
+
+
+def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn):
+    """Split GOI-role genes into (seed, tree_extra, suppressed_count).
+
+    Seed genes feed `expanded_db.faa` (used as the next wave's MMseqs2 query DB
+    AND historically as the tree input). Strict filter: HIGH/MEDIUM confidence
+    AND goi_class in {confident_goi, probable_goi}.
+
+    Tree-extra genes feed `goi_for_tree.faa` *in addition to* the seed list:
+    HIGH/MEDIUM-confidence GOI hits whose goi_class disqualified them from
+    seeding (typically `tandem_goi_copy`). They appear in MAFFT/IQ-TREE so
+    species like Apis cerana — which only carry tandem-duplicate evidence —
+    are not silently dropped from the phylogeny.
+
+    Suppressed_count is the total of GOI-role genes that did NOT qualify for
+    seeding (used for logging).
+    """
+    seed = []
+    tree_extra = []
+    suppressed = 0
+    for g in all_genes:
+        gid = g.get("id", "")
+        meta = feature_meta.get(gid, {})
+        role = meta.get("role", "goi" if is_goi_query_id_fn(gid) else "flanking")
+        if role != "goi":
+            continue
+        confidence = meta.get("confidence", "")
+        goi_class = meta.get("goi_class", "")
+        if (confidence in _TREE_QUALIFYING_CONFIDENCE
+                and goi_class in _SEED_QUALIFYING_CLASSES):
+            seed.append(g)
+        else:
+            suppressed += 1
+            if confidence in _TREE_QUALIFYING_CONFIDENCE:
+                tree_extra.append(g)
+    return seed, tree_extra, suppressed
+
+
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
     """
     Worker function to search a single genome.
-    Returns: (genome_name, list_of_new_genes, error_message_or_none)
+    Returns: (genome_name, list_of_new_genes, list_of_tree_extra_genes,
+             error_message_or_none)
     """
     genome_name = os.path.basename(genome_path)
     if not os.path.exists(genome_path):
         msg = "Genome file not found"
         logger.error(f"[{genome_name}] {msg}.")
-        return genome_name, [], msg
+        return genome_name, [], [], msg
     
     unique_id = uuid.uuid4().hex
     hits_file = f"{args.output_dir}/hits/{prefix}{genome_name}.m8"
     tmp_dir = f"{args.output_dir}/tmp_mmseqs_{unique_id}_{genome_name}"
     
     new_genes = []
+    tree_extra_genes = []
     error_message = None
-    
+
     try:
         # Parse DB once so we can adapt hit-length filtering for short proteins.
         base_db_sequences = {}
@@ -3857,7 +3900,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     f"[{genome_name}] Skipping genome after MMseqs resource failures "
                     "(prefilter/search crash persisted across retries)."
                 )
-                return genome_name, [], None
+                return genome_name, [], [], None
             raise RuntimeError(
                 f"MMseqs easy-search failed for {genome_name}: {mmseqs_details}"
             )
@@ -3871,7 +3914,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         )
         if not hits:
             logger.info(f"[{genome_name}] No hits found in MMseqs output.")
-            return genome_name, [], None
+            return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
 
@@ -3893,7 +3936,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         
         if not synteny_blocks:
             logger.info(f"[{genome_name}] No valid syntenic region found.")
-            return genome_name, [], None
+            return genome_name, [], [], None
             
         # Optimization: Merge overlapping search regions
         pre_merge_count = len(synteny_blocks)
@@ -4498,26 +4541,18 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # survived confidence/ambiguity triage. Low-confidence ambiguous/tandem
         # calls are still reported in GFF/plots but should not recursively seed
         # later waves.
-        new_genes = []
-        suppressed_seed_count = 0
-        for g in all_genes:
-            gid = g.get('id', '')
-            meta = feature_meta.get(gid, {})
-            role = meta.get("role", "goi" if is_goi_query_id(gid) else "flanking")
-            confidence = meta.get("confidence", "")
-            goi_class = meta.get("goi_class", "")
-            if role != "goi":
-                continue
-            if confidence in {"HIGH", "MEDIUM"} and goi_class in {"confident_goi", "probable_goi"}:
-                new_genes.append(g)
-            else:
-                suppressed_seed_count += 1
+        new_genes, tree_extra_genes, suppressed_seed_count = (
+            _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id)
+        )
         if all_genes:
             logger.info(
                 f"[{genome_name}] Expansion payload: {len(new_genes)} GOI-derived / "
                 f"{len(all_genes)} total annotations"
                 + (
-                    f" ({suppressed_seed_count} GOI-like annotations withheld from seeding)."
+                    f" ({suppressed_seed_count} GOI-like annotations withheld from seeding"
+                    + (f", {len(tree_extra_genes)} of which still feed the tree"
+                       if tree_extra_genes else "")
+                    + ")."
                     if suppressed_seed_count
                     else "."
                 )
@@ -4529,8 +4564,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     finally:
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            
-    return genome_name, new_genes, error_message
+
+    return genome_name, new_genes, tree_extra_genes, error_message
 def main():
     parser = argparse.ArgumentParser(description="Iterative Genome Search Runner (Wavefront Parallel)")
     parser.add_argument("--initial_db", required=True)
@@ -5112,6 +5147,11 @@ def main():
     total_new_genes = 0
     genomes_with_hits = 0
     genomes_without_hits = 0
+    # Tree-only GOI hits (e.g. tandem_goi_copy) — accumulated across waves
+    # and written to goi_for_tree.faa so that COMPUTE_TREE sees species like
+    # Apis cerana whose only GOI evidence is a tandem duplicate.
+    tree_extras_total = []
+    tree_extras_seen_ids = set()
 
     for i, wave in enumerate(waves):
         # Skip already completed waves
@@ -5153,7 +5193,7 @@ def main():
                 cumulative_genome_idx += 1
                 gbase = os.path.basename(entry['name'])
                 try:
-                    gname, new_genes, genome_error = future.result()
+                    gname, new_genes, tree_extras, genome_error = future.result()
                     if genome_error:
                         wave_errors.append((gname, genome_error))
                         logger.error(
@@ -5162,11 +5202,14 @@ def main():
                         )
                         continue
                     gene_count = len(new_genes) if new_genes else 0
-                    if gene_count > 0:
+                    extra_count = len(tree_extras) if tree_extras else 0
+                    if gene_count > 0 or extra_count > 0:
                         genomes_with_hits += 1
+                        msg = f"  ✓ {gbase}: {gene_count} new gene(s)"
+                        if extra_count:
+                            msg += f" + {extra_count} tree-only hit(s)"
                         logger.info(
-                            f"  ✓ {gbase}: {gene_count} new gene(s) "
-                            f"({cumulative_genome_idx}/{total_genomes} overall)"
+                            f"{msg} ({cumulative_genome_idx}/{total_genomes} overall)"
                         )
                     else:
                         genomes_without_hits += 1
@@ -5176,6 +5219,12 @@ def main():
                         )
                     if new_genes:
                         wave_results.extend(new_genes)
+                    if tree_extras:
+                        for g in tree_extras:
+                            gid = g.get('id', '')
+                            if gid and gid not in tree_extras_seen_ids:
+                                tree_extras_seen_ids.add(gid)
+                                tree_extras_total.append(g)
                 except Exception as exc:
                     wave_errors.append((entry.get('name', 'unknown'), str(exc)))
                     logger.error(
@@ -5239,6 +5288,40 @@ def main():
     expanded_db = f"{args.output_dir}/expanded_db.faa"
     if os.path.exists(latest_db):
         shutil.move(latest_db, expanded_db)
+
+    # Build a tree-input FASTA = expanded_db + tree-only GOI hits (tandem_copy
+    # and other MEDIUM/HIGH GOI hits that were withheld from wave seeding).
+    # This is what COMPUTE_TREE consumes — keeping seeding strict but the tree
+    # complete.
+    goi_for_tree = f"{args.output_dir}/goi_for_tree.faa"
+    if os.path.exists(expanded_db):
+        shutil.copyfile(expanded_db, goi_for_tree)
+    else:
+        # Defensive: emit an empty file so downstream wiring doesn't trip.
+        open(goi_for_tree, 'w').close()
+    if tree_extras_total:
+        existing_ids = set()
+        if os.path.exists(goi_for_tree):
+            with open(goi_for_tree) as fh:
+                for line in fh:
+                    if line.startswith('>'):
+                        existing_ids.add(line[1:].split()[0].strip())
+        appended = 0
+        with open(goi_for_tree, 'a') as fh:
+            for g in tree_extras_total:
+                gid = g.get('id', '')
+                seq = g.get('seq', '')
+                if not gid or not seq or gid in existing_ids:
+                    continue
+                fh.write(f">{gid}\n")
+                for i in range(0, len(seq), 80):
+                    fh.write(seq[i:i+80] + "\n")
+                existing_ids.add(gid)
+                appended += 1
+        logger.info(
+            f"  Tree-input FASTA: {goi_for_tree} (added {appended} tree-only hit(s) "
+            f"on top of expanded_db.faa)"
+        )
 
     # Final summary
     logger.info("")

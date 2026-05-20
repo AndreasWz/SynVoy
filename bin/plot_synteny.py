@@ -155,6 +155,20 @@ GENE_PALETTE = [
     "#d37295", "#fabfd2", "#b6992d", "#7b848f", "#f1ce63",
 ]
 
+# Okabe-Ito / Wong 2011 colorblind-safe palette for publication SVG
+PUB_PALETTE = [
+    "#0072B2",  # blue
+    "#009E73",  # bluish green
+    "#D55E00",  # vermillion
+    "#CC79A7",  # reddish purple
+    "#56B4E9",  # sky blue
+    "#E69F00",  # orange
+    "#F0E442",  # yellow
+    "#666666",  # neutral gray
+]
+GOI_PUB_COLOUR = "#E64B35"  # Nature-red for publication GOI
+GOI_PUB_BORDER = "#B71C1C"  # dark vermillion
+
 GOI_COLOUR    = "#e31a1c"   # bright red (default for GOI)
 GOI_BORDER    = "#8b0000"   # dark red
 UNMATCHED_CLR = "#d9d9d9"   # light gray
@@ -844,6 +858,107 @@ def _overlaps_any(gene, intervals):
     return False
 
 
+def _synthesize_home_goi_gene(home_genes, query_intervals, home_gff_path):
+    """Inject a synthetic GOI gene into `home_genes` if none is present.
+
+    The home synteny-block BED only contains *flanking* genes — by design.
+    For short queries (e.g. melittin, 26 aa) the GOI itself often sits
+    inside a much larger container gene (e.g. LOC726866, 17 kb), so the
+    `identify_goi_names()` size filter rejects everything and the home
+    track ends up with a silent gap where the GOI should be.
+
+    This helper scans `home_gff` for the gene that best overlaps the
+    query span, then appends a fresh entry to `home_genes` so the
+    downstream track-building code (and `identify_goi_names`) treats it
+    like any other home gene. Mutates `home_genes` in place; returns the
+    synthetic gene's `name` (or None if nothing could be synthesized).
+    """
+    if not query_intervals:
+        return None
+    if not home_gff_path or home_gff_path == "NO_GFF" or not os.path.exists(home_gff_path):
+        return None
+
+    chrom = query_intervals[0]["chrom"]
+    qstart = min(q["start"] for q in query_intervals)
+    qend = max(q["end"] for q in query_intervals)
+    qstrand = query_intervals[0].get("strand", "+")
+    # Use the true CDS coverage (sum of exon lengths, NOT min..max which
+    # includes introns). For melittin: sum ≈ 210 bp; without this fix the
+    # max_size grew to ~40 kb and the 17 kb container LOC726866 was
+    # incorrectly accepted as "small enough" to be the GOI itself.
+    q_cds_total = max(1, sum(q["end"] - q["start"] for q in query_intervals))
+    max_size = min(max(q_cds_total * 10, 2000), 5000)
+
+    # Skip if a small home gene already covers the query — `identify_goi_names`
+    # will mark that one. We only inject when there's a true gap.
+    for g in home_genes:
+        if g["chrom"] != chrom:
+            continue
+        if (g["end"] - g["start"]) > max_size:
+            continue
+        if g["start"] < qend and g["end"] > qstart:
+            return g["name"]
+
+    # Find the best-overlapping gene in home_gff that's *small* enough to be
+    # the GOI itself, not a container.
+    best = None
+    best_ov = 0
+    try:
+        with open(home_gff_path) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                p = line.rstrip("\n").split("\t")
+                if len(p) < 9 or p[2] != "gene" or p[0] != chrom:
+                    continue
+                try:
+                    gs = int(p[3]) - 1
+                    ge = int(p[4])
+                except ValueError:
+                    continue
+                if (ge - gs) > max_size:
+                    continue
+                ov = max(0, min(ge, qend) - max(gs, qstart))
+                if ov <= 0:
+                    continue
+                attrs = {}
+                for kv in p[8].split(";"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        attrs[k] = unquote(v)
+                gid = attrs.get("ID", "") or attrs.get("Name", "") or "GOI"
+                gname = attrs.get("Name") or attrs.get("gene") or gid
+                if ov > best_ov:
+                    best = {
+                        "chrom": chrom, "start": gs, "end": ge,
+                        "name": gid,
+                        "strand": p[6] if p[6] in {"+", "-"} else qstrand,
+                        "display_name": gname,
+                    }
+                    best_ov = ov
+    except OSError as exc:
+        print(f"[plot] WARN: could not scan home_gff for synthetic GOI gene: {exc}",
+              file=sys.stderr)
+        return None
+
+    if best is None:
+        # Fallback: synthesize purely from query_bed coords (no symbol).
+        best = {
+            "chrom": chrom, "start": qstart, "end": qend,
+            "name": "GOI", "strand": qstrand, "display_name": "GOI",
+        }
+
+    home_genes.append(best)
+    home_genes.sort(key=lambda g: g["start"])
+    print(
+        f"[plot] Synthesized home GOI gene '{best['display_name']}' at "
+        f"{chrom}:{best['start']:,}-{best['end']:,} (strand {best['strand']}) "
+        f"— home_bed had no row for the GOI itself.",
+        file=sys.stderr,
+    )
+    return best["name"]
+
+
 def identify_goi_names(home_genes, query_intervals):
     """
     Identify which home-gene names are GOI by overlapping with query_bed.
@@ -963,6 +1078,20 @@ def _darken_hex(hexc, factor=0.7):
     g = int(int(hexc[2:4], 16) * factor)
     b = int(int(hexc[4:6], 16) * factor)
     return f"#{min(r,255):02x}{min(g,255):02x}{min(b,255):02x}"
+
+
+def _is_dark_hex(hexc):
+    """Return True when a hex colour is dark enough for white text."""
+    if not hexc:
+        return False
+    hexc = hexc.lstrip("#")
+    if len(hexc) != 6:
+        return False
+    r = int(hexc[0:2], 16)
+    g = int(hexc[2:4], 16)
+    b = int(hexc[4:6], 16)
+    luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    return luminance < 140
 
 
 def _get_coords(gene):
@@ -1128,8 +1257,59 @@ def get_anchor_center(genes):
     return (start + end) / 2
 
 
+def _widen_sparse_plot(all_tracks, target_coverage=0.25, max_factor=4.0):
+    """Inflate every gene's visual width around its center when the plot has
+    pixel headroom — i.e. when the median per-track gene coverage of the plot
+    range is small.
+
+    Centers don't move, so ribbon endpoints stay aligned. Strand-split /
+    bumping in `_assign_sub_tracks` picks up any overlaps the widening
+    introduces. Dense plots (many genes per track) are untouched.
+
+    Returns the applied factor (1.0 if no widening was done).
+    """
+    all_x = []
+    for t in all_tracks:
+        x_off = t["offset"]
+        for g in t["genes"]:
+            all_x.append(g["start_plot"] - x_off)
+            all_x.append(g["end_plot"] - x_off)
+    if not all_x:
+        return 1.0
+
+    plot_range = max(1, max(all_x) - min(all_x))
+    coverages = []
+    for t in all_tracks:
+        if not t["genes"]:
+            continue
+        total_w = sum(g["end_plot"] - g["start_plot"] for g in t["genes"])
+        coverages.append(total_w / plot_range)
+    if not coverages:
+        return 1.0
+
+    coverages.sort()
+    median_cov = coverages[len(coverages) // 2]
+    if median_cov >= target_coverage:
+        return 1.0
+    factor = min(max_factor, target_coverage / max(median_cov, 1e-9))
+    if factor <= 1.05:
+        return 1.0
+
+    for t in all_tracks:
+        for g in t["genes"]:
+            c = (g["start_plot"] + g["end_plot"]) / 2.0
+            half = (g["end_plot"] - g["start_plot"]) / 2.0 * factor
+            g["start_plot"] = c - half
+            g["end_plot"]   = c + half
+    return factor
+
+
 def _assign_sub_tracks(genes, x_off, min_gap=800):
-    """Greedy interval scheduling: writes gene['_sub_track'] in-place."""
+    """Greedy interval scheduling: writes gene['_sub_track'] in-place.
+
+    Sub-tracks are spent only when genes would visually overlap. No strand
+    awareness — strand stays a property of each gene model, not of a row.
+    """
     sorted_genes = sorted(genes, key=lambda g: g["start_plot"] - x_off)
     sub_ends = []  # rightmost x used by each sub-track so far
     for gene in sorted_genes:
@@ -1156,15 +1336,66 @@ def _svg_esc(text):
     return _html_escape(str(text), quote=True)
 
 
+def _export_html_inline_svg(html_path, svg_path):
+    """Write a standalone SVG that mirrors the interactive HTML's render.
+
+    The interactive HTML embeds one inline `<svg>` plus a `<style>` block
+    using CSS variables. Browsers resolve those when loading the HTML, but a
+    raw SVG file has no such page context — without help, the standalone
+    SVG renders mostly black because every `var(--…)` falls back to the
+    default. This helper inlines the page CSS into the SVG inside CDATA so
+    the resulting `.svg` is visually identical to the HTML view, drops
+    cleanly into READMEs, and renders correctly in any SVG viewer.
+    """
+    with open(html_path) as fh:
+        src = fh.read()
+    style_blocks = re.findall(r'<style[^>]*>(.*?)</style>', src, re.DOTALL)
+    combined_style = "\n".join(style_blocks)
+    m = re.search(r'(<svg[^>]*>)(.*?)(</svg>)', src, re.DOTALL)
+    if not m:
+        raise RuntimeError("no <svg>...</svg> element found in HTML output")
+    svg_open, svg_inner, svg_close = m.group(1), m.group(2), m.group(3)
+    if 'xmlns="http://www.w3.org/2000/svg"' not in svg_open:
+        svg_open = svg_open.replace(
+            '<svg', '<svg xmlns="http://www.w3.org/2000/svg"', 1
+        )
+    body = (svg_open
+            + '\n<style type="text/css"><![CDATA[\n'
+            + combined_style
+            + '\n]]></style>\n'
+            + svg_inner + svg_close)
+    with open(svg_path, "w") as fh:
+        fh.write('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + body)
+
+
+def _format_species_label(name):
+    """Apply --common_names mode to a raw species string.
+
+    Reads two module globals set by main() at startup:
+      _synvoy_taxa       — sibling helper module (or None if init failed)
+      _common_name_mode  — one of 'both', 'common', 'scientific', 'off'
+    Falls back to the raw name unchanged when lookup is disabled or the
+    helper is unavailable.
+    """
+    helper = globals().get("_synvoy_taxa")
+    mode = globals().get("_common_name_mode", "off")
+    if helper is None or mode == "off":
+        return name.replace("_", " ") if name else ""
+    try:
+        return helper.label_for_species(name.replace("_", " "), mode=mode)
+    except Exception:
+        return name.replace("_", " ") if name else ""
+
+
 def _svg_arrow_path(x0, x1, yb, h, strand, rx=3):
     """Generate SVG path 'd' attribute for a pentagon gene arrow with rounded back."""
     w = x1 - x0
-    aw = min(w * 0.18, h * 0.7)
+    aw = min(w * 0.35, h * 0.8)
     if aw < 1:
         aw = min(w * 0.5, 1)
     ym = yb + h / 2
     yt = yb + h
-    rx = min(rx, w * 0.3, h * 0.3)
+    rx = min(rx, w * 0.2, h * 0.2)
 
     if strand == "+":
         # Rounded left edge, pointed right
@@ -1265,26 +1496,56 @@ def _build_tooltip_json(gene, track, home_products):
     return _svg_esc(json.dumps(data, ensure_ascii=True))
 
 
+def _gene_display_label(gene, track, home_products, goi_f, resolved_goi_f):
+    """Return the human-readable label string for a gene, regardless of
+    whether the label is currently emitted as on-canvas text. Used both
+    when setting the gene-group `data-label` (for click-to-pin in JS)
+    and when emitting the default label layer."""
+    name = gene["name"]
+    home_id = gene.get("home_gene_id", name)
+    if not track["is_home"]:
+        if goi_f:
+            label = clean_gene_label(name, keep_goi_prefix=True)
+            if not label or label == 'GOI':
+                label = clean_gene_label(home_id, keep_goi_prefix=True)
+            if not resolved_goi_f:
+                label = "~ " + label
+        else:
+            label = clean_gene_label(_preferred_target_label(gene))
+            if not label and home_id:
+                label = clean_gene_label(home_id)
+    else:
+        label = _preferred_home_label(gene, home_products)
+    return label or name
+
+
 def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                         home_products, args,
                         subtitle_bits, hidden_absent_tracks,
-                        ambiguous_track_count, resolved_track_count):
-    """Render synteny visualization as self-contained HTML with embedded SVG."""
+                        ambiguous_track_count, resolved_track_count,
+                        force_home_labels=False):
+    """Render synteny visualization as self-contained HTML with embedded SVG.
+
+    `force_home_labels=True` adds an on-canvas label for every gene in the
+    home track (used by the publication-SVG export). The interactive HTML
+    leaves it False so the canvas stays clean — flanking gene names live in
+    tooltips and click-to-pin labels."""
 
     n_tracks = len(all_tracks)
 
     # ---- Layout constants ----
-    GENE_H        = 28
-    SUB_TRACK_GAP = 8
-    TRACK_MARGIN  = 95
-    LEFT_MARGIN   = 280
+    GENE_H        = 30
+    SUB_TRACK_GAP = 10
+    TRACK_MARGIN  = 85
+    # LEFT_MARGIN will be computed dynamically below based on longest track label
+    LEFT_MARGIN   = 220
     RIGHT_MARGIN  = 50
     TOP_MARGIN    = 72
-    BOTTOM_MARGIN = 65
-    TRACK_PAD     = 14
+    BOTTOM_MARGIN = 90  # More room for legend
+    TRACK_PAD     = 10
     MIN_GENE_PX   = 4
     EXON_RX       = 3
-    RIBBON_GAP    = 8
+    RIBBON_GAP    = min(8, TRACK_MARGIN * 0.1)
 
     # ---- Compute x range ----
     all_x_bp = []
@@ -1304,6 +1565,16 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     x_max_bp += pad_bp
 
     # ---- Plot dimensions ----
+    # Dynamic left margin: measure longest track label and allow more room
+    try:
+        max_lbl = 0
+        for t in all_tracks:
+            lbl = re.sub(r"<[^>]+>", "", t.get("label", "") or "")
+            max_lbl = max(max_lbl, len(lbl))
+        # approx char * px + padding
+        LEFT_MARGIN = max(260, int(max_lbl * 8 + 60))
+    except Exception:
+        LEFT_MARGIN = 260
     if args.plot_width > 0:
         plot_w = max(800, args.plot_width)
     else:
@@ -1354,10 +1625,23 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
 
     # ---- SVG defs (filters) ----
     svg_parts.append('<defs>')
-    svg_parts.append("""
+    svg_parts.append(f"""
     <filter id="geneShadow" x="-4%" y="-15%" width="108%" height="140%">
       <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-opacity="0.10" flood-color="#000"/>
     </filter>
+    <linearGradient id="geneGloss" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="45%" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="55%" stop-color="#000000" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.25"/>
+    </linearGradient>
+    <!-- Diagonal-stripe pattern for ambiguous GOI / low-confidence rescue
+         hits. Same idiom as plot_synteny_matrix.py so the two plots read alike. -->
+    <pattern id="ambiguousGoi" patternUnits="userSpaceOnUse"
+             width="7" height="7" patternTransform="rotate(45)">
+      <rect width="7" height="7" fill="#fff0ec"/>
+      <rect width="3" height="7" fill="{GOI_PUB_COLOUR}" opacity="0.75"/>
+    </pattern>
     """)
     svg_parts.append('</defs>')
 
@@ -1389,7 +1673,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             svg_parts.append(
                 f'<rect x="{x_left:.1f}" y="{yb - TRACK_PAD:.1f}" '
                 f'width="{x_right - x_left:.1f}" height="{th + 2*TRACK_PAD:.1f}" '
-                f'class="track-bg" rx="6"/>'
+                f'class="track-bg track-item" data-track-idx="{ti}" rx="6"/>'
             )
         else:
             boundaries = [x_left] + chrom_break_xs + [x_right]
@@ -1401,7 +1685,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                     svg_parts.append(
                         f'<rect x="{seg_x0:.1f}" y="{yb - TRACK_PAD:.1f}" '
                         f'width="{seg_x1 - seg_x0:.1f}" height="{th + 2*TRACK_PAD:.1f}" '
-                        f'class="track-bg" rx="6"/>'
+                        f'class="track-bg track-item" data-track-idx="{ti}" rx="6"/>'
                     )
 
     # ---- Ribbons (drawn first, behind genes) ----
@@ -1413,8 +1697,8 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             home_id = lg.get("home_gene_id", "")
             if not home_id:
                 continue
-            ribbon_alpha = args.ribbon_alpha_dense
-            y_lg_top = gene_yb(ti + 1, lg) + GENE_H + RIBBON_GAP
+            
+            y_lg_top = gene_yb(ti + 1, lg) - RIBBON_GAP
             for ug in upper["genes"]:
                 u_name = ug["name"]
                 u_home = ug.get("home_gene_id", u_name)
@@ -1424,12 +1708,18 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 if match:
                     colour = gene_colours.get(home_id,
                              gene_colours.get(u_name, UNMATCHED_CLR))
+                    
                     if is_goi(home_id):
                         colour = _goi_colour_for_genome(
                             lower["genome_id"], goi_genome_colours)
+                        ribbon_alpha = 0.40
                         if _is_goi_target_gene(lg) and not _is_resolved_goi_target_gene(lg):
-                            ribbon_alpha = 0.10
-                    y_ug_bot = gene_yb(ti, ug) - RIBBON_GAP
+                            ribbon_alpha = 0.15
+                    else:
+                        identity = lg.get("identity", 50.0)
+                        ribbon_alpha = 0.08 + (min(identity, 100) / 100) * 0.35
+
+                    y_ug_bot = gene_yb(ti, ug) + GENE_H + RIBBON_GAP
 
                     ux0, ux1 = gene_px(ug, upper)
                     lx0, lx1 = gene_px(lg, lower)
@@ -1439,7 +1729,8 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                     svg_parts.append(
                         f'<path d="{path_d}" fill="{fill}" stroke="{edge}" '
                         f'stroke-width="0.5" class="ribbon" '
-                        f'data-homology="{_svg_esc(home_id)}"/>'
+                        f'data-homology="{_svg_esc(home_id)}" '
+                        f'data-upper-track="{ti}" data-lower-track="{ti + 1}"/>'
                     )
     svg_parts.append('</g>')
 
@@ -1470,8 +1761,11 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 bw = 2.2 if confidence == "HIGH" or track["is_home"] else 1.8
                 dash = ""
             elif ambiguous_goi:
-                colour = _hex_to_rgba(
-                    _goi_colour_for_genome(track["genome_id"], goi_genome_colours), 0.32)
+                # Ambiguous GOI: diagonal-stripe pattern fill + dashed border
+                # to make 'low-confidence rescue hit' visible at a glance,
+                # rather than just a slightly-different border weight on a
+                # solid red block. Matches the matrix plot's idiom.
+                colour = "url(#ambiguousGoi)"
                 bclr = GOI_BORDER
                 bw = 1.5
                 dash = ' stroke-dasharray="6,3"'
@@ -1488,7 +1782,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             else:
                 colour = UNMATCHED_CLR
                 bclr = "#b0b0b0"
-                bw = 0.8
+                bw = 1.0
                 dash = ' stroke-dasharray="2,2"' if confidence == "LOW" else ""
 
             x0, x1 = gene_px(gene, track)
@@ -1498,10 +1792,24 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             tooltip_json = _build_tooltip_json(gene, track, home_products)
             goi_attr = ' data-is-goi="true"' if goi_like else ''
             hom_id_attr = _svg_esc(home_id)
+            x0_attr = f'{x0:.1f}'
+            x1_attr = f'{x1:.1f}'
+            yb_attr = f'{yb:.1f}'
+
+            # Pre-compute the gene's display label so click-to-pin in JS can
+            # look it up without redoing the (track-aware) label resolution.
+            display_label = _gene_display_label(
+                gene, track, home_products, goi_like, resolved_goi
+            )
+            label_attr = _svg_esc(display_label)
 
             svg_parts.append(
                 f'<g class="gene-group" data-homology="{hom_id_attr}" '
-                f'data-track="{ti}" data-tooltip=\'{tooltip_json}\'{goi_attr}>'
+                f'data-track="{ti}" data-track-idx="{ti}" '
+                f'data-x0="{x0_attr}" data-x1="{x1_attr}" data-yb="{yb_attr}" '
+                f'data-fill="{colour}" data-identity="{gene.get("identity", 0.0)}" '
+                f'data-label="{label_attr}" '
+                f'data-tooltip=\'{tooltip_json}\'{goi_attr}>'
             )
 
             # Render gene body
@@ -1588,11 +1896,14 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                                 f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
                             )
             else:
-                # --- Single-block arrow gene ---
+                # --- Single-block arrow gene (pentagon points along strand) ---
                 path_d = _svg_arrow_path(x0, x1, yb, GENE_H, strand, rx=EXON_RX)
                 svg_parts.append(
                     f'<path d="{path_d}" fill="{colour}" stroke="{bclr}" '
                     f'stroke-width="{bw}" class="exon"{dash}/>'
+                )
+                svg_parts.append(
+                    f'<path d="{path_d}" fill="url(#geneGloss)" pointer-events="none"/>'
                 )
 
             svg_parts.append('</g>')
@@ -1619,67 +1930,30 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             )
 
     # ---- Gene labels ----
+    # Interactive HTML keeps the canvas clean: only GOIs are labelled by
+    # default. Flanking-gene names live in the hover tooltip and on the
+    # click-to-pin layer. Publication SVG (`force_home_labels=True`) adds
+    # one label per home-track gene.
     svg_parts.append('<g class="gene-labels">')
     for ti, track in enumerate(all_tracks):
         x_off = track["offset"]
-        genes_in_track = track["genes"]
-        n_genes = len(genes_in_track)
+        n_genes = len(track["genes"])
+        fsize = max(9, 13 - (n_genes // 6))
 
-        label_candidates = []
-        for gene in genes_in_track:
+        for gene in track["genes"]:
             name = gene["name"]
             home_id = gene.get("home_gene_id", name)
             goi_f = _is_goi_target_gene(gene) if not track["is_home"] else (is_goi(name) or is_goi(home_id))
             resolved_goi_f = _is_resolved_goi_target_gene(gene) if not track["is_home"] else goi_f
 
-            has_colour = (home_id in gene_colours or name in gene_colours)
-            if n_genes > 12 and not goi_f and not has_colour:
+            home_force = force_home_labels and track["is_home"]
+            if not (goi_f or home_force):
                 continue
 
-            if not track["is_home"]:
-                if goi_f:
-                    label = clean_gene_label(name, keep_goi_prefix=True)
-                    if not label or label == 'GOI':
-                        label = clean_gene_label(home_id, keep_goi_prefix=True)
-                    if not resolved_goi_f:
-                        label = "~ " + label
-                else:
-                    label = clean_gene_label(_preferred_target_label(gene))
-                    if not label and home_id:
-                        label = clean_gene_label(home_id)
-            else:
-                label = _preferred_home_label(gene, home_products)
+            label = _gene_display_label(gene, track, home_products, goi_f, resolved_goi_f)
 
             g_start, g_end = _get_coords(gene)
-            xc_bp = (g_start + g_end) / 2 - x_off
-            xc_px = bp2px(xc_bp)
-            priority = 0 if goi_f else (1 if has_colour else 2)
-            label_candidates.append((xc_px, label, gene, goi_f, priority))
-
-        label_candidates.sort(key=lambda c: (c[4], c[0]))
-
-        fsize = max(9, 13 - (n_genes // 6))
-        char_w_est = fsize * 4.2
-        rotation_factor = 0.70
-        placed_ranges_by_sub = {}
-
-        for xc_px, label, gene, goi_f, priority in label_candidates:
-            est_width = len(label) * char_w_est * rotation_factor
-            lbl_left = xc_px - est_width / 2
-            lbl_right = xc_px + est_width / 2
-            margin = fsize * 2
-
-            sub_idx = gene.get("_sub_track", 0)
-            placed_ranges = placed_ranges_by_sub.setdefault(sub_idx, [])
-
-            overlaps = any(
-                lbl_left < pr + margin and lbl_right > pl - margin
-                for pl, pr in placed_ranges
-            )
-            if overlaps and not goi_f:
-                continue
-
-            placed_ranges.append((lbl_left, lbl_right))
+            xc_px = bp2px((g_start + g_end) / 2 - x_off)
             yb_px = gene_yb(ti, gene)
             lbl_y = yb_px - 4
 
@@ -1690,44 +1964,14 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
 
             svg_parts.append(
                 f'<text x="{xc_px:.1f}" y="{lbl_y:.1f}" '
-                f'transform="rotate(-30 {xc_px:.1f} {lbl_y:.1f})" '
-                f'class="{lbl_class}" font-size="{fsize}">{_svg_esc(label)}</text>'
+                f'transform="rotate(-45 {xc_px:.1f} {lbl_y:.1f})" '
+                f'class="{lbl_class} track-item" data-track-idx="{ti}" '
+                f'font-size="{fsize}">{_svg_esc(label)}</text>'
             )
     svg_parts.append('</g>')
 
-    # ---- Track labels (left margin) ----
-    svg_parts.append('<g class="track-labels">')
-    for ti, track in enumerate(all_tracks):
-        yb = track_y[ti]
-        th = track_heights[ti]
-        label_y = yb + th / 2
-
-        # Split label into name and status
-        track_label = track["label"]
-        # Strip HTML tags for SVG text
-        clean_lbl = re.sub(r"<[^>]+>", "", track_label)
-
-        svg_parts.append(
-            f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y:.1f}" '
-            f'class="track-label" text-anchor="end" '
-            f'dominant-baseline="central">{_svg_esc(clean_lbl)}</text>'
-        )
-
-        if not track["is_home"]:
-            status = track.get("goi_status", "")
-            if status == "absent":
-                svg_parts.append(
-                    f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y + 16:.1f}" '
-                    f'class="goi-status absent" text-anchor="end" '
-                    f'dominant-baseline="central">✗ GOI absent</text>'
-                )
-            elif status == "ambiguous":
-                svg_parts.append(
-                    f'<text x="{LEFT_MARGIN - 16:.0f}" y="{label_y + 16:.1f}" '
-                    f'class="goi-status ambiguous" text-anchor="end" '
-                    f'dominant-baseline="central">~ GOI ambiguous</text>'
-                )
-    svg_parts.append('</g>')
+    # ---- Pinned-labels layer (populated by JS on click-to-pin) ----
+    svg_parts.append('<g class="pinned-labels"></g>')
 
     # ---- Gap breaks & chromosome labels ----
     for ti, track in enumerate(all_tracks):
@@ -1741,13 +1985,13 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 svg_parts.append(
                     f'<line x1="{brk_px:.1f}" y1="{yb - TRACK_PAD:.1f}" '
                     f'x2="{brk_px:.1f}" y2="{yb + th + TRACK_PAD:.1f}" '
-                    f'class="chrom-break-line"/>'
+                    f'class="chrom-break-line track-item" data-track-idx="{ti}"/>'
                 )
             else:
                 svg_parts.append(
                     f'<text x="{brk_px:.1f}" y="{yb + th/2:.1f}" '
                     f'text-anchor="middle" dominant-baseline="central" '
-                    f'class="break-label">// {_svg_esc(brk["text"])}</text>'
+                    f'class="break-label track-item" data-track-idx="{ti}">// {_svg_esc(brk["text"])}</text>'
                 )
 
         # Chromosome labels below segments
@@ -1770,7 +2014,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                     short = ch if len(ch) <= 14 else ch[-12:]
                     svg_parts.append(
                         f'<text x="{cx:.1f}" y="{yb + th + TRACK_PAD + 10:.1f}" '
-                        f'text-anchor="middle" class="chrom-label">{_svg_esc(short)}</text>'
+                        f'text-anchor="middle" class="chrom-label track-item" data-track-idx="{ti}">{_svg_esc(short)}</text>'
                     )
 
     # ---- Scale bar ----
@@ -1798,6 +2042,85 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
         f'{_format_bp_label(scale_len_bp)}</text>'
     )
 
+    # ---- Track labels (left margin) ----
+    # Layout:
+    #   x=  8..26 → collapse-toggle button (own column, never under text)
+    #   x=  ...   → GOI clade dot, just left of the species label
+    #   x=  LEFT_MARGIN-14 right edge → species, accession, status (right-aligned)
+    TOGGLE_X      = 8
+    TOGGLE_W      = 18
+    TEXT_RIGHT_X  = LEFT_MARGIN - 14
+    DOT_X         = LEFT_MARGIN - 4
+
+    svg_parts.append('<g class="track-labels">')
+    for ti, track in enumerate(all_tracks):
+        yb = track_y[ti] + GENE_H / 2
+        label = re.sub(r"<[^>]+>", "", track["label"])
+
+        # Parse out accession if possible (assume label is "Species_name (Accession)")
+        species = label
+        acc = ""
+        m = re.search(r"^(.*?)\s*\(([^)]+)\)$", label)
+        if m:
+            species = m.group(1).strip()
+            acc = m.group(2).strip()
+
+        # Collapse toggle for non-home tracks, in its own left-edge column so
+        # the species name never overlaps it.
+        if not track.get("is_home"):
+            svg_parts.append(
+                f'<g class="track-toggle" data-track-idx="{ti}">'
+                f'<rect x="{TOGGLE_X}" y="{yb - TOGGLE_W/2:.1f}" '
+                f'width="{TOGGLE_W}" height="{TOGGLE_W}" rx="3"/>'
+                f'<text x="{TOGGLE_X + TOGGLE_W/2:.1f}" y="{yb:.1f}" '
+                f'text-anchor="middle" dominant-baseline="central">▼</text>'
+                f'</g>'
+            )
+
+        # GOI clade color indicator (right of all labels, before the plot)
+        g_clr = goi_genome_colours.get(track.get("genome_id", ""), GOI_COLOUR)
+        svg_parts.append(
+            f'<circle cx="{DOT_X}" cy="{yb:.1f}" r="4" fill="{g_clr}" />'
+        )
+
+        # Species/common name (NCBI 'datasets' lookup if enabled).
+        species_label = _format_species_label(species)
+        svg_parts.append(
+            f'<text x="{TEXT_RIGHT_X}" y="{yb:.1f}" '
+            f'text-anchor="end" class="track-label" font-style="italic">{_svg_esc(species_label)}</text>'
+        )
+
+        # Accession and span
+        if acc:
+            span_str = acc
+            if track["genes"]:
+                chroms = sorted({g["chrom"] for g in track["genes"]})
+                chr_str = chroms[0] if len(chroms) == 1 else f"{len(chroms)} chr"
+                span_str = f"{acc} • {chr_str}"
+
+            svg_parts.append(
+                f'<text x="{TEXT_RIGHT_X}" y="{yb + 14:.1f}" '
+                f'text-anchor="end" class="chrom-label">{_svg_esc(span_str)}</text>'
+            )
+
+        # GOI status indicators
+        if not track["is_home"]:
+            status = track.get("goi_status", "")
+            if status == "absent":
+                svg_parts.append(
+                    f'<text x="{TEXT_RIGHT_X}" y="{yb + 28:.1f}" '
+                    f'text-anchor="end" class="goi-status absent">✗ GOI not found</text>'
+                )
+            elif status == "ambiguous":
+                svg_parts.append(
+                    f'<text x="{TEXT_RIGHT_X}" y="{yb + 28:.1f}" '
+                    f'text-anchor="end" class="goi-status ambiguous">⚠ Ambiguous orthology</text>'
+                )
+    svg_parts.append('</g>')
+
+    # ---- Legend (Bottom left) ----
+    # Removed as requested.
+
     # ---- Title & subtitle ----
     title_x = plot_w / 2
     svg_parts.append(
@@ -1817,27 +2140,50 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     return html
 
 
-def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=None):
-    """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML."""
+def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=None,
+                     clade_count=4):
+    """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML.
+
+    The tree is midpoint-rooted and split into ``clade_count`` clades by
+    cutting the K−1 longest non-root branches (see
+    ``synvoy_tree.partition_clades``). Each clade gets one distinct colour
+    from the colour-blind-safe ``CLADE_PALETTE``; leaves within the same
+    cut subtree share that colour and so form visually contiguous groups —
+    matching the matrix plot's idiom.
+
+    The legacy per-genome ``goi_genome_colours`` is kept as a fallback for
+    leaves that cannot be assigned to a clade (e.g. trees with <2 leaves).
+    """
     if not tree_file or not os.path.exists(tree_file):
         return
 
     try:
-        if ETE3_AVAILABLE:
-            t = Tree(tree_file)
-        else:
-            with open(tree_file) as fh:
-                newick_str = fh.read().strip()
-            t = _parse_newick(newick_str)
+        with open(tree_file) as fh:
+            newick_str = fh.read()
+        # Use the shared synvoy_tree parser → midpoint root → partition.
+        # Side-effect: this is a separate code path from ete3, but the
+        # implementation is dependency-free and produces equivalent layouts.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import synvoy_tree as _stree
+        raw = _stree.parse_newick_tree(newick_str)
+        t = _stree.midpoint_root(raw) if raw is not None else None
     except Exception as exc:
         print(f"Warning: could not parse tree for rendering: {exc}")
         return
 
-    leaves = list(t.iter_leaves())
+    if t is None:
+        return
+
+    leaves = list(t.leaves())
     if len(leaves) < 2:
         return
 
-    # Assign coordinates via recursive DFS
+    # Clade partition — leaf name → 0-based clade id. K-longest-branches mode
+    # (default K=4): cuts the K−1 deepest splits near the root so the
+    # rendered colours track the natural major lineages.
+    leaf_clade = _stree.partition_clades(t, target_k=clade_count)
+
+    # Assign coordinates via recursive DFS using the rooted tree.
     node_coords = {}
     leaf_counter = [0]
 
@@ -1845,13 +2191,14 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
         if node.is_leaf():
             y = leaf_counter[0]
             leaf_counter[0] += 1
-            node_coords[node] = (x_offset + node.dist, y)
+            node_coords[id(node)] = (x_offset + node.dist, y)
         else:
             child_ys = []
             for child in node.children:
                 _layout(child, x_offset + node.dist)
-                child_ys.append(node_coords[child][1])
-            node_coords[node] = (x_offset + node.dist, sum(child_ys) / len(child_ys))
+                child_ys.append(node_coords[id(child)][1])
+            node_coords[id(node)] = (x_offset + node.dist,
+                                     sum(child_ys) / len(child_ys))
 
     _layout(t, 0)
 
@@ -1860,7 +2207,6 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
     if max_x <= 0:
         max_x = 1
 
-    # Layout params
     left_m = 40
     right_m = 320
     top_m = 60
@@ -1876,36 +2222,58 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
     def ty(val):
         return top_m + val * leaf_h + leaf_h / 2
 
+    # Each non-root node inherits the clade colour of *any* descendant leaf
+    # (since clades are contiguous by construction, all descendants share
+    # the same id). This lets us colour internal branches consistently.
+    def _node_clade_color(node):
+        for leaf in _iter_leaves(node):
+            cid = leaf_clade.get(leaf.name)
+            if cid is not None:
+                return _stree.color_for_clade(cid)
+        return "#777"
+
+    def _iter_leaves(node):
+        if node.is_leaf():
+            yield node
+            return
+        for c in node.children:
+            yield from _iter_leaves(c)
+
     svg_parts = []
 
-    # Branch lines
-    for node in t.traverse():
-        if node.is_root():
+    # Branch lines, coloured by clade.
+    for node in t.all_nodes():
+        if node.parent is None:
             continue
-        parent = node.up
-        px, py = node_coords[parent]
-        cx, cy = node_coords[node]
+        parent = node.parent
+        px, py = node_coords[id(parent)]
+        cx, cy = node_coords[id(node)]
+        bcol = _node_clade_color(node)
         svg_parts.append(
             f'<polyline points="{tx(px):.1f},{ty(py):.1f} '
             f'{tx(px):.1f},{ty(cy):.1f} {tx(cx):.1f},{ty(cy):.1f}" '
-            f'fill="none" stroke="#555" stroke-width="1.5"/>'
+            f'fill="none" stroke="{bcol}" stroke-width="1.5"/>'
         )
 
-    # Leaf nodes
+    # Leaf nodes coloured by clade. Falls back to the legacy per-genome
+    # palette only if clade assignment failed for this leaf.
     for leaf in leaves:
-        lx, ly = node_coords[leaf]
-        gid = _genome_id_from_leaf(leaf.name)
-        key = gid if gid else "home"
-
-        colour = GOI_COLOUR
-        if goi_genome_colours:
-            if key in goi_genome_colours:
-                colour = goi_genome_colours[key]
-            else:
-                for k, c in goi_genome_colours.items():
-                    if k in key or key in k:
-                        colour = c
-                        break
+        lx, ly = node_coords[id(leaf)]
+        cid = leaf_clade.get(leaf.name)
+        if cid is not None:
+            colour = _stree.color_for_clade(cid)
+        else:
+            gid = _genome_id_from_leaf(leaf.name)
+            key = gid if gid else "home"
+            colour = GOI_COLOUR
+            if goi_genome_colours:
+                if key in goi_genome_colours:
+                    colour = goi_genome_colours[key]
+                else:
+                    for k, c in goi_genome_colours.items():
+                        if k in key or key in k:
+                            colour = c
+                            break
 
         # Clean label
         label = leaf.name
@@ -1986,6 +2354,51 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
 
 
 # ======================================================================
+# Publication SVG Renderer
+# ======================================================================
+#
+# The publication SVG is the same content as the interactive HTML, but
+# rendered with every home-genome gene labelled on the canvas (so the
+# figure is self-describing in print). The narrow vertical layout the
+# previous renderer produced has been removed — the user wanted the
+# publication output to be a verbatim mirror of the HTML view.
+
+
+def render_publication_svg(all_tracks, gene_colours, goi_genome_colours,
+                           home_products, args,
+                           subtitle_bits, hidden_absent_tracks,
+                           ambiguous_track_count, resolved_track_count):
+    """Render publication SVG = HTML plot with home-genome gene names forced on."""
+    pub_html = render_synteny_html(
+        all_tracks, gene_colours, goi_genome_colours,
+        home_products, args,
+        subtitle_bits, hidden_absent_tracks,
+        ambiguous_track_count, resolved_track_count,
+        force_home_labels=True,
+    )
+
+    style_blocks = re.findall(r"<style[^>]*>(.*?)</style>", pub_html, re.DOTALL)
+    combined_style = "\n".join(style_blocks)
+    m = re.search(r"(<svg[^>]*>)(.*?)(</svg>)", pub_html, re.DOTALL)
+    if not m:
+        raise RuntimeError("no <svg>...</svg> in publication HTML render")
+    svg_open, svg_inner, svg_close = m.group(1), m.group(2), m.group(3)
+    if 'xmlns="http://www.w3.org/2000/svg"' not in svg_open:
+        svg_open = svg_open.replace(
+            "<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+        + svg_open
+        + "\n<style type=\"text/css\"><![CDATA[\n"
+        + combined_style
+        + "\n]]></style>\n"
+        + svg_inner
+        + svg_close
+    )
+
+
+# ======================================================================
 # HTML + CSS + JS Templates
 # ======================================================================
 
@@ -2061,6 +2474,11 @@ body {
 .gene-group .exon {
   transition: filter 0.15s ease;
 }
+/* Right-click pinned: subtle dark outline so it's visually marked as
+   "I asked for this label" without changing the gene fill. */
+.gene-group.pinned .exon {
+  stroke: #1a1d26;
+}
 
 /* Intron lines */
 .intron-line {
@@ -2092,6 +2510,73 @@ body {
   fill: var(--text-primary);
   font-size: 13px;
   font-weight: 600;
+    pointer-events: none;
+}
+.track-toggle { cursor: pointer; }
+.track-toggle rect {
+    fill: var(--track-bg);
+    stroke: var(--track-border);
+    stroke-width: 1;
+}
+.track-toggle:hover rect {
+    fill: var(--surface);
+    stroke: var(--text-muted);
+}
+.track-toggle text {
+    fill: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    user-select: none;
+    pointer-events: none;
+}
+.track-toggle:hover text { fill: var(--text-primary); }
+.track-summary {
+    display: none;
+    fill: var(--text-secondary);
+    font-size: 10px;
+    font-style: italic;
+    pointer-events: none;
+}
+.track-manager {
+    position: fixed;
+    top: 52px;
+    right: 16px;
+    z-index: 101;
+    width: 280px;
+    max-height: 55vh;
+    overflow: auto;
+    background: rgba(255,255,255,0.96);
+    border: 1px solid var(--track-border);
+    border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.14);
+    padding: 12px;
+    display: none;
+}
+.track-manager.visible {
+    display: block;
+}
+.track-manager h3 {
+    font-size: 13px;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+.track-manager label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 4px;
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+.track-manager label:hover {
+    background: var(--track-bg);
+}
+.track-manager input {
+    margin-top: 2px;
+}
+.track-item-hidden {
+    display: none !important;
 }
 
 /* GOI status indicators */
@@ -2107,16 +2592,19 @@ body {
   fill: var(--text-muted);
   font-size: 10px;
   font-weight: 500;
+    pointer-events: none;
 }
 .chrom-break-line {
   stroke: #94a3b8;
   stroke-width: 1.5;
   stroke-dasharray: 5,4;
+    pointer-events: none;
 }
 .break-label {
   fill: var(--text-muted);
   font-size: 9px;
   font-weight: 600;
+    pointer-events: none;
 }
 
 /* Scale bar */
@@ -2141,7 +2629,27 @@ body {
   font-size: 11px;
 }
 
-/* Highlight states (click-to-highlight) */
+/* Pinned gene labels (added by JS on right-click) */
+.pinned-label {
+  fill: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.pinned-label-bg {
+  fill: rgba(255,255,255,0.85);
+  stroke: var(--track-border);
+  stroke-width: 0.5;
+  pointer-events: none;
+}
+.pinned-label-leader {
+  stroke: var(--text-muted);
+  stroke-width: 0.6;
+  fill: none;
+  pointer-events: none;
+}
+
+/* Highlight states (left-click follows a gene's orthologs across tracks) */
 .gene-group.highlighted {
   filter: drop-shadow(0 2px 8px rgba(0,0,0,0.2)) brightness(1.1) !important;
   opacity: 1 !important;
@@ -2150,20 +2658,29 @@ body {
   opacity: 0.18 !important;
   filter: saturate(0.3) !important;
 }
-.ribbon.highlighted {
-  opacity: 0.5 !important;
-}
-.ribbon.dimmed {
-  opacity: 0.03 !important;
-}
+.ribbon.highlighted { opacity: 0.5 !important; }
+.ribbon.dimmed      { opacity: 0.03 !important; }
 
-/* GOI pulse animation */
+/* GOI pulse animation (one shot on load, draws the eye to the GOI). */
 @keyframes goi-pulse {
   0%, 100% { filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08)); }
-  50% { filter: drop-shadow(0 0 8px rgba(227,26,28,0.4)) brightness(1.1); }
+  50%      { filter: drop-shadow(0 0 8px rgba(227,26,28,0.4)) brightness(1.1); }
 }
 .gene-group[data-is-goi="true"] {
   animation: goi-pulse 1.8s ease-in-out 3;
+}
+
+.track-bg.track-item-hidden,
+.track-label.track-item-hidden,
+.track-summary.track-item-hidden,
+.track-toggle.track-item-hidden,
+.chrom-label.track-item-hidden,
+.chrom-break-line.track-item-hidden,
+.break-label.track-item-hidden,
+.goi-status.track-item-hidden,
+.gene-label.track-item-hidden,
+.gene-group.track-item-hidden {
+    display: none !important;
 }
 
 /* Tooltip */
@@ -2220,11 +2737,17 @@ body {
 }
 """
 
-_JS_TEMPLATE = """
+_JS_TEMPLATE = r"""
 document.addEventListener('DOMContentLoaded', () => {
   const tooltip = document.getElementById('tooltip');
   const svg = document.querySelector('.synteny-svg');
   if (!svg) return;
+
+    const trackManager = document.getElementById('track-manager');
+    const trackManagerBtn = document.getElementById('track-manager-btn');
+    const ribbonsGroup = svg.querySelector('.ribbons');
+    const trackCount = new Set(Array.from(svg.querySelectorAll('[data-track-idx]')).map(el => el.dataset.trackIdx).filter(Boolean)).size;
+    const collapsedTracks = new Set();
 
   // ---- Zoom controls ----
   let zoom = 1;
@@ -2239,6 +2762,166 @@ document.addEventListener('DOMContentLoaded', () => {
   if (zoomIn) zoomIn.addEventListener('click', () => { zoom = Math.min(5, zoom * 1.25); applyZoom(); });
   if (zoomOut) zoomOut.addEventListener('click', () => { zoom = Math.max(0.2, zoom / 1.25); applyZoom(); });
   if (zoomReset) zoomReset.addEventListener('click', () => { zoom = 1; applyZoom(); });
+
+    // ---- Track manager / collapse controls ----
+    function uniqueTrackIndices() {
+        const indices = new Set();
+        svg.querySelectorAll('[data-track-idx]').forEach(el => {
+            if (el.dataset.trackIdx !== undefined && el.dataset.trackIdx !== '') indices.add(el.dataset.trackIdx);
+        });
+        return Array.from(indices).sort((a, b) => Number(a) - Number(b));
+    }
+
+    function trackLabelFor(idx) {
+        const labelEl = svg.querySelector('.track-label[data-track-idx="' + idx + '"]');
+        if (labelEl) return labelEl.textContent.trim();
+        const summaryEl = svg.querySelector('.track-summary[data-track-idx="' + idx + '"]');
+        if (summaryEl) return summaryEl.textContent.replace(/^⋯\\s*/, '').replace(/\\s*\\(collapsed\\)$/, '').trim();
+        return 'Track ' + idx;
+    }
+
+    function setTrackCollapsed(idx, collapsed) {
+        const state = collapsed ? 'add' : 'delete';
+        collapsedTracks[state](idx);
+        svg.querySelectorAll('[data-track-idx="' + idx + '"]').forEach(el => {
+            if (el.classList.contains('track-summary')) return;
+            el.classList.toggle('track-item-hidden', collapsed);
+        });
+        svg.querySelectorAll('.track-summary[data-track-idx="' + idx + '"]').forEach(el => {
+            el.classList.toggle('track-item-hidden', !collapsed);
+        });
+        svg.querySelectorAll('.track-toggle[data-track-idx="' + idx + '"]').forEach(el => {
+            // The toggle is a <g> containing a <rect> background and a <text>
+            // glyph. Update only the text child so the rect stays intact.
+            const tEl = el.querySelector('text') || el;
+            tEl.textContent = collapsed ? '▶' : '▼';
+        });
+        rebuildRibbons();
+    }
+
+    function buildTrackManager() {
+        if (!trackManager) return;
+        trackManager.innerHTML = '<h3>Manage tracks</h3>';
+        uniqueTrackIndices().forEach(idx => {
+            const row = document.createElement('label');
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = !collapsedTracks.has(idx);
+            if (idx === '0') {
+                cb.checked = true;
+                cb.disabled = true;
+            }
+            cb.addEventListener('change', () => setTrackCollapsed(idx, !cb.checked));
+            const span = document.createElement('span');
+            span.textContent = trackLabelFor(idx);
+            row.appendChild(cb);
+            row.appendChild(span);
+            trackManager.appendChild(row);
+        });
+    }
+
+    if (trackManagerBtn && trackManager) {
+        trackManagerBtn.addEventListener('click', () => {
+            trackManager.classList.toggle('visible');
+            if (trackManager.classList.contains('visible')) buildTrackManager();
+        });
+        document.addEventListener('click', (e) => {
+            if (!trackManager.contains(e.target) && e.target !== trackManagerBtn) {
+                trackManager.classList.remove('visible');
+            }
+        });
+    }
+
+    svg.querySelectorAll('.track-toggle').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const idx = el.dataset.trackIdx;
+            setTrackCollapsed(idx, !collapsedTracks.has(idx));
+            buildTrackManager();
+        });
+    });
+
+    function buildRibbonPath(ux0, ux1, uy, lx0, lx1, ly) {
+        const cy = (uy + ly) / 2;
+        return 'M' + ux0.toFixed(2) + ',' + uy.toFixed(2) +
+                     ' C' + ux0.toFixed(2) + ',' + cy.toFixed(2) + ' ' + lx0.toFixed(2) + ',' + cy.toFixed(2) +
+                     ' ' + lx0.toFixed(2) + ',' + ly.toFixed(2) + ' L' + lx1.toFixed(2) + ',' + ly.toFixed(2) +
+                     ' C' + lx1.toFixed(2) + ',' + cy.toFixed(2) + ' ' + ux1.toFixed(2) + ',' + cy.toFixed(2) +
+                     ' ' + ux1.toFixed(2) + ',' + uy.toFixed(2) + ' Z';
+    }
+
+    function rebuildRibbons() {
+        if (!ribbonsGroup) return;
+        ribbonsGroup.innerHTML = '';
+        const visible = uniqueTrackIndices().filter(idx => !collapsedTracks.has(idx));
+        for (let vi = 0; vi < visible.length - 1; vi++) {
+            const upperIdx = visible[vi];
+            const lowerIdx = visible[vi + 1];
+            const upperGenes = Array.from(svg.querySelectorAll('.gene-group[data-track-idx="' + upperIdx + '"]')).filter(el => !el.classList.contains('track-item-hidden'));
+            const lowerGenes = Array.from(svg.querySelectorAll('.gene-group[data-track-idx="' + lowerIdx + '"]')).filter(el => !el.classList.contains('track-item-hidden'));
+            const upperByHomology = new Map();
+            upperGenes.forEach(g => {
+                const hom = g.dataset.homology;
+                if (!upperByHomology.has(hom)) upperByHomology.set(hom, []);
+                upperByHomology.get(hom).push(g);
+            });
+            lowerGenes.forEach(lg => {
+                const hom = lg.dataset.homology;
+                const matches = upperByHomology.get(hom) || [];
+                if (!matches.length) return;
+                const lx0 = parseFloat(lg.dataset.x0);
+                const lx1 = parseFloat(lg.dataset.x1);
+                const ly = parseFloat(lg.dataset.yb) - 11;
+                const identity = Math.max(0, Math.min(100, parseFloat(lg.dataset.identity || '50')));
+                const isGoi = lg.dataset.isGoi === 'true';
+                const clr = lg.dataset.fill || '#909090';
+                const alpha = isGoi ? 0.40 : (0.08 + (identity / 100) * 0.35);
+                matches.forEach(ug => {
+                    const ux0 = parseFloat(ug.dataset.x0);
+                    const ux1 = parseFloat(ug.dataset.x1);
+                    const uy = parseFloat(ug.dataset.yb) + 11;
+                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    path.setAttribute('class', 'ribbon');
+                    path.setAttribute('data-homology', hom);
+                    path.setAttribute('data-upper-track', String(upperIdx));
+                    path.setAttribute('data-lower-track', String(lowerIdx));
+                    path.setAttribute('d', buildRibbonPath(ux0, ux1, uy, lx0, lx1, ly));
+                    path.setAttribute('fill', rgbaFromHex(clr, alpha));
+                    path.setAttribute('stroke', rgbaFromHex(clr, Math.min(1, alpha * 1.6)));
+                    path.setAttribute('stroke-width', isGoi ? '0.5' : '0.3');
+                    ribbonsGroup.appendChild(path);
+                });
+            });
+        }
+    }
+
+    function rgbaFromHex(hex, alpha) {
+        if (!hex) hex = '#909090';
+        hex = String(hex).trim();
+        // If input is already rgb/rgba, parse numbers and set alpha
+        const rgbMatch = hex.match(/rgba?\s*\(\s*([0-9]+)\s*,\s*([0-9]+)\s*,\s*([0-9]+)(?:\s*,\s*([0-9\.]+))?\s*\)/i);
+        if (rgbMatch) {
+            const r = parseInt(rgbMatch[1], 10);
+            const g = parseInt(rgbMatch[2], 10);
+            const b = parseInt(rgbMatch[3], 10);
+            return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha.toFixed(3) + ')';
+        }
+        // Otherwise expect a hex string like #rrggbb
+        const clean = hex.replace('#', '');
+        if (clean.length === 3) {
+            const r = parseInt(clean[0] + clean[0], 16);
+            const g = parseInt(clean[1] + clean[1], 16);
+            const b = parseInt(clean[2] + clean[2], 16);
+            return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha.toFixed(3) + ')';
+        }
+        const r = parseInt(clean.slice(0, 2), 16) || 0;
+        const g = parseInt(clean.slice(2, 4), 16) || 0;
+        const b = parseInt(clean.slice(4, 6), 16) || 0;
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha.toFixed(3) + ')';
+    }
+
+    buildTrackManager();
+    rebuildRibbons();
 
   // ---- Hover tooltips ----
   svg.querySelectorAll('.gene-group').forEach(el => {
@@ -2282,7 +2965,100 @@ document.addEventListener('DOMContentLoaded', () => {
     tooltip.style.top = Math.max(4, y) + 'px';
   }
 
-  // ---- Click-to-highlight orthologs ----
+  // ---- Pinned gene labels (right-click) ----
+  // Hover         → tooltip (above)
+  // Left-click    → follow the gene's orthologs across tracks (below)
+  // Right-click   → toggle a persistent label above that gene
+  const pinnedLayer = svg.querySelector('.pinned-labels');
+  const pinnedById = new Map();
+  let pinSeq = 0;
+
+  function geneKey(el) {
+    if (!el.dataset.pinKey) el.dataset.pinKey = 'g' + (pinSeq++);
+    return el.dataset.pinKey;
+  }
+
+  function pinLabel(el) {
+    if (!pinnedLayer) return;
+    const key = geneKey(el);
+    if (pinnedById.has(key)) return;
+    const x0 = parseFloat(el.dataset.x0);
+    const x1 = parseFloat(el.dataset.x1);
+    const yb = parseFloat(el.dataset.yb);
+    const text = el.dataset.label || '';
+    if (!text) return;
+    const cx = (x0 + x1) / 2;
+    const ly = yb - 6;
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const group = document.createElementNS(SVG_NS, 'g');
+    group.setAttribute('class', 'pinned-label-group');
+    group.dataset.pinKey = key;
+
+    const leader = document.createElementNS(SVG_NS, 'line');
+    leader.setAttribute('x1', cx.toFixed(1));
+    leader.setAttribute('y1', yb.toFixed(1));
+    leader.setAttribute('x2', cx.toFixed(1));
+    leader.setAttribute('y2', (ly + 2).toFixed(1));
+    leader.setAttribute('class', 'pinned-label-leader');
+    group.appendChild(leader);
+
+    const tx = document.createElementNS(SVG_NS, 'text');
+    tx.setAttribute('x', cx.toFixed(1));
+    tx.setAttribute('y', ly.toFixed(1));
+    tx.setAttribute('text-anchor', 'middle');
+    tx.setAttribute('class', 'pinned-label');
+    tx.textContent = text;
+    pinnedLayer.appendChild(group);
+    group.appendChild(tx);
+
+    try {
+      const bb = tx.getBBox();
+      const pad = 3;
+      const rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', (bb.x - pad).toFixed(1));
+      rect.setAttribute('y', (bb.y - pad).toFixed(1));
+      rect.setAttribute('width',  (bb.width  + 2 * pad).toFixed(1));
+      rect.setAttribute('height', (bb.height + 2 * pad).toFixed(1));
+      rect.setAttribute('rx', '2');
+      rect.setAttribute('class', 'pinned-label-bg');
+      group.insertBefore(rect, tx);
+    } catch(err) { /* getBBox may fail if not rendered yet */ }
+
+    el.classList.add('pinned');
+    pinnedById.set(key, group);
+  }
+
+  function unpinLabel(el) {
+    const key = geneKey(el);
+    const node = pinnedById.get(key);
+    if (node) { node.remove(); pinnedById.delete(key); }
+    el.classList.remove('pinned');
+  }
+
+  function togglePin(el) {
+    if (pinnedById.has(geneKey(el))) unpinLabel(el);
+    else pinLabel(el);
+  }
+
+  function clearAllPins() {
+    pinnedById.forEach((node) => node.remove());
+    pinnedById.clear();
+    svg.querySelectorAll('.gene-group.pinned').forEach(g => g.classList.remove('pinned'));
+  }
+
+  svg.querySelectorAll('.gene-group').forEach(el => {
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      togglePin(el);
+    });
+  });
+
+  const clearPinsBtn = document.getElementById('clear-pins');
+  if (clearPinsBtn) clearPinsBtn.addEventListener('click', clearAllPins);
+
+  // ---- Left-click: follow a gene's orthologs across tracks ----
   let selectedHom = null;
   svg.querySelectorAll('.gene-group').forEach(el => {
     el.addEventListener('click', (e) => {
@@ -2340,7 +3116,10 @@ def _assemble_full_html(svg_content, width, height):
   <button id="zoom-in" title="Zoom in">+</button>
   <button id="zoom-out" title="Zoom out">−</button>
   <button id="zoom-reset" title="Reset zoom">⟲</button>
+  <button id="clear-pins" title="Clear pinned labels (right-click a gene to pin its name)">⌫</button>
+  <button id="track-manager-btn" title="Manage tracks">📋</button>
 </div>
+<div id="track-manager" class="track-manager"></div>
 <div class="plot-wrapper">
 <div class="zoom-container">
 <svg class="synteny-svg" width="{width}" height="{height}"
@@ -2383,8 +3162,45 @@ def main():
     ap.add_argument("--ribbon_alpha_dense", type=float, default=0.20, help="Alpha for flanking ribbons")
     ap.add_argument("--hide_goi_absent", action="store_true",
                     help="Hide target tracks with no GOI-like annotation when informative tracks exist")
+    ap.add_argument("--pub_svg", action="store_true",
+                    help="Also write a publication SVG: same as the interactive "
+                         "HTML view, with every home-genome gene labelled.")
+    # Legacy flags from the previous narrow-layout publication renderer.
+    # Accepted but ignored so existing Nextflow invocations keep working.
+    ap.add_argument("--pub_width", type=int, default=183, help=argparse.SUPPRESS)
+    ap.add_argument("--pub_palette", default="okabe_ito",
+                    choices=["okabe_ito", "tableau"], help=argparse.SUPPRESS)
     ap.add_argument("--output",         required=True)
+    ap.add_argument("--common_names", choices=("both", "common", "scientific", "off"),
+                    default="both",
+                    help="Species label style. 'both' shows 'Scientific (common)'.")
+    ap.add_argument("--common_names_tsv", default="",
+                    help="Optional 2-column TSV (scientific<TAB>common) "
+                         "overriding NCBI lookups.")
+    ap.add_argument("--no_network", action="store_true",
+                    help="Skip the NCBI 'datasets' CLI lookup for common names.")
+    ap.add_argument("--clade_count", type=int, default=4,
+                    help="Number of clades for tree-leaf colouring (default 4). "
+                         "Iteratively splits the largest clade of the "
+                         "midpoint-rooted tree (topology-driven). Each "
+                         "clade is rendered with a distinct colour from "
+                         "the colour-blind-safe CLADE_PALETTE.")
     args = ap.parse_args()
+
+    # Initialize common-name resolver up front (cheap; just reads cache).
+    if args.common_names != "off":
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import synvoy_taxa  # noqa: WPS433 — sibling helper module
+            synvoy_taxa.init_lookup(
+                common_names_tsv=args.common_names_tsv or None,
+                allow_network=not args.no_network,
+            )
+            globals()["_synvoy_taxa"] = synvoy_taxa
+        except Exception as exc:
+            print(f"[plot] Common-name lookup unavailable: {exc}", file=sys.stderr)
+            globals()["_synvoy_taxa"] = None
+    globals()["_common_name_mode"] = args.common_names
 
     # -- 0. Load species mapping -----------------------------------------
     species_map = {}  # accession -> species name
@@ -2417,7 +3233,17 @@ def main():
     if args.query_bed and os.path.exists(args.query_bed):
         for g in parse_bed(args.query_bed):
             query_intervals.append({"chrom": g["chrom"],
-                                    "start": g["start"], "end": g["end"]})
+                                    "start": g["start"], "end": g["end"],
+                                    "strand": g.get("strand", "+")})
+
+    # The synteny-block BED that feeds `home_genes` carries flanking genes
+    # only — by design, since `extract_flanking_genes.py` filters the GOI
+    # itself out of the flanking set. That means the home track has every
+    # neighbour but a *gap* where the GOI should be, which prevents the
+    # legacy plot from drawing the GOI on the home row at all (severe bug).
+    # Synthesize one from query_bed + home_gff before downstream track
+    # construction sees `home_genes`.
+    _synthesize_home_goi_gene(home_genes, query_intervals, args.home_gff)
 
     # Identify GOI gene names dynamically from query_bed overlap
     identify_goi_names(home_genes, query_intervals)
@@ -2667,7 +3493,18 @@ def main():
 
     n_tracks = len(all_tracks)
 
+    # -- 4b. Adaptive widening for sparse plots --------------------------
+    # When most tracks have few genes spread across a wide bp range, the
+    # default px-per-bp scale leaves gene models too narrow to read. Scale
+    # each gene's visual width around its center; centers don't move so
+    # ortholog ribbons stay aligned. No-op on dense plots.
+    widen_factor = _widen_sparse_plot(all_tracks)
+    if widen_factor > 1.0:
+        print(f"[plot] Adaptive gene widening factor: {widen_factor:.2f}×")
+
     # -- 5. Sub-track assignment -----------------------------------------
+    # Pure overlap-based bumping: a sub-track is spent only when genes
+    # would collide on a single row.
     for track in all_tracks:
         _assign_sub_tracks(track["genes"], track["offset"])
 
@@ -2697,7 +3534,38 @@ def main():
 
     with open(args.output, "w") as f:
         f.write(html)
-    print(f"Synteny plot saved to {args.output}")
+    print(f"Synteny plot (HTML) saved to {args.output}")
+
+    # -- 7a-bis. Always export a static-SVG sibling of the interactive HTML.
+    # This is a verbatim extraction of the inline <svg> with the page's CSS
+    # CDATA-embedded — the result is visually identical to the HTML but
+    # standalone. It's what the user actually wants to drop into a paper
+    # or a README and not the narrow publication-format `--pub_svg` view.
+    static_svg_path = args.output.replace(".html", "_view.svg")
+    if static_svg_path == args.output:
+        static_svg_path = args.output + ".view.svg"
+    try:
+        _export_html_inline_svg(args.output, static_svg_path)
+        print(f"Static-view SVG saved to {static_svg_path}")
+    except Exception as exc:
+        print(f"  (could not export static-view SVG: {exc})", file=sys.stderr)
+
+    # -- 7b. Render Publication SVG --------------------------------------
+    # Same content as the interactive HTML but with every home-genome gene
+    # labelled on the canvas, so the figure is self-describing in print.
+    if args.pub_svg:
+        pub_svg_content = render_publication_svg(
+            all_tracks, gene_colours, goi_genome_colours,
+            home_products, args,
+            subtitle_bits, hidden_absent_tracks,
+            ambiguous_track_count, resolved_track_count,
+        )
+        pub_output = args.output.replace(".html", ".svg")
+        if pub_output == args.output:
+            pub_output += ".svg"
+        with open(pub_output, "w") as f:
+            f.write(pub_svg_content)
+        print(f"Publication SVG saved to {pub_output}")
     print(f"  Tracks: {n_tracks} ({n_tracks - 1} target genomes)")
     print(f"  GOI tracks: {resolved_track_count} resolved, {ambiguous_track_count} ambiguous")
     if hidden_absent_tracks:
@@ -2709,7 +3577,7 @@ def main():
     if tree_output == args.output:
         tree_output = args.output.replace(".html", "_tree.html")
     _render_tree_svg(args.tree, goi_genome_colours, tree_output,
-                     species_map=species_map)
+                     species_map=species_map, clade_count=args.clade_count)
 
 
 if __name__ == "__main__":

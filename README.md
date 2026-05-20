@@ -1,160 +1,75 @@
-# SynVoy - Synteny Voyager
+<h1 align="center">SynVoy &mdash; Synteny Voyager</h1>
 
-[![test](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml/badge.svg)](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+<p align="center">
+  <em>Find orthologous genes that BLAST can't.</em>
+</p>
 
-*Navigating synteny. Discovering orthology.*  
-*Mapping evolutionary pathways through syntenic navigation.*
-
-SynVoy is a Nextflow pipeline for finding orthologous genes across evolutionary distances using genomic synteny.
-
-Standard sequence-similarity searches often fail when orthologs are highly divergent or consist of short, complex micro-exons. SynVoy addresses this by leveraging the conservation of gene order (macro-synteny): it identifies the conserved flanking genes around a Gene of Interest (GOI) in a reference species, locates the homologous genomic neighborhood in target species, and then runs a localized sequence search to find the GOI candidate.
-
-> **Status:** Early development. Expect breaking changes between versions.
-
-## Table of Contents
-
-- [How It Works](#how-it-works)
-- [Setup from Scratch](#setup-from-scratch)
-  - [Prerequisites](#prerequisites)
-  - [1. Clone the Repository](#1-clone-the-repository)
-  - [2. Install Nextflow](#2-install-nextflow)
-  - [3. Set Up the Conda Environment](#3-set-up-the-conda-environment)
-  - [4. Verify the Installation](#4-verify-the-installation)
-  - [Alternative: Docker](#alternative-docker)
-- [Quick Start](#quick-start)
-  - [Easy Mode](#easy-mode-automated-genome-retrieval)
-  - [Pro Mode](#pro-mode-local-files)
-- [Output](#output)
-- [Further Reading](#further-reading)
-- [License](#license)
-- [Citation and Support](#citation-and-support)
+<p align="center">
+  <a href="https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml"><img src="https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml/badge.svg" alt="test"/></a>
+  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3"/></a>
+  <img src="https://img.shields.io/badge/status-early%20development-orange" alt="status"/>
+</p>
 
 ---
 
-## How It Works
+## What SynVoy does
 
-1. **Input Resolution** — Accepts a UniProt/NCBI accession, a local FASTA, or an inline FASTA sequence (Easy Mode) and resolves it to a protein query.
-2. **Genome Staging** — In Easy Mode, automatically fetches the reference ("home") genome and related target assemblies from NCBI. In Pro Mode, the user supplies local files.
-3. **Gene Localization** — Maps the GOI onto the home genome with tblastn + MMseqs2 and annotates its exon structure (from GFF or *de novo* via Prodigal).
-4. **Flanking Gene Extraction** — Extracts the *n* genes immediately upstream and downstream of the GOI locus. Genes that are similar to the GOI (e.g. tandem duplicates) are filtered out of the flanking set to avoid inflating synteny scores. Optionally, those GOI-similar neighbors are emitted as additional GOI queries (`--expand_goi_similar`), so that paralogs in other genomes are also discovered.
-5. **Phylogenetic Ordering** — Sorts target genomes by evolutionary distance to the reference so that the iterative search proceeds from closest to most distant relatives.
-6. **Iterative Synteny Search** — For each target genome, maps flanking genes with MMseqs2, clusters hits into candidate syntenic blocks, and runs localized tblastn + miniprot + Smith-Waterman searches inside those blocks to find the GOI (and any GOI-similar neighbor queries).
-7. **Region Clustering & Scoring** — Filters and ranks candidate blocks by synteny score (fraction of conserved flanking genes).
-8. **Phylogenetic Tree & Visualization** — Aligns all discovered GOI sequences across all genomes (MAFFT) and infers a phylogenetic tree (IQ-TREE with ultrafast bootstrap). When `--expand_goi_similar` is enabled, the tree includes paralogs and orthologs together, enabling resolution of duplication vs. speciation events. An interactive HTML synteny plot (Plotly) is generated alongside the tree.
+SynVoy is a Nextflow pipeline for finding **orthologous genes across evolutionary distances** when standard sequence-similarity searches fail — for example, on highly divergent toxins or short micro-exon genes.
+
+Instead of relying on the gene's sequence alone, it uses the **conserved order of its neighbouring genes (macro-synteny)** to locate the right genomic neighbourhood in target species, then runs a localised search inside that region.
+
+> **Concrete example.** Give SynVoy the UniProt accession for honeybee melittin and a list of bee genomes. It locates melittin's neighbourhood in *Apis mellifera*, finds the homologous neighbourhood in each target genome by mapping the flanking genes, and recovers the divergent melittin orthologs that pure BLAST/MMseqs2 misses.
+>
+> **Validated finding.** Run with melittin against ant genomes, SynVoy independently re-finds **U11-myrmicitoxin-Tb1a** (UniProt `A0A6M3Z554`) at the right locus in *Tetramorium bicarinatum* — a 26 % identity hit that standard homology search drops, but synteny correctly anchors. This is a known myrmicitoxin from the same melittin-derived family.
+
+<p align="center">
+  <img src="assets/example_synteny_plot.svg" alt="SynVoy synteny matrix — melittin across 19 bee + outgroup genomes" width="780"/>
+</p>
+<p align="center"><sub><b>Matrix view</b> — melittin orthologs across 19 bee + outgroup genomes. Each row is a species; each column is a home-genome flanking-gene slot, with the GOI ("Melt") highlighted. Cell shading encodes confidence: <b>solid</b> = HIGH, <b>lightly dotted</b> = MEDIUM, <b>hatched</b> = LOW (likely false positive). The cladogram on the left is an NCBI-taxonomy species tree colour-grouped into Hymenoptera families (Apinae, other bees, Vespidae, Formicidae).</sub></p>
+
+<details>
+<summary><b>Track view</b> (per-locus arrow plot — click to expand)</summary>
+
+<p align="center">
+  <img src="assets/example_legacy_synteny_plot.svg" alt="SynVoy synteny tracks — melittin locus across bee genomes" width="520"/>
+</p>
+<p align="center"><sub><b>Track view</b> (interactive HTML; static SVG export shown). Same melittin run as above, but per-locus: each species gets a horizontal track of gene arrows, ribbons connect orthologous flanking genes between adjacent species, and resolved vs. ambiguous GOIs are visually distinct (solid red = resolved, hatched red = ambiguous family member). Open the live HTML for tooltips on hover, left-click on a gene to highlight its orthologs across all tracks, and right-click to pin a label for that gene.</sub></p>
+
+</details>
 
 ---
 
-## Setup from Scratch
+## When to use SynVoy
 
-### Prerequisites
-
-| Requirement | Notes |
+| Scenario | Use SynVoy? |
 |---|---|
-| **OS** | Linux (tested) or macOS |
-| **Java** | 17 or newer (required by current Nextflow; the Conda env includes OpenJDK) |
-| **Conda or Mamba** | [Miniforge](https://github.com/conda-forge/miniforge) recommended. Miniconda/Anaconda also work. |
-| **Git** | To clone the repository |
-| **Internet** | Easy Mode needs access to NCBI/UniProt for genome downloads |
+| Standard tblastn / MMseqs2 already finds clean orthologs | No — you don't need it. |
+| Target gene is short / micro-exon / highly divergent | **Yes** — synteny anchors the search. |
+| Targets are unannotated / freshly assembled genomes | **Yes** — Pro Mode handles raw FASTA. |
+| You need ortholog vs. paralog resolution within a family | **Yes** — `--expand_goi_similar` includes paralogs in the tree. |
+| Whole-genome ortholog inference across many species | Use OrthoFinder / TOGA — SynVoy is gene-centric. |
 
-### 1. Clone the Repository
+---
+
+## Quick install
+
+Requires Linux/macOS, Conda or Mamba, and Java ≥17 (Conda will pull it in).
 
 ```bash
 git clone https://github.com/AndreasWz/SynVoy.git
 cd SynVoy
-```
-
-### 2. Install Nextflow
-
-Check if Nextflow is already installed:
-
-```bash
-nextflow -version
-```
-
-If the command is not found, install it:
-
-```bash
-# Option A: using Conda (simplest — it will be included in the env in step 3)
-# Skip this step; the environment.yml already lists nextflow.
-
-# Option B: standalone install into ~/bin
-curl -s https://get.nextflow.io | bash
-mkdir -p ~/bin && mv nextflow ~/bin/
-# Make sure ~/bin is on your PATH:
-export PATH="$HOME/bin:$PATH"
-# (add the line above to ~/.bashrc to make it permanent)
-```
-
-Current Nextflow requires **Java ≥17**. Verify with `java -version`. If missing, let Conda pull OpenJDK in with the environment below, or install Java 17+ via your system package manager.
-
-### 3. Set Up the Conda Environment
-
-The environment bundles Nextflow, all bioinformatics tools (MMseqs2, BLAST, Prodigal, miniprot, MAFFT, IQ-TREE), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
-
-```bash
-# Create the environment (mamba is faster if available)
-mamba env create -f environment.yml
-# or: conda env create -f environment.yml
-
-# Activate it
+mamba env create -f environment.yml      # or: conda env create -f environment.yml
 conda activate synvoy_env
+nextflow -version                         # sanity check
 ```
 
-> The environment is named `synvoy_env` (defined in `environment.yml`). You must activate it every time you open a new terminal before running the pipeline.
-
-### 4. Verify the Installation
-
-```bash
-# All of these should print version info without errors:
-nextflow -version
-java -version
-mmseqs version
-tblastn -version
-miniprot --version
-prodigal -v
-mafft --version
-augustus --version
-iqtree2 --version || iqtree --version
-datasets version
-esearch -version
-python -c "import Bio; import plotly; import ete3; import taxopy; import parasail; import psutil; print('Python deps OK')"
-```
-
-If any tool is missing, re-create the environment:
-
-```bash
-conda env remove -n synvoy_env
-conda env create -f environment.yml
-```
-
-### Alternative: Docker
-
-If you prefer containers over Conda:
-
-```bash
-# Build the image (all tools are baked in)
-docker build -t synvoy-local:latest .
-
-# Run with the docker profile (no Conda needed)
-nextflow run main.nf -profile docker --mode easy --query_id Q16553 --outdir results
-```
-
-For Singularity (common on HPC):
-
-```bash
-nextflow run main.nf -profile singularity --mode easy --query_id Q16553 --outdir results
-```
+Full step-by-step setup, Docker/Singularity instructions, and verification commands live in **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 ---
 
-## Quick Start
+## Quick start
 
-> **New here?** Follow [docs/QUICKSTART.md](docs/QUICKSTART.md) for a
-> ~20–30 min end-to-end walkthrough — it runs melittin in Easy Mode
-> against NCBI-fetched bee genomes, so you don't need any local data.
-> Covers expected output shape and troubleshooting. If you already
-> know Nextflow, the two examples below are enough.
+> **New here?** Follow **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for a 20–30 min end-to-end walkthrough on melittin against NCBI-fetched bee genomes — no local data needed.
 
 ### Easy Mode (automated genome retrieval)
 
@@ -191,46 +106,78 @@ nextflow run main.nf \
 ```
 
 > `--home_gff` is optional but strongly recommended — it provides much better flanking-gene extraction than Prodigal prediction alone.
-
 > Use `-resume` to restart from the last successful step after a crash or parameter tweak.
+
+---
+
+## How it works
+
+```
+query (UniProt/FASTA)
+        │
+        ▼
+[1] Resolve & normalise query  ──►  protein FASTA
+[2] Stage genomes              ──►  home + targets (Easy: auto-fetch | Pro: local)
+[3] Locate GOI in home genome  ──►  tblastn + MMseqs2
+[4] Extract flanking genes     ──►  n upstream + n downstream, GOI-similar filtered
+[5] Order targets by distance  ──►  closest first
+[6] For each target:
+      map flanking genes      ──►  candidate syntenic blocks
+      localised search inside ──►  tblastn + miniprot + Smith-Waterman
+[7] Cluster & score regions   ──►  rank by conserved-flank fraction
+[8] Tree + plots              ──►  MAFFT + IQ-TREE, matrix view (clean SVG)
+                                    + interactive track plot (HTML)
+```
 
 ---
 
 ## Output
 
-Results are written to the directory specified by `--outdir`:
+Results land in the directory passed to `--outdir`. Quick orientation:
 
-| File | Description |
+| File | What it is |
 |---|---|
-| `*_synteny_plot.html` | Interactive HTML visualization of syntenic blocks across species |
-| `*_tree.nwk` | Newick phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes |
-| `regions/*.regions.bed` | BED files with genomic coordinates of candidate syntenic blocks |
-| `synvoy_report.json` | Machine-readable run summary (parameters, genome QC, exit codes) |
-| `intermediate/` | Per-phase artifacts (flanking genes, MMseqs2 hits, GFFs, etc.) |
+| `plot_inputs_*/X.homology.tsv` | **Canonical per-target ortholog calls.** Filter `confidence=HIGH` for paper-quality results. |
+| `plot_inputs_*/X.gff` | Per-target gene/mRNA/CDS coordinates with SynVoy attributes. |
+| `regions/X.scores.tsv` | Synteny-scoring details per candidate region (score, p-value, flanking-gene recovery). |
+| `regions/X.regions.bed` | BED of candidate syntenic blocks. |
+| `*_synteny_plot.html` | Interactive track-style visualisation per locus (with tooltips, ortholog click-highlighting). |
+| `*_synteny_plot_view.svg` | Static SVG mirror of the HTML view — visually identical, paper- and README-ready. Auto-emitted with every run. |
+| `*_synteny_plot.svg` | Narrow publication-format SVG (only when `--pub_svg` is passed). |
+| Matrix view (`bin/plot_synteny_matrix.py`) | Phylogeny-anchored matrix across all species — paper-ready SVG (the first figure above). |
+| `*_tree.html` / `_tree.nwk` | Phylogenetic tree of GOI sequences (midpoint-rooted, clade-coloured). |
+| `synvoy_report.json` | One-shot machine-readable run summary. |
+| `intermediate/` | Per-phase artifacts (debugging only). |
+
+Full output guide with column definitions and "I want X, open Y" lookup
+table: **[docs/OUTPUT.md](docs/OUTPUT.md)**.
 
 ---
 
-## Further Reading
+## Further reading
 
-- **[docs/USAGE.md](docs/USAGE.md)** — Full parameter reference, execution profiles, algorithm details, HPC/SLURM setup, and troubleshooting.
-- **[docs/PARAMETERS.md](docs/PARAMETERS.md)** — Per-parameter tuning guide with recommended ranges and biological rationale.
+- **[docs/INSTALL.md](docs/INSTALL.md)** — Detailed setup, Docker, Singularity.
+- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** — End-to-end melittin walkthrough.
+- **[docs/OUTPUT.md](docs/OUTPUT.md)** — Output file guide ("I want X, open Y").
+- **[docs/USAGE.md](docs/USAGE.md)** — Full parameter reference, profiles, HPC/SLURM, troubleshooting.
+- **[docs/PARAMETERS.md](docs/PARAMETERS.md)** — Per-parameter tuning guide with biological rationale.
 
+---
 
 ## License
 
-SynVoy is distributed under the [GNU AGPLv3](LICENSE) License.
+SynVoy is distributed under the **[GNU AGPLv3](LICENSE)** license.
 
 ---
 
-## Citation and Support
+## Citation
 
-If SynVoy contributes to your research, please cite the software repository.
-
-Recommended software citation:
+If SynVoy contributes to your research, please cite the software repository:
 
 > Weitz, F. A. SynVoy: Synteny-guided orthology discovery [Computer software]. GitHub. https://github.com/AndreasWz/SynVoy
 
-You can also use this BibTeX template:
+<details>
+<summary>BibTeX</summary>
 
 ```bibtex
 @software{synvoy,
@@ -242,4 +189,6 @@ You can also use this BibTeX template:
 }
 ```
 
-If SynVoy is useful for your work, please consider starring the repository: https://github.com/AndreasWz/SynVoy
+</details>
+
+If SynVoy is useful for your work, please consider starring the repository: <https://github.com/AndreasWz/SynVoy>
