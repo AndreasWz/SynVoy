@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Split BED file into multiple files based on locus clustering.")
@@ -29,12 +30,20 @@ def main():
                     'line': line.strip()
                 })
     except FileNotFoundError:
-        print(f"Error: File {args.bed} not found.")
-        return
+        print(f"ERROR: BED file {args.bed} not found. Expected output from LOCATE_GENE.", file=sys.stderr)
+        sys.exit(1)
 
     if not entries:
-        print("No entries found.")
-        return
+        print(
+            "ERROR: Gene not found in home genome. Both BLAST and MMseqs2 returned no hits "
+            f"above the e-value threshold.\n"
+            "Why: The query sequence may be too divergent from the home genome, the gene may be "
+            "absent, or the e-value cutoff may be too strict.\n"
+            "Try: Lower --search_evalue (e.g. 1e-2), verify the query FASTA is the correct "
+            "protein/CDS sequence, or check that --home_genome points to the right assembly.",
+            file=sys.stderr
+        )
+        sys.exit(1)
 
     # Sort
     entries.sort(key=lambda x: (x['chrom'], x['start']))

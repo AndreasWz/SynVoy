@@ -296,34 +296,43 @@ These control per-process resource allocation. Override them for your hardware.
 
 ### Automatic Parameter Estimation (LLM)
 
-SynVoy can automatically estimate optimal search parameters based on the biological context of your search. This is powered by Gemma 4 (Google's open-weight LLM) running locally via [Ollama](https://ollama.com), with Google Cloud Gemini API as a cloud fallback, and deterministic heuristics when no LLM is available.
+SynVoy can automatically estimate optimal search parameters based on the biological context of your search — query gene size, home species genome architecture, and evolutionary distance to the targets. Without an API key it falls back to deterministic heuristics encoding the same biological rules.
 
-**Enabled by default.** Disable with `--auto_params false`.
+**Disabled by default** (requires an API key to be useful). Enable with `--auto_params true`.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--auto_params` | `true` | Enable automatic parameter estimation. When on, SynVoy analyzes your query gene, home species genome architecture, and target species distances to set optimal values for ~25 search parameters. |
-| `--llm_model` | `auto` | Ollama model name. `auto` selects based on system resources: `gemma4:e4b` (4B, laptops), `gemma4:26b` (26B MoE, workstations), `gemma4:31b` (31B, clusters). |
-| `--ollama_url` | `http://localhost:11434` | Ollama server URL |
-| `--google_api_key` | _(empty)_ | Google Cloud Gemini API key (optional cloud fallback). Also read from `GOOGLE_API_KEY` env var. |
-| `--multi_profile` | `true` | For small searches, run with multiple parameter profiles (sensitive/balanced/stringent) and automatically select the best result. |
+| `--auto_params` | `false` | Enable automatic parameter estimation. When on, SynVoy analyzes your query gene, home species genome architecture, and target species distances to set optimal values for ~25 search parameters. |
+| `--llm_provider` | `google` | LLM provider: `google` (Google Gemini) or `openai` (OpenAI or any OpenAI-compatible API). |
+| `--llm_api_key` | _(empty)_ | API key for the chosen provider. Also read from `LLM_API_KEY`, `GOOGLE_API_KEY` (for google), or `OPENAI_API_KEY` (for openai) env vars. |
+| `--llm_api_base_url` | _(empty)_ | Custom API base URL for OpenAI-compatible providers (Together, Groq, LM Studio, etc.). Ignored for google. |
+| `--llm_model` | _(empty)_ | Model override. Defaults: `gemini-2.5-flash-lite` (google), `gpt-4o-mini` (openai). |
+| `--multi_profile` | `false` | For small searches, run with multiple parameter profiles (sensitive/balanced/stringent) and automatically select the best result. |
 | `--multi_profile_max_jobs` | `30` | Max total jobs (`loci × targets × 3`) allowed for multi-profile. If exceeded, only the LLM-estimated profile runs. |
 
-**Setup (optional, for LLM-quality estimation):**
+**Setup:**
 
 ```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
+# Option A: Google Gemini (free tier at aistudio.google.com/apikey)
+export GOOGLE_API_KEY=your_key_here
+nextflow run main.nf ... --auto_params true
 
-# Pull the Gemma 4 model (choose based on your hardware)
-ollama pull gemma4:e4b    # 4B params, ~4GB, works on any modern laptop
-ollama pull gemma4:26b    # 26B MoE, ~16GB, recommended for workstations
-ollama pull gemma4:31b    # 31B dense, ~24GB, for servers/clusters
+# Option B: OpenAI
+export OPENAI_API_KEY=your_key_here
+nextflow run main.nf ... --auto_params true --llm_provider openai
+
+# Option C: OpenAI-compatible endpoint (Together, Groq, LM Studio, etc.)
+export LLM_API_KEY=your_key_here
+nextflow run main.nf ... --auto_params true --llm_provider openai \
+    --llm_api_base_url https://api.together.xyz \
+    --llm_model meta-llama/Llama-3.1-8B-Instruct-Turbo
 ```
 
-> **Note:** Without Ollama, SynVoy falls back to built-in heuristic rules that encode the same biological reasoning (kingdom-specific intron lengths, distance-adaptive sensitivity, query-size thresholds). The heuristic fallback is solid — the LLM just adds nuance for edge cases.
+> **No API key?** `--auto_params true` still runs but uses built-in heuristic rules.
+> These cover kingdom-specific intron lengths, distance-adaptive sensitivity, and
+> query-size thresholds. Solid for most cases; the LLM adds nuance for edge cases.
 
-**What gets estimated:**
+**What gets estimated (~25 parameters):**
 - **Genome architecture**: `max_intron`, `cluster_distance`, `region_padding` — adapted for plants (↑), bacteria (↓), vertebrates, fungi
 - **Search sensitivity**: `mmseqs_sensitivity`, `search_evalue`, `min_hit_identity` — relaxed for distant searches, tightened for close species
 - **Query-size tuning**: `sw_min_score`, `min_hit_length` — lowered for small peptides, raised for large proteins
@@ -566,29 +575,28 @@ The pipeline auto-disables Smith-Waterman in `auto` mode when neither
 is installed — it doesn't crash, just prints a warning and continues
 with MMseqs2 + tblastn only.
 
-### Ollama parameter-advisor timeout / connection refused
+### LLM parameter advisor: API key error / no key set
 
-**Symptom:** `LLM_PARAM_ADVISOR` hangs for minutes, or errors out with
-`Connection refused` to `http://localhost:11434`.
+**Symptom:** `LLM_PARAM_ADVISOR` logs "No LLM API key provided" and uses heuristics,
+or fails with an HTTP 401 / 403 error.
 
-**Cause:** Ollama server is not running, the Gemma model is not pulled,
-or the model is too large for your RAM.
+**Cause:** `--auto_params true` is set but no API key was provided, or the key is invalid.
 
 **Fix (pick one):**
-- Disable LLM auto-params entirely (recommended for students):
+- **Recommended for students / reproducibility:** disable LLM auto-params entirely:
   ```
   --auto_params false --multi_profile false
   ```
-- Or use Google's hosted API instead of local Ollama:
+  The heuristic fallback is solid and covers most common cases.
+- **Google Gemini** (free tier available at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
   ```
   export GOOGLE_API_KEY=your_api_key
-  # When GOOGLE_API_KEY is set, llm_param_advisor.py routes to the
-  # Google Cloud Gemma endpoint instead of localhost:11434.
+  nextflow run main.nf ... --auto_params true
   ```
-- Or start Ollama and pre-pull the model before the run:
+- **OpenAI:**
   ```
-  ollama serve &
-  ollama pull gemma4:e4b
+  export OPENAI_API_KEY=your_api_key
+  nextflow run main.nf ... --auto_params true --llm_provider openai
   ```
 
 ### GPU out-of-memory (OOM) during STRUCTURAL_SEARCH / ESMFold

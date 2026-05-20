@@ -58,8 +58,8 @@ Notes on the flags:
 - `--max_genomes 5` — cap the NCBI taxonomy walk at 5 related bee
   assemblies. Fewer genomes → faster run, less informative tree;
   more genomes → the opposite.
-- `--auto_params false --multi_profile false` — disables the Ollama
-  LLM parameter advisor for reproducibility. You can enable it later
+- `--auto_params false --multi_profile false` — disables the LLM
+  parameter advisor for reproducibility. You can enable it later
   (see [Going further](#going-further)).
 
 If your laptop has <16 GB RAM, add `-profile laptop_safe` instead of
@@ -145,9 +145,19 @@ tooltips show gene names and identities.
 - **Switch to Pro Mode** to supply your own genomes and a home GFF —
   see [USAGE.md § 1](USAGE.md#pro-mode). Pro Mode is reproducible
   (no taxonomy walk) and is what the paper's benchmarks use.
-- **Enable the LLM parameter advisor** for harder queries:
-  `--auto_params true` (optionally use Ollama with `gemma4:e4b`
-  pulled locally, or set `GOOGLE_API_KEY` for the hosted fallback).
+- **Enable the LLM parameter advisor** for harder queries by providing
+  a cloud API key:
+  ```bash
+  # Google Gemini (free tier available at aistudio.google.com)
+  export GOOGLE_API_KEY=your_key
+  nextflow run main.nf ... --auto_params true
+
+  # OpenAI
+  export OPENAI_API_KEY=your_key
+  nextflow run main.nf ... --auto_params true --llm_provider openai
+  ```
+  Without an API key, `--auto_params true` falls back to built-in
+  heuristics (still useful, just not LLM-quality).
 
 ## Troubleshooting
 

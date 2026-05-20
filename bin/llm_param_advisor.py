@@ -2,9 +2,9 @@
 """
 llm_param_advisor.py — LLM-powered parameter estimation for SynVoy.
 
-Uses Gemma 4 (via Ollama local API or Google Cloud Gemini API) to analyze
-biological context and estimate optimal pipeline parameters.  Falls back
-to deterministic heuristics when no LLM backend is available.
+Uses a cloud LLM API (Google Gemini or OpenAI-compatible) to analyze biological
+context and estimate optimal pipeline parameters.  Falls back to deterministic
+heuristics when no API key is available.
 
 All estimated parameters are validated against allowed ranges and checked
 for breaking combinations before being emitted.
@@ -14,11 +14,7 @@ import argparse
 import json
 import logging
 import os
-import platform
 import re
-import socket
-import shutil
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -31,8 +27,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-DEFAULT_OLLAMA_TIMEOUT = 300
 
 # ---------------------------------------------------------------------------
 # Parameter specifications: allowed ranges, types, and defaults
@@ -74,7 +68,7 @@ ESTIMABLE_PARAMS: Dict[str, Dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------
-# System prompt for Gemma 4
+# System prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
@@ -243,160 +237,24 @@ E. coli beta-lactamase (286aa) in Enterobacteriaceae (~300 Mya):
 
 
 # ---------------------------------------------------------------------------
-# Backend: Ollama (local)
+# Backend: Google Gemini API
 # ---------------------------------------------------------------------------
 
 
-def _detect_system_resources() -> Dict[str, Any]:
-    """Detect available system resources for model selection."""
-    import psutil  # safe — installed with most Python envs
-
-    ram_gb = psutil.virtual_memory().total / (1024**3)
-
-    # Attempt GPU VRAM detection
-    vram_gb = 0
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            vram_gb = sum(int(x.strip()) for x in result.stdout.strip().split("\n") if x.strip()) / 1024
-    except Exception:
-        pass
-
-    return {"ram_gb": round(ram_gb, 1), "vram_gb": round(vram_gb, 1)}
-
-
-def _auto_select_model(resources: Optional[Dict] = None) -> str:
-    """Select the best Gemma 4 model based on available resources."""
-    if resources is None:
-        try:
-            resources = _detect_system_resources()
-        except ImportError:
-            # psutil not available; assume modest hardware
-            return "gemma4:e4b"
-
-    ram = resources.get("ram_gb", 8)
-    vram = resources.get("vram_gb", 0)
-
-    if vram >= 20 or ram >= 48:
-        model = "gemma4:31b"
-    elif vram >= 10 or ram >= 24:
-        model = "gemma4:26b"
-    else:
-        model = "gemma4:e4b"
-
-    logger.info(
-        f"Auto-selected model: {model} "
-        f"(RAM={ram:.0f}GB, VRAM={vram:.0f}GB)"
-    )
-    return model
-
-
-def _check_ollama_available(ollama_url: str, model: str = "") -> bool:
-    """Check if Ollama server is reachable and the model is available."""
-    try:
-        req = urllib.request.Request(f"{ollama_url}/api/version")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status != 200:
-                return False
-    except Exception:
-        return False
-
-    # If a model name is provided, verify it's actually pulled
-    if model:
-        try:
-            req = urllib.request.Request(f"{ollama_url}/api/tags")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode())
-                available = {m.get("name", "") for m in data.get("models", [])}
-                # Exact match first; if model has no tag, allow any variant of that base name
-                if model not in available:
-                    has_tag = ":" in model
-                    if has_tag or not any(a.startswith(model + ":") or a == model for a in available):
-                        logger.warning(
-                            f"Ollama server reachable but model '{model}' not found. "
-                            f"Available: {sorted(available) or 'none'}. "
-                            f"Run 'ollama pull {model}' to download it."
-                        )
-                        return False
-        except Exception as exc:
-            logger.warning(f"Could not verify model availability: {exc}")
-            # Server is reachable, proceed anyway — the model call will fail fast
-
-    return True
-
-
-def _call_ollama(
-    context: Dict,
-    model: str,
-    ollama_url: str,
-    timeout: int = DEFAULT_OLLAMA_TIMEOUT,
-) -> Optional[Dict]:
-    """Call Gemma 4 via Ollama's native /api/chat endpoint."""
-    if not _check_ollama_available(ollama_url, model=model):
-        logger.warning("Ollama server not reachable or model not available")
-        return None
-
-    api_url = f"{ollama_url}/api/chat"
-    user_msg = (
-        f"Analyze this biological context and estimate optimal SynVoy parameters.\n\n"
-        f"Context:\n{json.dumps(context, indent=2)}"
-    )
-
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            "stream": False,
-            "think": False,  # Disable reasoning trace — critical for CPU speed
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 1024,
-            },
-        }
-    ).encode()
-
-    headers = {"Content-Type": "application/json"}
-
-    req = urllib.request.Request(api_url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read().decode())
-            content = result.get("message", {}).get("content", "")
-            eval_count = result.get("eval_count", 0)
-            total_s = round(result.get("total_duration", 0) / 1e9, 1)
-            logger.info(f"Ollama response: {eval_count} tokens in {total_s}s")
-            return _parse_llm_json(content)
-    except (TimeoutError, socket.timeout) as exc:
-        logger.error(f"Ollama call timed out after {timeout}s: {exc}")
-        return None
-    except Exception as exc:
-        logger.error(f"Ollama call failed: {exc}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Backend: Google Cloud Gemini API
-# ---------------------------------------------------------------------------
-
-
-def _call_google_cloud(
+def _call_google(
     context: Dict,
     api_key: str,
+    model: str = "gemini-2.5-flash-lite",
     timeout: int = 30,
 ) -> Optional[Dict]:
     """Call Google Gemini API for parameter estimation."""
     if not api_key:
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={api_key}"
+    )
 
     user_msg = (
         f"Analyze this biological context and estimate optimal SynVoy parameters.\n\n"
@@ -417,7 +275,6 @@ def _call_google_cloud(
 
     headers = {"Content-Type": "application/json"}
 
-    # Retry on 429 (rate limit) with backoff — free tier has low rpm limits
     max_retries = 3
     for attempt in range(max_retries):
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
@@ -426,18 +283,99 @@ def _call_google_cloud(
                 result = json.loads(resp.read().decode())
                 candidates = result.get("candidates", [])
                 if candidates:
-                    content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    content = (
+                        candidates[0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text", "")
+                    )
                     return _parse_llm_json(content)
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 503) and attempt < max_retries - 1:
-                wait = 15 * (attempt + 1)
-                logger.warning(f"Gemini HTTP {exc.code}, retrying in {wait}s ({attempt+1}/{max_retries})...")
                 import time
+                wait = 15 * (attempt + 1)
+                logger.warning(
+                    f"Gemini HTTP {exc.code}, retrying in {wait}s "
+                    f"({attempt + 1}/{max_retries})..."
+                )
                 time.sleep(wait)
                 continue
-            logger.error(f"Google Cloud API call failed: {exc}")
+            logger.error(f"Google Gemini API call failed: HTTP {exc.code}")
+            body = exc.read().decode(errors="replace")
+            logger.debug(f"Response body: {body[:300]}")
         except Exception as exc:
-            logger.error(f"Google Cloud API call failed: {exc}")
+            logger.error(f"Google Gemini API call failed: {exc}")
+            break
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Backend: OpenAI-compatible API (OpenAI, Together, Groq, LM Studio, etc.)
+# ---------------------------------------------------------------------------
+
+
+def _call_openai(
+    context: Dict,
+    api_key: str,
+    model: str = "gpt-4o-mini",
+    api_base_url: str = "https://api.openai.com",
+    timeout: int = 30,
+) -> Optional[Dict]:
+    """Call any OpenAI-compatible chat completions API."""
+    if not api_key:
+        return None
+
+    url = f"{api_base_url.rstrip('/')}/v1/chat/completions"
+    user_msg = (
+        f"Analyze this biological context and estimate optimal SynVoy parameters.\n\n"
+        f"Context:\n{json.dumps(context, indent=2)}"
+    )
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1024,
+            "response_format": {"type": "json_object"},
+        }
+    ).encode()
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode())
+                content = (
+                    result.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                return _parse_llm_json(content)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < max_retries - 1:
+                import time
+                wait = 15 * (attempt + 1)
+                logger.warning(
+                    f"OpenAI API rate-limited, retrying in {wait}s "
+                    f"({attempt + 1}/{max_retries})..."
+                )
+                time.sleep(wait)
+                continue
+            logger.error(f"OpenAI-compatible API call failed: HTTP {exc.code}")
+            body = exc.read().decode(errors="replace")
+            logger.debug(f"Response body: {body[:300]}")
+        except Exception as exc:
+            logger.error(f"OpenAI-compatible API call failed: {exc}")
             break
     return None
 
@@ -523,7 +461,9 @@ def validate_and_clamp(raw_params: Dict) -> Tuple[Dict, List[str]]:
             else:
                 coerced = value
         except (ValueError, TypeError):
-            warnings.append(f"Cannot convert {key}={value} to {expected_type.__name__}, skipping")
+            warnings.append(
+                f"Cannot convert {key}={value} to {expected_type.__name__}, skipping"
+            )
             continue
 
         # Range clamping for numeric types
@@ -611,8 +551,7 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
     max_dist_mya = targets.get("max_evolutionary_distance_mya", 0)
     gene_family = query.get("gene_family_size_estimate", "unknown")
 
-    # ---- Fallback for unknown kingdom ----
-    # When NCBI lookup failed, guess kingdom from genome size or default to Animalia
+    # Fallback for unknown kingdom
     if kingdom == "Unknown":
         if genome_mb > 0:
             if genome_mb < 20:
@@ -624,10 +563,10 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
             else:
                 kingdom = "Plantae"
         else:
-            kingdom = "Animalia"  # safe default — moderate introns/padding
+            kingdom = "Animalia"
         logger.info(f"Unknown kingdom, falling back to '{kingdom}' (genome_size={genome_mb}Mb)")
 
-    # ---- Kingdom-based genome architecture ----
+    # Kingdom-based genome architecture
     if kingdom in ("Bacteria", "Archaea"):
         params["max_intron"] = 0 if kingdom == "Bacteria" else 200
         params["cluster_distance"] = 20000
@@ -653,23 +592,20 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
             params["cluster_distance"] = 600000
             params["region_padding"] = 400000
             params["padding_max"] = 700000
-        params["min_synteny_score"] = 0.4  # plants are more rearranged
+        params["min_synteny_score"] = 0.4
         params["n_flanking_genes"] = 12
     elif kingdom == "Animalia":
         if genome_mb > 2000:
-            # Large vertebrate genome
             params["max_intron"] = 50000
             params["cluster_distance"] = 300000
             params["region_padding"] = 200000
             params["padding_max"] = 350000
         elif genome_mb < 300:
-            # Compact genome (insects, nematodes)
             params["max_intron"] = 15000
             params["cluster_distance"] = 100000
 
-    # ---- Query-size adaptive ----
+    # Query-size adaptive
     if query_length < 80:
-        # Small peptide (melittin, defensin)
         params["sw_min_score"] = 10
         params["min_hit_length"] = 8
         params["min_hit_identity"] = 8
@@ -677,11 +613,10 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
         params["sw_min_score"] = 15
         params["min_hit_length"] = 8
     elif query_length > 1000:
-        # Large multi-domain protein
         params["sw_min_score"] = 30
         params["max_blocks_per_genome"] = 120
 
-    # ---- Gene family adaptive ----
+    # Gene family adaptive
     if gene_family == "large" or query.get("domain_families"):
         params["max_flanking_goi_similarity"] = 22
         params["expand_goi_similar"] = True
@@ -690,7 +625,7 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
     elif gene_family == "medium":
         params["max_flanking_goi_similarity"] = 28
 
-    # ---- Evolutionary distance adaptive ----
+    # Evolutionary distance adaptive
     if max_dist_mya > 700:
         params["mmseqs_sensitivity"] = 11
         params["min_hit_identity"] = 5
@@ -711,7 +646,7 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
         params["min_gene_identity"] = 20
         params["search_evalue"] = 0.05
 
-    # ---- Remove entries that match defaults ----
+    # Remove entries that match defaults
     cleaned = {}
     for key, value in params.items():
         if key in ESTIMABLE_PARAMS:
@@ -722,61 +657,82 @@ def heuristic_estimate(context: Dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Default models per provider
+# ---------------------------------------------------------------------------
+
+DEFAULT_MODELS = {
+    "google": "gemini-2.5-flash-lite",
+    "openai": "gpt-4o-mini",
+}
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
 
 def estimate_params(
     context: Dict,
-    model: str = "auto",
-    ollama_url: str = "http://localhost:11434",
-    ollama_timeout: int = DEFAULT_OLLAMA_TIMEOUT,
-    google_api_key: str = "",
+    provider: str = "google",
+    api_key: str = "",
+    api_base_url: str = "",
+    model: str = "",
 ) -> Dict[str, Any]:
     """
     Estimate pipeline parameters using the best available backend.
-    Priority: Ollama → Google Cloud → Heuristic.
+    Priority: API key → heuristic.
+
+    provider: 'google' or 'openai' (or any OpenAI-compatible endpoint via api_base_url)
+    api_key: provider API key
+    api_base_url: custom base URL for OpenAI-compatible providers (e.g. Together, Groq)
+    model: model name override; if empty, uses provider default
     """
     raw_params: Optional[Dict] = None
     backend_used = "none"
 
-    # --- Try Ollama first ---
-    if model == "auto":
-        try:
-            model = _auto_select_model()
-        except Exception:
-            model = "gemma4:e4b"
+    resolved_model = model or DEFAULT_MODELS.get(provider, "")
 
-    if _check_ollama_available(ollama_url):
-        logger.info(f"Attempting LLM estimation via Ollama ({model}, timeout={ollama_timeout}s)...")
-        raw_params = _call_ollama(context, model, ollama_url, timeout=ollama_timeout)
+    if api_key:
+        if provider == "google":
+            logger.info(f"Attempting LLM estimation via Google Gemini ({resolved_model})...")
+            raw_params = _call_google(context, api_key, model=resolved_model)
+            if raw_params is not None:
+                backend_used = f"google:{resolved_model}"
+        else:
+            # openai or any OpenAI-compatible provider
+            base = api_base_url or "https://api.openai.com"
+            provider_label = api_base_url if api_base_url else "openai"
+            logger.info(
+                f"Attempting LLM estimation via OpenAI-compatible API "
+                f"({provider_label}, model={resolved_model})..."
+            )
+            raw_params = _call_openai(
+                context, api_key, model=resolved_model, api_base_url=base
+            )
+            if raw_params is not None:
+                backend_used = f"openai:{resolved_model}"
+
         if raw_params is not None:
-            backend_used = f"ollama:{model}"
-            logger.info(f"LLM estimation successful ({backend_used})")
+            logger.info(f"LLM estimation successful (backend: {backend_used})")
+        else:
+            logger.warning(
+                "LLM API call failed or returned unparseable output. "
+                "Falling back to heuristic estimation."
+            )
     else:
-        logger.warning(
-            f"Ollama unreachable at {ollama_url} — typical on HPC/cluster nodes "
-            f"without localhost Ollama. Falling back to Google Cloud (if API key "
-            f"provided) or heuristic estimation."
-        )
-
-    # --- Try Google Cloud as fallback ---
-    if raw_params is None and google_api_key:
-        logger.info("Attempting LLM estimation via Google Cloud Gemini API...")
-        raw_params = _call_google_cloud(context, google_api_key)
-        if raw_params is not None:
-            backend_used = "google_cloud:gemini"
-            logger.info(f"LLM estimation successful ({backend_used})")
-
-    # --- Heuristic fallback ---
-    if raw_params is None:
         logger.info(
-            "No LLM backend available. Using heuristic parameter estimation. "
-            "Install Ollama (https://ollama.com) with 'ollama pull gemma4:e4b' "
-            "for LLM-powered estimation."
+            "No LLM API key provided. Using heuristic parameter estimation.\n"
+            "To enable LLM-quality estimation, set --auto_params true and provide\n"
+            "an API key via --llm_api_key or the LLM_API_KEY environment variable.\n"
+            "Supported providers: Google Gemini (--llm_provider google) and\n"
+            "OpenAI / compatible APIs (--llm_provider openai)."
         )
+
+    # Heuristic fallback
+    if raw_params is None:
         raw_params = heuristic_estimate(context)
         backend_used = "heuristic"
+        logger.info("Using heuristic parameter estimation.")
 
     # Validate and clamp
     validated_params, warnings = validate_and_clamp(raw_params)
@@ -791,7 +747,6 @@ def estimate_params(
         else:
             logger.warning(issue)
 
-    # Build result with metadata
     result = {
         "backend": backend_used,
         "parameters": validated_params,
@@ -817,31 +772,59 @@ def estimate_params(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LLM-powered parameter estimation for SynVoy"
+        description="LLM-powered parameter estimation for SynVoy",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Google Gemini (recommended)
+  llm_param_advisor.py --context ctx.json --provider google --api_key $GOOGLE_API_KEY --output params.json
+
+  # OpenAI
+  llm_param_advisor.py --context ctx.json --provider openai --api_key $OPENAI_API_KEY --output params.json
+
+  # OpenAI-compatible (e.g. Together, Groq, local LM Studio)
+  llm_param_advisor.py --context ctx.json --provider openai \\
+      --api_key $TOGETHER_API_KEY --api_base_url https://api.together.xyz \\
+      --model meta-llama/Llama-3.1-8B-Instruct-Turbo --output params.json
+
+  # No API key: pure heuristic estimation
+  llm_param_advisor.py --context ctx.json --output params.json
+""",
     )
     parser.add_argument(
         "--context", required=True, help="Path to context.json from build_llm_context.py"
     )
     parser.add_argument(
-        "--model",
-        default="auto",
-        help="Ollama model name or 'auto' for resource-based selection (default: auto)",
+        "--provider",
+        default="google",
+        choices=["google", "openai"],
+        help="LLM provider: 'google' (Gemini) or 'openai' (OpenAI or compatible). Default: google",
     )
     parser.add_argument(
-        "--ollama_url",
-        default="http://localhost:11434",
-        help="Ollama server URL (default: http://localhost:11434)",
-    )
-    parser.add_argument(
-        "--ollama_timeout",
-        type=int,
-        default=DEFAULT_OLLAMA_TIMEOUT,
-        help=f"Ollama request timeout in seconds (default: {DEFAULT_OLLAMA_TIMEOUT})",
-    )
-    parser.add_argument(
-        "--google_api_key",
+        "--api_key",
         default="",
-        help="Google Cloud Gemini API key (optional fallback)",
+        help=(
+            "API key for the chosen provider. "
+            "Also read from LLM_API_KEY, GOOGLE_API_KEY (for google), "
+            "or OPENAI_API_KEY (for openai) env vars."
+        ),
+    )
+    parser.add_argument(
+        "--api_base_url",
+        default="",
+        help=(
+            "Custom API base URL for OpenAI-compatible providers "
+            "(e.g. https://api.together.xyz, https://api.groq.com/openai). "
+            "Ignored for the google provider."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help=(
+            "Model name override. Defaults: google=gemini-2.5-flash-lite, "
+            "openai=gpt-4o-mini. Use this for custom models on compatible endpoints."
+        ),
     )
     parser.add_argument("--output", required=True, help="Output JSON path")
 
@@ -851,16 +834,21 @@ def main():
     with open(args.context) as fh:
         context = json.load(fh)
 
-    # Get Google API key from env if not in CLI
-    google_key = args.google_api_key or os.environ.get("GOOGLE_API_KEY", "")
+    # Resolve API key: CLI arg > LLM_API_KEY > provider-specific env var
+    api_key = args.api_key
+    if not api_key:
+        api_key = os.environ.get("LLM_API_KEY", "")
+    if not api_key and args.provider == "google":
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not api_key and args.provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY", "")
 
-    # Estimate
     result = estimate_params(
         context=context,
+        provider=args.provider,
+        api_key=api_key,
+        api_base_url=args.api_base_url,
         model=args.model,
-        ollama_url=args.ollama_url,
-        ollama_timeout=max(args.ollama_timeout, 1),
-        google_api_key=google_key,
     )
 
     # Write output
@@ -881,7 +869,6 @@ def main():
     if result["issues"]:
         logger.info(f"Issues: {len(result['issues'])}")
 
-    # Also print the flat params to stdout for easy consumption
     print(json.dumps(result, indent=2))
 
 

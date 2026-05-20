@@ -48,3 +48,11 @@ TODO.md
 CLAUDE.md
 docs/AI_analysis_md
 scratch/
+docs/LOCAL_PLAN.md
+docs/BENCHMARK_PLAN.md
+docs/TODO.md
+benchmark_results/
+scripts/benchmark/
+tests/benchmark_truth/
+tmp/
+.claude/

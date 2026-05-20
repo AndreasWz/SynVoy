@@ -77,6 +77,23 @@ _model_cache: Dict[str, Any] = {
 }
 
 
+def _chunk_sequence(seq: str, chunk_size: int, overlap: int) -> List[str]:
+    """Split long protein sequences into overlapping chunks."""
+    if chunk_size <= 0 or len(seq) <= chunk_size:
+        return [seq]
+
+    overlap = max(0, min(overlap, chunk_size - 1))
+    step = max(1, chunk_size - overlap)
+    chunks: List[str] = []
+    for start in range(0, len(seq), step):
+        chunk = seq[start : start + chunk_size]
+        if chunk:
+            chunks.append(chunk)
+        if start + chunk_size >= len(seq):
+            break
+    return chunks
+
+
 def _ensure_model_loaded(device: str = "cpu") -> None:
     """Load ProtT5 encoder into the process-level cache (once)."""
     if _model_cache["model"] is not None:
@@ -87,7 +104,10 @@ def _ensure_model_loaded(device: str = "cpu") -> None:
 
     logger.info(f"Loading ProtT5 model ({PLM_MODEL_ID}) on {device} ...")
     tokenizer = T5Tokenizer.from_pretrained(PLM_MODEL_ID, do_lower_case=False)
-    model = T5EncoderModel.from_pretrained(PLM_MODEL_ID)
+    load_kwargs: Dict[str, Any] = {}
+    if device != "cpu" and torch.cuda.is_available():
+        load_kwargs["torch_dtype"] = torch.float16
+    model = T5EncoderModel.from_pretrained(PLM_MODEL_ID, **load_kwargs)
 
     # Half-precision weights must be cast to float32 on CPU
     if device == "cpu":
@@ -108,8 +128,9 @@ def _ensure_model_loaded(device: str = "cpu") -> None:
 def embed_proteins(
     sequences: List[Tuple[str, str]],
     device: str = "cpu",
-    batch_size: int = 8,
+    batch_size: int = 1,
     max_length: int = 1024,
+    chunk_overlap: int = 128,
 ) -> Dict[str, np.ndarray]:
     """
     Compute ProtT5 mean-pool embeddings for protein sequences.
@@ -118,7 +139,8 @@ def embed_proteins(
         sequences: list of (id, amino_acid_sequence) pairs
         device:    'cpu' or 'cuda'
         batch_size: proteins per forward pass
-        max_length: truncate sequences longer than this
+        max_length: maximum residues per chunk
+        chunk_overlap: overlap between chunks for long proteins
 
     Returns:
         dict  {sequence_id: np.ndarray(1024,)}
@@ -137,15 +159,17 @@ def embed_proteins(
 
         prepared: List[str] = []
         batch_ids: List[str] = []
+        batch_chunk_map: List[Tuple[str, int]] = []
         for seq_id, seq in batch:
             if not seq or len(seq) < 5:
                 continue
-            seq = seq[:max_length]
             # Replace rare / non-standard amino acids with X
             seq = re.sub(r"[UZOB]", "X", seq)
-            # ProtT5 expects space-separated single characters
-            prepared.append(" ".join(list(seq)))
-            batch_ids.append(seq_id)
+            for chunk_index, chunk in enumerate(_chunk_sequence(seq, max_length, chunk_overlap)):
+                # ProtT5 expects space-separated single characters
+                prepared.append(" ".join(list(chunk)))
+                batch_ids.append(seq_id)
+                batch_chunk_map.append((seq_id, chunk_index))
 
         if not prepared:
             continue
@@ -166,11 +190,22 @@ def embed_proteins(
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
 
         hidden = outputs.last_hidden_state  # (batch, seq_len, 1024)
+        chunk_embeddings: Dict[str, List[Tuple[int, np.ndarray]]] = {}
 
         for i, seq_id in enumerate(batch_ids):
             mask = attention_mask[i].unsqueeze(-1).float()  # (seq_len, 1)
-            emb = (hidden[i] * mask).sum(dim=0) / mask.sum()
-            embeddings[seq_id] = emb.cpu().numpy().astype(np.float32)
+            mask_sum = mask.sum()
+            if mask_sum.item() == 0:
+                continue
+            emb = (hidden[i] * mask).sum(dim=0) / mask_sum
+            chunk_embeddings.setdefault(seq_id, []).append(
+                (batch_chunk_map[i][1], emb.cpu().numpy().astype(np.float32))
+            )
+
+        for seq_id, seq_chunks in chunk_embeddings.items():
+            seq_chunks.sort(key=lambda item: item[0])
+            vectors = np.stack([emb for _, emb in seq_chunks])
+            embeddings[seq_id] = vectors.mean(axis=0).astype(np.float32)
 
     return embeddings
 
@@ -284,62 +319,67 @@ def predict_orfs_prodigal(
 
     # Fallback: direct Prodigal call (legacy path, only if gene_predictor
     # module is not importable)
-    logger.debug("gene_predictor module not available; falling back to direct Prodigal")
-    proteins_file = os.path.join(output_dir, "prodigal_orfs.faa")
-    gff_file = os.path.join(output_dir, "prodigal_orfs.gff")
+    logger.warning("gene_predictor module not available; falling back to direct Prodigal")
 
-    cmd = ["prodigal", "-i", region_fasta, "-a", proteins_file, "-f", "gff", "-o", gff_file]
-    if meta_mode:
-        cmd.extend(["-p", "meta"])
+    with tempfile.TemporaryDirectory(prefix="plm_search_prodigal_") as temp_dir:
+        proteins_file = os.path.join(temp_dir, "prodigal_orfs.faa")
+        gff_file = os.path.join(temp_dir, "prodigal_orfs.gff")
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            logger.debug(f"Prodigal exited {result.returncode}: {result.stderr[:200]}")
+        cmd = ["prodigal", "-i", region_fasta, "-a", proteins_file, "-f", "gff", "-o", gff_file]
+        if meta_mode:
+            cmd.extend(["-p", "meta"])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                logger.warning(f"Prodigal exited {result.returncode}: {result.stderr[:200]}")
+                return []
+        except subprocess.TimeoutExpired as exc:
+            logger.warning(f"Prodigal timed out after 120 s: {exc}")
             return []
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        logger.debug(f"Prodigal unavailable or timed out: {exc}")
-        return []
+        except FileNotFoundError as exc:
+            logger.warning(f"Prodigal unavailable: {exc}")
+            return []
 
-    if not os.path.exists(proteins_file) or os.path.getsize(proteins_file) == 0:
-        return []
+        if not os.path.exists(proteins_file) or os.path.getsize(proteins_file) == 0:
+            return []
 
-    orfs: List[Dict[str, Any]] = []
-    current_id: Optional[str] = None
-    current_seq: List[str] = []
-    current_meta: Dict[str, Any] = {}
+        orfs: List[Dict[str, Any]] = []
+        current_id: Optional[str] = None
+        current_seq: List[str] = []
+        current_meta: Dict[str, Any] = {}
 
-    with open(proteins_file) as fh:
-        for line in fh:
-            line = line.strip()
-            if line.startswith(">"):
-                if current_id and current_seq:
-                    seq = "".join(current_seq).rstrip("*")
-                    if len(seq) >= min_aa:
-                        orfs.append({"id": current_id, "seq": seq, **current_meta})
+        with open(proteins_file) as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith(">"):
+                    if current_id and current_seq:
+                        seq = "".join(current_seq).rstrip("*")
+                        if len(seq) >= min_aa:
+                            orfs.append({"id": current_id, "seq": seq, **current_meta})
 
-                # Prodigal header: >contig_N # start # end # strand # ID=...
-                parts = line[1:].split(" # ")
-                current_id = parts[0].strip()
-                current_seq = []
-                current_meta = {}
-                if len(parts) >= 4:
-                    try:
-                        current_meta["start"] = int(parts[1]) - 1   # 0-based
-                        current_meta["end"] = int(parts[2])          # exclusive
-                        current_meta["strand"] = "+" if parts[3] == "1" else "-"
-                    except (ValueError, IndexError):
-                        pass
-            else:
-                current_seq.append(line)
+                    # Prodigal header: >contig_N # start # end # strand # ID=...
+                    parts = line[1:].split(" # ")
+                    current_id = parts[0].strip()
+                    current_seq = []
+                    current_meta = {}
+                    if len(parts) >= 4:
+                        try:
+                            current_meta["start"] = int(parts[1]) - 1   # 0-based
+                            current_meta["end"] = int(parts[2])          # exclusive
+                            current_meta["strand"] = "+" if parts[3] == "1" else "-"
+                        except (ValueError, IndexError):
+                            pass
+                else:
+                    current_seq.append(line)
 
-    # last record
-    if current_id and current_seq:
-        seq = "".join(current_seq).rstrip("*")
-        if len(seq) >= min_aa:
-            orfs.append({"id": current_id, "seq": seq, **current_meta})
+        # last record
+        if current_id and current_seq:
+            seq = "".join(current_seq).rstrip("*")
+            if len(seq) >= min_aa:
+                orfs.append({"id": current_id, "seq": seq, **current_meta})
 
-    return orfs
+        return orfs
 
 
 # ---------------------------------------------------------------------------
@@ -352,13 +392,13 @@ def plm_search_region(
     output_dir: str,
     similarity_threshold: float = 0.5,
     device: str = "cpu",
-    predictor: str = "auto",
+    predictor: str = "augustus",  # Changed: enforce Augustus for eukaryotic ORF prediction
     augustus_species: str = "fly",
 ) -> List[Dict[str, Any]]:
     """
     Search for GOI homologs in a genomic region via PLM embeddings.
 
-    1. Predict ORFs/genes (Augustus for eukaryotes, Prodigal for prokaryotes)
+    1. Predict ORFs/genes with Augustus (eukaryotic-capable; no Prodigal fallback to prevent silent multi-exon loss)
     2. Embed proteins with ProtT5
     3. Compare against pre-computed GOI embeddings
     4. Return hits above similarity threshold
