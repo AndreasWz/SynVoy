@@ -4,6 +4,43 @@ This document provides in-depth explanations for every configurable parameter in
 
 ---
 
+## Quick start: pick a preset
+
+Most users don't need to tune individual parameters. SynVoy ships four named presets that bundle the GOI/family/classification knobs for common gene archetypes. Pick by query type:
+
+```
+Is your query < ~100 aa AND a single-copy peptide?
+    → -profile <execution>,preset_short_peptide
+       (melittin, defensins, mastoparan, small toxins)
+
+Is your query part of a tandem gene family with many close paralogs?
+    → -profile <execution>,preset_tandem_family
+       (LY6/3FTx, MRJP, defensin clusters, olfactory receptors)
+
+Is your query one of a small (2–10) paralog family you want to discriminate?
+    → -profile <execution>,preset_paralog_discrimination
+       --goi_family_tokens 'PARALOG1,PARALOG2,...'
+       (TP53/TP63/TP73, HOX, SOX, paired ZNFs)
+
+Is your query a well-conserved, single-copy housekeeping gene?
+    → -profile <execution>,preset_single_copy
+       (ACTB, EF1A, ribosomal proteins, conserved TFs)
+
+None of the above? → run with defaults; the defaults are tuned for divergent
+toxin recovery and work as a sensible middle ground.
+```
+
+`<execution>` is one of `standard`, `docker`, `singularity`, `laptop_safe`, `docker_max`, `slurm`, `hpc_singularity`, `hpc_conda` — see the [Profiles] section of the README. Presets compose with execution profiles via comma.
+
+Equivalent invocation with `-c` (no profile composition):
+```
+nextflow run main.nf -c conf/presets/<preset_name>.config ...
+```
+
+Preset source files live in [`conf/presets/`](../conf/presets/) — copy and edit them as a starting point for query-specific tweaks. The full reference below documents every individual parameter for users who need finer control.
+
+---
+
 ## Table of Contents
 
 1. [Input & Mode Selection](#1-input--mode-selection)
@@ -24,7 +61,6 @@ This document provides in-depth explanations for every configurable parameter in
 16. [Resource Tuning](#16-resource-tuning)
 17. [LLM Parameter Estimation](#17-llm-parameter-estimation)
 18. [Advanced & Output](#18-advanced--output)
-19. [Reserved / Unimplemented](#19-reserved--unimplemented)
 
 ---
 
@@ -631,32 +667,32 @@ The memory allocated to the LOCATE_GENE process. This should accommodate the MMs
 ## 17. LLM Parameter Estimation
 
 ### `auto_params`
-**Type:** Boolean | **Default:** `true`
+**Type:** Boolean | **Default:** `false`
 
-Master switch for automatic parameter estimation. When enabled, SynVoy analyzes the biological context of your search — the query protein characteristics (size, exon count, signal peptide, gene family), the home species genome architecture (kingdom, genome size, gene count, intron lengths), and the target species evolutionary distances — to automatically set optimal values for approximately 25 search parameters. The estimation uses a three-tier system: (1) Ollama local LLM (Gemma 4), (2) Google Cloud Gemini API, (3) deterministic heuristic rules. All three backends encode the same biological reasoning (kingdom-specific intron sizes, distance-adaptive sensitivity, query-size thresholds), but the LLM backends add nuance for edge cases. Disable this with `--auto_params false` if you want full manual control over all parameters or if the estimation is producing suboptimal results for your specific use case. When disabled, all parameters use their nextflow.config defaults.
+Master switch for automatic parameter estimation. When enabled, SynVoy analyzes the biological context of your search — the query protein characteristics (size, exon count, signal peptide, gene family), the home species genome architecture (kingdom, genome size, gene count, intron lengths), and the target species evolutionary distances — to automatically set optimal values for approximately 25 search parameters. When an API key is available (`llm_api_key` or the relevant env var), estimation uses a cloud LLM. Without a key it falls back to built-in deterministic heuristics that encode the same biological rules. Disable this with `--auto_params false` if you want full manual control over all parameters. When disabled, all parameters use their nextflow.config defaults.
 
-### `llm_model`
-**Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'gemma4:e4b'`, `'gemma4:26b'`, `'gemma4:31b'`
+### `llm_provider`
+**Type:** String | **Default:** `'google'` | **Options:** `'google'`, `'openai'`
 
-The Ollama model used for local LLM-powered parameter estimation. **`auto`** detects system resources (RAM, GPU VRAM) and selects the best model that will fit: `gemma4:e4b` (4B parameters, ~4 GB, laptops), `gemma4:26b` (26B MoE, ~16 GB, workstations), or `gemma4:31b` (31B dense, ~24 GB, servers). The larger models produce more nuanced parameter estimates, especially for unusual biological contexts (polyploid plants, highly rearranged insect lineages, extremophile bacteria). The 4B model is sufficient for common cases (standard insects, vertebrates, plants) but may struggle with edge cases. All models use the same system prompt and produce JSON output. If Ollama is not installed or the model is not pulled, the pipeline seamlessly falls back to the Google Cloud API or heuristic estimation. Specify a model explicitly to force a particular size regardless of detected resources.
+The LLM provider for parameter estimation. `'google'` uses Google Gemini (default model: `gemini-2.5-flash-lite`). `'openai'` uses OpenAI's chat completions API (default model: `gpt-4o-mini`) or any OpenAI-compatible endpoint when `llm_api_base_url` is set — this covers Together, Groq, Fireworks, LM Studio, and similar services. The API key is resolved from `llm_api_key`, then from the provider-specific env vars (`GOOGLE_API_KEY` for google, `OPENAI_API_KEY` for openai), then from the generic `LLM_API_KEY` env var.
 
-### `ollama_url`
-**Type:** String | **Default:** `'http://localhost:11434'`
-
-The URL of the Ollama server for local LLM inference. The default assumes Ollama is running locally on the standard port. Change this if Ollama is running on a different machine (e.g., `'http://gpu-server:11434'`) or a non-standard port. The pipeline verifies server reachability with a version check before attempting model inference. If the server is unreachable (network error, Ollama not running), the pipeline falls back to Google Cloud or heuristic estimation without error — the Ollama backend is always optional. For containerized deployments, you may need to use the Docker host IP or a service name instead of localhost. The pipeline sends a single chat API request per run, so network latency is not a concern — even a remote server on a different continent would add only a few hundred milliseconds to the total estimation time.
-
-### `ollama_timeout`
-**Type:** Integer (seconds) | **Default:** `480`
-
-The maximum time in seconds to wait for a response from the Ollama server. CPU inference with Gemma 4 models can be slow — the 4B model (`gemma4:e4b`) takes approximately 3–4 minutes on a modern laptop CPU, while the 26B and 31B models can take 10+ minutes without GPU acceleration. The default of 480 seconds (8 minutes) provides adequate headroom for CPU inference of the smallest model. If using GPU inference, responses typically return in 5–30 seconds, making the timeout effectively irrelevant. If the timeout is hit, the pipeline falls back to Google Cloud or heuristic estimation. Increase this value if running larger models on CPU. Decrease it if you want faster fallback to heuristic when Ollama is slow. The timeout applies to the total API response time including model loading, inference, and response generation.
-
-### `google_api_key`
+### `llm_api_key`
 **Type:** String | **Default:** `''` (empty)
 
-The Google Cloud Gemini API key for cloud-based LLM parameter estimation. This is the second-tier fallback after Ollama — if Ollama is not available or fails, and this key is provided, the pipeline sends the biological context to the Gemini 2.5 Flash Lite model via Google's generative AI API. The key can be provided via this parameter (`--google_api_key YOUR_KEY`), or more safely via the `GOOGLE_API_KEY` environment variable (recommended to avoid exposing the key in command line history or Nextflow logs). The API key is associated with your Google Cloud project billing — each call uses approximately 1,000–2,000 tokens, which is negligible cost even on the free tier. The Gemini API typically responds in 2–3 seconds. If the API returns an error (rate limiting, authentication failure), the pipeline falls back to heuristic estimation. **Never commit API keys to version control.**
+The API key for the chosen LLM provider. Can be provided here or (recommended) via environment variable to avoid exposing the key in command history or Nextflow logs. The key is resolved in this order: `--llm_api_key` CLI flag → `LLM_API_KEY` env var → `GOOGLE_API_KEY` env var (for google provider) → `OPENAI_API_KEY` env var (for openai provider). Each call uses approximately 1,000–2,000 tokens, negligible cost on any provider's free or standard tier. **Never commit API keys to version control.**
+
+### `llm_api_base_url`
+**Type:** String | **Default:** `''` (empty)
+
+Custom API base URL for OpenAI-compatible providers. Leave empty to use the default endpoint for the chosen provider (`https://api.openai.com` for openai, Google's endpoint for google). Set this to use Together (`https://api.together.xyz`), Groq (`https://api.groq.com/openai`), LM Studio (`http://localhost:1234`), or any other OpenAI-compatible service. Ignored for the google provider.
+
+### `llm_model`
+**Type:** String | **Default:** `''` (empty = provider default)
+
+Model name override. When empty, uses the provider default: `gemini-2.5-flash-lite` for google, `gpt-4o-mini` for openai. Set this when using an OpenAI-compatible provider with a specific model name (e.g. `meta-llama/Llama-3.1-8B-Instruct-Turbo` on Together). The model receives a detailed system prompt with SynVoy-specific biological reasoning — any instruction-following model with JSON output support works.
 
 ### `multi_profile`
-**Type:** Boolean | **Default:** `true`
+**Type:** Boolean | **Default:** `false`
 
 Enables multi-profile mode, where SynVoy runs the same search with multiple parameter profiles (sensitive, balanced, stringent) and automatically selects the best result. When the LLM estimates parameters, it produces a single "balanced" profile. Multi-profile mode generates two additional variants: a "sensitive" profile with relaxed thresholds (lower identity, lower synteny score, higher sensitivity) and a "stringent" profile with tighter thresholds (higher identity, higher synteny score). The best result per target is selected based on GOI detection confidence and synteny score. This triples the computational work but significantly improves the chance of finding the optimal parameters for each target species — close species benefit from stringent parameters while distant species benefit from sensitive parameters. The mode is automatically disabled when the total job count (loci × targets × 3 profiles) would exceed `multi_profile_max_jobs`.
 
@@ -689,19 +725,3 @@ The maximum number of times a failed Nextflow process is retried before the pipe
 
 The Docker/Singularity container image used for running pipeline processes when a container profile is active. The default expects a locally built image tagged `synvoy-local:latest`. Build it from the project Dockerfile: `docker build -t synvoy-local:latest .`. The container bundles all dependencies (MMseqs2, tblastn, Augustus, Prodigal, miniprot, parasail, MAFFT, IQ-TREE, Python with BioPython, etc.) in a reproducible environment. Override this to use a pre-built remote image (e.g., from Docker Hub or a private registry). The `beforeScript` directive ensures workspace scripts in `bin/` override any scripts packaged inside the container, so local code changes take effect immediately without rebuilding. This parameter is only used when a Docker or Singularity profile is active — Conda profiles ignore it entirely.
 
----
-
-## 19. Reserved / Unimplemented
-
-The following parameters are defined in `nextflow.config` but are not currently wired into the pipeline. They are reserved for planned future features:
-
-| Parameter | Default | Intended Purpose |
-|---|---|---|
-| `expand_db_threshold` | `1e-10` | E-value threshold for expanding the iterative search database with discovered homologs |
-| `diamond_sensitivity` | `"very-sensitive"` | DIAMOND alignment sensitivity (planned DIAMOND integration as MMseqs2 alternative) |
-| `enable_splice_variants` | `true` | Detect and report alternative splice variants at each locus |
-| `enable_frameshifts` | `true` | Detect and report frameshift mutations in pseudogene candidates |
-| `mutation_rate` | `0.05` | Expected mutation rate for evolutionary distance calibration |
-| `num_mutant_variants` | `10` | Number of mutant variants to generate for sensitivity testing |
-
-These parameters can be safely ignored. Setting them has no effect on current pipeline behavior.
