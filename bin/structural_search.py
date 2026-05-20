@@ -512,13 +512,13 @@ def structural_search_region(
     device: str = "cpu",
     max_length: int = 700,
     threads: int = 1,
-    predictor: str = "auto",
+    predictor: str = "augustus",  # Changed: enforce Augustus for eukaryotic ORF prediction
     augustus_species: str = "fly",
 ) -> List[Dict[str, Any]]:
     """
     Search for GOI structural homologs in a genomic region.
 
-    1. Predict ORFs/genes (Augustus for eukaryotes, Prodigal for prokaryotes)
+    1. Predict ORFs/genes with Augustus (eukaryotic-capable; no Prodigal fallback to prevent silent multi-exon loss)
     2. Fold ORFs with ESMFold
     3. Compare against pre-folded GOI structures via Foldseek
     4. Return hits above TM-score threshold

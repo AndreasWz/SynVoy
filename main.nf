@@ -575,8 +575,17 @@ workflow {
             genomes_dir_ch = channel.empty()
             species_map_ch = channel.value(no_species_map_file)
         }
-        // Species name for phylogenetic sorting (pro mode: use param or extract from filename)
-        home_species_for_sort_ch = channel.value(params.home_species ?: params.home_genome)
+        // Species name for phylogenetic sorting + matrix home-row label.
+        // Pro mode default: take the home_genome filename and strip
+        // FASTA suffixes. The full path used to leak through as the
+        // species name (so the matrix row label became the file path).
+        def _home_stem = ''
+        if (params.home_genome) {
+            _home_stem = new File(params.home_genome).name
+                .replaceFirst(/\.gz$/, '')
+                .replaceFirst(/\.(fna|fa|fasta)$/, '')
+        }
+        home_species_for_sort_ch = channel.value(params.home_species ?: _home_stem)
     }
 
     // Normalize query to protein space (DNA queries are translated to best ORF)
@@ -685,7 +694,17 @@ workflow {
     
     uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
     LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch)
-    
+
+    LOCATE_GENE.out.bed.view { bed ->
+        def lines = bed.readLines().findAll { it.trim() && !it.startsWith('#') }
+        if (lines) {
+            def loci = lines.collect { l -> def f = l.split('\t'); "${f[0]}:${f[1]}-${f[2]}" }.join(', ')
+            "${c.green}[OK  ]${c.reset} ${c.white}${'LOCATE_GENE'.padRight(24)}${c.reset} ${lines.size()} hit(s) → ${loci}"
+        } else {
+            "${c.red}[WARN]${c.reset} ${c.white}${'LOCATE_GENE'.padRight(24)}${c.reset} No hits found — gene absent or below e-value threshold (${params.search_evalue}). Pipeline will abort with a diagnostic."
+        }
+    }
+
     // 4b. ANNOTATE GOI EXONS
     // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
     // If GFF available: matches GOI to annotated gene and extracts CDS/exons
@@ -963,16 +982,19 @@ workflow {
         }
 
         // --- PHYLOGENY & PLOTTING ---
-        // Collect all proteins for tree: Flanking Genes + Discovered Genes (from Expanded DB or Regions?)
-        // Iterative Search output might be best source of all gene sequences found.
-        // expanded_db contains everything found so far.
-        // Let's use expanded_db per locus.
-        
+        // The tree FASTA is goi_for_tree.faa (= expanded_db.faa + tree-only
+        // GOI hits like tandem_copy that are deliberately withheld from wave
+        // seeding). Falls back to expanded_db if the new file isn't present
+        // (older runs / partial reruns).
+
         uiPhase(4, 'Phylogenetics and Visualization')
         uiStatus('RUN ', 'COMPUTE_TREE', 'Computing GOI phylogenetic trees')
-        
+
+        tree_input_ch = ITERATIVE_SEARCH.out.goi_for_tree
+            .ifEmpty( ITERATIVE_SEARCH.out.expanded_db )
+
         COMPUTE_TREE(
-            ITERATIVE_SEARCH.out.expanded_db
+            tree_input_ch
         )
         
         COMPUTE_TREE.out.tree.view { locus, tree ->
@@ -1043,7 +1065,8 @@ workflow {
             plot_inputs_split.candidate_beds, // candidate_beds
             plot_inputs_split.homology_tsvs,  // homology_tsvs
             plot_inputs_split.tree,           // tree
-            species_map_ch                    // species_mapping.tsv (already a value channel)
+            species_map_ch,                   // species_mapping.tsv (already a value channel)
+            home_species_for_sort_ch          // home species label for the matrix-view home row
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->

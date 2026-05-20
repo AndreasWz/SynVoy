@@ -1241,7 +1241,28 @@ def main():
     assemblies = apply_bad_quality_policy(collected, args)
 
     if not assemblies:
-        print("WARNING: No acceptable related assemblies found.", file=sys.stderr)
+        # The TaxID resolved fine but the assembly walk produced 0 genomes
+        # — graceful exit with empty manifest, but tell the user concretely
+        # what to try. (Pre-2026-05-08 message was a one-liner that left
+        # students staring at downstream "no inputs" failures.)
+        print(
+            f"WARNING: No acceptable related assemblies found for "
+            f"'{args.home_species}' (TaxID {species_taxid}). The taxonomy "
+            f"lookup succeeded but the multi-level assembly walk returned "
+            f"0 candidates that pass the quality policy "
+            f"('{args.bad_quality_policy}', "
+            f"N50 >= {getattr(args, 'bad_min_n50', 'n/a')}). "
+            f"Try: (1) relax the quality policy with "
+            f"--bad_quality_policy keep; "
+            f"(2) raise --max_genomes; "
+            f"(3) specify target species directly via --target_species "
+            f"\"Species1,Species2\"; "
+            f"(4) switch to Pro Mode and pass --target_genomes with "
+            f"local FASTA files. "
+            f"Continuing with empty target set; downstream stages will "
+            f"run home-only or skip cleanly.",
+            file=sys.stderr,
+        )
         output_path = Path(args.outdir)
         output_path.mkdir(parents=True, exist_ok=True)
         (output_path / "genomes_manifest.txt").touch()
