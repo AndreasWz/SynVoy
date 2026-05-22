@@ -1,0 +1,40 @@
+# Conda env for SynVoy melittin benchmark competitors.
+# Install: conda env create -f scripts/benchmark/competitors.yml
+# Activate: conda activate synvoy_benchmark
+#
+# GENESPACE is R-based and installed separately via R inside this env;
+# see run_genespace.sh for the BiocManager invocation.
+# TOGA2 is NOT in this env — it has its own install (Cactus alignment chain).
+
+name: synvoy_benchmark
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+
+  # NCBI data fetching
+  - ncbi-datasets-cli
+
+  # Sequence-only orthology baselines
+  - orthofinder=3.*
+  - mmseqs2
+
+  # GENESPACE deps (R + DIAMOND + MCScanX wrapped via R wrapper)
+  - r-base>=4.3
+  - r-essentials
+  - bioconductor-rtracklayer
+  - bioconductor-biostrings
+  - diamond
+  - mcscanx
+
+  # Generic genomics utilities
+  - samtools
+  - bedtools
+  - seqkit
+
+  - pip:
+      # SonicParanoid2 (PyPI-only)
+      - sonicparanoid>=2.0

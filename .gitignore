@@ -52,7 +52,8 @@ docs/LOCAL_PLAN.md
 docs/BENCHMARK_PLAN.md
 docs/TODO.md
 benchmark_results/
-scripts/benchmark/
+# scripts/benchmark/ is now tracked — wrappers are part of the paper-supporting code.
+# Genome data + truth files stay ignored (large/curated, kept out of git).
 tests/benchmark_truth/
 tmp/
 .claude/
