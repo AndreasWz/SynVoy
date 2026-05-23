@@ -53,6 +53,17 @@ THREADS="${THREADS:-4}"
 LASTZ_JOB_MEMORY_GB="${LASTZ_JOB_MEMORY_GB:-8}"
 LASTZ_JOB_TIME_HOURS="${LASTZ_JOB_TIME_HOURS:-12}"
 MLC_MAX_RETRIES="${MLC_MAX_RETRIES:-0}"
+
+# LASTZ params tuned for distant-homology comparisons (Apis vs ants ≈ 155 Mya).
+# Defaults in make_lastz_chains are vertebrate-tuned (K=2400 L=3000 H=2000
+# Y=9400) and produce ZERO alignments for Hymenoptera family-level pairs.
+# These values follow Hiller lab's distant-homology recommendations
+# (Kirilenko et al. 2023 Supp. for >100My; HoxD55-style permissive).
+# Override per-run via env vars if you want to tighten back up.
+LASTZ_K="${LASTZ_K:-1500}"        # seed score threshold (lower = more sensitive)
+LASTZ_L="${LASTZ_L:-2500}"        # gap-free extension threshold
+LASTZ_H="${LASTZ_H:-0}"           # HSP score filter (0 = disable)
+LASTZ_Y="${LASTZ_Y:-3400}"        # chain gap penalty cap
 # These default to the env + paths created by scripts/benchmark/toga_setup.sh.
 # Run toga_setup.sh ONCE before this script. Override to reuse a different env.
 TOGA_ENV="${TOGA_ENV:-synvoy_toga}"
@@ -318,6 +329,10 @@ run_target() {
                 --pd "${chain_proj}" \
                 --cluster_executor local \
                 --num_fill_jobs "${THREADS}" \
+                --lastz_k "${LASTZ_K}" \
+                --lastz_l "${LASTZ_L}" \
+                --lastz_h "${LASTZ_H}" \
+                --lastz_y "${LASTZ_Y}" \
                 --force \
             > "${WORK}/logs/${sp}_chain.log" 2>&1 \
             || { echo "    chain generation FAILED — see ${WORK}/logs/${sp}_chain.log"; return 1; }
