@@ -150,6 +150,47 @@ class TestMultiLocusStagingDiagnostics(unittest.TestCase):
         self.assertIn("confident_goi", goi_class_counts)
         self.assertGreater(goi_class_counts["confident_goi"], 0)
 
+    def test_headline_reflects_goi_not_raw_hits(self):
+        """docs/TODO.md §1k: a run with HIGH-confidence GOI annotations but an empty
+        hits/ dir must NOT advertise itself as empty. The old total_hits/genomes_with_hits
+        (raw .m8 count) read 0 here and looked like a failed run."""
+        genomes = ["GCF_000001.1.fna", "GCF_000002.1.fna"]
+        for genome in genomes:
+            for locus_idx in range(1, 3):
+                self._write(
+                    f"regions/{genome}.locus{locus_idx}.gff",
+                    _gff_lines(genome, locus_idx, n_annotations=4),  # 2 HIGH goi per file
+                )
+                self._write(
+                    f"scores/{genome}.locus{locus_idx}.scores.tsv",
+                    _scores_tsv(locus_idx, n_rows=2),
+                )
+        # Deliberately write NO hits/*.m8 — this is the §1k scenario.
+
+        summary = build_report(self.test_dir)["summary"]
+
+        # The misleading raw-hit keys are gone, renamed to be unambiguous.
+        self.assertNotIn("total_hits", summary)
+        self.assertNotIn("genomes_with_hits", summary)
+        self.assertEqual(summary["total_raw_search_hits"], 0)
+        self.assertEqual(summary["genomes_with_raw_search_hits"], 0)
+
+        # The headline reflects the actual GOI yield, not the empty m8 staging.
+        self.assertGreater(summary["high_confidence_goi"], 0)
+        self.assertEqual(summary["headline_metric"], summary["high_confidence_goi"])
+        self.assertGreater(summary["genomes_with_goi_annotations"], 0)
+        self.assertIn("high-confidence", summary["headline"])
+        self.assertNotIn("No GOI ortholog", summary["headline"])
+
+    def test_headline_empty_run_says_so(self):
+        """A genuinely empty run gets an explicit 'no annotations' headline, not a number."""
+        self._write("regions/GCF_x.faa", ">p1\nMK\n")  # keep staging non-empty
+        self._write("hits/blk_GCF_x.m8", "q\tc\t90\t10\t0\t0\t1\t10\t1\t10\t1e-9\t40\n")
+        summary = build_report(self.test_dir)["summary"]
+        self.assertEqual(summary["high_confidence_goi"], 0)
+        self.assertEqual(summary["headline_metric"], 0)
+        self.assertIn("No GOI ortholog", summary["headline"])
+
 
 class TestEmptyStagingFailsLoud(unittest.TestCase):
     def setUp(self):

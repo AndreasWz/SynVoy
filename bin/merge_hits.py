@@ -3,6 +3,26 @@
 import sys
 import argparse
 
+
+def _parse_bit(parts):
+    """Bit score lives in the optional 7th BED column (emitted by locate_gene.nf).
+    Returns None when absent so older 6-column inputs still work."""
+    if len(parts) > 6 and parts[6] not in ('.', ''):
+        try:
+            return float(parts[6])
+        except ValueError:
+            return None
+    return None
+
+
+def _max_bit(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Merge BLAST/MMseqs hits to BED")
     parser.add_argument("--mmseqs", help="MMseqs2 m8 output (converted to bed-like)")
@@ -28,7 +48,8 @@ def main():
                             'end': int(parts[2]),
                             'source': 'mmseqs',
                             'score': float(parts[4]), # evalue/score
-                            'strand': parts[5]
+                            'strand': parts[5],
+                            'bit': _parse_bit(parts)
                         })
         except FileNotFoundError:
             pass
@@ -46,7 +67,8 @@ def main():
                             'end': int(parts[2]),
                             'source': 'blast',
                             'score': float(parts[4]),
-                            'strand': parts[5]
+                            'strand': parts[5],
+                            'bit': _parse_bit(parts)
                         })
         except FileNotFoundError:
             pass
@@ -80,8 +102,9 @@ def main():
                     next_hit['strand'] == curr['strand']):
                 # Merge
                 curr['end'] = max(curr['end'], next_hit['end'])
-                # Keep better score (min evalue logic or max bitscore - assume evalue here from module)
+                # Keep best e-value (min) and best bit score (max) across merged HSPs.
                 curr['score'] = min(curr['score'], next_hit['score'])
+                curr['bit'] = _max_bit(curr.get('bit'), next_hit.get('bit'))
                 # Strand voting? 
                 if curr['strand'] != next_hit['strand']:
                     pass # Ambiguous, keep curr
@@ -92,8 +115,12 @@ def main():
 
     with open(args.output, 'w') as out:
         for m in merged:
-            # BED: chrom, start, end, name, score, strand
-            out.write(f"{m['chrom']}\t{m['start']}\t{m['end']}\tgene_loc\t{m['score']}\t{m['strand']}\n")
+            # BED: chrom, start, end, name, evalue, strand, bitscore
+            # The 7th (bit) column lets split_loci.py rank loci robustly where
+            # BLAST e-values saturate at 0.0 (docs/TODO.md §1d). '.' when unknown.
+            bit = m.get('bit')
+            bit_str = f"{bit:g}" if bit is not None else "."
+            out.write(f"{m['chrom']}\t{m['start']}\t{m['end']}\tgene_loc\t{m['score']}\t{m['strand']}\t{bit_str}\n")
 
 if __name__ == "__main__":
     main()

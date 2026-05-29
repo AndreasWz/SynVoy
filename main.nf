@@ -23,6 +23,7 @@ include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
+include { STAGE_REGION_FOR_REPORT } from './modules/stage_for_report.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
@@ -115,6 +116,39 @@ def looksLikeInlineSequence(value) {
         return true
     }
     return false
+}
+
+// Derive a home-species proxy from the home-genome filename when --home_species
+// is not given (Pro mode). Genomes are usually named after the organism
+// (Photinus_pyralis.fna -> "Photinus_pyralis"), which phylo_sort and
+// build_llm_context normalize to a binomial. Returns '' when nothing usable
+// remains after stripping FASTA suffixes. See docs/TODO.md §1i.
+def homeSpeciesStem(genomePath) {
+    if (!genomePath) {
+        return ''
+    }
+    return new File(genomePath.toString()).name
+        .replaceFirst(/\.gz$/, '')
+        .replaceFirst(/\.(fna|fa|fasta)$/, '')
+        .trim()
+}
+
+// A filename stem is only a usable species proxy if it could plausibly be an
+// organism name. Reject empty strings, generic placeholders, and bare assembly
+// accessions (which carry a taxid but no name for the LLM context).
+def isUsableSpeciesName(name) {
+    if (!name) {
+        return false
+    }
+    def n = name.toString().trim()
+    def lower = n.toLowerCase()
+    if (lower in ['home', 'home_genome', 'genome', 'sequence', 'query', 'target', 'reference', 'ref', 'n/a', 'null']) {
+        return false
+    }
+    if (lower.startsWith('gca_') || lower.startsWith('gcf_')) {
+        return false
+    }
+    return (n ==~ /.*[A-Za-z].*/)
 }
 
 def paramBool(value) {
@@ -283,6 +317,19 @@ workflow {
             validationErrors << "Home GFF not found: ${params.home_gff}"
         } else if (!params.home_gff && params.home_genome) {
             validationWarnings << "No --home_gff provided. Flanking-gene extraction will fall back to Prodigal gene prediction on the home genome, which is substantially less reliable than a curated GFF. Supply --home_gff if you have one."
+        }
+        // home_species drives taxonomy sorting (phylo_sort) and the LLM parameter
+        // advisor's biological context. Missing it silently degrades the run to
+        // kingdom=Unknown / phylo distance 999 and mis-tunes per-target stringency
+        // (docs/TODO.md §1i). Infer from the genome filename when plausible; either
+        // way make the degradation loud rather than silent.
+        if (params.home_genome && !params.home_species) {
+            def stem = homeSpeciesStem(params.home_genome)
+            if (isUsableSpeciesName(stem)) {
+                validationWarnings << "No --home_species provided; inferring \"${stem}\" from the home-genome filename for taxonomy sorting and LLM context. Pass --home_species \"Genus species\" explicitly if that is wrong."
+            } else {
+                validationWarnings << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). Taxonomy sorting (phylo_sort) and the parameter advisor will fall back to kingdom=Unknown / phylogenetic distance 999, which mis-tunes per-target search stringency. The run will still proceed. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\") for correct behaviour."
+            }
         }
         if (!params.target_genomes) {
             validationWarnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
@@ -496,7 +543,7 @@ workflow {
         home_species_ch = resolved_species_ch.map { resolved ->
             def species = params.home_species ?: resolved
             if (!species) {
-                log.error "${c.red}Could not detect species. Please provide --home_species${c.reset}"
+                log.error "${c.red}ERROR: Could not determine home species from the query. Why: easy mode reads the organism from the query's UniProt/NCBI metadata, but this query returned none. Try: pass --home_species \"Genus species\" explicitly.${c.reset}"
                 exit 1
             }
             return species
@@ -579,12 +626,7 @@ workflow {
         // Pro mode default: take the home_genome filename and strip
         // FASTA suffixes. The full path used to leak through as the
         // species name (so the matrix row label became the file path).
-        def _home_stem = ''
-        if (params.home_genome) {
-            _home_stem = new File(params.home_genome).name
-                .replaceFirst(/\.gz$/, '')
-                .replaceFirst(/\.(fna|fa|fasta)$/, '')
-        }
+        def _home_stem = homeSpeciesStem(params.home_genome)
         home_species_for_sort_ch = channel.value(params.home_species ?: _home_stem)
     }
 
@@ -601,7 +643,10 @@ workflow {
         uiStatus('RUN ', 'ESTIMATE_PARAMS', 'Estimating optimal parameters for this search')
 
         // Determine inputs for the estimator
-        def est_home_species = params.mode == 'easy' ? home_species_ch : channel.value(params.home_species ?: '')
+        // Pro mode: reuse the same filename-stem fallback as PHYLO_SORT instead of an
+        // empty string, which previously cascaded to kingdom=Unknown / genome=0Mb in
+        // build_llm_context and mis-tuned the parameter advisor (docs/TODO.md §1i).
+        def est_home_species = params.mode == 'easy' ? home_species_ch : home_species_for_sort_ch
         def est_target_species = channel.value(params.target_species ?: '')
 
         // Resolved metadata JSON is available in easy mode; create a stub for pro mode
@@ -1093,9 +1138,13 @@ workflow {
             .collect()
             .set { collected_regions }
 
-        ITERATIVE_SEARCH.out.gff
-            .map { rec -> rec[1] }
-            .flatten()
+        // Tag each per-locus region GFF with its home-locus id so they no longer
+        // collide by basename during report staging (and so generate_report.py can
+        // dedup the same target ortholog found from multiple loci — docs/TODO.md §1h).
+        STAGE_REGION_FOR_REPORT(
+            ITERATIVE_SEARCH.out.gff.transpose()
+        )
+        STAGE_REGION_FOR_REPORT.out
             .ifEmpty(no_gffs_sentinel)
             .collect()
             .set { collected_region_gffs }

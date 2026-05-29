@@ -26,18 +26,6 @@ except ImportError:
 LARGE_RANK = 10**18
 
 
-def run_command(cmd, check=True):
-    """Run command and return output."""
-    try:
-        result = subprocess.run(cmd, check=check, capture_output=True, text=True)
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f"Error: {e.stderr}", file=sys.stderr)
-        if check:
-            raise
-        return None
-
-
 def extract_zip_archive(zip_path: Path, extract_dir: Path):
     """
     Extract a ZIP archive using Python stdlib so Docker/Conda runs do not
@@ -175,6 +163,38 @@ def assembly_rank_tuple(entry, ranking_mode):
     )
 
 
+def parse_quality_line(line):
+    """Parse one tab-separated assembly-docsum row (from ``xtract ... -def NA``)
+    into a quality-metrics dict.
+
+    Column order matches the xtract -element list:
+      0 AssemblyAccession  1 SpeciesName  2 RefSeq_category  3 AssemblyStatus
+      4 ScaffoldCount  5 ContigCount  6 ScaffoldN50  7 ContigN50
+      8 ScaffoldN80  9 ContigN80
+
+    NCBI docsums expose no top-level scaffold/contig COUNT, so columns 4-5 arrive
+    as ``NA`` (-> None) and the quality gate relies on N50 + assembly level rather
+    than the historically-unreliable counts (which NCBI inflates with alternate
+    haplotypes / unplaced sequences). The ``-def NA`` placeholder in the caller is
+    what keeps these columns aligned; without it the N50 values shift left into
+    the count slots and a great assembly is rejected. (docs/TODO.md §1l)
+    """
+    parts = line.split("\t")
+    parts += [""] * (10 - len(parts))
+    return {
+        "accession": parts[0].strip(),
+        "species": parts[1].strip(),
+        "category": parts[2].strip() or None,
+        "assembly_status": parts[3].strip() or None,
+        "scaffold_count": parse_int(parts[4]),
+        "contig_count": parse_int(parts[5]),
+        "scaffold_n50": parse_float(parts[6]),
+        "contig_n50": parse_float(parts[7]),
+        "scaffold_n80": parse_float(parts[8]),
+        "contig_n80": parse_float(parts[9]),
+    }
+
+
 def get_assembly_quality(accession):
     """Fetch quality fields for one assembly accession from NCBI assembly docsum."""
     query = accession
@@ -184,6 +204,15 @@ def get_assembly_quality(accession):
         "xtract",
         "-pattern",
         "DocumentSummary",
+        # -def emits a placeholder for any ABSENT element so the columns never
+        # shift. NCBI assembly docsums carry no top-level <ScaffoldCount>/
+        # <ContigCount> (those live in the Meta/Stats block); without -def,
+        # xtract collapses the missing fields and the present <ScaffoldN50>
+        # slides into the scaffold_count slot — e.g. Photinus pyralis
+        # GCF_008802855.1 reports a 47 Mb scaffold N50, which was being read as
+        # "scaffold_count=47017841" and failed the quality gate. (docs/TODO.md §1l)
+        "-def",
+        "NA",
         "-element",
         "AssemblyAccession",
         "SpeciesName",
@@ -206,20 +235,7 @@ def get_assembly_quality(accession):
         line = output.decode().strip().split("\n")[0] if output else ""
         if not line:
             return {}
-        parts = line.split("\t")
-        parts += [""] * (10 - len(parts))
-        return {
-            "accession": parts[0].strip(),
-            "species": parts[1].strip(),
-            "category": parts[2].strip() if len(parts) > 2 else None,
-            "assembly_status": parts[3].strip() if len(parts) > 3 else None,
-            "scaffold_count": parse_int(parts[4]) if len(parts) > 4 else None,
-            "contig_count": parse_int(parts[5]) if len(parts) > 5 else None,
-            "scaffold_n50": parse_float(parts[6]) if len(parts) > 6 else None,
-            "contig_n50": parse_float(parts[7]) if len(parts) > 7 else None,
-            "scaffold_n80": parse_float(parts[8]) if len(parts) > 8 else None,
-            "contig_n80": parse_float(parts[9]) if len(parts) > 9 else None,
-        }
+        return parse_quality_line(line)
     except Exception:
         return {}
 

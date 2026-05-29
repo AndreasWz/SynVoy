@@ -10,6 +10,9 @@ process SPLIT_LOCI {
     
     script:
     """
-    split_loci.py --bed $bed --output_prefix locus
+    split_loci.py --bed $bed --output_prefix locus \\
+        --max_loci ${params.max_loci} \\
+        --min_bit_ratio ${params.locus_min_bit_ratio} \\
+        --family_warning_threshold ${params.family_warning_threshold}
     """
 }
