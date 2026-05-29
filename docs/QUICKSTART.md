@@ -19,16 +19,17 @@ Before starting:
 
 1. **A working SynVoy installation.** See the
    [README](../README.md) for conda setup, and come back here.
-2. **Java 17+** and **Nextflow 25.10+** on PATH:
-   ```
-   java -version   # expect 17 or higher
-   nextflow -v     # expect 25.10 or higher; 26.04 is supported
-   ```
-3. **The SynVoy conda environment activated:**
+2. **The SynVoy conda environment activated:**
    ```
    conda activate synvoy_env
    ```
-4. **(Optional but recommended) an NCBI API key** to raise the download
+   The env provides Nextflow (≥25.10; 26.04 supported) and OpenJDK 17 — you
+   should not need to install either separately. Sanity check after activation:
+   ```
+   nextflow -version   # provided by the env
+   java -version       # provided by the env
+   ```
+3. **(Optional but recommended) an NCBI API key** to raise the download
    rate limit from 3/s to 10/s:
    ```
    export NCBI_API_KEY=your_key_here
@@ -169,6 +170,10 @@ documented in [USAGE.md § 8](USAGE.md#8-troubleshooting), especially:
   [USAGE.md § Easy Mode fails to download genomes](USAGE.md#easy-mode-fails-to-download-genomes).
 - Pipeline finishes with `0 annotations` →
   [USAGE.md § Pipeline finishes with ...](USAGE.md#pipeline-finishes-with-synvoy_reportjson-showing-0-annotations--0-regions).
+- **OOM / `cannot fit database into ... not enough memory to keep dbreader/write in memory`**
+  → you're running large (vertebrate-scale) targets on a small machine. Add
+  `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem`
+  (8 GB RAM). See [USAGE.md § Memory tiers](USAGE.md#memory-tiers-combine-with-an-execution-backend).
 - `parasail` import error → re-create the `synvoy_env` environment;
   Python must be `<3.13` because `ete3` is not Python 3.13-ready yet.
 - `-resume` reruns everything → check that paths and params didn't change.

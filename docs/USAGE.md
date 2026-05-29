@@ -96,13 +96,20 @@ nextflow run main.nf \
 
 ## 2. Execution Profiles
 
-Append a profile with `-profile <name>` to control how resources are allocated. Combine with a comma for multi-profile runs (e.g. `-profile docker,laptop_safe` is **not** supported — pick one).
+Append a profile with `-profile <name>` to control how resources are allocated. **Profiles are combinable** as long as you don't pick two from the same axis — pick **one execution profile** (`standard` / `docker` / `singularity` / `slurm` / …), optionally **one memory tier** (`laptop_safe` / `low_mem`), and optionally **one biology preset** (`preset_single_copy` / `preset_short_peptide` / …). Example:
+
+```bash
+-profile standard,low_mem,preset_single_copy
+```
+
+Don't combine two execution backends (e.g. `docker,singularity`) or two memory tiers — later values silently override earlier ones, which is usually not what you want.
+
+### Execution backends
 
 | Profile | Executor | Environment | Description |
 |---|---|---|---|
 | `standard` | local | Conda | Default. 2 CPUs / 10 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
-| `laptop_safe` | local | Conda | Conservative. 1 CPU, single task at a time, high memory ceiling (12 GB) but strict fork limits. Prevents system freezes on machines with limited RAM. |
 | `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
 | `docker_max` | local | Docker | Auto-detects all host CPUs and RAM. Allocates nearly everything to the heaviest tasks (MMseqs2, ITERATIVE_SEARCH). Single-fork to avoid OOM. Ideal for dedicated machines. |
 | `singularity` | local | Singularity | Like `docker` but uses Singularity with auto-mounts. |
@@ -110,6 +117,27 @@ Append a profile with `-profile <name>` to control how resources are allocated. 
 | `hpc_singularity` | SLURM | Singularity | SLURM + Singularity containers. Caches images in `~/.singularity/cache`. |
 | `hpc_conda` | SLURM | Conda+Mamba | SLURM + Conda (uses Mamba for faster env creation). |
 | `test` | local | Conda | Loads `conf/test.config` with small test data and relaxed thresholds for CI. |
+
+### Memory tiers (combine with an execution backend)
+
+The defaults assume a workstation with at least ~12 GB free RAM. On laptops, lower the per-process ceilings — the single most important knob is `mmseqs_split_memory_limit`, which bounds the per-split target-DB size that MMseqs2 keeps resident during search. Pick the tier that matches your free RAM, not your total RAM (subtract whatever the OS + browser are using).
+
+| Profile | Target machine | `iterative_search_memory` | `mmseqs_split_memory_limit` | `mmseqs_sensitivity` |
+|---|---|---|---|---|
+| (none — uses defaults) | ≥16 GB free RAM | 10 GB | 8G | 9.5 |
+| `laptop_safe` | ~16 GB RAM laptop | 8 GB | 4G | 8.0 |
+| `low_mem` | ~8 GB RAM laptop | 4 GB | 2G | 7.0 |
+
+Trade-off: tighter tiers are slower (more MMseqs splits, less parallelism) and slightly less sensitive on highly divergent queries. They're the right pick when you're seeing `cannot fit database into ... / not enough memory to keep dbreader/write in memory` errors from MMseqs2 — that means your `mmseqs_split_memory_limit` is too high for the genome you're searching.
+
+### Biology presets (combine with an execution backend + memory tier)
+
+| Profile | Use for |
+|---|---|
+| `preset_single_copy` | Housekeeping / single-copy conserved orthologs (e.g. SLRP genes DCN/FMOD/ASPN across vertebrates, ACTB, ribosomal proteins). |
+| `preset_short_peptide` | Short, divergent peptides (e.g. mature melittin, defensins, signal-peptide-only queries). |
+| `preset_tandem_family` | Tandem-duplicated families with many close paralogs (e.g. luciferases, opsins, cytochrome P450 clusters). |
+| `preset_paralog_discrimination` | When the goal is to tell paralogs apart, not just find any family member (e.g. distinguishing TP53 from TP63/TP73). |
 
 ---
 
@@ -421,13 +449,13 @@ nextflow clean -f
 
 ### Pipeline crashes with SIGKILL (exit code 137) during LOCATE_GENE or ITERATIVE_SEARCH
 
-**Cause:** Out of memory. MMseqs2 database indexing and tblastn can be RAM-intensive.
+**Cause:** Out of memory. MMseqs2's translated target database and tBLASTN's index can be RAM-intensive — especially on vertebrate-scale genomes (1-3 GB FASTA → 3-9 GB 6-frame translated DB).
 
 **Fix:**
-- Reduce MMseqs2 memory with `--mmseqs_split_memory_limit '1G'`
-- Use `-profile laptop_safe` to constrain parallelism
-- Increase available memory or switch to an HPC profile
-- Check that `/tmp` has sufficient free space (MMseqs2 uses it for temporary files)
+- Use the right memory tier — `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem` (8 GB RAM). See [§2 — Memory tiers](#memory-tiers-combine-with-an-execution-backend).
+- If the error message is `cannot fit database into ... / not enough memory to keep dbreader/write in memory`, drop `--mmseqs_split_memory_limit` further (try `1G`).
+- Increase available memory or switch to an HPC profile.
+- Check that `/tmp` has sufficient free space (MMseqs2 uses it for temporary files).
 
 ### ITERATIVE_SEARCH runs for a very long time (>40 min per genome)
 
