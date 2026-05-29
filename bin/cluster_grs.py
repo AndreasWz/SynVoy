@@ -8,6 +8,9 @@ import re
 import random
 from collections import defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sequence_utils import parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
+
 # No BioPython needed - we parse FASTA manually for genome length
 
 def parse_args():
@@ -80,6 +83,15 @@ def parse_args():
         default=3,
         help="Adaptive mode: a cluster with >= this many unique flanking hits is kept "
              "even if it falls below the score floor",
+    )
+    parser.add_argument(
+        "--strong_synteny_min_flanking",
+        type=int,
+        default=5,
+        help="A cluster sitting on >= this many HIGH-confidence flanking genes (from "
+             "--target_gff) but with no GOI model is surfaced as a "
+             "'goi_missing_but_strong_synteny' region at MEDIUM confidence rather than "
+             "being dropped (docs/TODO.md §1e). Set 0 to disable.",
     )
     parser.add_argument(
         "--species_map",
@@ -199,16 +211,6 @@ def load_synteny_map(bed_file):
     except Exception as e:
         print(f"Error loading synteny map: {e}", file=sys.stderr)
     return gene_map
-
-
-def parse_gff_attrs(attr_field):
-    attrs = {}
-    for kv in (attr_field or "").split(";"):
-        if "=" not in kv:
-            continue
-        key, value = kv.split("=", 1)
-        attrs[key] = value
-    return attrs
 
 
 _CONF_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -463,6 +465,65 @@ def build_goi_anchor_clusters(goi_intervals, existing_clusters):
         )
     return anchors
 
+def load_flanking_intervals_from_gff(gff_file, confidences=("HIGH",)):
+    """Parse modeled flanking-gene intervals (SynVoyRole=flanking) at the given
+    confidence level(s) from the iterative target GFF.
+
+    Used to recognise blocks with strong conserved synteny but no GOI model
+    (docs/TODO.md §1e): a cluster sitting on >=N HIGH-confidence flanking genes
+    is the orthologous neighbourhood even when the GOI itself is too divergent
+    for miniprot to model. De-duplicated by gene Name so a multi-exon model and
+    its coarse hit-span don't double-count one flanking gene.
+    """
+    if not gff_file or not os.path.exists(gff_file):
+        return []
+    wanted = {c.strip().upper() for c in confidences}
+    accepted_types = {"mRNA", "gene", "transcript", "mrna"}
+    seen = {}
+    try:
+        with open(gff_file) as fh:
+            for line in fh:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 9 or parts[2] not in accepted_types:
+                    continue
+                attrs = parse_gff_attrs(parts[8])
+                role = (attrs.get("SynVoyRole") or "").strip().lower()
+                if role != "flanking":
+                    continue
+                if (attrs.get("Confidence") or "").strip().upper() not in wanted:
+                    continue
+                try:
+                    s, e = int(parts[3]), int(parts[4])
+                except ValueError:
+                    continue
+                if e < s:
+                    s, e = e, s
+                gene = attrs.get("Name") or attrs.get("SynVoy_Parent") or attrs.get("ID") or f"{parts[0]}:{s}"
+                key = (parts[0], gene)
+                if key in seen:
+                    seen[key]["start"] = min(seen[key]["start"], s)
+                    seen[key]["end"] = max(seen[key]["end"], e)
+                else:
+                    seen[key] = {"chrom": parts[0], "start": s, "end": e, "gene": gene}
+    except Exception as exc:
+        print(f"WARNING: Could not parse flanking intervals from target GFF: {exc}", file=sys.stderr)
+        return []
+    return list(seen.values())
+
+
+def count_high_flanking(chrom, start, end, flanking_intervals):
+    """Number of distinct HIGH-confidence flanking genes overlapping a span."""
+    genes = set()
+    for iv in flanking_intervals:
+        if iv["chrom"] != chrom:
+            continue
+        if not (end < iv["start"] or start > iv["end"]):
+            genes.add(iv["gene"])
+    return len(genes)
+
+
 def get_genome_length(genome_file):
     """Get total length of genome (sum of sequence lengths)."""
     total_len = 0
@@ -708,6 +769,17 @@ def main():
             file=sys.stderr,
         )
 
+    # HIGH-confidence flanking genes (from the iterative target GFF) let us recognise
+    # the orthologous neighbourhood even when the GOI itself is too divergent to model
+    # (docs/TODO.md §1e). Empty when no target GFF is supplied → feature is a no-op.
+    high_flanking_intervals = load_flanking_intervals_from_gff(args.target_gff, confidences=("HIGH",))
+    if high_flanking_intervals:
+        print(
+            f"INFO: Loaded {len(high_flanking_intervals)} HIGH-confidence flanking gene "
+            f"interval(s) for strong-synteny detection.",
+            file=sys.stderr,
+        )
+
     # Cluster
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_distance)
     
@@ -756,6 +828,14 @@ def main():
             n=200, seed=42
         )
         
+        high_flanking_count = count_high_flanking(
+            cluster_chrom, cluster_start, cluster_end, high_flanking_intervals
+        )
+        strong_synteny = (
+            args.strong_synteny_min_flanking > 0
+            and high_flanking_count >= args.strong_synteny_min_flanking
+        )
+
         scored_clusters.append({
             'cluster': cl,
             'unique': unique_genes,
@@ -769,6 +849,8 @@ def main():
             'end': cluster_end,
             'chrom': cluster_chrom,
             'goi_overlap': goi_overlap,
+            'high_flanking_count': high_flanking_count,
+            'strong_synteny': strong_synteny,
         })
 
     # Sort: Score desc, P-value asc
@@ -821,15 +903,43 @@ def main():
                         break  # clusters are sorted by score desc
                 num_to_output = max(1, min(num_to_output, args.adaptive_max_regions))
 
+            # §1e: never drop a strong-synteny neighbourhood (>=N HIGH flanking genes, no
+            # GOI model) just because weak GOI-fallback regions — which get a score bonus —
+            # filled the adaptive cap. Guarantee the top such block(s) a slot beyond the
+            # cap so "candidate ortholog locus, no GOI model" is surfaced, not silently lost.
+            selected_indices = list(range(num_to_output))
+            if args.strong_synteny_min_flanking > 0:
+                STRONG_SYNTENY_KEEP = 2
+                already = set(selected_indices)
+                rescued = 0
+                for idx, cl in enumerate(ordered_clusters):
+                    if rescued >= STRONG_SYNTENY_KEEP:
+                        break
+                    if idx in already:
+                        continue
+                    if (cl.get("strong_synteny")
+                            and not cl.get("goi_overlap")
+                            and not cl.get("is_goi_anchor")):
+                        selected_indices.append(idx)
+                        rescued += 1
+                if rescued:
+                    selected_indices.sort()
+                    print(
+                        f"INFO: Surfaced {rescued} strong-synteny region(s) with no GOI model "
+                        f"(>= {args.strong_synteny_min_flanking} HIGH flanking genes) beyond the "
+                        f"adaptive cap (docs/TODO.md §1e).",
+                        file=sys.stderr,
+                    )
+
             print(
-                f"INFO: Emitting {num_to_output}/{len(ordered_clusters)} regions "
+                f"INFO: Emitting {len(selected_indices)}/{len(ordered_clusters)} regions "
                 f"(adaptive selection, best_score={ordered_clusters[0]['score']:.2f}).",
                 file=sys.stderr,
             )
-            
-            for i in range(num_to_output):
-                best = ordered_clusters[i]
-                
+
+            for i, cluster_idx in enumerate(selected_indices):
+                best = ordered_clusters[cluster_idx]
+
                 # Determine Confidence
                 if best['score'] >= args.min_score:
                     confidence = "HIGH"
@@ -837,19 +947,44 @@ def main():
                     confidence = "MEDIUM"
                 else:
                     confidence = "LOW"
-                
+
+                # §1e: a block with strong conserved synteny (>=N HIGH flanking genes)
+                # but no GOI model/overlap is the orthologous neighbourhood with a GOI
+                # too divergent to call. Surface it explicitly at >= MEDIUM rather than
+                # letting it read as a LOW score-floor pick (or get dropped entirely).
+                goi_missing_strong = bool(
+                    best.get("strong_synteny")
+                    and not best.get("goi_overlap")
+                    and not best.get("is_goi_anchor")
+                )
+                if goi_missing_strong and _CONF_RANK.get(confidence, 0) < _CONF_RANK["MEDIUM"]:
+                    confidence = "MEDIUM"
+
                 # Determine Region Strand
                 plus_cnt = sum(1 for h in best['cluster'] if h['strand'] == '+')
                 minus_cnt = len(best['cluster']) - plus_cnt
                 region_strand = "-" if minus_cnt > plus_cnt else "+"
-                
+
                 if best.get("is_goi_anchor"):
+                    region_class = "goi_anchor"
                     core_name = f"Reg{i+1}_GOI_anchor_C{confidence}_S{best['score']:.2f}"
+                elif goi_missing_strong:
+                    region_class = "goi_missing_but_strong_synteny"
+                    core_name = (
+                        f"Reg{i+1}_FLANKonly{best['high_flanking_count']}_"
+                        f"C{confidence}_S{best['score']:.2f}"
+                    )
+                elif best.get("goi_overlap"):
+                    region_class = "goi_overlap"
+                    core_name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
                 else:
+                    region_class = "synteny_block"
                     core_name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
                 name = f"{species_label}|{core_name}" if species_label else core_name
 
-                if args.max_regions > 0:
+                if goi_missing_strong:
+                    selected_reason = "flanking_only_no_goi_call"
+                elif args.max_regions > 0:
                     selected_reason = "user_cap"
                 elif best['score'] >= score_floor:
                     selected_reason = "score_floor"
@@ -878,6 +1013,9 @@ def main():
                     "p_value": best["p_value"],
                     "goi_overlap": bool(best.get("goi_overlap")),
                     "is_goi_anchor": bool(best.get("is_goi_anchor")),
+                    "high_flanking_count": best.get("high_flanking_count", 0),
+                    "region_class": region_class,
+                    "goi_missing": goi_missing_strong,
                     "confidence": confidence,
                     "selection_reason": selected_reason,
                 })
@@ -918,6 +1056,9 @@ def main():
             "p_value",
             "goi_overlap",
             "is_goi_anchor",
+            "high_flanking_count",
+            "region_class",
+            "goi_missing",
             "confidence",
             "selection_reason",
         ]

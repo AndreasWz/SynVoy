@@ -8,6 +8,9 @@ import re
 import sys
 from collections import Counter, defaultdict
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
+
 
 KNOWN_SUFFIXES = [
     ".homology.tsv",
@@ -30,16 +33,6 @@ def _clean_json_text(text):
     return cleaned
 
 
-def _parse_gff_attrs(attr_field):
-    attrs = {}
-    for kv in (attr_field or "").split(";"):
-        if "=" not in kv:
-            continue
-        key, value = kv.split("=", 1)
-        attrs[key] = value
-    return attrs
-
-
 def _safe_float(value, default=0.0):
     try:
         return float(value)
@@ -51,8 +44,33 @@ def _is_true(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+# Per-locus region files are staged for the report with a "<locus>__" prefix
+# (modules/stage_for_report.nf) so that same-named files from different home loci
+# (e.g. GCA_036250285.1.fna.gff produced once per locus) no longer overwrite each
+# other during the GENERATE_REPORT cp. The prefix is stripped for genome-id purposes
+# and recovered as provenance for cross-locus GOI dedup (docs/TODO.md §1h).
+_STAGING_PREFIX_RE = re.compile(r"^(locus_[A-Za-z0-9.]+|\d+)__")
+
+
+def _strip_staging_prefix(name):
+    return _STAGING_PREFIX_RE.sub("", name, count=1)
+
+
+def staging_source_label(path_or_name):
+    """Recover the per-locus staging tag (e.g. ``locus_3``) a region file came from.
+
+    Falls back to the bare filename when the file carries no staging prefix
+    (older runs / direct invocation), so provenance is always non-empty.
+    """
+    base = os.path.basename(path_or_name or "")
+    m = _STAGING_PREFIX_RE.match(base)
+    if m:
+        return m.group(1)
+    return base
+
+
 def canonical_genome_id(path_or_name):
-    name = os.path.basename(path_or_name or "")
+    name = _strip_staging_prefix(os.path.basename(path_or_name or ""))
     m = re.search(r"(GC[AF]_\d+\.\d+)", name)
     if m:
         return m.group(1)
@@ -363,6 +381,275 @@ def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
     return diagnostics
 
 
+def _format_goi_headline(high, medium, low, n_genomes):
+    """One-line, unambiguous summary of the GOI ortholog yield, for the summary block.
+
+    Replaces the old reliance on `total_hits` (raw .m8 count, often 0) as the at-a-glance
+    signal — that made successful runs look empty. See docs/TODO.md §1k.
+    """
+    if not (high or medium or low):
+        return "No GOI ortholog annotations were produced."
+    confident = []
+    if high:
+        confident.append(f"{high} high-confidence")
+    if medium:
+        confident.append(f"{medium} medium-confidence")
+    if confident:
+        lead = " + ".join(confident)
+        tail = f" (+{low} low-confidence/ambiguous)" if low else ""
+    else:
+        lead, tail = f"{low} low-confidence/ambiguous", ""
+    return f"{lead} GOI ortholog annotation(s){tail} across {n_genomes} genome(s)."
+
+
+def _confidence_rank(confidence):
+    return {"HIGH": 2, "MEDIUM": 1}.get((confidence or "").upper(), 0)
+
+
+def collect_goi_annotations(gff_files):
+    """Flatten every GOI mRNA across all per-locus region GFFs into structured
+    records (genome, target chrom/start/end, confidence, identity, provenance).
+
+    The genome is canonicalised (staging prefix stripped) so the same target genome
+    found from several home loci groups together; the staging tag is kept as the
+    per-locus source for dedup provenance (docs/TODO.md §1h).
+    """
+    annotations = []
+    for gff_path in gff_files:
+        genome = canonical_genome_id(gff_path)
+        source = staging_source_label(gff_path)
+        try:
+            with open(gff_path) as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
+                        continue
+                    attrs = _parse_gff_attrs(parts[8])
+                    model_id = attrs.get("ID", "")
+                    role = (attrs.get("SynVoyRole") or "").strip().lower()
+                    if not role:
+                        role = "goi" if model_id.startswith("GOI_") or attrs.get("SynVoy_Parent", "").startswith("GOI_") else "flanking"
+                    if role != "goi":
+                        continue
+                    try:
+                        start, end = int(parts[3]), int(parts[4])
+                    except ValueError:
+                        continue
+                    if end < start:
+                        start, end = end, start
+                    annotations.append({
+                        "genome": genome,
+                        "source": source,
+                        "chrom": parts[0],
+                        "start": start,
+                        "end": end,
+                        "confidence": (attrs.get("Confidence", "") or "UNKNOWN").upper(),
+                        "goi_class": attrs.get("GOIClass", ""),
+                        "identity": (attrs.get("Identity", "") or "").strip(),
+                        "target_gene": attrs.get("TargetGene", ""),
+                        "model_status": attrs.get("ModelStatus", ""),
+                        "mrna_id": model_id,
+                    })
+        except Exception as exc:
+            print(f"Warning: Could not parse GFF for dedup {gff_path}: {exc}")
+    return annotations
+
+
+def collect_high_flanking_per_locus(gff_files):
+    """Count distinct HIGH-confidence flanking genes per (genome, locus, chrom) from
+    the staged per-locus GFFs. Used by build_self_consistency to spot blocks with
+    strong conserved synteny but no GOI model (docs/TODO.md §1j identity-decay sanity).
+    De-duplicated by gene Name so a multi-exon annotation and its coarse hit-span
+    don't double-count one flanking gene.
+    """
+    seen = defaultdict(set)  # (genome, locus, chrom) -> set of gene names
+    for gff_path in gff_files:
+        genome = canonical_genome_id(gff_path)
+        locus = staging_source_label(gff_path)
+        try:
+            with open(gff_path) as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
+                        continue
+                    attrs = _parse_gff_attrs(parts[8])
+                    role = (attrs.get("SynVoyRole") or "").strip().lower()
+                    if role != "flanking":
+                        continue
+                    if (attrs.get("Confidence") or "").strip().upper() != "HIGH":
+                        continue
+                    gene = (attrs.get("Name") or attrs.get("SynVoy_Parent")
+                            or attrs.get("ID") or f"{parts[0]}:{parts[3]}")
+                    seen[(genome, locus, parts[0])].add(gene)
+        except Exception as exc:
+            print(f"Warning: Could not parse GFF for self-consistency {gff_path}: {exc}")
+    return {key: len(genes) for key, genes in seen.items()}
+
+
+def _reciprocal_overlap(a, b):
+    """min(overlap/len_a, overlap/len_b) — 1.0 for identical spans, 0.0 if disjoint."""
+    inter = min(a["end"], b["end"]) - max(a["start"], b["start"]) + 1
+    if inter <= 0:
+        return 0.0
+    len_a = a["end"] - a["start"] + 1
+    len_b = b["end"] - b["start"] + 1
+    return min(inter / len_a, inter / len_b)
+
+
+def dedupe_goi_annotations(annotations, min_overlap=0.8):
+    """Collapse HIGH/MEDIUM GOI hits that are the same target gene found from
+    multiple home loci (docs/TODO.md §1h).
+
+    Key: ``(genome, target_chrom)`` plus reciprocal coordinate overlap > ``min_overlap``.
+    The kept record is the highest-confidence / highest-identity member, with a
+    ``provenance`` list of the source home loci it was recovered from. When the
+    identity is bit-for-bit identical across >=2 loci (a near-certain "one gene,
+    many seeds" signal) the record is reclassified ``goi_class=cross_locus_duplicate``.
+
+    LOW-confidence hits are left untouched (they are noisy fallback spans, not
+    ortholog calls), matching the headline metric which only counts HIGH/MEDIUM.
+    """
+    considered = [a for a in annotations if a["confidence"] in {"HIGH", "MEDIUM"}]
+    groups = defaultdict(list)
+    for a in considered:
+        groups[(a["genome"], a["chrom"])].append(a)
+
+    records = []
+    for (genome, chrom), items in groups.items():
+        items.sort(key=lambda r: (r["start"], r["end"]))
+        clusters = []  # each: {"members": [...], "rep": <best member>}
+        for a in items:
+            placed = False
+            for cl in clusters:
+                if _reciprocal_overlap(a, cl["rep"]) > min_overlap:
+                    cl["members"].append(a)
+                    better = (_confidence_rank(a["confidence"]), _safe_float(a["identity"]))
+                    current = (_confidence_rank(cl["rep"]["confidence"]), _safe_float(cl["rep"]["identity"]))
+                    if better > current:
+                        cl["rep"] = a
+                    placed = True
+                    break
+            if not placed:
+                clusters.append({"members": [a], "rep": a})
+
+        for cl in clusters:
+            members, rep = cl["members"], cl["rep"]
+            sources = sorted({m["source"] for m in members})
+            identity_strs = {m["identity"] for m in members}
+            is_cross_dup = (
+                len(sources) >= 2
+                and len(identity_strs) == 1
+                and "" not in identity_strs
+            )
+            records.append({
+                "genome": genome,
+                "chrom": chrom,
+                "start": rep["start"],
+                "end": rep["end"],
+                "confidence": rep["confidence"],
+                "identity": rep["identity"],
+                "goi_class": "cross_locus_duplicate" if is_cross_dup else rep["goi_class"],
+                "original_goi_class": rep["goi_class"],
+                "target_gene": rep["target_gene"],
+                "model_status": rep["model_status"],
+                "provenance": sources,
+                "n_source_loci": len(sources),
+                "n_merged_hits": len(members),
+                "cross_locus_duplicate": is_cross_dup,
+            })
+
+    records.sort(key=lambda r: (-_confidence_rank(r["confidence"]), -_safe_float(r["identity"]), r["genome"], r["chrom"]))
+    return {
+        "records": records,
+        "high_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "HIGH"),
+        "medium_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "MEDIUM"),
+        "cross_locus_duplicates": sum(1 for r in records if r["cross_locus_duplicate"]),
+        "hits_collapsed_by_dedup": len(considered) - len(records),
+        "pre_dedup_high_medium": len(considered),
+        "post_dedup_records": len(records),
+    }
+
+
+def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
+                           *, strong_flanking_min=20):
+    """End-of-run sanity checks (docs/TODO.md §1j).
+
+    Currently emits two flag types:
+
+    * ``strong_synteny_no_goi`` — a (genome, locus, chrom) cell with >=
+      ``strong_flanking_min`` HIGH-confidence flanking genes but zero HIGH-confidence
+      GOI calls. That's the orthologous neighbourhood with a GOI too divergent for the
+      current miniprot/classify thresholds; the advice asks the user to lower
+      ``--miniprot_min_identity`` or inspect the block. (The cluster_grs side of this,
+      §1e, surfaces the *block*; this flags the *genome+locus* as worth user attention.)
+
+    * ``cross_locus_duplicate`` — same target gene found from >=2 home loci with
+      bit-for-bit identical identity (already collapsed by §1h's
+      ``dedupe_goi_annotations``; surfaced here so it is visible in the report
+      alongside other self-consistency outputs).
+
+    Reciprocal-best protein check across home paralogs (TODO §1j first bullet) is
+    deferred — it needs an aligner and the per-locus home queries staged at report
+    time, but for paralogs on different chromosomes (TP53/63/73, the motivating case)
+    synteny anchoring already provides the locus assignment. Same-coord cross-locus
+    cases are caught by §1h's coord-overlap dedup.
+    """
+    # Count HIGH-conf GOI per (genome, locus, chrom) for the identity-decay check.
+    high_goi_count = defaultdict(int)
+    for a in goi_annotations:
+        if a["confidence"] == "HIGH":
+            high_goi_count[(a["genome"], a["source"], a["chrom"])] += 1
+
+    flags = []
+    for (genome, locus, chrom), flank_n in flanking_per_locus.items():
+        if flank_n >= strong_flanking_min and high_goi_count.get((genome, locus, chrom), 0) == 0:
+            flags.append({
+                "type": "strong_synteny_no_goi",
+                "genome": genome,
+                "locus": locus,
+                "chrom": chrom,
+                "high_flanking_count": flank_n,
+                "high_goi_count": 0,
+                "advice": (
+                    "Strong synteny but no HIGH-confidence GOI call — try a lower "
+                    "--classify_high_min_identity / --classify_medium_min_identity, or "
+                    "inspect this block manually (the orthologous neighbourhood likely "
+                    "exists but the GOI is too divergent for current thresholds)."
+                ),
+            })
+
+    for rec in goi_dedup.get("records", []):
+        if rec.get("cross_locus_duplicate"):
+            flags.append({
+                "type": "cross_locus_duplicate",
+                "genome": rec["genome"],
+                "chrom": rec["chrom"],
+                "start": rec["start"],
+                "end": rec["end"],
+                "loci": rec["provenance"],
+                "identity": rec["identity"],
+                "note": "same gene identically modeled from multiple home loci; collapsed into one record (§1h)",
+            })
+
+    return {
+        "checks_performed": ["strong_synteny_no_goi", "cross_locus_duplicate"],
+        "deferred_checks": ["reciprocal_best_paralog"],
+        "thresholds": {"strong_flanking_min": strong_flanking_min},
+        "flags": flags,
+        "summary": {
+            "n_strong_synteny_no_goi": sum(1 for f in flags if f["type"] == "strong_synteny_no_goi"),
+            "n_cross_locus_duplicates": sum(1 for f in flags if f["type"] == "cross_locus_duplicate"),
+            "total_flags": len(flags),
+        },
+    }
+
+
 def build_report(results_dir, qc_json=None, qc_policy=None):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
@@ -407,6 +694,33 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
         if genome in downstream_genomes:
             failed_downstream.append(genome)
 
+    # GOI ortholog headline metrics — what a user actually wants to read. The historical
+    # total_hits/genomes_with_hits counted raw .m8 search hits staged under hits/, which is
+    # frequently 0 even on successful runs (annotations come from the region GFFs, not the
+    # m8 staging) and was being misread as "the run found nothing". See docs/TODO.md §1k.
+    goi_conf = annotation_summary.get("goi_confidence_counts", {})
+    goi_high = goi_conf.get("HIGH", 0)
+    goi_medium = goi_conf.get("MEDIUM", 0)
+    goi_low = goi_conf.get("LOW", 0)
+    confident_goi = annotation_summary.get("goi_class_counts", {}).get("confident_goi", 0)
+    resolved_goi = sum(row.get("resolved_goi_annotations", 0) for row in annotation_summary["per_genome"])
+    genomes_with_goi = sum(1 for row in annotation_summary["per_genome"] if row.get("goi_annotations", 0) > 0)
+
+    # Cross-locus dedup: the same target ortholog is reported once per home locus it was
+    # found from (e.g. the luciferase rerun's Aquatica gene appears identically via locus_3
+    # and locus_4). Collapse those so the headline counts distinct genes, not seeds, and
+    # flag bit-for-bit-identical multi-locus hits as cross_locus_duplicate. docs/TODO.md §1h.
+    goi_annotations = collect_goi_annotations(gff_files)
+    goi_dedup = dedupe_goi_annotations(goi_annotations)
+    dedup_high = goi_dedup["high_confidence_goi_deduped"]
+    dedup_medium = goi_dedup["medium_confidence_goi_deduped"]
+
+    # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
+    # cross-locus duplicate visibility. The flanking-only-block surfacing is the §1e
+    # piece that already lives in cluster_grs.py.
+    flanking_per_locus = collect_high_flanking_per_locus(gff_files)
+    self_consistency = build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus)
+
     report = {
         "genome_qc": qc_records,
         "qc_summary": {
@@ -420,11 +734,28 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
         },
         "annotations": annotation_summary,
         "regions": region_summary,
+        "goi_dedup": goi_dedup,
+        "self_consistency": self_consistency,
         "staging_diagnostics": staging_diagnostics,
         "summary": {
+            # --- Headline: the number(s) a user actually cares about ---
+            # Post-dedup (docs/TODO.md §1h): distinct HIGH/MEDIUM ortholog genes, not the
+            # per-home-locus seed count, so the same gene found from N loci reads as one.
+            "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low, genomes_with_goi),
+            "headline_metric": dedup_high,  # distinct high-confidence GOI orthologs (post-dedup)
+            "high_confidence_goi": dedup_high,
+            "medium_confidence_goi": dedup_medium,
+            "high_confidence_goi_pre_dedup": goi_high,
+            "medium_confidence_goi_pre_dedup": goi_medium,
+            "cross_locus_duplicate_goi": goi_dedup["cross_locus_duplicates"],
+            "goi_hits_collapsed_by_dedup": goi_dedup["hits_collapsed_by_dedup"],
+            "self_consistency_flag_count": self_consistency["summary"]["total_flags"],
+            "strong_synteny_no_goi_flags": self_consistency["summary"]["n_strong_synteny_no_goi"],
+            "low_confidence_goi": goi_low,
+            "confident_goi_annotations": confident_goi,
+            "resolved_goi_annotations": resolved_goi,
+            "genomes_with_goi_annotations": genomes_with_goi,
             "total_new_genes": sum(genes_added_per_genome.values()),
-            "genomes_with_hits": len(hits_per_genome),
-            "total_hits": sum(hits_per_genome.values()),
             "genomes_with_annotations": len(annotation_summary["per_genome"]),
             "total_annotations": annotation_summary["total_annotations"],
             "total_goi_annotations": annotation_summary["role_counts"].get("goi", 0),
@@ -435,6 +766,12 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
             "staging_empty": staging_diagnostics["empty"],
+            # --- Low-level diagnostic (NOT the result count) ---
+            # Raw MMseqs/BLAST .m8 hits staged under hits/; often 0 even when annotations
+            # were produced. Renamed from total_hits/genomes_with_hits so it stops reading
+            # as "the run found nothing" (docs/TODO.md §1k).
+            "total_raw_search_hits": sum(hits_per_genome.values()),
+            "genomes_with_raw_search_hits": len(hits_per_genome),
         },
     }
     return report
@@ -478,6 +815,9 @@ def main():
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)
     print(f"Report generated: {args.output}")
+    # Surface the GOI headline so the run's terminal/log shows the real result rather
+    # than only the (often-zero) raw-hit diagnostic. See docs/TODO.md §1k.
+    print(f"  {report['summary']['headline']}")
 
     if report["staging_diagnostics"]["empty"]:
         msg = format_empty_staging_message(report["staging_diagnostics"])
