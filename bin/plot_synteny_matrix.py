@@ -57,42 +57,8 @@ from synvoy_tree import (  # noqa: E402
     CLADE_PALETTE,
     species_from_leaf,
 )
-
-# ─────────────────────────────── parsers ────────────────────────────────────
-
-def parse_bed(path):
-    """BED → list of {chrom,start,end,name,strand}."""
-    rows = []
-    if not path or not os.path.exists(path):
-        return rows
-    with open(path) as fh:
-        for line in fh:
-            if not line.strip() or line.startswith("#"):
-                continue
-            p = line.rstrip("\n").split("\t")
-            if len(p) < 3:
-                continue
-            try:
-                start = int(p[1])
-                end = int(p[2])
-            except ValueError:
-                continue
-            name = p[3] if len(p) > 3 else f"{p[0]}:{start}-{end}"
-            strand = p[5] if len(p) > 5 and p[5] in {"+", "-"} else "+"
-            rows.append({"chrom": p[0], "start": start, "end": end,
-                         "name": name, "strand": strand})
-    return rows
-
-
-def parse_gff_attrs(field):
-    out = {}
-    for kv in field.split(";"):
-        kv = kv.strip()
-        if not kv or "=" not in kv:
-            continue
-        k, v = kv.split("=", 1)
-        out[k.strip()] = v.strip()
-    return out
+# Shared BED/GFF parsers (replaces local copies — see sequence_utils.py).
+from sequence_utils import parse_bed, parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
 
 
 def parse_home_gff_genes(path):

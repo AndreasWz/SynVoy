@@ -33,10 +33,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 try:
-    from sequence_utils import parse_fasta, write_fasta
+    from sequence_utils import parse_fasta, write_fasta, setup_logging
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, write_fasta
+    from sequence_utils import parse_fasta, write_fasta, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -664,7 +664,7 @@ def main():
                         help="Max sequence length for ESMFold (VRAM safety)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    setup_logging()
 
     if not check_esmfold_available():
         logger.error(
