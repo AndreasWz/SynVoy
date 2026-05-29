@@ -71,17 +71,25 @@ if [[ "${SKIP_TOGA1}" != "1" ]]; then
     fi
 
     echo
-    echo "=== [TOGA1] installing uv into ${ENV_TOGA1} ==="
-    mamba run -n "${ENV_TOGA1}" pip install --quiet uv 2>&1 | tail -3 || true
-
-    echo
     echo "=== [shared] cloning make_lastz_chains ==="
     if [[ ! -d "${TOOLS_DIR}/make_lastz_chains" ]]; then
         git clone --depth 1 https://github.com/hillerlab/make_lastz_chains.git "${TOOLS_DIR}/make_lastz_chains"
     fi
 
+    # Install make_lastz_chains and its Python deps DIRECTLY into the conda env
+    # (not into a separate uv venv). LASTZ workers are spawned by Nextflow via
+    # `mamba run -n synvoy_toga python3 run_lastz.py …` and thus need py2bit /
+    # twobitreader on the conda env's sys.path. Installing into a side venv at
+    # ${TOOLS_DIR}/make_lastz_chains/.venv was the silent footgun that caused
+    # every LASTZ job to fail with `ModuleNotFoundError: No module named 'py2bit'`.
+    echo "  installing make_lastz_chains + deps into ${ENV_TOGA1}"
     (cd "${TOOLS_DIR}/make_lastz_chains" && \
-        mamba run -n "${ENV_TOGA1}" bash -c "uv venv && source .venv/bin/activate && uv pip install ."  2>&1 | tail -5 || true)
+        mamba run -n "${ENV_TOGA1}" python3 -m pip install . 2>&1 | tail -5 || true)
+    # Belt-and-suspenders: explicit installs in case pyproject.toml drifts.
+    mamba run -n "${ENV_TOGA1}" python3 -m pip install py2bit twobitreader 2>&1 | tail -3 || true
+    # Verify the imports the LASTZ workers will actually attempt.
+    mamba run -n "${ENV_TOGA1}" python3 -c "import py2bit, twobitreader" \
+        || { echo "  ERROR: py2bit/twobitreader still missing after install — abort" >&2; return 1 2>/dev/null || exit 1; }
 
     echo
     echo "=== [TOGA1] cloning TOGA (Kirilenko et al., Science 2023) ==="
