@@ -72,23 +72,13 @@ def _is_mmseqs_resource_failure(details: str) -> bool:
 
 
 # Shared helpers
-def str2bool(value: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    val = value.strip().lower()
-    if val in {"true", "1", "yes", "y", "t"}:
-        return True
-    if val in {"false", "0", "no", "n", "f"}:
-        return False
-    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
-
 # Use our own sequence utilities (no BioPython dependency)
 try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        parse_gff, get_feature_id, load_genome, reverse_complement, translate
+        parse_gff, get_feature_id, load_genome, reverse_complement, translate,
+        parse_gff_attributes as _parse_gff_attributes,
+        str2bool,
     )
     from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
 except ImportError:
@@ -96,7 +86,9 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        parse_gff, get_feature_id, load_genome, reverse_complement, translate
+        parse_gff, get_feature_id, load_genome, reverse_complement, translate,
+        parse_gff_attributes as _parse_gff_attributes,
+        str2bool,
     )
     from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
 
@@ -289,10 +281,6 @@ def _check_family_consistency(target_gene: str, target_product: str) -> Tuple[bo
         if product_norm and tok in product_norm:
             return True, f"matched_product:{tok}"
     return False, "no_family_match"
-
-
-def run_command(cmd):
-    subprocess.check_call(cmd)
 
 
 @contextlib.contextmanager
@@ -617,16 +605,6 @@ def build_flanking_query_by_parent(
             }
 
     return result
-
-
-def _parse_gff_attributes(attr_field: str) -> Dict[str, str]:
-    attrs: Dict[str, str] = {}
-    for kv in (attr_field or "").split(";"):
-        if not kv or "=" not in kv:
-            continue
-        key, value = kv.split("=", 1)
-        attrs[key] = value
-    return attrs
 
 
 def _select_parent_id(attrs: Dict[str, str], model_id: str) -> str:

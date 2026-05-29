@@ -8,10 +8,16 @@ import sys
 import tempfile
 
 try:
-    from sequence_utils import load_genome, write_fasta, parse_fasta
+    from sequence_utils import (
+        load_genome, write_fasta, parse_fasta,
+        parse_bed as _parse_bed_dicts, str2bool,
+    )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import load_genome, write_fasta, parse_fasta
+    from sequence_utils import (
+        load_genome, write_fasta, parse_fasta,
+        parse_bed as _parse_bed_dicts, str2bool,
+    )
 
 try:
     from gene_predictor import predict_genes, check_predictor_available
@@ -20,39 +26,17 @@ except ImportError:
     from gene_predictor import predict_genes, check_predictor_available
 
 
-def str2bool(value: str) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    val = value.strip().lower()
-    if val in {"true", "1", "yes", "y", "t"}:
-        return True
-    if val in {"false", "0", "no", "n", "f"}:
-        return False
-    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
-
-
 def parse_bed(path):
-    regions = []
-    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        return regions
-    with open(path, "r") as f:
-        for line in f:
-            if not line.strip() or line.startswith("#"):
-                continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 3:
-                continue
-            try:
-                chrom = parts[0]
-                start = int(parts[1])
-                end = int(parts[2])
-                if end > start:
-                    regions.append((chrom, start, end))
-            except ValueError:
-                continue
-    return regions
+    """Local tuple-returning view (chrom, start, end) over the shared BED parser.
+
+    Drops zero/negative-length rows, which is the contract merge_regions and
+    prodigal expect.
+    """
+    return [
+        (r["chrom"], r["start"], r["end"])
+        for r in _parse_bed_dicts(path)
+        if r["end"] > r["start"]
+    ]
 
 
 def merge_regions(regions, genome_seqs, window):

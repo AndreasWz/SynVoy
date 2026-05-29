@@ -11,11 +11,19 @@ Handles:
 - Fallback to sequential numbering
 """
 
-import re
-import hashlib
+import argparse
 import gzip
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
-from typing import Iterator, Dict, List, Tuple, Optional, Any
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from urllib.parse import unquote
 
 
 # =============================================================================
@@ -377,10 +385,9 @@ def parse_gff_attributes(attr_string: str) -> Dict[str, str]:
             pair = pair.strip()
             if '=' in pair:
                 key, value = pair.split('=', 1)
-                # URL decode common escapes
-                value = value.replace('%3B', ';').replace('%3D', '=')
-                value = value.replace('%26', '&').replace('%2C', ',')
-                attributes[key.strip()] = value.strip()
+                # Full URL decode (covers %3B %3D %26 %2C and any other percent-escapes
+                # that GFF3 producers may emit, e.g. %20 spaces in product names).
+                attributes[key.strip()] = unquote(value.strip())
     
     # Try GTF format (key "value";)
     elif '"' in attr_string:
@@ -575,6 +582,211 @@ def merge_fastas(input_paths: List[str], output_path: str, deduplicate: bool = T
             records.append((header, seq))
     
     write_fasta(records, output_path)
+
+
+# =============================================================================
+# BED PARSING
+# =============================================================================
+
+def parse_bed(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """
+    Parse a BED file into a list of dicts.
+
+    Each row carries: chrom, start, end, name, strand, display_name.
+    Missing optional columns get sensible defaults:
+      - name: '{chrom}:{start}-{end}' if BED has fewer than 4 columns
+      - strand: '+'
+      - display_name: '' (BED col 7 used by extract_flanking_genes.py)
+
+    Returns an empty list for missing, empty, or unreadable paths so callers
+    can treat absence the same as "no rows".
+    """
+    rows: List[Dict[str, Any]] = []
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return rows
+    with open(path) as fh:
+        for line in fh:
+            line = line.rstrip('\n\r')
+            if not line.strip() or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if len(parts) < 3:
+                continue
+            try:
+                start = int(parts[1])
+                end = int(parts[2])
+            except ValueError:
+                continue
+            chrom = parts[0]
+            name = parts[3] if len(parts) > 3 and parts[3] else f"{chrom}:{start}-{end}"
+            strand = parts[5] if len(parts) > 5 and parts[5] in {'+', '-'} else '+'
+            display_name = parts[6] if len(parts) > 6 else ''
+            rows.append({
+                'chrom': chrom,
+                'start': start,
+                'end': end,
+                'name': name,
+                'strand': strand,
+                'display_name': display_name,
+            })
+    return rows
+
+
+# =============================================================================
+# FASTA HEADERS-ONLY (cheap iterator)
+# =============================================================================
+
+def iter_fasta_headers(path: Union[str, Path]) -> Iterator[str]:
+    """
+    Yield raw FASTA headers (without the leading '>') from a file.
+
+    Cheap alternative to `parse_fasta` for scripts that only need IDs and
+    never touch the sequence (e.g. counting, indexing, dedup).
+    """
+    _open = gzip.open if str(path).endswith('.gz') else open
+    with _open(path, 'rt') as fh:
+        for line in fh:
+            if line.startswith('>'):
+                yield line[1:].rstrip('\n\r')
+
+
+# =============================================================================
+# CLI / PROCESS HELPERS
+# =============================================================================
+
+def str2bool(value: Any) -> bool:
+    """
+    Argparse-friendly boolean parser.
+
+    Accepts: True/False, 'true'/'false', '1'/'0', 'yes'/'no', 'y'/'n', 't'/'f'
+    (case-insensitive). Raises argparse.ArgumentTypeError on anything else,
+    which gives a clean argparse error message.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    val = str(value).strip().lower()
+    if val in {'true', '1', 'yes', 'y', 't'}:
+        return True
+    if val in {'false', '0', 'no', 'n', 'f'}:
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
+
+
+def run_command(
+    cmd: Sequence[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+    text: bool = True,
+    timeout: Optional[float] = None,
+    cwd: Optional[Union[str, Path]] = None,
+    env: Optional[Dict[str, str]] = None,
+    input: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    """
+    Thin, consistent subprocess.run wrapper used across SynVoy scripts.
+
+    Defaults match the common case: check=True, no capture (output streams to
+    the task log), text mode. Pass capture=True when you need stdout/stderr
+    on the returned CompletedProcess.
+
+    Raises subprocess.CalledProcessError if check=True and the command fails;
+    subprocess.TimeoutExpired if timeout elapses.
+    """
+    return subprocess.run(
+        list(cmd),
+        check=check,
+        capture_output=capture,
+        text=text,
+        timeout=timeout,
+        cwd=cwd,
+        env=env,
+        input=input,
+    )
+
+
+def require_binary(name: str, install_hint: Optional[str] = None) -> str:
+    """
+    Resolve an external tool on PATH or exit with a clear, consistent error.
+
+    Returns the absolute path to the binary on success. On miss, prints a
+    one-line error (plus install_hint if given) to stderr and raises
+    FileNotFoundError so the calling script's main() can decide whether to
+    sys.exit(1) or recover.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    msg = f"required binary not found on PATH: {name!r}"
+    if install_hint:
+        msg += f" — {install_hint}"
+    print(f"ERROR: {msg}", file=sys.stderr)
+    raise FileNotFoundError(msg)
+
+
+def setup_logging(
+    level: Union[int, str] = logging.INFO,
+    *,
+    name: Optional[str] = None,
+    with_date: bool = True,
+) -> logging.Logger:
+    """
+    One-call logging setup used across SynVoy bin/ scripts.
+
+    Idempotent: if the root logger already has handlers (e.g. set up by a
+    library or a parent script) we leave them alone and just adjust the
+    requested logger's level. This avoids the duplicate-line spam that
+    happens when basicConfig is called twice.
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        fmt = '%(asctime)s [%(levelname)s] %(message)s'
+        kwargs: Dict[str, Any] = {'level': level, 'format': fmt}
+        if with_date:
+            kwargs['datefmt'] = '%Y-%m-%d %H:%M:%S'
+        logging.basicConfig(**kwargs)
+    logger = logging.getLogger(name) if name else root
+    logger.setLevel(level)
+    return logger
+
+
+# =============================================================================
+# JSON IO
+# =============================================================================
+
+def read_json(path: Union[str, Path]) -> Any:
+    """Read a JSON file. Raises on missing or malformed input."""
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def write_json(
+    path: Union[str, Path],
+    obj: Any,
+    *,
+    indent: int = 2,
+    atomic: bool = True,
+) -> None:
+    """
+    Write `obj` as JSON to `path`.
+
+    With atomic=True (default), the JSON is written to a sibling temp file
+    and then os.replace'd into place — readers never see a half-written
+    file if the writer is interrupted. Set atomic=False only when the
+    destination is on a different filesystem than its parent dir.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if atomic:
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        with open(tmp, 'w') as fh:
+            json.dump(obj, fh, indent=indent)
+        os.replace(tmp, path)
+    else:
+        with open(path, 'w') as fh:
+            json.dump(obj, fh, indent=indent)
 
 
 # =============================================================================

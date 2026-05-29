@@ -38,6 +38,10 @@ from collections import defaultdict
 from html import escape as _html_escape
 from urllib.parse import unquote
 
+# Shared helpers (single source of truth for BED/GFF parsing).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sequence_utils import parse_bed, parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
+
 try:
     from ete3 import Tree
     ETE3_AVAILABLE = True
@@ -178,31 +182,6 @@ TRACK_BG_CLR  = "#f3f5f8"   # very light blue-gray track background
 # ======================================================================
 # Parsing helpers
 # ======================================================================
-
-def parse_bed(bed_file):
-    """Parse a BED file -> list of dicts with chrom/start/end/name/strand."""
-    genes = []
-    if not bed_file or not os.path.exists(bed_file):
-        return genes
-    with open(bed_file) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            p = line.split("\t")
-            if len(p) < 4:
-                continue
-            genes.append({
-                "chrom":  p[0],
-                "start":  int(p[1]),
-                "end":    int(p[2]),
-                "name":   p[3],
-                "strand": p[5] if len(p) > 5 else "+",
-                # Optional display label (BED col7 from extract_flanking_genes.py)
-                "display_name": p[6] if len(p) > 6 else "",
-            })
-    return genes
-
 
 def parse_candidate_regions(candidate_beds):
     """
@@ -361,16 +340,6 @@ def _select_goi_context_genes(genes, flank_bp=200000):
         if g["chrom"] == goi_chrom and g["end"] >= win_s and g["start"] <= win_e
     ]
     return selected
-
-
-def _parse_gff_attrs(attr_field):
-    attrs = {}
-    for kv in (attr_field or "").split(";"):
-        if "=" not in kv:
-            continue
-        k, v = kv.split("=", 1)
-        attrs[k] = unquote(v)
-    return attrs
 
 
 def _is_generic_gene_label(name):
@@ -2440,6 +2409,11 @@ body {
 .toolbar button:hover {
   background: var(--track-bg); color: var(--text-primary);
 }
+.toolbar button.active {
+  background: var(--track-bg); color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--track-border);
+}
+.ribbons.ribbons-hidden { display: none; }
 .plot-wrapper {
   width: 100%; overflow: auto; padding: 16px;
 }
@@ -2762,6 +2736,18 @@ document.addEventListener('DOMContentLoaded', () => {
   if (zoomIn) zoomIn.addEventListener('click', () => { zoom = Math.min(5, zoom * 1.25); applyZoom(); });
   if (zoomOut) zoomOut.addEventListener('click', () => { zoom = Math.max(0.2, zoom / 1.25); applyZoom(); });
   if (zoomReset) zoomReset.addEventListener('click', () => { zoom = 1; applyZoom(); });
+
+  // ---- Ribbon visibility toggle ----
+  const toggleRibbonsBtn = document.getElementById('toggle-ribbons');
+  if (toggleRibbonsBtn && ribbonsGroup) {
+    toggleRibbonsBtn.addEventListener('click', () => {
+      const hidden = ribbonsGroup.classList.toggle('ribbons-hidden');
+      toggleRibbonsBtn.classList.toggle('active', hidden);
+      toggleRibbonsBtn.setAttribute('title', hidden
+        ? 'Show synteny ribbons (connections between tracks)'
+        : 'Hide synteny ribbons (connections between tracks)');
+    });
+  }
 
     // ---- Track manager / collapse controls ----
     function uniqueTrackIndices() {
@@ -3117,6 +3103,7 @@ def _assemble_full_html(svg_content, width, height):
   <button id="zoom-out" title="Zoom out">−</button>
   <button id="zoom-reset" title="Reset zoom">⟲</button>
   <button id="clear-pins" title="Clear pinned labels (right-click a gene to pin its name)">⌫</button>
+  <button id="toggle-ribbons" title="Hide/show synteny ribbons (connections between tracks)">≋</button>
   <button id="track-manager-btn" title="Manage tracks">📋</button>
 </div>
 <div id="track-manager" class="track-manager"></div>
