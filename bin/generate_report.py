@@ -153,8 +153,19 @@ def summarize_hits(hit_files):
     return hits_per_genome
 
 
-def summarize_annotations(gff_files):
-    per_genome = {}
+def _process_gffs_unified(gff_files):
+    """Single read-pass over every per-locus region GFF that simultaneously produces
+    the three outputs build_report needs: the annotation summary, the per-row GOI
+    record list (used for dedup), and the (genome, locus, chrom)→HIGH-flanking-set map.
+
+    Previously these three were computed in three separate functions, each iterating
+    the entire ``gff_files`` list and re-opening every file (docs/TODO.md §1c). For the
+    SP-family runs (~50K GFFs) that meant 3× the disk I/O and explained the timeouts
+    Ivan's pipeline was hitting. The three public wrappers below remain for tests and
+    external callers (each just discards the two outputs it doesn't need).
+    """
+    # ── summarize_annotations accumulators ────────────────────────────────
+    per_genome_ann = {}
     role_counts = Counter()
     goi_confidence_counts = Counter()
     goi_class_counts = Counter()
@@ -163,10 +174,15 @@ def summarize_annotations(gff_files):
     goi_evidence_counts = Counter()
     fallback_goi_annotations = 0
     total_annotations = 0
+    # ── collect_goi_annotations accumulator ───────────────────────────────
+    goi_records = []
+    # ── collect_high_flanking_per_locus accumulator ───────────────────────
+    flanking_seen = defaultdict(set)  # (genome, locus, chrom) -> set of gene names
 
     for gff_path in gff_files:
         genome = canonical_genome_id(gff_path)
-        stats = per_genome.setdefault(
+        source = staging_source_label(gff_path)
+        ann_stats = per_genome_ann.setdefault(
             genome,
             {
                 "genome": genome,
@@ -185,7 +201,13 @@ def summarize_annotations(gff_files):
         try:
             with open(gff_path) as fh:
                 for line in fh:
-                    line = line.strip()
+                    # NB: rstrip("\n") matches the collect_goi_annotations behaviour
+                    # which trimmed only the newline (not surrounding whitespace).
+                    # summarize_annotations used .strip() but parts of the GFF aren't
+                    # whitespace-sensitive past the 9-tab field split, so the looser
+                    # rstrip preserves identical semantics for the line.split("\t")
+                    # downstream.
+                    line = line.rstrip("\n")
                     if not line or line.startswith("#"):
                         continue
                     parts = line.split("\t")
@@ -201,40 +223,69 @@ def summarize_annotations(gff_files):
                     evidence_type = attrs.get("EvidenceType", attrs.get("Type", "")) or "unknown"
                     model_status = attrs.get("ModelStatus", "")
 
-                    stats["total_annotations"] += 1
-                    stats["role_counts"][role] += 1
-                    stats["evidence_type_counts"][evidence_type] += 1
+                    # — summarize_annotations bookkeeping —
+                    ann_stats["total_annotations"] += 1
+                    ann_stats["role_counts"][role] += 1
+                    ann_stats["evidence_type_counts"][evidence_type] += 1
                     if model_status:
-                        stats["model_status_counts"][model_status] += 1
+                        ann_stats["model_status_counts"][model_status] += 1
                         model_status_counts[model_status] += 1
-                    stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
+                    ann_stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
                     if role == "goi" and goi_class:
-                        stats["goi_class_counts"][goi_class] += 1
+                        ann_stats["goi_class_counts"][goi_class] += 1
 
                     total_annotations += 1
                     role_counts[role] += 1
                     evidence_type_counts[evidence_type] += 1
 
                     if role == "goi":
-                        stats["goi_annotations"] += 1
+                        ann_stats["goi_annotations"] += 1
                         goi_confidence_counts[confidence] += 1
                         if goi_class:
                             goi_class_counts[goi_class] += 1
                         goi_evidence_counts[evidence_type] += 1
                         if goi_class == "ambiguous_goi_family_member":
-                            stats["ambiguous_goi_annotations"] += 1
+                            ann_stats["ambiguous_goi_annotations"] += 1
                         else:
-                            stats["resolved_goi_annotations"] += 1
+                            ann_stats["resolved_goi_annotations"] += 1
                         if evidence_type in {"fallback_hit_span", "raw_hit", "rescued_exon"}:
                             fallback_goi_annotations += 1
+
+                        # — collect_goi_annotations bookkeeping —
+                        try:
+                            start, end = int(parts[3]), int(parts[4])
+                        except ValueError:
+                            continue
+                        if end < start:
+                            start, end = end, start
+                        goi_records.append({
+                            "genome": genome,
+                            "source": source,
+                            "chrom": parts[0],
+                            "start": start,
+                            "end": end,
+                            "confidence": confidence,
+                            "goi_class": goi_class,
+                            "identity": (attrs.get("Identity", "") or "").strip(),
+                            "target_gene": attrs.get("TargetGene", ""),
+                            "model_status": model_status,
+                            "mrna_id": model_id,
+                        })
+
+                    elif role == "flanking" and confidence == "HIGH":
+                        # — collect_high_flanking_per_locus bookkeeping —
+                        gene = (attrs.get("Name") or attrs.get("SynVoy_Parent")
+                                or attrs.get("ID") or f"{parts[0]}:{parts[3]}")
+                        flanking_seen[(genome, source, parts[0])].add(gene)
         except Exception as exc:
             print(f"Warning: Could not parse GFF {gff_path}: {exc}")
 
+    # Build the summarize_annotations return shape
     per_genome_list = []
     genomes_without_goi = []
     genomes_with_only_ambiguous_goi = []
-    for genome in sorted(per_genome):
-        stats = per_genome[genome]
+    for genome in sorted(per_genome_ann):
+        stats = per_genome_ann[genome]
         row = {
             "genome": genome,
             "total_annotations": stats["total_annotations"],
@@ -253,7 +304,7 @@ def summarize_annotations(gff_files):
         elif stats["resolved_goi_annotations"] == 0:
             genomes_with_only_ambiguous_goi.append(genome)
 
-    return {
+    annotation_summary = {
         "per_genome": per_genome_list,
         "total_annotations": total_annotations,
         "role_counts": dict(role_counts),
@@ -266,6 +317,14 @@ def summarize_annotations(gff_files):
         "genomes_without_goi": genomes_without_goi,
         "genomes_with_only_ambiguous_goi": genomes_with_only_ambiguous_goi,
     }
+    flanking_per_locus = {key: len(genes) for key, genes in flanking_seen.items()}
+    return annotation_summary, goi_records, flanking_per_locus
+
+
+def summarize_annotations(gff_files):
+    """Backwards-compat wrapper. Prefer ``_process_gffs_unified`` for build_report
+    so the same GFF isn't read three times (docs/TODO.md §1c)."""
+    return _process_gffs_unified(gff_files)[0]
 
 
 def summarize_region_scores(score_files):
@@ -333,6 +392,44 @@ def summarize_region_scores(score_files):
         "selection_reason_counts": dict(selection_reason_counts),
         "goi_anchor_regions": goi_anchor_regions,
     }
+
+
+def scan_dir_by_suffix(dir_path, suffix_buckets):
+    """Single ``os.scandir()`` pass that classifies entries by filename suffix.
+
+    Replaces the previous N×``glob.glob(dir + '*.ext')`` pattern, which made one
+    directory walk per extension (4 walks of ``staged_results/regions/`` per report
+    at SP-family scale — ~50K files each). At that scale the redundant walks were a
+    real fraction of the report's wall time (docs/TODO.md §1c).
+
+    Args:
+        dir_path: Directory to scan. Missing directories return empty buckets.
+        suffix_buckets: ``{bucket_name: (suffix1, suffix2, ...)}``. First matching
+            suffix wins; pass the more-specific suffix first if there's any overlap
+            (e.g. ".scores.tsv" before ".tsv").
+
+    Returns:
+        ``{bucket_name: [str]}`` of full paths.
+    """
+    result = {name: [] for name in suffix_buckets}
+    if not os.path.isdir(dir_path):
+        return result
+    try:
+        with os.scandir(dir_path) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file(follow_symlinks=True):
+                        continue
+                except OSError:
+                    continue
+                name = entry.name
+                for bucket, suffixes in suffix_buckets.items():
+                    if any(name.endswith(s) for s in suffixes):
+                        result[bucket].append(entry.path)
+                        break
+    except OSError:
+        pass
+    return result
 
 
 def _dir_diagnostics(dir_path, patterns, sample_size=5):
@@ -410,86 +507,21 @@ def collect_goi_annotations(gff_files):
     """Flatten every GOI mRNA across all per-locus region GFFs into structured
     records (genome, target chrom/start/end, confidence, identity, provenance).
 
-    The genome is canonicalised (staging prefix stripped) so the same target genome
-    found from several home loci groups together; the staging tag is kept as the
-    per-locus source for dedup provenance (docs/TODO.md §1h).
+    Backwards-compat wrapper around ``_process_gffs_unified`` — ``build_report`` calls
+    the unified pass directly so the same GFFs aren't read three times at SP-family
+    scale (docs/TODO.md §1c).
     """
-    annotations = []
-    for gff_path in gff_files:
-        genome = canonical_genome_id(gff_path)
-        source = staging_source_label(gff_path)
-        try:
-            with open(gff_path) as fh:
-                for line in fh:
-                    line = line.rstrip("\n")
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
-                        continue
-                    attrs = _parse_gff_attrs(parts[8])
-                    model_id = attrs.get("ID", "")
-                    role = (attrs.get("SynVoyRole") or "").strip().lower()
-                    if not role:
-                        role = "goi" if model_id.startswith("GOI_") or attrs.get("SynVoy_Parent", "").startswith("GOI_") else "flanking"
-                    if role != "goi":
-                        continue
-                    try:
-                        start, end = int(parts[3]), int(parts[4])
-                    except ValueError:
-                        continue
-                    if end < start:
-                        start, end = end, start
-                    annotations.append({
-                        "genome": genome,
-                        "source": source,
-                        "chrom": parts[0],
-                        "start": start,
-                        "end": end,
-                        "confidence": (attrs.get("Confidence", "") or "UNKNOWN").upper(),
-                        "goi_class": attrs.get("GOIClass", ""),
-                        "identity": (attrs.get("Identity", "") or "").strip(),
-                        "target_gene": attrs.get("TargetGene", ""),
-                        "model_status": attrs.get("ModelStatus", ""),
-                        "mrna_id": model_id,
-                    })
-        except Exception as exc:
-            print(f"Warning: Could not parse GFF for dedup {gff_path}: {exc}")
-    return annotations
+    return _process_gffs_unified(gff_files)[1]
 
 
 def collect_high_flanking_per_locus(gff_files):
     """Count distinct HIGH-confidence flanking genes per (genome, locus, chrom) from
     the staged per-locus GFFs. Used by build_self_consistency to spot blocks with
     strong conserved synteny but no GOI model (docs/TODO.md §1j identity-decay sanity).
-    De-duplicated by gene Name so a multi-exon annotation and its coarse hit-span
-    don't double-count one flanking gene.
+
+    Backwards-compat wrapper around ``_process_gffs_unified`` (docs/TODO.md §1c).
     """
-    seen = defaultdict(set)  # (genome, locus, chrom) -> set of gene names
-    for gff_path in gff_files:
-        genome = canonical_genome_id(gff_path)
-        locus = staging_source_label(gff_path)
-        try:
-            with open(gff_path) as fh:
-                for line in fh:
-                    line = line.rstrip("\n")
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
-                        continue
-                    attrs = _parse_gff_attrs(parts[8])
-                    role = (attrs.get("SynVoyRole") or "").strip().lower()
-                    if role != "flanking":
-                        continue
-                    if (attrs.get("Confidence") or "").strip().upper() != "HIGH":
-                        continue
-                    gene = (attrs.get("Name") or attrs.get("SynVoy_Parent")
-                            or attrs.get("ID") or f"{parts[0]}:{parts[3]}")
-                    seen[(genome, locus, parts[0])].add(gene)
-        except Exception as exc:
-            print(f"Warning: Could not parse GFF for self-consistency {gff_path}: {exc}")
-    return {key: len(genes) for key, genes in seen.items()}
+    return _process_gffs_unified(gff_files)[2]
 
 
 def _reciprocal_overlap(a, b):
@@ -576,8 +608,107 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
     }
 
 
+def load_paralog_check_rows(paralog_check_dir):
+    """Read every ``<genome>.paralog_check.tsv`` produced by RECIPROCAL_BEST_PARALOG
+    (docs/TODO.md §1j Phase B).
+
+    Returns a list of dicts keyed by the TSV header. Skips header-only files (the
+    rescue/single-paralog no-op case) and silently tolerates missing dirs."""
+    rows = []
+    if not paralog_check_dir or not os.path.isdir(paralog_check_dir):
+        return rows
+    with os.scandir(paralog_check_dir) as it:
+        for entry in it:
+            if not entry.is_file() or not entry.name.endswith(".paralog_check.tsv"):
+                continue
+            try:
+                with open(entry.path) as fh:
+                    reader = csv.DictReader(fh, delimiter="\t")
+                    for row in reader:
+                        if not row.get("best_paralog"):
+                            continue
+                        try:
+                            row["best_bit_f"] = float(row.get("best_bit") or 0)
+                            row["second_bit_f"] = float(row.get("second_bit") or 0)
+                            row["gap_f"] = float(row.get("bitscore_gap") or 0)
+                            row["start_i"] = int(row.get("start") or 0)
+                            row["end_i"] = int(row.get("end") or 0)
+                        except ValueError:
+                            continue
+                        rows.append(row)
+            except OSError:
+                continue
+    return rows
+
+
+def build_paralog_confusion_flags(paralog_rows, min_gap):
+    """Emit a ``paralog_confusion`` flag for each call whose best home paralog
+    differs from the modal best paralog at the same (genome, locus), provided
+    the bitscore gap to the runner-up exceeds ``min_gap`` (so near-ties don't
+    fire).
+
+    Per-call summary (``best_paralog_per_call``) is also returned for transparency
+    so the report carries the alignment evidence behind every flag.
+    """
+    if not paralog_rows:
+        return [], [], {}
+
+    # Modal best-paralog per (genome, locus).
+    by_locus = defaultdict(Counter)
+    for r in paralog_rows:
+        by_locus[(r["genome"], r["locus"])][r["best_paralog"]] += 1
+    modal_per_locus = {key: ctr.most_common(1)[0][0] for key, ctr in by_locus.items()}
+
+    flags = []
+    per_call_summary = []
+    for r in paralog_rows:
+        key = (r["genome"], r["locus"])
+        modal = modal_per_locus.get(key, "")
+        is_confused = (r["best_paralog"] != modal) and (r["gap_f"] >= min_gap)
+        per_call_summary.append({
+            "genome": r["genome"],
+            "locus": r["locus"],
+            "chrom": r["chrom"],
+            "start": r["start_i"],
+            "end": r["end_i"],
+            "mrna_id": r.get("mrna_id", ""),
+            "best_paralog": r["best_paralog"],
+            "best_bit": r["best_bit_f"],
+            "second_paralog": r.get("second_paralog", ""),
+            "second_bit": r["second_bit_f"],
+            "bitscore_gap": r["gap_f"],
+            "locus_modal_paralog": modal,
+            "confused": is_confused,
+        })
+        if is_confused:
+            flags.append({
+                "type": "paralog_confusion",
+                "genome": r["genome"],
+                "locus": r["locus"],
+                "chrom": r["chrom"],
+                "start": r["start_i"],
+                "end": r["end_i"],
+                "mrna_id": r.get("mrna_id", ""),
+                "assigned_paralog": modal,           # the locus's "own" paralog (modal best)
+                "best_match_paralog": r["best_paralog"],
+                "bitscore_gap": r["gap_f"],
+                "advice": (
+                    f"Recovered protein aligns best to '{r['best_paralog']}' (bit={r['best_bit_f']:.1f}) "
+                    f"but the modal best paralog at this locus is '{modal}' "
+                    f"(bit-gap {r['gap_f']:.1f} >= {min_gap}). Likely a sibling paralog "
+                    "dragged in by MEDIUM-confidence iterative search — re-check the call's "
+                    "family assignment before reporting it as an ortholog of the locus paralog."
+                ),
+            })
+
+    return flags, per_call_summary, modal_per_locus
+
+
 def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
-                           *, strong_flanking_min=20):
+                           *, strong_flanking_min=20,
+                           paralog_flags=None, paralog_per_call=None,
+                           paralog_modal_per_locus=None,
+                           paralog_min_gap=5.0):
     """End-of-run sanity checks (docs/TODO.md §1j).
 
     Currently emits two flag types:
@@ -594,11 +725,15 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
       ``dedupe_goi_annotations``; surfaced here so it is visible in the report
       alongside other self-consistency outputs).
 
-    Reciprocal-best protein check across home paralogs (TODO §1j first bullet) is
-    deferred — it needs an aligner and the per-locus home queries staged at report
-    time, but for paralogs on different chromosomes (TP53/63/73, the motivating case)
-    synteny anchoring already provides the locus assignment. Same-coord cross-locus
-    cases are caught by §1h's coord-overlap dedup.
+    * ``paralog_confusion`` (§1j Phase B, landed) — a call whose best home paralog
+      (parasail SW vs every sequence in the multi-FASTA query) differs from the
+      modal best at the same (genome, locus) and the bitscore gap to the runner-up
+      exceeds ``paralog_min_gap``. Catches TP53/63/73-style sibling leakage at
+      MEDIUM confidence (the residual issue from docs/TP53_PARALOG_ASSESSMENT.md).
+
+    For single-paralog queries the §1j check is a no-op and ``paralog_flags`` is
+    empty; for multi-paralog runs the RECIPROCAL_BEST_PARALOG process produces a
+    TSV per (locus, genome) that ``load_paralog_check_rows`` then aggregates.
     """
     # Count HIGH-conf GOI per (genome, locus, chrom) for the identity-decay check.
     high_goi_count = defaultdict(int)
@@ -637,20 +772,46 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "note": "same gene identically modeled from multiple home loci; collapsed into one record (§1h)",
             })
 
+    # §1j Phase B paralog confusion flags (computed in build_paralog_confusion_flags
+    # and threaded through; we only attach them here so the existing flag-summary
+    # plumbing carries them).
+    paralog_flags = paralog_flags or []
+    paralog_per_call = paralog_per_call or []
+    paralog_modal_per_locus = paralog_modal_per_locus or {}
+    flags.extend(paralog_flags)
+
+    checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate"]
+    deferred_checks = []
+    if paralog_per_call:
+        checks_performed.append("paralog_confusion")
+    else:
+        deferred_checks.append("paralog_confusion")
+
     return {
-        "checks_performed": ["strong_synteny_no_goi", "cross_locus_duplicate"],
-        "deferred_checks": ["reciprocal_best_paralog"],
-        "thresholds": {"strong_flanking_min": strong_flanking_min},
+        "checks_performed": checks_performed,
+        "deferred_checks": deferred_checks,
+        "thresholds": {
+            "strong_flanking_min": strong_flanking_min,
+            "paralog_confusion_min_gap": paralog_min_gap,
+        },
         "flags": flags,
+        # Carry the full per-call paralog alignment table so the paper can
+        # cite exact numbers without re-running anything.
+        "paralog_alignment_table": paralog_per_call,
+        "modal_paralog_per_locus": [
+            {"genome": g, "locus": l, "paralog": p}
+            for (g, l), p in sorted(paralog_modal_per_locus.items())
+        ],
         "summary": {
             "n_strong_synteny_no_goi": sum(1 for f in flags if f["type"] == "strong_synteny_no_goi"),
             "n_cross_locus_duplicates": sum(1 for f in flags if f["type"] == "cross_locus_duplicate"),
+            "n_paralog_confusion": sum(1 for f in flags if f["type"] == "paralog_confusion"),
             "total_flags": len(flags),
         },
     }
 
 
-def build_report(results_dir, qc_json=None, qc_policy=None):
+def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -658,10 +819,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
     hits_dir = os.path.join(results_dir, "hits")
     scores_dir = os.path.join(results_dir, "scores")
 
-    fasta_files = glob.glob(os.path.join(regions_dir, "*.faa")) + glob.glob(os.path.join(regions_dir, "*.fna"))
-    gff_files = glob.glob(os.path.join(regions_dir, "*.gff")) + glob.glob(os.path.join(regions_dir, "*.gff3"))
-    score_files = glob.glob(os.path.join(scores_dir, "*.scores.tsv"))
-    hit_files = glob.glob(os.path.join(hits_dir, "*.m8"))
+    # Single scandir() per directory, classify by suffix in one pass (docs/TODO.md §1c).
+    regions_scan = scan_dir_by_suffix(regions_dir, {
+        "fasta": (".faa", ".fna"),
+        "gff": (".gff", ".gff3"),
+    })
+    scores_scan = scan_dir_by_suffix(scores_dir, {"scores": (".scores.tsv",)})
+    hits_scan = scan_dir_by_suffix(hits_dir, {"hits": (".m8",)})
+    fasta_files = regions_scan["fasta"]
+    gff_files = regions_scan["gff"]
+    score_files = scores_scan["scores"]
+    hit_files = hits_scan["hits"]
 
     staging_diagnostics = build_staging_diagnostics(
         results_dir,
@@ -681,7 +849,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
 
     genes_added_per_genome = summarize_fasta_outputs(fasta_files)
     hits_per_genome = summarize_hits(hit_files)
-    annotation_summary = summarize_annotations(gff_files)
+    # One read-pass over every GFF instead of three (docs/TODO.md §1c). The three
+    # public functions (summarize_annotations / collect_goi_annotations /
+    # collect_high_flanking_per_locus) still work for tests + external callers; they
+    # just throw away the two outputs they don't need each.
+    annotation_summary, goi_annotations, flanking_per_locus = _process_gffs_unified(gff_files)
     region_summary = summarize_region_scores(score_files)
 
     downstream_genomes = set(genes_added_per_genome) | set(hits_per_genome)
@@ -710,16 +882,32 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
     # found from (e.g. the luciferase rerun's Aquatica gene appears identically via locus_3
     # and locus_4). Collapse those so the headline counts distinct genes, not seeds, and
     # flag bit-for-bit-identical multi-locus hits as cross_locus_duplicate. docs/TODO.md §1h.
-    goi_annotations = collect_goi_annotations(gff_files)
+    # ``goi_annotations`` + ``flanking_per_locus`` came out of the unified GFF pass above.
     goi_dedup = dedupe_goi_annotations(goi_annotations)
     dedup_high = goi_dedup["high_confidence_goi_deduped"]
     dedup_medium = goi_dedup["medium_confidence_goi_deduped"]
 
+    # §1j Phase B: per-call reciprocal-best paralog check (run by RECIPROCAL_BEST_PARALOG
+    # per (locus, genome) and staged under paralog_check/). Aggregated here so the
+    # self-consistency block can emit paralog_confusion flags for any call whose best
+    # home paralog differs from the modal best at the same locus.
+    paralog_check_rows = load_paralog_check_rows(
+        os.path.join(results_dir, "paralog_check")
+    )
+    paralog_flags, paralog_per_call, paralog_modal = build_paralog_confusion_flags(
+        paralog_check_rows, min_gap=paralog_confusion_min_gap,
+    )
+
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
-    # cross-locus duplicate visibility. The flanking-only-block surfacing is the §1e
-    # piece that already lives in cluster_grs.py.
-    flanking_per_locus = collect_high_flanking_per_locus(gff_files)
-    self_consistency = build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus)
+    # cross-locus duplicate visibility + paralog confusion. The flanking-only-block
+    # surfacing is the §1e piece that already lives in cluster_grs.py.
+    self_consistency = build_self_consistency(
+        goi_annotations, goi_dedup, flanking_per_locus,
+        paralog_flags=paralog_flags,
+        paralog_per_call=paralog_per_call,
+        paralog_modal_per_locus=paralog_modal,
+        paralog_min_gap=paralog_confusion_min_gap,
+    )
 
     report = {
         "genome_qc": qc_records,
@@ -751,6 +939,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None):
             "goi_hits_collapsed_by_dedup": goi_dedup["hits_collapsed_by_dedup"],
             "self_consistency_flag_count": self_consistency["summary"]["total_flags"],
             "strong_synteny_no_goi_flags": self_consistency["summary"]["n_strong_synteny_no_goi"],
+            "paralog_confusion_flags": self_consistency["summary"]["n_paralog_confusion"],
             "low_confidence_goi": goi_low,
             "confident_goi_annotations": confident_goi,
             "resolved_goi_annotations": resolved_goi,
@@ -805,13 +994,22 @@ def main():
     parser.add_argument("--qc_policy", default="unspecified", help="QC handling policy used in the workflow")
     parser.add_argument("--output", required=True, help="Report JSON")
     parser.add_argument(
+        "--paralog_confusion_min_gap", type=float, default=5.0,
+        help="Bitscore gap required to flag a paralog_confusion (docs/TODO.md §1j Phase B)",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
     )
     args = parser.parse_args()
 
-    report = build_report(args.results_dir, qc_json=args.qc_json, qc_policy=args.qc_policy)
+    report = build_report(
+        args.results_dir,
+        qc_json=args.qc_json,
+        qc_policy=args.qc_policy,
+        paralog_confusion_min_gap=args.paralog_confusion_min_gap,
+    )
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)
     print(f"Report generated: {args.output}")

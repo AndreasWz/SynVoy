@@ -155,8 +155,12 @@ class TestUnit(unittest.TestCase):
         out_hi = build_self_consistency(annos, dedup, flanking, strong_flanking_min=15)
         self.assertEqual(out_lo["summary"]["n_strong_synteny_no_goi"], 1)
         self.assertEqual(out_hi["summary"]["n_strong_synteny_no_goi"], 0)
-        # Reciprocal-best is explicitly listed as deferred (transparency for users).
-        self.assertIn("reciprocal_best_paralog", out_lo["deferred_checks"])
+        # When no paralog-check data is staged (the single-paralog case), the
+        # paralog_confusion check is reported as deferred for transparency.
+        # When the per-call paralog data IS staged, build_self_consistency moves it
+        # from deferred_checks into checks_performed; that path is covered by
+        # tests/test_reciprocal_best_paralog.py::test_self_consistency_threads_paralog_flags_through.
+        self.assertIn("paralog_confusion", out_lo["deferred_checks"])
 
 
 if __name__ == "__main__":

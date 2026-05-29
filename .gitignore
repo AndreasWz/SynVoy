@@ -57,3 +57,4 @@ benchmark_results/
 tests/benchmark_truth/
 tmp/
 .claude/
+CLAUDE.md

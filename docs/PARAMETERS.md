@@ -39,6 +39,23 @@ nextflow run main.nf -c conf/presets/<preset_name>.config ...
 
 Preset source files live in [`conf/presets/`](../conf/presets/) — copy and edit them as a starting point for query-specific tweaks. The full reference below documents every individual parameter for users who need finer control.
 
+### Preset auto-apply (default ON since 2026-05-29)
+
+You don't actually have to pick a preset by hand. After `LOCATE_GENE` finishes, SynVoy profiles the BLAST/MMseqs2 hit distribution (`intermediate/locate_gene/hit_profile.json`), picks the matching preset (`intermediate/locate_gene/auto_preset.json`), and **applies it at runtime** to the downstream steps (`EXTRACT_FLANKING`, `ITERATIVE_SEARCH`, `CLUSTER_REGIONS`) via a value channel — no pipeline restart needed. The chosen preset is logged as:
+
+```
+[INFO] §1f preset applied: preset_paralog_discrimination (auto_preset.json chose preset_paralog_discrimination)
+```
+
+Knobs:
+
+- `--auto_apply_preset false` keeps the recommendation advisory-only (the legacy behaviour). Use this if you want a CLI value you set for a preset-affected param (e.g. `--classify_high_min_identity 60`) to survive into downstream steps. With auto-apply on, the preset's value wins.
+- `--preset_override preset_X` pins a specific preset, bypassing the hit-profile decision. Combine with `--auto_apply_preset true` (the default) to apply it at runtime, or use `-profile preset_X` to apply it at launch.
+
+**One caveat:** `NORMALIZE_QUERY` runs *before* `LOCATE_GENE`, so its `min_query_length` cannot be auto-injected — for queries shorter than the default (`30` aa), pass `--min_query_length 20` explicitly or use `-profile preset_short_peptide` at launch so the value is set before normalization runs. Every other preset-affected param (Smith–Waterman, hit, classify, family, adaptive-region, `max_flanking_goi_similarity`, `expand_goi_similar`) is covered by the runtime injection.
+
+The Python `PRESET_OVERRIDES` table in `bin/resolve_effective_params.py` is the single source of truth; `tests/test_resolve_effective_params.py::test_preset_overrides_match_groovy_configs` keeps the Groovy `.config` files in lockstep so `-profile preset_X` and `--auto_apply_preset` produce identical effective values.
+
 ---
 
 ## Table of Contents
@@ -61,6 +78,7 @@ Preset source files live in [`conf/presets/`](../conf/presets/) — copy and edi
 16. [Resource Tuning](#16-resource-tuning)
 17. [LLM Parameter Estimation](#17-llm-parameter-estimation)
 18. [Advanced & Output](#18-advanced--output)
+19. [Auto-Apply Preset, Self-Consistency & Rescue](#19-auto-apply-preset-self-consistency--rescue)
 
 ---
 
@@ -724,4 +742,55 @@ The maximum number of times a failed Nextflow process is retried before the pipe
 **Type:** String | **Default:** `'synvoy-local:latest'`
 
 The Docker/Singularity container image used for running pipeline processes when a container profile is active. The default expects a locally built image tagged `synvoy-local:latest`. Build it from the project Dockerfile: `docker build -t synvoy-local:latest .`. The container bundles all dependencies (MMseqs2, tblastn, Augustus, Prodigal, miniprot, parasail, MAFFT, IQ-TREE, Python with BioPython, etc.) in a reproducible environment. Override this to use a pre-built remote image (e.g., from Docker Hub or a private registry). The `beforeScript` directive ensures workspace scripts in `bin/` override any scripts packaged inside the container, so local code changes take effect immediately without rebuilding. This parameter is only used when a Docker or Singularity profile is active — Conda profiles ignore it entirely.
+
+---
+
+## 19. Auto-Apply Preset, Self-Consistency & Rescue
+
+A small group of orthogonal toggles that landed together in the 2026-05-27/29 batch. All are safe defaults — change them only if you understand what you give up.
+
+### `auto_apply_preset`
+**Type:** Boolean | **Default:** `true`
+
+When true (default), the preset chosen from the LOCATE_GENE hit profile is applied at runtime to every downstream process via a value channel (see §1f auto-apply in the Quick start above). When false, the recommendation is kept advisory-only and the params used by `EXTRACT_FLANKING`, `ITERATIVE_SEARCH`, and `CLUSTER_REGIONS` come straight from `params.*` — so any CLI override you pass for a preset-affected param (e.g. `--classify_high_min_identity 60`) is honoured end-to-end. Disable this when you're benchmarking parameter sensitivity, or when you want the static `-profile preset_X` startup path to be the only place presets take effect. NORMALIZE_QUERY's `min_query_length` is the one preset-affected param that this toggle can't touch — it runs before LOCATE_GENE, so for short queries you still need `--min_query_length 20` or `-profile preset_short_peptide` at launch.
+
+### `preset_override`
+**Type:** String | **Default:** `''` (empty — let auto-detection choose)
+
+Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution.
+
+### `allow_unknown_species`
+**Type:** Boolean | **Default:** `false`
+
+By default the pipeline aborts at startup if `--home_species` is empty AND can't be inferred from the genome filename — that empty value used to cascade silently into `phylo_sort.py` and `auto_params`, producing kingdom=Unknown and broken phylo distances (the §1i incident on the luciferase run). Set to true to opt out of that gate when you genuinely don't know the species (e.g. a draft assembly with a meaningless stem). The pipeline then proceeds with a loud `WARN` and degraded phylogenetic ordering. Always prefer fixing `--home_species`; this flag exists for the rare case where you can't.
+
+### `disable_strong_synteny_rescue`
+**Type:** Boolean | **Default:** `false`
+
+§1e rescue pass: when a syntenic block has ≥5 HIGH-confidence flanking genes but no GOI annotation (a "right neighbourhood, missed GOI" case), SynVoy runs a relaxed-stringency `miniprot` pass over the block window to emit a LOW-confidence rescue GOI model (`EvidenceType=relaxed_miniprot_rescue`). Set true to skip this — useful when you're already running many loci and don't want extra LOW-confidence noise in the report.
+
+### `strong_synteny_rescue_miniprot_outc`
+**Type:** Float | **Default:** `0.05` (5 % query coverage)
+
+Minimum miniprot query-coverage fraction for a rescue model to be emitted. Lower = more permissive (rescues more sketchy fragments). Raise to `0.2` if you only want rescue models that cover at least a fifth of the query.
+
+### `strong_synteny_rescue_window_pad`
+**Type:** Integer (bp) | **Default:** `2000`
+
+Bp padded each side of the syntenic block coordinates before extracting the window for the rescue miniprot run. Wider = catches GOI bodies that start just outside the strong-flanking span, at the cost of larger search windows.
+
+### `strong_synteny_rescue_miniprot_timeout`
+**Type:** Integer (seconds) | **Default:** `120`
+
+Per-block timeout for the rescue miniprot invocation. Bumps to `300` are reasonable on long blocks; keep it short to avoid stalling the report on pathological blocks.
+
+### `disable_paralog_check`
+**Type:** Boolean | **Default:** `false`
+
+§1j Phase B reciprocal-best paralog check: for paralog-family queries (multi-sequence home FASTA like TP53 + TP63 + TP73), each recovered GOI target protein is Smith–Waterman-aligned against every home paralog with `parasail`. The per-call best/runner-up bitscores feed `generate_report`'s `paralog_confusion` flag — when a call's best home paralog differs from the *modal* best at the same (genome, locus) with a sufficient bitscore gap, the report flags it. Single-paralog queries are automatic no-ops (the alignment step is skipped). Set true to skip even on multi-paralog runs (useful for short-peptide runs where the paralog list is irrelevant).
+
+### `paralog_confusion_min_gap`
+**Type:** Float | **Default:** `5.0`
+
+Minimum bitscore-gap (best vs second-best paralog) before a paralog-confusion flag fires. The default of 5 keeps borderline ties off the report. Raise to `15`/`20` for stricter flagging (only clear-cut paralog reassignments), lower to `2` if you want every disagreeing call surfaced.
 

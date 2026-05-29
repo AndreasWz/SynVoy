@@ -10,6 +10,9 @@ process ITERATIVE_SEARCH {
     val flanking_genes
     val min_score
     val sensitivity
+    // §1f: preset-affected params resolved at runtime (see RESOLVE_EFFECTIVE_PARAMS).
+    // All other params still read directly from `params.X`.
+    val settings
 
     output:
     tuple val(locus_id), path("iterative_results/expanded_db.faa"), emit: expanded_db
@@ -33,8 +36,8 @@ process ITERATIVE_SEARCH {
         --mmseqs_split_memory_limit ${params.mmseqs_split_memory_limit} \\
         --mmseqs_verbosity ${params.mmseqs_verbosity} \\
         --evalue ${params.search_evalue} \\
-        --min_identity ${params.min_hit_identity} \\
-        --min_length ${params.min_hit_length} \\
+        --min_identity ${settings.min_hit_identity} \\
+        --min_length ${settings.min_hit_length} \\
         --max_intron ${params.max_intron} \\
         --cluster_distance ${params.cluster_distance} \\
         --min_gene_identity ${params.min_gene_identity} \\
@@ -43,8 +46,8 @@ process ITERATIVE_SEARCH {
         --padding_max ${params.padding_max} \\
         --enable_smith_waterman ${params.enable_smith_waterman} \\
         --sw_method ${params.sw_method} \\
-        --sw_min_score ${params.sw_min_score} \\
-        --sw_min_identity ${params.sw_min_identity} \\
+        --sw_min_score ${settings.sw_min_score} \\
+        --sw_min_identity ${settings.sw_min_identity} \\
         --sw_timeout_seconds ${params.sw_timeout_seconds} \\
         --aug_relaxed_evalue_mult ${params.aug_relaxed_evalue_mult} \\
         --aug_relaxed_evalue_cap ${params.aug_relaxed_evalue_cap} \\
@@ -66,13 +69,13 @@ process ITERATIVE_SEARCH {
         --min_block_genes ${params.min_block_genes} \\
         --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
-        --classify_high_min_identity ${params.classify_high_min_identity} \\
-        --classify_medium_min_identity ${params.classify_medium_min_identity} \\
-        --classify_tandem_min_identity ${params.classify_tandem_min_identity} \\
-        --classify_fragment_max_qcov ${params.classify_fragment_max_qcov} \\
-        --classify_complete_min_qcov ${params.classify_complete_min_qcov} \\
-        --strict_goi_family ${params.strict_goi_family} \\
-        --goi_family_tokens "${params.goi_family_tokens}" \\
+        --classify_high_min_identity ${settings.classify_high_min_identity} \\
+        --classify_medium_min_identity ${settings.classify_medium_min_identity} \\
+        --classify_tandem_min_identity ${settings.classify_tandem_min_identity} \\
+        --classify_fragment_max_qcov ${settings.classify_fragment_max_qcov} \\
+        --classify_complete_min_qcov ${settings.classify_complete_min_qcov} \\
+        --strict_goi_family ${settings.strict_goi_family} \\
+        --goi_family_tokens "${settings.goi_family_tokens}" \\
         --gene_predictor ${params.gene_predictor} \\
         --augustus_species ${params.augustus_species} \\
         --enable_plm_search ${params.enable_plm_search} \\
