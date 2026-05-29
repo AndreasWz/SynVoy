@@ -25,11 +25,15 @@ UNIPROT_RE = re.compile(
     r'^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$'
 )
 
-# NCBI RefSeq protein accessions
-NCBI_REFSEQ_RE = re.compile(r'^[XNWY]P_\d+\.\d+$')
+# NCBI RefSeq protein accessions. The version suffix is OPTIONAL: efetch resolves
+# both XP_031329057 and XP_031329057.1, and users routinely paste the unversioned
+# form. Requiring '.\d+' (and matching the raw input rather than the version-stripped
+# clean form, as the UniProt branch does) previously misclassified e.g. XP_031329057
+# as a gene symbol.
+NCBI_REFSEQ_RE = re.compile(r'^[XNWY]P_\d+(\.\d+)?$')
 
-# NCBI GenBank protein accessions  (e.g., KAF1234567.1, AAB12345.1)
-NCBI_GENBANK_RE = re.compile(r'^[A-Z]{3}\d{5,}\.\d+$')
+# NCBI GenBank protein accessions  (e.g., KAF1234567.1, AAB12345.1, AAB12345)
+NCBI_GENBANK_RE = re.compile(r'^[A-Z]{3}\d{5,}(\.\d+)?$')
 
 
 def detect_input_type(gene_input):
