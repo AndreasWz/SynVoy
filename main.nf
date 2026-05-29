@@ -23,7 +23,16 @@ include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
 include { GENERATE_REPORT } from './modules/generate_report.nf'
-include { STAGE_REGION_FOR_REPORT } from './modules/stage_for_report.nf'
+// 4 aliases so each per-locus file type (gff / faa / homology.tsv / scores.tsv) gets
+// its own STAGE_REGION_FOR_REPORT instance — each prefixes basenames with the locus_id
+// before they reach GENERATE_REPORT's flat-cp staging (docs/TODO.md §1h + follow-up).
+include { STAGE_REGION_FOR_REPORT as STAGE_REGION_GFF       } from './modules/stage_for_report.nf'
+include { STAGE_REGION_FOR_REPORT as STAGE_REGION_FAA       } from './modules/stage_for_report.nf'
+include { STAGE_REGION_FOR_REPORT as STAGE_REGION_HOMOLOGY  } from './modules/stage_for_report.nf'
+include { STAGE_REGION_FOR_REPORT as STAGE_REGION_SCORES    } from './modules/stage_for_report.nf'
+include { RESCUE_STRONG_SYNTENY } from './modules/rescue_strong_synteny.nf'
+include { RECIPROCAL_BEST_PARALOG } from './modules/reciprocal_best_paralog.nf'
+include { RESOLVE_EFFECTIVE_PARAMS } from './modules/resolve_effective_params.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
@@ -321,14 +330,17 @@ workflow {
         // home_species drives taxonomy sorting (phylo_sort) and the LLM parameter
         // advisor's biological context. Missing it silently degrades the run to
         // kingdom=Unknown / phylo distance 999 and mis-tunes per-target stringency
-        // (docs/TODO.md §1i). Infer from the genome filename when plausible; either
-        // way make the degradation loud rather than silent.
+        // (docs/TODO.md §1i). Infer from the genome filename when plausible; refuse
+        // to start otherwise (overridable with --allow_unknown_species for users who
+        // genuinely don't care, e.g. the integration test on generic fixtures).
         if (params.home_genome && !params.home_species) {
             def stem = homeSpeciesStem(params.home_genome)
             if (isUsableSpeciesName(stem)) {
                 validationWarnings << "No --home_species provided; inferring \"${stem}\" from the home-genome filename for taxonomy sorting and LLM context. Pass --home_species \"Genus species\" explicitly if that is wrong."
+            } else if (paramBool(params.allow_unknown_species)) {
+                validationWarnings << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). --allow_unknown_species is set, so the run will proceed with kingdom=Unknown / phylo distance 999, which mis-tunes per-target search stringency. Outputs will still be produced."
             } else {
-                validationWarnings << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). Taxonomy sorting (phylo_sort) and the parameter advisor will fall back to kingdom=Unknown / phylogenetic distance 999, which mis-tunes per-target search stringency. The run will still proceed. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\") for correct behaviour."
+                validationErrors << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). SynVoy refuses to start because taxonomy sorting and the parameter advisor would silently degrade to kingdom=Unknown / phylo distance 999. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\"), or set --allow_unknown_species true if you genuinely don't need taxonomic context."
             }
         }
         if (!params.target_genomes) {
@@ -750,6 +762,45 @@ workflow {
         }
     }
 
+    // 4a-bis. §1f: resolve preset-affected params at runtime. LOCATE_GENE's
+    // advisory auto_preset.json (or params.preset_override) → effective_params.json,
+    // exposed downstream as `val settings` so the chosen preset actually takes
+    // effect in EXTRACT_FLANKING / ITERATIVE_SEARCH / CLUSTER_REGIONS without a
+    // pipeline restart. Defaults flow through unchanged when auto_apply_preset=false.
+    def preset_default_keys = [
+        'sw_min_score','sw_min_identity',
+        'min_hit_identity','min_hit_length','min_query_length',
+        'classify_high_min_identity','classify_medium_min_identity','classify_tandem_min_identity',
+        'classify_fragment_max_qcov','classify_complete_min_qcov',
+        'expand_goi_similar','strict_goi_family','goi_family_tokens',
+        'max_flanking_goi_similarity',
+        'adaptive_score_floor_frac','adaptive_score_floor_abs',
+        'adaptive_max_regions','adaptive_unique_gene_floor',
+        'auto_params','multi_profile',
+    ]
+    def preset_defaults_map = preset_default_keys.collectEntries { k -> [(k): params[k]] }
+    def preset_defaults_json = groovy.json.JsonOutput.toJson(preset_defaults_map)
+
+    auto_preset_ch = LOCATE_GENE.out.auto_preset
+        .ifEmpty(file("${projectDir}/assets/sentinels/NO_AUTO_PRESET"))
+
+    RESOLVE_EFFECTIVE_PARAMS(
+        auto_preset_ch,
+        preset_defaults_json,
+        params.preset_override ?: '',
+        !paramBool(params.auto_apply_preset)
+    )
+
+    effective_settings_ch = RESOLVE_EFFECTIVE_PARAMS.out.json
+        .map { f ->
+            def parsed = new groovy.json.JsonSlurper().parse(f)
+            def s = parsed.settings as Map
+            // Surface the chosen preset in the console banner for auditability.
+            log.info "[INFO] §1f preset applied: ${parsed.preset_applied ?: 'none'} (${parsed.apply_reason})"
+            s
+        }
+        .first()
+
     // 4b. ANNOTATE GOI EXONS
     // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
     // If GFF available: matches GOI to annotated gene and extracts CDS/exons
@@ -843,7 +894,8 @@ workflow {
         params.n_flanking_genes,
         params.min_flanking_size,
         params.prefer_large_genes,
-        normalized_gene_ready_ch.first()  // GOI protein for similarity-based flanking filter
+        normalized_gene_ready_ch.first(),  // GOI protein for similarity-based flanking filter
+        effective_settings_ch              // §1f: resolved preset-affected params
     )
     
     // 6b. CRITICAL FIX: Prepare Initial Database with GOI included
@@ -949,7 +1001,8 @@ workflow {
             iterative_search_final_inputs.map { rec -> rec[4] }, // home_db
             params.n_flanking_genes,
             params.min_synteny_score,
-            params.mmseqs_sensitivity
+            params.mmseqs_sensitivity,
+            effective_settings_ch  // §1f: resolved preset-affected params
         )
         
         ITERATIVE_SEARCH.out.expanded_db.view { locus, db ->
@@ -1020,7 +1073,8 @@ workflow {
             clustering_inputs.map { rec -> tuple(rec[3], rec[4]) }, // [locus_id, synteny_bed]
             params.n_flanking_genes,
             params.min_synteny_score,
-            species_map_ch
+            species_map_ch,
+            effective_settings_ch  // §1f: resolved preset-affected params
         )
         CLUSTER_REGIONS.out.bed.count().view { count ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'CLUSTER_REGIONS'.padRight(24)}${c.reset} generated ${count} clustered region set(s)"
@@ -1131,42 +1185,108 @@ workflow {
         def no_augmented_sentinel = file("${projectDir}/assets/sentinels/NO_AUGMENTED")
         def no_scores_sentinel = file("${projectDir}/assets/sentinels/NO_SCORES")
         
-        ITERATIVE_SEARCH.out.region_genes
-            .map { rec -> rec[1] }
-            .flatten()
-            .ifEmpty(no_regions_sentinel)
-            .collect()
-            .set { collected_regions }
+        // Tag every per-locus region file (.gff / .faa / .homology.tsv / .scores.tsv)
+        // with its home-locus id before GENERATE_REPORT's flat-cp staging, so same-named
+        // files from different loci no longer overwrite each other. The GFF case landed
+        // first (docs/TODO.md §1h); this also covers .faa / .homology.tsv / .scores.tsv
+        // (the §1h follow-up that previously under-reported `total_new_genes` and the
+        // per-locus region score counts in multi-locus runs).
+        // Python side: generate_report.py's canonical_genome_id() strips the locus prefix
+        // before grouping by genome, so no parser change is needed.
 
-        // Tag each per-locus region GFF with its home-locus id so they no longer
-        // collide by basename during report staging (and so generate_report.py can
-        // dedup the same target ortholog found from multiple loci — docs/TODO.md §1h).
-        STAGE_REGION_FOR_REPORT(
-            ITERATIVE_SEARCH.out.gff.transpose()
+        // §1e follow-up: rescue pass against blocks cluster_grs classified as
+        // goi_missing_but_strong_synteny. Inputs: scores.tsv per (locus, genome),
+        // the genomes dir to resolve the target FASTA, and the GOI query FASTA.
+        // Output GFFs are mixed with iterative_search's per-locus GFFs into the
+        // staging channel so the report parser sees them via the same path.
+        rescue_query_ch = ( params.query
+            ? channel.value(file(params.query))
+            : EXTRACT_FLANKING.out.faa.map { rec -> rec[1] }.first() )
+
+        RESCUE_STRONG_SYNTENY(
+            CLUSTER_REGIONS.out.scores,
+            genomes_dir_ch.first(),
+            rescue_query_ch
         )
-        STAGE_REGION_FOR_REPORT.out
+
+        // §1j Phase B: reciprocal-best paralog check. Per (locus, genome), align
+        // each recovered GOI target protein against every paralog in the home
+        // query FASTA. generate_report.py uses the result to flag MEDIUM-confidence
+        // calls whose best home paralog differs from the modal best at the same
+        // locus — the TP63 ↔ TP73 bleed observed in docs/TP53_PARALOG_ASSESSMENT.md.
+        // No-op when params.query has a single sequence (nothing reciprocal).
+        paralog_faa_ch = ITERATIVE_SEARCH.out.region_genes.transpose()
+            .map { locus_id, faa ->
+                def stem = faa.name.replaceFirst(/\.faa$/, '')
+                tuple("${locus_id}::${stem}", locus_id, stem, faa)
+            }
+        paralog_gff_ch = ITERATIVE_SEARCH.out.gff.transpose()
+            .map { locus_id, gff ->
+                def stem = gff.name.replaceFirst(/\.gff3?$/, '')
+                tuple("${locus_id}::${stem}", gff)
+            }
+        paralog_inputs_ch = paralog_faa_ch
+            .map { key, locus_id, stem, faa -> tuple(key, locus_id, stem, faa) }
+            .join(paralog_gff_ch)
+            .map { key, locus_id, stem, faa, gff ->
+                def genome_name = stem.replaceFirst(/\.(fna|fa|fasta)$/, '')
+                tuple(locus_id, genome_name, faa, gff)
+            }
+
+        RECIPROCAL_BEST_PARALOG(
+            paralog_inputs_ch,
+            rescue_query_ch   // same home query as the rescue pass — multi-FASTA = paralog panel
+        )
+
+        STAGE_REGION_GFF(
+            ITERATIVE_SEARCH.out.gff.transpose()
+                .mix(RESCUE_STRONG_SYNTENY.out.gff)
+        )
+        STAGE_REGION_GFF.out
             .ifEmpty(no_gffs_sentinel)
             .collect()
             .set { collected_region_gffs }
 
-        ITERATIVE_SEARCH.out.homology
-            .map { rec -> rec[1] }
-            .flatten()
+        STAGE_REGION_FAA(
+            ITERATIVE_SEARCH.out.region_genes.transpose()
+        )
+        STAGE_REGION_FAA.out
+            .ifEmpty(no_regions_sentinel)
+            .collect()
+            .set { collected_regions }
+
+        STAGE_REGION_HOMOLOGY(
+            ITERATIVE_SEARCH.out.homology.transpose()
+        )
+        STAGE_REGION_HOMOLOGY.out
             .ifEmpty(no_homology_sentinel)
             .collect()
             .set { collected_homology }
-            
+
         ITERATIVE_SEARCH.out.hits
             .map { rec -> rec[1] }
             .ifEmpty(no_hits_sentinel)
             .collect()
             .set { collected_hits }
 
-        CLUSTER_REGIONS.out.scores
-            .map { rec -> rec[1] }
+        // CLUSTER_REGIONS.out.scores tuple is (locus_id, genome_name, score_file).
+        // Drop genome_name and feed (locus_id, score_file) into STAGE_REGION_SCORES.
+        STAGE_REGION_SCORES(
+            CLUSTER_REGIONS.out.scores.map { rec -> tuple(rec[0], rec[2]) }
+        )
+        STAGE_REGION_SCORES.out
             .ifEmpty(no_scores_sentinel)
             .collect()
             .set { collected_scores }
+
+        // §1j Phase B paralog-check TSVs (one per (locus, genome) when params.query
+        // has >=2 paralogs; the script no-ops to a header-only TSV when it has 1).
+        def no_paralog_sentinel = file("${projectDir}/assets/sentinels/NO_PARALOG_CHECK")
+        RECIPROCAL_BEST_PARALOG.out.tsv
+            .map { rec -> rec[1] }
+            .ifEmpty(no_paralog_sentinel)
+            .collect()
+            .set { collected_paralog_check }
             
         // No standalone augmented proteins - pass sentinel file
         collected_augmented = channel.value(no_augmented_sentinel)
@@ -1179,6 +1299,8 @@ workflow {
             collected_augmented,
             qc_summary_ch,
             collected_scores,
+            collected_paralog_check,
+            params.paralog_confusion_min_gap,
             params.qc_fail_policy
         )
         

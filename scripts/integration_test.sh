@@ -26,8 +26,14 @@ nextflow run main.nf \
     --query "$QUERY" \
     --target_genomes "$TARGET_DIR/*.fna" \
     --home_genome "$HOME_GENOME" \
+    --allow_unknown_species true \
     --outdir "$OUTDIR" \
     -resume
+
+# --allow_unknown_species: this test uses generic fixture names (test_data/home.fasta)
+# whose stem cannot be parsed as a Genus_species, so the §1i hard gate would refuse to
+# start. The flag opts out of the gate for the test; real users should pass
+# --home_species "Genus species" instead.
 
 echo "=== Verification ==="
 

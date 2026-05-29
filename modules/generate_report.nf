@@ -12,6 +12,8 @@ process GENERATE_REPORT {
     path augmented       // unused sentinel – single file, no collision
     path qc_json
     path score_files,    stageAs: 'scores/?/*'
+    path paralog_check_files, stageAs: 'paralog_check/?/*'  // §1j Phase B
+    val paralog_confusion_min_gap
     val qc_policy
     
     output:
@@ -19,7 +21,16 @@ process GENERATE_REPORT {
     
     script:
     """
-    mkdir -p staged_results/regions staged_results/hits staged_results/scores
+    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check
+
+    # Stage paralog-check TSVs from numbered subdirs (§1j Phase B).
+    for f in \$(find -L paralog_check -type f 2>/dev/null); do
+        fname=\$(basename "\$f")
+        case "\$fname" in
+            NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
+        esac
+        cp "\$f" staged_results/paralog_check/ 2>/dev/null || true
+    done
 
     # Stage region outputs (.faa / .gff / .homology.tsv) from numbered subdirs
     for f in \$(find -L region_genes region_gffs homology -type f 2>/dev/null); do
@@ -58,6 +69,7 @@ process GENERATE_REPORT {
         --results_dir staged_results \\
         --qc_json "${qc_json}" \\
         --qc_policy "${qc_policy}" \\
+        --paralog_confusion_min_gap ${paralog_confusion_min_gap} \\
         --output synvoy_report.json
     """
 }

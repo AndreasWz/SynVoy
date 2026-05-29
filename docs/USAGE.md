@@ -139,6 +139,8 @@ Trade-off: tighter tiers are slower (more MMseqs splits, less parallelism) and s
 | `preset_tandem_family` | Tandem-duplicated families with many close paralogs (e.g. luciferases, opsins, cytochrome P450 clusters). |
 | `preset_paralog_discrimination` | When the goal is to tell paralogs apart, not just find any family member (e.g. distinguishing TP53 from TP63/TP73). |
 
+> **Auto-apply (since 2026-05-29, default ON):** if you don't pick a preset, SynVoy picks one for you after `LOCATE_GENE` from the hit distribution and applies it at runtime to `EXTRACT_FLANKING` / `ITERATIVE_SEARCH` / `CLUSTER_REGIONS` via a value channel — no restart needed. The chosen preset is logged as `[INFO] §1f preset applied: …` and dumped to `intermediate/locate_gene/effective_params.json`. Pin one with `--preset_override preset_X`, opt out with `--auto_apply_preset false`. The one caveat: `NORMALIZE_QUERY.min_query_length` is resolved before LOCATE_GENE runs, so short queries (< 30 aa) still need `--min_query_length 20` or `-profile preset_short_peptide` set at launch. See [docs/PARAMETERS.md §19](PARAMETERS.md#19-auto-apply-preset-self-consistency--rescue) for the full toggle list.
+
 ---
 
 ## 3. Algorithm Overview
