@@ -53,17 +53,20 @@ Instead of relying on the gene's sequence alone, it uses the **conserved order o
 
 ## Quick install
 
-Requires Linux/macOS, Conda or Mamba, and Java ≥17 (Conda will pull it in).
+Requires Linux/macOS and Conda or Mamba. Nextflow and OpenJDK 17 are
+bundled into the conda env — no separate install needed.
 
 ```bash
 git clone https://github.com/AndreasWz/SynVoy.git
 cd SynVoy
 mamba env create -f environment.yml      # or: conda env create -f environment.yml
 conda activate synvoy_env
-nextflow -version                         # sanity check
+nextflow -version                         # sanity check (provided by the env)
 ```
 
-Full step-by-step setup, Docker/Singularity instructions, and verification commands live in **[docs/INSTALL.md](docs/INSTALL.md)**.
+Full step-by-step setup, Docker/Singularity instructions, an HPC path for
+standalone Nextflow, and verification commands live in
+**[docs/INSTALL.md](docs/INSTALL.md)**.
 
 ---
 
@@ -107,6 +110,7 @@ nextflow run main.nf \
 
 > `--home_gff` is optional but strongly recommended — it provides much better flanking-gene extraction than Prodigal prediction alone.
 > Use `-resume` to restart from the last successful step after a crash or parameter tweak.
+> **Low-RAM machines:** add `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem` (8 GB RAM) to lower the MMseqs split-memory ceiling and avoid `cannot fit database into ...` errors on vertebrate-scale genomes. See [USAGE.md § Memory tiers](docs/USAGE.md#memory-tiers-combine-with-an-execution-backend).
 
 ---
 

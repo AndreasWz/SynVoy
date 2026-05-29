@@ -9,10 +9,15 @@ Full setup instructions for SynVoy. For a 5-line quick install, see the [README]
 | Requirement | Notes |
 |---|---|
 | **OS** | Linux (tested) or macOS |
-| **Java** | 17 or newer (required by current Nextflow; the Conda env includes OpenJDK) |
 | **Conda or Mamba** | [Miniforge](https://github.com/conda-forge/miniforge) recommended. Miniconda/Anaconda also work. |
 | **Git** | To clone the repository |
 | **Internet** | Easy Mode needs access to NCBI/UniProt for genome downloads |
+
+> **Note on Java and Nextflow:** Both are provided by the `synvoy_env`
+> conda environment (`openjdk >=17` and `nextflow >=25.10`). You do **not**
+> need to install them separately. See the
+> [HPC / standalone Nextflow](#hpc--standalone-nextflow-no-conda) section
+> below if your environment forbids conda.
 
 ---
 
@@ -23,46 +28,22 @@ git clone https://github.com/AndreasWz/SynVoy.git
 cd SynVoy
 ```
 
-## 2. Install Nextflow
+## 2. Set Up the Conda Environment
 
-Check if Nextflow is already installed:
-
-```bash
-nextflow -version
-```
-
-If the command is not found, install it:
-
-```bash
-# Option A: using Conda (simplest — it will be included in the env in step 3)
-# Skip this step; the environment.yml already lists nextflow.
-
-# Option B: standalone install into ~/bin
-curl -s https://get.nextflow.io | bash
-mkdir -p ~/bin && mv nextflow ~/bin/
-# Make sure ~/bin is on your PATH:
-export PATH="$HOME/bin:$PATH"
-# (add the line above to ~/.bashrc to make it permanent)
-```
-
-Current Nextflow requires **Java ≥17**. Verify with `java -version`. If missing, let Conda pull OpenJDK in with the environment below, or install Java 17+ via your system package manager.
-
-## 3. Set Up the Conda Environment
-
-The environment bundles Nextflow, all bioinformatics tools (MMseqs2, BLAST, Prodigal, miniprot, MAFFT, IQ-TREE), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
+The environment bundles **Nextflow**, **OpenJDK 17**, all bioinformatics tools (MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies. This is the single canonical install path.
 
 ```bash
 # Create the environment (mamba is faster if available)
 mamba env create -f environment.yml
 # or: conda env create -f environment.yml
 
-# Activate it
+# Activate it (must be done in every new terminal before running the pipeline)
 conda activate synvoy_env
 ```
 
-> The environment is named `synvoy_env` (defined in `environment.yml`). You must activate it every time you open a new terminal before running the pipeline.
+> The environment is named `synvoy_env` (defined in `environment.yml`).
 
-## 4. Verify the Installation
+## 3. Verify the Installation
 
 ```bash
 # All of these should print version info without errors:
@@ -106,6 +87,25 @@ For Singularity (common on HPC):
 ```bash
 nextflow run main.nf -profile singularity --mode easy --query_id Q16553 --outdir results
 ```
+
+---
+
+## HPC / standalone Nextflow (no conda)
+
+If your environment forbids Conda (some HPC systems load Nextflow as a
+module), you can run SynVoy against a system Nextflow as long as you also
+provide Java ≥17 and let Nextflow use the Docker or Singularity profile
+to pick up all the bioinformatics tools:
+
+```bash
+# system / module-loaded Nextflow
+nextflow -version    # must report ≥25.10 and Java ≥17
+nextflow run main.nf -profile singularity --mode easy --query_id Q16553 --outdir results
+```
+
+In that path you do **not** need `environment.yml`. The conda env is
+optional only when you go through `-profile docker` or `-profile singularity`.
+With `-profile standard`, the conda env is mandatory.
 
 ---
 
