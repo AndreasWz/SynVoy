@@ -64,6 +64,12 @@ LASTZ_K="${LASTZ_K:-1500}"        # seed score threshold (lower = more sensitive
 LASTZ_L="${LASTZ_L:-2500}"        # gap-free extension threshold
 LASTZ_H="${LASTZ_H:-0}"           # HSP score filter (0 = disable)
 LASTZ_Y="${LASTZ_Y:-3400}"        # chain gap penalty cap
+# Target (Apis) chunk size for make_lastz_chains. The make_lastz_chains default
+# is 175 Mb — i.e. the WHOLE Apis genome goes into a single lastz job; combined
+# with sensitive K that produces 100M+ HSPs and overflows lastz's 32-bit segment
+# table. Smaller chunks bound each job's segment count (belt-and-suspenders on
+# top of the soft-masking fix below) and parallelize better. Override via env.
+LASTZ_SEQ1_CHUNK="${LASTZ_SEQ1_CHUNK:-30000000}"
 # These default to the env + paths created by scripts/benchmark/toga_setup.sh.
 # Run toga_setup.sh ONCE before this script. Override to reuse a different env.
 TOGA_ENV="${TOGA_ENV:-synvoy_toga}"
@@ -150,6 +156,81 @@ PY
     export MLC_MAX_RETRIES
     echo "  patched make_lastz_chains Nextflow wrapper:"
     echo "    memory=${MLC_JOB_MEMORY_GB} GB, time=${MLC_JOB_TIME_HOURS} h, maxRetries=${MLC_MAX_RETRIES}"
+
+    # ── soft-masking fix ──────────────────────────────────────────────────
+    # make_lastz_chains 2.0.8 (upstream PR #110 "fix/py2bit-large-genome")
+    # extracts each lastz partition with py2bit's tb.sequence(), which silently
+    # STRIPS soft-masking (returns all-uppercase; only hard-N blocks survive).
+    # The genomes ARE soft-masked (~27-42% lowercase), so lastz ends up seeding
+    # across all repeats -> ~100M HSPs -> overflow of lastz's 32-bit segment
+    # table ("table size ... exceeds allocation limit of 4,294,967,279") at the
+    # sensitive K we need for Apis-vs-ant (~155 My) homology. twoBitToFa
+    # preserves lowercase soft-masking by default AND reads v1/-long 2bits, so
+    # it keeps PR #110's large-genome support. Patch the extractor in place.
+    local run_lastz_py
+    run_lastz_py="$(dirname "${MAKE_CHAINS_PY}")/standalone_scripts/run_lastz.py"
+    if [[ ! -f "${run_lastz_py}" ]]; then
+        echo "  ERROR: run_lastz.py not found at ${run_lastz_py}" >&2
+        return 1
+    fi
+    python3 - "${run_lastz_py}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+if "SYNVOY_MASK_FIX" in text:
+    sys.exit(0)  # idempotent: already patched
+
+new_func = '''def extract_twobit_partition(two_bit_path, chrom, start, end, tmp_dir):
+    """Extract one partition from a .2bit to temp FASTA via twoBitToFa.
+
+    SYNVOY_MASK_FIX: upstream PR #110 switched this to py2bit, whose
+    .sequence() silently drops soft-masking (returns uppercase). Unmasked
+    input makes lastz seed across repeats and overflow its 32-bit segment
+    table at sensitive K. twoBitToFa preserves lowercase soft-masking and
+    still reads v1/-long 2bits, so PR #110's large-genome support is kept.
+    0-based half-open coords match the partition strings.
+    """
+    import subprocess as _subprocess
+    fasta_path = os.path.join(tmp_dir, f"{_gen_random_string(8)}_partition.fa")
+    raw_path = os.path.join(tmp_dir, f"{_gen_random_string(8)}_raw.fa")
+    _subprocess.run(
+        ["twoBitToFa", f"-seq={chrom}", f"-start={start}", f"-end={end}",
+         two_bit_path, raw_path],
+        check=True,
+    )
+    # twoBitToFa emits ">chrom:start-end"; rewrite to bare ">chrom" so the
+    # sequence name matches what the rest of the pipeline expects.
+    with open(raw_path) as _fin, open(fasta_path, "w") as _fout:
+        for _i, _line in enumerate(_fin):
+            if _i == 0:
+                print(">" + chrom, file=_fout)  # bare name (twoBitToFa wrote ">chrom:start-end")
+            else:
+                _fout.write(_line)
+    os.remove(raw_path)
+    return fasta_path
+'''
+
+text, n = re.subn(
+    r"def extract_twobit_partition\(.*?\n    return fasta_path\n",
+    new_func,
+    text,
+    count=1,
+    flags=re.DOTALL,
+)
+if n != 1:
+    sys.stderr.write("ERROR: could not locate extract_twobit_partition to patch\n")
+    sys.exit(2)
+path.write_text(text)
+PY
+    local mask_rc=$?
+    if (( mask_rc != 0 )); then
+        echo "  ERROR: run_lastz.py soft-masking patch failed (rc=${mask_rc})" >&2
+        return 1
+    fi
+    echo "  patched run_lastz.py: twoBitToFa partition extraction (preserves soft-masking)"
 }
 
 # ── stage 1: verify env exists (created separately by toga_setup.sh) ─────
@@ -333,6 +414,7 @@ run_target() {
                 --lastz_l "${LASTZ_L}" \
                 --lastz_h "${LASTZ_H}" \
                 --lastz_y "${LASTZ_Y}" \
+                --seq1_chunk "${LASTZ_SEQ1_CHUNK}" \
                 --force \
             > "${WORK}/logs/${sp}_chain.log" 2>&1 \
             || { echo "    chain generation FAILED — see ${WORK}/logs/${sp}_chain.log"; return 1; }
