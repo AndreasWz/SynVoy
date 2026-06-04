@@ -11,6 +11,7 @@ process RESOLVE_GENE_INPUT {
     path "resolved_query/*.fasta", emit: fasta
     path "resolved_query/resolved_input.json", emit: metadata
     path "resolved_query/resolved_species.txt", emit: species
+    path "resolved_query/resolved_gene_symbol.txt", emit: gene_symbol  // §1n
     
     script:
     def inline_flag = inline_input ? "true" : "false"

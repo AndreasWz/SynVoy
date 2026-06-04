@@ -65,6 +65,19 @@ class TestStagingPrefixParsing(unittest.TestCase):
         self.assertEqual(canonical_genome_id("7__home.fasta.gff"),
                          canonical_genome_id("home.fasta.gff"))
 
+    def test_canonical_genome_id_collapses_rescue_passes(self):
+        # §1m/§17 hull rescue and §1e strong-synteny rescue emit
+        # "<genome>.hull_rescue.gff" / "<genome>.rescue.gff". These MUST collapse to
+        # the real genome so the rescue model is deduped + owned alongside the main
+        # calls — otherwise a redundant paralog rescue leaks as a phantom genome and
+        # escapes ownership demotion (the dcn_18 mouse.hull_rescue biglycan leak).
+        self.assertEqual(canonical_genome_id("mouse.hull_rescue.gff"), "mouse")
+        self.assertEqual(canonical_genome_id("mouse.hull_rescue.gff"),
+                         canonical_genome_id("mouse.fna.gff"))
+        self.assertEqual(canonical_genome_id("zebrafish.fna.rescue.gff"), "zebrafish")
+        self.assertEqual(canonical_genome_id("cow.hull_rescue.gff"),
+                         canonical_genome_id("cow.fna"))
+
     def test_staging_source_label(self):
         self.assertEqual(staging_source_label("locus_12__GCA_1.1.fna.gff"), "locus_12")
         self.assertEqual(staging_source_label("3__GCA_1.1.fna.gff"), "3")

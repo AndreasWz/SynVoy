@@ -96,11 +96,22 @@ nextflow run main.nf \
 
 ## 2. Execution Profiles
 
-Append a profile with `-profile <name>` to control how resources are allocated. **Profiles are combinable** as long as you don't pick two from the same axis — pick **one execution profile** (`standard` / `docker` / `singularity` / `slurm` / …), optionally **one memory tier** (`laptop_safe` / `low_mem`), and optionally **one biology preset** (`preset_single_copy` / `preset_short_peptide` / …). Example:
+Append a profile with `-profile <name>` to control how resources are allocated. **Profiles are combinable** as long as you don't pick two from the same axis — pick **one execution profile** (`auto` / `standard` / `docker` / `singularity` / `slurm` / …), optionally **one memory tier** (`laptop_safe` / `low_mem`), and optionally **one biology preset** (`preset_single_copy` / `preset_short_peptide` / …). Example:
 
 ```bash
 -profile standard,low_mem,preset_single_copy
 ```
+
+> **Not sure how to tune your run? Use `-profile auto`.** It runs locally
+> through the conda env like `standard`, and guarantees the full auto-tuning
+> stack is on: the query preset is auto-picked from the hit distribution (§1f),
+> the home-locus count is capped (§1d), strong-synteny rescue and the
+> reciprocal-best paralog check run (§1e/§1j). It's the recommended starting
+> point when you don't already know whether your query is short / divergent /
+> single-copy / paralog-rich. On a small machine, add a memory tier:
+> `-profile auto,low_mem`. (Docker / Singularity / HPC users already get this
+> behaviour for free — the stack is on by default — so keep using your
+> execution profile.)
 
 Don't combine two execution backends (e.g. `docker,singularity`) or two memory tiers — later values silently override earlier ones, which is usually not what you want.
 
@@ -108,6 +119,7 @@ Don't combine two execution backends (e.g. `docker,singularity`) or two memory t
 
 | Profile | Executor | Environment | Description |
 |---|---|---|---|
+| `auto` | local | Conda | **Recommended zero-config default.** Like `standard`, plus it pins the full auto-tuning stack on (auto preset selection, locus cap, strong-synteny rescue, paralog check). Best when you don't want to hand-pick a preset. Does *not* enable the LLM advisor (`--auto_params true` is still opt-in). |
 | `standard` | local | Conda | Default. 2 CPUs / 10 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
 | `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
