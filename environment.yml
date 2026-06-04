@@ -2,7 +2,11 @@ name: synvoy_env
 channels:
   - conda-forge
   - bioconda
-  - defaults
+  # 'defaults' deliberately omitted: since 2024 Anaconda's defaults channel
+  # requires ToS acceptance and aborts non-interactive `conda env create` with
+  # CondaToSNonInteractiveError. All deps below resolve from conda-forge +
+  # bioconda. 'nodefaults' also blocks a user's global .condarc from re-adding it.
+  - nodefaults
 dependencies:
   # Core
   # Python 3.13 removed stdlib cgi, which ete3 still imports.

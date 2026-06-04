@@ -5,6 +5,7 @@ nextflow.enable.dsl=2
 // Import Modules
 include { LOCATE_GENE } from './modules/locate_gene.nf'
 include { SPLIT_LOCI } from './modules/split_loci.nf'
+include { RESOLVE_HOME_LOCUS } from './modules/resolve_home_locus.nf'  // §1n
 include { EXTRACT_FLANKING } from './modules/extract_flanking.nf'
 include { PREPARE_INITIAL_DB } from './modules/prepare_initial_db.nf'
 include { ITERATIVE_SEARCH } from './modules/iterative_search.nf'
@@ -31,7 +32,9 @@ include { STAGE_REGION_FOR_REPORT as STAGE_REGION_FAA       } from './modules/st
 include { STAGE_REGION_FOR_REPORT as STAGE_REGION_HOMOLOGY  } from './modules/stage_for_report.nf'
 include { STAGE_REGION_FOR_REPORT as STAGE_REGION_SCORES    } from './modules/stage_for_report.nf'
 include { RESCUE_STRONG_SYNTENY } from './modules/rescue_strong_synteny.nf'
+include { RESCUE_GOI_HULL } from './modules/rescue_goi_hull.nf'  // §1m fumble fix
 include { RECIPROCAL_BEST_PARALOG } from './modules/reciprocal_best_paralog.nf'
+include { BUILD_HOME_PARALOG_PANEL; ASSIGN_LOCUS_OWNERSHIP } from './modules/assign_locus_ownership.nf'
 include { RESOLVE_EFFECTIVE_PARAMS } from './modules/resolve_effective_params.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
@@ -550,6 +553,11 @@ workflow {
         
         // Get resolved species (auto-detected from ID, or user-provided)
         resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { species_file -> species_file.text.trim() }
+
+        // §1n: GOI gene symbol — user override wins, else the resolved UniProt symbol.
+        gene_symbol_ch = params.home_goi_gene \
+            ? channel.value(params.home_goi_gene.toString()) \
+            : RESOLVE_GENE_INPUT.out.gene_symbol.map { f -> f.text.trim() }.first()
         
         // Determine home species: user-provided takes priority, else auto-detected
         home_species_ch = resolved_species_ch.map { resolved ->
@@ -591,9 +599,12 @@ workflow {
         
     } else {
         // --- Pro mode: User provides files directly ---
-        
+
         // 1. Query Setup
         raw_gene_ch = channel.fromPath(params.query)
+
+        // §1n: no UniProt lookup in Pro mode — symbol comes only from --home_goi_gene.
+        gene_symbol_ch = channel.value((params.home_goi_gene ?: '').toString())
         
         // 2. Home Genome Setup
         home_genome_ch = channel.fromPath(params.home_genome)
@@ -830,9 +841,6 @@ workflow {
         "${c.green}[OK  ]${c.reset} ${c.white}${'SPLIT_LOCI'.padRight(24)}${c.reset} identified ${count} locus/loci"
     }
     
-    distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
-        .map { file -> tuple(file.baseName, file) }
-    
     // Prepare effective home GFF (borrowed annotations + predictions) when targets exist
     def has_targets = params.target_genomes || params.mode == 'easy'
     if (has_targets) {
@@ -882,6 +890,42 @@ workflow {
             .first()
     } else {
         effective_home_gff_ch = home_gff_ch
+    }
+
+    // 5b. §1n — two-path home-locus establishment.
+    // When enabled and the GOI is a named gene in the home GFF, RESOLVE_HOME_LOCUS
+    // emits a single annotated locus BED (with a query↔gene consistency check) and we
+    // feed ONLY that to EXTRACT_FLANKING — bypassing split_loci's noisy fan-out (which
+    // for gene families keeps paralog loci and anchors the search on the wrong
+    // neighbourhood). On any miss it emits an empty BED and we fall back to split_loci.
+    // LOCATE_GENE/SPLIT_LOCI still run (they feed ANNOTATE_GOI/PREPARE_HOME_PROTEOME and
+    // the fallback), but the expensive per-locus ITERATIVE_SEARCH only sees the 1 locus.
+    def use_name_locus = paramBool(params.enable_name_locus) ||
+        (params.home_goi_gene && params.home_goi_gene.toString().trim())
+    if (use_name_locus) {
+        RESOLVE_HOME_LOCUS(
+            normalized_gene_ready_ch.first(),
+            gene_symbol_ch,
+            effective_home_gff_ch,
+            home_genome_ch.first()
+        )
+        distinct_loci_ch = RESOLVE_HOME_LOCUS.out.bed
+            .combine( SPLIT_LOCI.out.beds.flatten().collect().ifEmpty([]) )
+            .flatMap { items ->
+                def name_bed = items[0]
+                def split_list = (items.size() > 1 && items[1] instanceof List) ? items[1]
+                    : (items.size() > 1 ? items[1..-1] : [])
+                if (name_bed.size() > 0) {
+                    log.info "${c.green}[§1n]${c.reset} name-lookup home locus matched — searching 1 annotated locus, bypassing split_loci (${split_list.size()} alignment-locate loci suppressed)"
+                    return [ name_bed ]
+                }
+                log.info "${c.yellow}[§1n]${c.reset} name-lookup did not anchor a locus (no symbol / not in GFF / failed consistency) — falling back to ${split_list.size()} alignment-locate loci"
+                return split_list
+            }
+            .map { file -> tuple(file.baseName, file) }
+    } else {
+        distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
+            .map { file -> tuple(file.baseName, file) }
     }
 
     // 6. Extract Flanking Genes
@@ -942,12 +986,15 @@ workflow {
         ASSESS_GENOME_QUALITY.out.json.view { qc_json ->
             try {
                 def qc = new groovy.json.JsonSlurper().parse(qc_json)
-                def pass_count = qc.count { genome_qc -> genome_qc.qc_status == 'PASS' }
-                def fail_count = qc.count { genome_qc -> genome_qc.qc_status == 'FAIL' }
+                // The QC summary JSON (assess_quality.nf / filter_sorted_genomes.py)
+                // names the field "status", not "qc_status" — reading the wrong key
+                // made every run print a misleading "0/N passed".
+                def pass_count = qc.count { genome_qc -> genome_qc.status == 'PASS' }
+                def fail_count = qc.count { genome_qc -> genome_qc.status == 'FAIL' }
                 def total = qc.size()
                 def msg = "QC complete: ${pass_count}/${total} passed"
                 if (fail_count > 0) {
-                    def failed_names = qc.findAll { genome_qc -> genome_qc.qc_status == 'FAIL' }.collect { genome_qc -> genome_qc.genome_id ?: genome_qc.genome ?: 'unknown' }.take(3).join(', ')
+                    def failed_names = qc.findAll { genome_qc -> genome_qc.status == 'FAIL' }.collect { genome_qc -> genome_qc.genome_id ?: genome_qc.genome ?: 'unknown' }.take(3).join(', ')
                     def suffix = fail_count > 3 ? " (+${fail_count - 3} more)" : ""
                     msg += ", ${fail_count} failed [${failed_names}${suffix}]"
                     if (params.qc_fail_policy == 'drop') msg += " (will be dropped)"
@@ -1238,9 +1285,33 @@ workflow {
             rescue_query_ch   // same home query as the rescue pass — multi-FASTA = paralog panel
         )
 
+        // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
+        // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
+        // STAGE_REGION_GFF like the strong-synteny rescue.
+        RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir_ch.first(), rescue_query_ch)
+
+        // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
+        // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target
+        // against it so the report can re-attribute orthologs filed under the wrong
+        // home locus (decorin recovered by the chr9 OMD locus belongs to the chr12
+        // DCN locus) and relabel paralogs carried under the GOI name (asporin at
+        // 49.5% labelled GOI_DCN). No-op when --disable_locus_ownership.
+        BUILD_HOME_PARALOG_PANEL(
+            effective_home_gff_ch,
+            PREPARE_HOME_PROTEOME.out.faa,
+            SPLIT_LOCI.out.beds.flatten().collect(),
+            normalized_gene_ready_ch.first()
+        )
+
+        ASSIGN_LOCUS_OWNERSHIP(
+            paralog_inputs_ch,
+            BUILD_HOME_PARALOG_PANEL.out.faa.first()  // value channel: broadcast panel to every genome (see module)
+        )
+
         STAGE_REGION_GFF(
             ITERATIVE_SEARCH.out.gff.transpose()
                 .mix(RESCUE_STRONG_SYNTENY.out.gff)
+                .mix(RESCUE_GOI_HULL.out.gff)
         )
         STAGE_REGION_GFF.out
             .ifEmpty(no_gffs_sentinel)
@@ -1287,10 +1358,19 @@ workflow {
             .ifEmpty(no_paralog_sentinel)
             .collect()
             .set { collected_paralog_check }
-            
+
+        // §1m locus-ownership TSVs (one per (locus, genome)) + the panel meta sidecar.
+        def no_ownership_sentinel = file("${projectDir}/assets/sentinels/NO_LOCUS_OWNERSHIP")
+        ASSIGN_LOCUS_OWNERSHIP.out.tsv
+            .map { rec -> rec[1] }
+            .ifEmpty(no_ownership_sentinel)
+            .collect()
+            .set { collected_locus_ownership }
+        collected_panel_meta = BUILD_HOME_PARALOG_PANEL.out.meta.ifEmpty(no_ownership_sentinel)
+
         // No standalone augmented proteins - pass sentinel file
         collected_augmented = channel.value(no_augmented_sentinel)
-        
+
         GENERATE_REPORT(
             collected_regions,
             collected_region_gffs,
@@ -1301,7 +1381,9 @@ workflow {
             collected_scores,
             collected_paralog_check,
             params.paralog_confusion_min_gap,
-            params.qc_fail_policy
+            params.qc_fail_policy,
+            collected_locus_ownership,
+            collected_panel_meta
         )
         
         GENERATE_REPORT.out.report.view { report ->

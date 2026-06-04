@@ -21,6 +21,12 @@ KNOWN_SUFFIXES = [
     ".faa",
     ".fna",
     ".m8",
+    # Rescue-pass GFFs (§1e strong-synteny, §1m/§17 hull) are named
+    # "<genome>.rescue.gff" / "<genome>.hull_rescue.gff". Strip the infix so they
+    # collapse to the real genome and are deduped/owned alongside the main calls —
+    # otherwise a redundant rescue model leaks as a phantom genome "<genome>.hull_rescue".
+    ".hull_rescue",
+    ".rescue",
 ]
 
 
@@ -608,9 +614,11 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
     }
 
 
-def load_paralog_check_rows(paralog_check_dir):
-    """Read every ``<genome>.paralog_check.tsv`` produced by RECIPROCAL_BEST_PARALOG
-    (docs/TODO.md §1j Phase B).
+def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
+    """Read every ``<genome><suffix>`` TSV produced by RECIPROCAL_BEST_PARALOG
+    (docs/TODO.md §1j Phase B) — also reused for the §1m locus-ownership TSVs,
+    which share the same column layout but carry ``locus_<id>|<gene>`` panel
+    labels in ``best_paralog`` (pass ``suffix='.locus_ownership.tsv'``).
 
     Returns a list of dicts keyed by the TSV header. Skips header-only files (the
     rescue/single-paralog no-op case) and silently tolerates missing dirs."""
@@ -619,7 +627,7 @@ def load_paralog_check_rows(paralog_check_dir):
         return rows
     with os.scandir(paralog_check_dir) as it:
         for entry in it:
-            if not entry.is_file() or not entry.name.endswith(".paralog_check.tsv"):
+            if not entry.is_file() or not entry.name.endswith(suffix):
                 continue
             try:
                 with open(entry.path) as fh:
@@ -704,11 +712,211 @@ def build_paralog_confusion_flags(paralog_rows, min_gap):
     return flags, per_call_summary, modal_per_locus
 
 
+def load_panel_meta(panel_meta_path):
+    """Read ``home_paralog_panel.faa.meta.tsv`` (build_home_paralog_panel.py, §1m).
+
+    Returns {panel_id: {locus, gene, chrom, start, end, is_goi}} so the report can
+    map an ownership row's ``best_paralog`` (a ``locus_<id>|<gene>`` panel label)
+    back to its home locus / gene / GOI-ness. Tolerates a missing file (ownership
+    becomes label-only / advisory)."""
+    meta = {}
+    if not panel_meta_path or not os.path.isfile(panel_meta_path):
+        return meta
+    try:
+        with open(panel_meta_path) as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                pid = row.get("panel_id")
+                if not pid:
+                    continue
+                meta[pid] = {
+                    "locus": row.get("locus_id", ""),
+                    "gene": row.get("gene", ""),
+                    "chrom": row.get("chrom", ""),
+                    "is_goi": _is_true(row.get("is_goi_gene")),
+                }
+    except OSError:
+        pass
+    return meta
+
+
+def _panel_locus(panel_label):
+    """``locus_4|gene-OMD`` -> ``locus_4``. Gene names may contain '-' but never
+    '|', so splitting on the first pipe is safe."""
+    return panel_label.split("|", 1)[0] if "|" in panel_label else panel_label
+
+
+def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_locus,
+                          *, tiebreak_gap=15.0):
+    """Re-attribute each deduped GOI ortholog to the home locus it *truly* belongs
+    to (docs/TODO.md §1m), using reciprocal-best alignment against the home-paralog
+    panel (the RBH leg) with a flanking-synteny tiebreak when the panel scores are
+    near-tied.
+
+    Why: home loci search independently, and cross-paralog flanking can anchor a
+    block over the wrong gene — so the chr9 osteomodulin locus modelled real decorin
+    on cow BTA5 while the chr12 decorin locus produced nothing there. §1h dedup keeps
+    the best copy but attributes it to whichever locus *recovered* it (osteomodulin),
+    and a true paralog (asporin) can keep the GOI label. This pass fixes both:
+
+      * ``owning_locus`` — the panel locus the recovered protein aligns best to.
+      * ``locus_reattributed`` flag — owning_locus differs from the recovered-from
+        provenance. When owning_locus is *absent* from provenance entirely and the
+        owner is the GOI's own gene, that's the §1m "owner search fumble" (the true
+        home locus failed to model its own gene).
+      * ``paralog_misassignment`` flag + ``inferred_paralog`` — the call aligns best
+        to a non-GOI home paralog (asporin, not decorin); relabel before it's read
+        as an ortholog of the GOI.
+
+    Mutates the records in ``goi_dedup['records']`` in place (adds owning_* keys) and
+    returns (flags, summary)."""
+    records = goi_dedup.get("records", [])
+    if not records or not ownership_rows:
+        return [], {"n_reattributed": 0, "n_paralog_misassignment": 0,
+                    "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0}
+
+    # Index ownership rows by genome+chrom for coordinate matching.
+    rows_by_gc = defaultdict(list)
+    for r in ownership_rows:
+        rows_by_gc[(r["genome"], r["chrom"])].append(r)
+
+    flags = []
+    n_reattributed = n_paralog = n_fumble = n_tiebreak = n_eval = 0
+
+    for rec in records:
+        cands = rows_by_gc.get((rec["genome"], rec["chrom"]), [])
+        if not cands:
+            continue
+        # Best-aligning ownership row overlapping this rep's span (multiple home loci
+        # may have recovered the same gene; take the highest-scoring model).
+        scored = []
+        for r in cands:
+            ov = _reciprocal_overlap(rec, {"start": r["start_i"], "end": r["end_i"]})
+            if ov > 0.5:
+                scored.append((r["best_bit_f"], ov, r))
+        if not scored:
+            continue
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        row = scored[0][2]
+        n_eval += 1
+
+        best_label = row["best_paralog"]
+        second_label = row.get("second_paralog", "")
+        gap = row["gap_f"]
+        owning_locus = _panel_locus(best_label)
+        owning_gene = best_label.split("|", 1)[1] if "|" in best_label else best_label
+        owning_is_goi = panel_meta.get(best_label, {}).get("is_goi", False)
+
+        # --- Synteny tiebreak: when the top-2 panel genes are near-tied, defer to
+        # which candidate locus's HIGH flanking neighbourhood is present on this
+        # target chromosome (true local synteny beats a coin-flip alignment gap).
+        tiebroken = False
+        if second_label and gap < tiebreak_gap:
+            second_locus = _panel_locus(second_label)
+            if second_locus != owning_locus:
+                f_best = flanking_per_locus.get((rec["genome"], owning_locus, rec["chrom"]), 0)
+                f_second = flanking_per_locus.get((rec["genome"], second_locus, rec["chrom"]), 0)
+                if f_second > f_best:
+                    owning_locus = second_locus
+                    owning_gene = second_label.split("|", 1)[1] if "|" in second_label else second_label
+                    owning_is_goi = panel_meta.get(second_label, {}).get("is_goi", False)
+                    tiebroken = True
+                    n_tiebreak += 1
+
+        provenance = rec.get("provenance", [])
+        # Re-attribution only makes sense when the owning gene IS the GOI (moving a true
+        # GOI ortholog to its correct home locus). When the best match is a home PARALOG
+        # (owning_is_goi=False — e.g. a homology-family entry like home_gene-BGN), that's a
+        # paralog_misassignment, not a reattribution to a searched locus.
+        reattributed = owning_is_goi and (owning_locus not in provenance or (
+            len(provenance) > 1 and provenance[0] != owning_locus
+        ))
+        owner_absent = owning_locus not in provenance
+
+        rec["owning_locus"] = owning_locus
+        rec["owning_gene"] = owning_gene
+        rec["owning_is_goi_gene"] = owning_is_goi
+        rec["ownership_bit"] = round(row["best_bit_f"], 1)
+        rec["ownership_gap"] = round(gap, 1)
+        rec["ownership_tiebroken"] = tiebroken
+        rec["locus_reattributed"] = reattributed
+        if not owning_is_goi:
+            rec["inferred_paralog"] = owning_gene
+            # Don't destroy the original; mark the family-member reassignment.
+            rec["goi_class"] = "paralog_not_goi"
+
+        if reattributed:
+            n_reattributed += 1
+            flags.append({
+                "type": "locus_reattributed",
+                "genome": rec["genome"],
+                "chrom": rec["chrom"],
+                "start": rec["start"],
+                "end": rec["end"],
+                "recovered_from": provenance,
+                "owning_locus": owning_locus,
+                "owning_gene": owning_gene,
+                "ownership_bit": round(row["best_bit_f"], 1),
+                "ownership_gap": round(gap, 1),
+                "tiebroken_by_synteny": tiebroken,
+                "advice": (
+                    f"Ortholog recovered from {provenance or '[]'} but aligns best to "
+                    f"'{best_label}' — re-attributed to {owning_locus}."
+                ),
+            })
+        if owner_absent and owning_is_goi:
+            n_fumble += 1
+            flags.append({
+                "type": "goi_owner_search_fumble",
+                "genome": rec["genome"],
+                "chrom": rec["chrom"],
+                "start": rec["start"],
+                "end": rec["end"],
+                "owning_locus": owning_locus,
+                "owning_gene": owning_gene,
+                "recovered_from": provenance,
+                "advice": (
+                    f"The GOI's own home locus ({owning_locus}/{owning_gene}) did NOT "
+                    f"recover this ortholog — it was only found via {provenance}. The "
+                    "true locus's flanking is likely rearranged in this genome so no "
+                    "GOI-search block formed there (docs/TODO.md §1m search-core fix)."
+                ),
+            })
+        if not owning_is_goi:
+            n_paralog += 1
+            flags.append({
+                "type": "paralog_misassignment",
+                "genome": rec["genome"],
+                "chrom": rec["chrom"],
+                "start": rec["start"],
+                "end": rec["end"],
+                "labeled_as": "GOI",
+                "inferred_paralog": owning_gene,
+                "owning_locus": owning_locus,
+                "ownership_bit": round(row["best_bit_f"], 1),
+                "ownership_gap": round(gap, 1),
+                "advice": (
+                    f"Call labeled as the GOI aligns best to home paralog '{owning_gene}' "
+                    f"(bit={row['best_bit_f']:.1f}, gap={gap:.1f}) — it is most likely an "
+                    f"ortholog of {owning_gene}, not the GOI. Relabeled goi_class=paralog_not_goi."
+                ),
+            })
+
+    summary = {
+        "evaluated": n_eval,
+        "n_reattributed": n_reattributed,
+        "n_paralog_misassignment": n_paralog,
+        "n_owner_search_fumble": n_fumble,
+        "n_tiebreak_applied": n_tiebreak,
+    }
+    return flags, summary
+
+
 def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                            *, strong_flanking_min=20,
                            paralog_flags=None, paralog_per_call=None,
                            paralog_modal_per_locus=None,
-                           paralog_min_gap=5.0):
+                           paralog_min_gap=5.0,
+                           ownership_flags=None, ownership_summary=None):
     """End-of-run sanity checks (docs/TODO.md §1j).
 
     Currently emits two flag types:
@@ -780,12 +988,22 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     paralog_modal_per_locus = paralog_modal_per_locus or {}
     flags.extend(paralog_flags)
 
+    # §1m locus-ownership flags (locus_reattributed / goi_owner_search_fumble /
+    # paralog_misassignment) computed in build_locus_ownership and threaded through.
+    ownership_flags = ownership_flags or []
+    ownership_summary = ownership_summary or {}
+    flags.extend(ownership_flags)
+
     checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate"]
     deferred_checks = []
     if paralog_per_call:
         checks_performed.append("paralog_confusion")
     else:
         deferred_checks.append("paralog_confusion")
+    if ownership_summary.get("evaluated"):
+        checks_performed.append("locus_ownership")
+    else:
+        deferred_checks.append("locus_ownership")
 
     return {
         "checks_performed": checks_performed,
@@ -802,16 +1020,21 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
             {"genome": g, "locus": l, "paralog": p}
             for (g, l), p in sorted(paralog_modal_per_locus.items())
         ],
+        "locus_ownership_summary": ownership_summary,
         "summary": {
             "n_strong_synteny_no_goi": sum(1 for f in flags if f["type"] == "strong_synteny_no_goi"),
             "n_cross_locus_duplicates": sum(1 for f in flags if f["type"] == "cross_locus_duplicate"),
             "n_paralog_confusion": sum(1 for f in flags if f["type"] == "paralog_confusion"),
+            "n_locus_reattributed": sum(1 for f in flags if f["type"] == "locus_reattributed"),
+            "n_goi_owner_search_fumble": sum(1 for f in flags if f["type"] == "goi_owner_search_fumble"),
+            "n_paralog_misassignment": sum(1 for f in flags if f["type"] == "paralog_misassignment"),
             "total_flags": len(flags),
         },
     }
 
 
-def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0):
+def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
+                 locus_ownership_tiebreak_gap=10.0):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -898,15 +1121,46 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         paralog_check_rows, min_gap=paralog_confusion_min_gap,
     )
 
+    # §1m locus ownership: reciprocal-best of each deduped GOI ortholog against the
+    # home-paralog panel (built by build_home_paralog_panel.py, RBH run by
+    # ASSIGN_LOCUS_OWNERSHIP and staged under locus_ownership/). Re-attributes
+    # orthologs the §1h dedup filed under the wrong home locus and relabels paralogs
+    # carried under the GOI name. Mutates goi_dedup records in place.
+    ownership_rows = load_paralog_check_rows(
+        os.path.join(results_dir, "locus_ownership"),
+        suffix=".locus_ownership.tsv",
+    )
+    panel_meta = load_panel_meta(
+        os.path.join(results_dir, "locus_ownership", "home_paralog_panel.faa.meta.tsv")
+    )
+    ownership_flags, ownership_summary = build_locus_ownership(
+        goi_dedup, ownership_rows, panel_meta, flanking_per_locus,
+        tiebreak_gap=locus_ownership_tiebreak_gap,
+    )
+
+    # §1m: ownership may relabel a call goi_class=paralog_not_goi (its best home match is a
+    # paralog, not the GOI — e.g. a 55% biglycan hit mislabeled GOI_DCN). Such a call is NOT
+    # a GOI ortholog, so drop it from the headline HIGH/MEDIUM counts. It stays in
+    # goi_dedup["records"] with its flag for transparency; the pre-ownership counts are kept
+    # as *_pre_ownership. This is what makes the RBH check actually demote the false positive.
+    dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
+    _own_recs = goi_dedup.get("records", [])
+    dedup_high = sum(1 for r in _own_recs
+                     if r.get("confidence") == "HIGH" and r.get("goi_class") != "paralog_not_goi")
+    dedup_medium = sum(1 for r in _own_recs
+                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") != "paralog_not_goi")
+
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
-    # cross-locus duplicate visibility + paralog confusion. The flanking-only-block
-    # surfacing is the §1e piece that already lives in cluster_grs.py.
+    # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
+    # The flanking-only-block surfacing is the §1e piece that lives in cluster_grs.py.
     self_consistency = build_self_consistency(
         goi_annotations, goi_dedup, flanking_per_locus,
         paralog_flags=paralog_flags,
         paralog_per_call=paralog_per_call,
         paralog_modal_per_locus=paralog_modal,
         paralog_min_gap=paralog_confusion_min_gap,
+        ownership_flags=ownership_flags,
+        ownership_summary=ownership_summary,
     )
 
     report = {
@@ -935,11 +1189,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "medium_confidence_goi": dedup_medium,
             "high_confidence_goi_pre_dedup": goi_high,
             "medium_confidence_goi_pre_dedup": goi_medium,
+            # Pre-ownership = before §1m relabeled paralog_not_goi calls out of the headline.
+            "high_confidence_goi_pre_ownership": dedup_high_pre_ownership,
+            "medium_confidence_goi_pre_ownership": dedup_medium_pre_ownership,
             "cross_locus_duplicate_goi": goi_dedup["cross_locus_duplicates"],
             "goi_hits_collapsed_by_dedup": goi_dedup["hits_collapsed_by_dedup"],
             "self_consistency_flag_count": self_consistency["summary"]["total_flags"],
             "strong_synteny_no_goi_flags": self_consistency["summary"]["n_strong_synteny_no_goi"],
             "paralog_confusion_flags": self_consistency["summary"]["n_paralog_confusion"],
+            "locus_reattributed_orthologs": self_consistency["summary"]["n_locus_reattributed"],
+            "goi_owner_search_fumbles": self_consistency["summary"]["n_goi_owner_search_fumble"],
+            "paralog_misassignments": self_consistency["summary"]["n_paralog_misassignment"],
             "low_confidence_goi": goi_low,
             "confident_goi_annotations": confident_goi,
             "resolved_goi_annotations": resolved_goi,
@@ -998,6 +1258,11 @@ def main():
         help="Bitscore gap required to flag a paralog_confusion (docs/TODO.md §1j Phase B)",
     )
     parser.add_argument(
+        "--locus_ownership_tiebreak_gap", type=float, default=15.0,
+        help="Panel bitscore gap below which locus ownership defers to the "
+             "flanking-synteny tiebreak (docs/TODO.md §1m)",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -1009,6 +1274,7 @@ def main():
         qc_json=args.qc_json,
         qc_policy=args.qc_policy,
         paralog_confusion_min_gap=args.paralog_confusion_min_gap,
+        locus_ownership_tiebreak_gap=args.locus_ownership_tiebreak_gap,
     )
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)

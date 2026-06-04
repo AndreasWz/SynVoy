@@ -113,6 +113,15 @@ def fetch_uniprot(uniprot_id, output_dir):
         sub_names = protein_desc.get('submissionNames', [])
         if sub_names:
             protein_name = sub_names[0].get('fullName', {}).get('value', '')
+
+    # Extract gene symbol (e.g. DCN) — §1n uses it to look the GOI up directly in the
+    # home GFF and bypass the noisy alignment-locate/split_loci fan-out.
+    gene_symbol = ''
+    for gene in data.get('genes', []):
+        gn = gene.get('geneName', {})
+        if isinstance(gn, dict) and gn.get('value'):
+            gene_symbol = gn['value']
+            break
     
     # Fetch FASTA
     fasta_url = f"{base_url}/{uniprot_id}.fasta"
@@ -158,11 +167,15 @@ def fetch_uniprot(uniprot_id, output_dir):
     print(f"  TaxID:   {taxid}")
     print(f"  FASTA:   {fasta_path}")
     
+    if gene_symbol:
+        print(f"  Gene:    {gene_symbol}")
+
     return {
         'fasta_path': str(fasta_path),
         'species': species,
         'taxid': str(taxid),
         'protein_name': protein_name,
+        'gene_symbol': gene_symbol,
         'source': 'uniprot',
         'input_id': uniprot_id
     }
@@ -443,18 +456,23 @@ Examples:
     # Validate: if no species, warn (but don't fail — main.nf handles this)
     if not result['species']:
         print("WARNING: No species detected. --home_species will be required.", file=sys.stderr)
-    
+
+    # §1n: ensure a gene_symbol key always exists (FASTA/NCBI paths may not set it).
+    result.setdefault('gene_symbol', '')
+
     # Write JSON result
     output_path = Path(args.outdir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     json_path = output_path / "resolved_input.json"
     with open(json_path, 'w') as f:
         json.dump(result, f, indent=2)
-    
+
     # Also write plain-text outputs for easy Nextflow consumption
     (output_path / "resolved_species.txt").write_text(result['species'])
     (output_path / "resolved_fasta.txt").write_text(result['fasta_path'])
+    # §1n: GOI gene symbol (may be empty) for the name-lookup home-locus path.
+    (output_path / "resolved_gene_symbol.txt").write_text(result.get('gene_symbol', ''))
     
     print(f"\n{'='*60}")
     print(f"Resolved: {result['source']} → {result['species'] or '(no species)'}")

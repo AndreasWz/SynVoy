@@ -342,6 +342,101 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
 
     return merge_intervals(goi_intervals)
 
+
+_BLOCK_ID_RE = re.compile(r"_b(\d+)_")
+
+
+def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000):
+    """Reuse the SEARCH's blocks for region selection instead of re-deriving them.
+
+    iterative_search_runner tags every model ID with its search block (`_b<N>_`) and
+    writes BlockFlankingSupport on each GOI model. Grouping GOI + flanking by that block
+    id gives, per block: the full neighbourhood span (already reflecting §18 gap-bridging),
+    the count of HIGH flanking genes, and the best non-LOW GOI confidence/identity. A plot
+    region can then inherit its block's REAL synteny support rather than being scored on
+    just the flanking that happen to fall in one 50 kb proximity fragment — so a true
+    ortholog whose flanking are spread across a rearrangement gap (decorin: 17 flanking,
+    block bridged) outranks a paralog whose block has few flanking (biglycan: 3), on
+    synteny grounds, not identity. Returns [] for legacy GFFs without block tags (no-op).
+    """
+    if not gff_file or not os.path.exists(gff_file):
+        return []
+
+    blocks = {}
+    try:
+        with open(gff_file) as fh:
+            for line in fh:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 9 or parts[2].lower() not in (
+                    "mrna", "gene", "transcript", "tandem_copy"
+                ):
+                    continue
+                attrs = parse_gff_attrs(parts[8])
+                m = _BLOCK_ID_RE.search(attrs.get("ID", ""))
+                if not m:
+                    continue
+                role = (attrs.get("SynVoyRole") or "").strip().lower()
+                conf = (attrs.get("Confidence") or "").strip().upper()
+                try:
+                    s, e = int(parts[3]), int(parts[4])
+                except ValueError:
+                    continue
+                if e < s:
+                    s, e = e, s
+                key = (parts[0], m.group(1))
+                b = blocks.setdefault(key, {
+                    "chrom": parts[0], "bstart": s, "bend": e,
+                    "gstart": None, "gend": None, "flank_high": 0,
+                    "best_conf": "", "best_id": 0.0, "has_goi": False,
+                })
+                b["bstart"] = min(b["bstart"], s)
+                b["bend"] = max(b["bend"], e)
+                if role == "goi":
+                    if conf == "LOW":
+                        continue  # never anchor on a LOW GOI model
+                    b["has_goi"] = True
+                    b["gstart"] = s if b["gstart"] is None else min(b["gstart"], s)
+                    b["gend"] = e if b["gend"] is None else max(b["gend"], e)
+                    try:
+                        ident = float(attrs.get("Identity", 0) or 0)
+                    except ValueError:
+                        ident = 0.0
+                    if (_CONF_RANK.get(conf, 0) > _CONF_RANK.get(b["best_conf"], 0)
+                            or (conf == b["best_conf"] and ident > b["best_id"])):
+                        b["best_conf"], b["best_id"] = conf, ident
+                elif role == "flanking" and conf == "HIGH":
+                    b["flank_high"] += 1
+    except Exception as exc:
+        print(f"WARNING: Could not parse block anchors from target GFF: {exc}", file=sys.stderr)
+        return []
+
+    pad = max(0, int(padding_bp))
+    anchors = []
+    for b in blocks.values():
+        if not b["has_goi"]:
+            continue
+        anchors.append({
+            "chrom": b["chrom"],
+            "start": max(0, b["bstart"] - pad),
+            "end": b["bend"] + pad,
+            "goi_start": b["gstart"], "goi_end": b["gend"],
+            "confidence": b["best_conf"], "identity": b["best_id"],
+            "flanking_support": b["flank_high"],
+        })
+    return anchors
+
+
+def _best_block_anchor(chrom, start, end, anchors):
+    """Block anchor with the most HIGH flanking overlapping [start, end] on chrom."""
+    best = None
+    for a in anchors:
+        if a["chrom"] == chrom and end >= a["start"] and start <= a["end"]:
+            if best is None or a["flanking_support"] > best["flanking_support"]:
+                best = a
+    return best
+
 def _is_goi_query_name(query_name):
     """
     Identify GOI-derived query names in m8 hits.
@@ -758,6 +853,17 @@ def main():
     goi_intervals_gff = load_goi_intervals_from_gff(args.target_gff, padding_bp=args.goi_padding)
     goi_intervals_hits = load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding)
     goi_intervals = merge_intervals(goi_intervals_gff + goi_intervals_hits)
+
+    # Reuse the SEARCH's block structure (incl. §18 gap-bridging) for region scoring,
+    # rather than scoring each proximity fragment on its own flanking. See
+    # load_goi_block_anchors_from_gff. Empty for legacy GFFs without block tags.
+    goi_block_anchors = load_goi_block_anchors_from_gff(args.target_gff, padding_bp=args.goi_padding)
+    if goi_block_anchors:
+        print(
+            f"INFO: Loaded {len(goi_block_anchors)} GOI search-block anchor(s) "
+            f"(max HIGH-flanking={max(a['flanking_support'] for a in goi_block_anchors)}).",
+            file=sys.stderr,
+        )
     if goi_intervals_hits and not goi_intervals_gff:
         print(
             f"INFO: Derived {len(goi_intervals_hits)} GOI interval(s) from hit file (no GOI GFF intervals).",
@@ -788,22 +894,7 @@ def main():
     scored_clusters = []
     for cl in clusters:
         unique_genes, consistency, strand_cons = score_flexible_synteny(cl, gene_map)
-        
-        # Composite Score
-        if total_genes_expected > 0:
-            coverage_score = unique_genes / total_genes_expected
-        else:
-            coverage_score = 0
-        
-        # Weighted quality: each weight is a true proportion of the quality score.
-        # Uses coverage as base metric, modulated by order consistency and strand coherence.
-        quality_score = (
-            args.weight_base * coverage_score +
-            args.weight_consistency * consistency +
-            args.weight_strand * strand_cons
-        )
-        
-        final_score = quality_score * coverage_score
+
         cluster_chrom = cl[0]['chrom']
         cluster_start = min(h['start'] for h in cl)
         cluster_end = max(h['end'] for h in cl)
@@ -815,10 +906,45 @@ def main():
             },
             goi_intervals,
         )
+
+        # A GOI-overlapping cluster inherits its SEARCH block's synteny support
+        # (BlockFlankingSupport, incl. §18 gap-bridging) and neighbourhood span instead
+        # of being scored on just the flanking that landed in this 50 kb proximity
+        # fragment. Without this, a true ortholog whose flanking are split across a
+        # rearrangement gap (decorin: flanking 1-2 Mb away) scores ~0 flanking and loses
+        # to a compact paralog cluster (biglycan). Monotonic — only raises support /
+        # widens span, so single-locus benchmarks (GOI already with its flanking) are
+        # unchanged. See load_goi_block_anchors_from_gff.
+        goi_block_flanking = 0
+        goi_identity = 0.0
+        if goi_overlap and goi_block_anchors:
+            anchor = _best_block_anchor(cluster_chrom, cluster_start, cluster_end, goi_block_anchors)
+            if anchor:
+                goi_block_flanking = anchor["flanking_support"]
+                goi_identity = anchor["identity"]
+                cluster_start = min(cluster_start, anchor["start"])
+                cluster_end = max(cluster_end, anchor["end"])
+
+        # Composite Score (coverage uses the block's flanking support when richer).
+        effective_unique = max(unique_genes, goi_block_flanking)
+        if total_genes_expected > 0:
+            coverage_score = effective_unique / total_genes_expected
+        else:
+            coverage_score = 0
+
+        # Weighted quality: each weight is a true proportion of the quality score.
+        # Uses coverage as base metric, modulated by order consistency and strand coherence.
+        quality_score = (
+            args.weight_base * coverage_score +
+            args.weight_consistency * consistency +
+            args.weight_strand * strand_cons
+        )
+
+        final_score = quality_score * coverage_score
         if goi_overlap:
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
-        
+
         p_val = estimate_pvalue(
             final_score, cl, hits, genome_len, args.cluster_distance,
             score_flexible_synteny, gene_map, total_genes_expected,
@@ -838,7 +964,7 @@ def main():
 
         scored_clusters.append({
             'cluster': cl,
-            'unique': unique_genes,
+            'unique': effective_unique,
             'consistency': consistency,
             'strand_cons': strand_cons,
             'coverage_score': coverage_score,
@@ -851,10 +977,13 @@ def main():
             'goi_overlap': goi_overlap,
             'high_flanking_count': high_flanking_count,
             'strong_synteny': strong_synteny,
+            'goi_block_flanking': goi_block_flanking,
+            'goi_identity': goi_identity,
         })
 
-    # Sort: Score desc, P-value asc
-    scored_clusters.sort(key=lambda x: (-x['score'], x['p_value']))
+    # Sort: block synteny support desc (true ortholog block beats a compact paralog
+    # block), then score desc, then P-value asc.
+    scored_clusters.sort(key=lambda x: (-x.get('goi_block_flanking', 0), -x['score'], x['p_value']))
 
     # GOI-aware prioritization:
     # 1) Prefer clusters overlapping GOI intervals from iterative target GFF.
@@ -911,6 +1040,22 @@ def main():
             if args.strong_synteny_min_flanking > 0:
                 STRONG_SYNTENY_KEEP = 2
                 already = set(selected_indices)
+                # A strong-synteny "no GOI here" region that sits INSIDE an already-selected
+                # GOI region is redundant and contradictory (the GOI region covers the same
+                # neighbourhood and DOES have a model) — common now that a GOI region inherits
+                # its full §18-bridged block span. Don't surface it.
+                selected_goi_spans = [
+                    (ordered_clusters[i]["chrom"], ordered_clusters[i]["start"], ordered_clusters[i]["end"])
+                    for i in selected_indices
+                    if ordered_clusters[i].get("goi_overlap")
+                ]
+
+                def _contained_in_selected_goi(cl):
+                    for gchrom, gstart, gend in selected_goi_spans:
+                        if cl["chrom"] == gchrom and cl["start"] >= gstart and cl["end"] <= gend:
+                            return True
+                    return False
+
                 rescued = 0
                 for idx, cl in enumerate(ordered_clusters):
                     if rescued >= STRONG_SYNTENY_KEEP:
@@ -919,7 +1064,8 @@ def main():
                         continue
                     if (cl.get("strong_synteny")
                             and not cl.get("goi_overlap")
-                            and not cl.get("is_goi_anchor")):
+                            and not cl.get("is_goi_anchor")
+                            and not _contained_in_selected_goi(cl)):
                         selected_indices.append(idx)
                         rescued += 1
                 if rescued:

@@ -67,11 +67,20 @@ process ITERATIVE_SEARCH {
         --min_exon_alnlen ${params.min_exon_alnlen} \\
         --max_blocks_per_genome ${params.max_blocks_per_genome} \\
         --min_block_genes ${params.min_block_genes} \\
+        --disable_synteny_collinearity ${params.disable_synteny_collinearity} \\
+        --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
+        --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
+        --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
         --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --classify_high_min_identity ${settings.classify_high_min_identity} \\
         --classify_medium_min_identity ${settings.classify_medium_min_identity} \\
         --classify_tandem_min_identity ${settings.classify_tandem_min_identity} \\
+        --disable_distance_autotune ${params.disable_distance_autotune} \\
+        --distance_autotune_close_pct ${params.distance_autotune_close_pct} \\
+        --distance_autotune_far_pct ${params.distance_autotune_far_pct} \\
+        --distance_autotune_max_relax ${params.distance_autotune_max_relax} \\
+        --distance_autotune_min_flanking ${params.distance_autotune_min_flanking} \\
         --classify_fragment_max_qcov ${settings.classify_fragment_max_qcov} \\
         --classify_complete_min_qcov ${settings.classify_complete_min_qcov} \\
         --strict_goi_family ${settings.strict_goi_family} \\
