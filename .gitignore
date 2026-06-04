@@ -15,6 +15,10 @@ test_home_db/
 # Local data (genomes, caches, archives, queries, docs, etc.)
 local_data/
 
+# Bachelor-cohort / user run outputs (zips, plots) staged at the repo root
+BAs_output/
+local_runs/
+
 # Environment and logs
 *.log
 *.tmp

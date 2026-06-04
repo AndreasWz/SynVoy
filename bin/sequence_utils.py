@@ -790,6 +790,60 @@ def write_json(
 
 
 # =============================================================================
+# ALIGNMENT (parasail Smith-Waterman)
+# =============================================================================
+
+def sw_align(query_seq: str, subject_seq: str,
+             gap_open: int = 11, gap_extend: int = 1) -> Tuple[float, float]:
+    """Smith-Waterman align two protein sequences, returning (score, percent_identity).
+
+    The raw parasail SW score doubles as a bitscore proxy — we only ever use it to
+    *rank* subjects against each other for a fixed query (paralog RBH / locus
+    ownership), so no e-value calibration is needed. Identity is read off the
+    traceback CIGAR when parasail exposes match/mismatch ops (=/X); otherwise it
+    falls back to a score/length approximation.
+
+    parasail is imported lazily so the many bin/ scripts that import sequence_utils
+    but never align don't take a hard dependency on the bioconda parasail-python
+    package. Raises RuntimeError with an actionable message when it is missing.
+    """
+    try:
+        import parasail  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised only without parasail
+        raise RuntimeError(
+            "parasail-python is required for Smith-Waterman alignment "
+            "(install via the synvoy_env conda env: `conda install -c bioconda parasail-python`)"
+        ) from exc
+
+    if not query_seq or not subject_seq:
+        return 0.0, 0.0
+    res = parasail.sw_trace_striped_16(query_seq, subject_seq, gap_open, gap_extend,
+                                       parasail.blosum62)
+    score = float(res.score)
+    cigar = getattr(res, "cigar", None)
+    cigar_ops = getattr(cigar, "seq", None) if cigar is not None else None
+    if cigar_ops is None or len(cigar_ops) == 0:
+        return score, 0.0
+    matches = 0
+    aligned = 0
+    for op in cigar_ops:
+        length = op >> 4
+        code = op & 0xF
+        # parasail cigar ops: 0=M (match-or-mismatch), 7='=', 8='X', 1=I, 2=D
+        if code in (0, 7, 8):
+            aligned += length
+            if code == 7:
+                matches += length
+    if aligned == 0 or matches == 0:
+        # blosum alphabet didn't tag =/X — approximate identity from the SW score
+        # relative to the query length, capped at 100%.
+        ident = min(1.0, score / max(1, len(query_seq))) * 100.0
+    else:
+        ident = 100.0 * matches / aligned
+    return score, ident
+
+
+# =============================================================================
 # TESTING
 # =============================================================================
 

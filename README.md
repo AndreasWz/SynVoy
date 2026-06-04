@@ -87,6 +87,12 @@ nextflow run main.nf \
   -profile standard
 ```
 
+> **New to SynVoy / unsure how to tune it?** Swap `-profile standard` for
+> `-profile auto` — same local+conda execution, but it auto-picks the query
+> preset and turns on the full auto-tuning stack so you don't have to know
+> whether your query is short / divergent / single-copy / paralog-rich. On a
+> small machine: `-profile auto,low_mem`. See [USAGE.md § Execution Profiles](docs/USAGE.md#2-execution-profiles).
+
 Optional flags:
 
 - `--home_species "Homo sapiens"` — override auto-detected species.

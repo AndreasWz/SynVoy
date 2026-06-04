@@ -191,6 +191,116 @@ EMISSION_CONFIG: Dict[str, Any] = {
 }
 
 
+def _median_best_flanking_identity(flanking_hits: List[Dict[str, Any]]) -> Tuple[Optional[float], int]:
+    """§1g distance proxy: median of the best %identity per flanking gene.
+
+    `flanking_hits` are the non-GOI (flanking-anchor) MMseqs hits for one target
+    genome. We collapse to one value per flanking query (its strongest hit) so a
+    multi-HSP gene doesn't dominate, then take the median. High median => the
+    target is a close relative (flanking genes align well); low median => distant.
+    Returns (median_identity_or_None, n_flanking_genes).
+    """
+    by_gene: Dict[str, float] = {}
+    for h in flanking_hits:
+        q = h.get('query', '')
+        if not q:
+            continue
+        pid = float(h.get('pident', 0.0) or 0.0)
+        if q not in by_gene or pid > by_gene[q]:
+            by_gene[q] = pid
+    if not by_gene:
+        return None, 0
+    vals = sorted(by_gene.values())
+    n = len(vals)
+    median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+    return median, n
+
+
+def _apply_distance_adaptive_thresholds(
+    args, flanking_hits: List[Dict[str, Any]], genome_name: str
+) -> Dict[str, Any]:
+    """§1g: relax the GOI classify identity bars for phylogenetically distant targets.
+
+    Mutates the module-global CLASSIFY_THRESHOLDS for the current genome. This is
+    safe under the ProcessPoolExecutor model: genomes run in separate worker
+    processes (no shared mutable state across genomes), and even when a worker is
+    reused for the next genome this function re-derives both adapted keys from the
+    immutable `args` baseline first, so there is no cross-genome drift. The only
+    keys touched are high_min_identity / medium_min_identity.
+
+    By construction the 'close' tier is a pure no-op (thresholds == baseline), so
+    well-conserved targets — and therefore the close-relative calls in existing
+    benchmarks — are unaffected. Returns a per-genome decision dict (for logging).
+    """
+    base_high = float(args.classify_high_min_identity)
+    base_med = float(args.classify_medium_min_identity)
+    # Reset to baseline first (idempotent across worker reuse).
+    CLASSIFY_THRESHOLDS["high_min_identity"] = base_high
+    CLASSIFY_THRESHOLDS["medium_min_identity"] = base_med
+
+    info: Dict[str, Any] = {
+        "median_flank_identity": None,
+        "n_flanking": 0,
+        "tier": "disabled" if getattr(args, "disable_distance_autotune", False) else "baseline",
+        "relax": 0.0,
+        "high_min_identity": base_high,
+        "medium_min_identity": base_med,
+        "manual_review": False,
+    }
+    if getattr(args, "disable_distance_autotune", False):
+        return info
+
+    median, n = _median_best_flanking_identity(flanking_hits)
+    info["median_flank_identity"] = median
+    info["n_flanking"] = n
+
+    min_flank = int(getattr(args, "distance_autotune_min_flanking", 3))
+    if median is None or n < min_flank:
+        logger.info(
+            f"[{genome_name}] §1g distance auto-tune: only {n} flanking gene(s) "
+            f"(< {min_flank}); keeping baseline thresholds "
+            f"(HIGH {base_high:.0f}, MEDIUM {base_med:.0f})."
+        )
+        info["tier"] = "insufficient_evidence"
+        return info
+
+    close_p = float(getattr(args, "distance_autotune_close_pct", 70.0))
+    far_p = float(getattr(args, "distance_autotune_far_pct", 40.0))
+    max_relax = float(getattr(args, "distance_autotune_max_relax", 10.0))
+
+    if median >= close_p:
+        relax, tier = 0.0, "close"
+    elif median <= far_p:
+        relax, tier = max_relax, "far"
+    else:
+        relax = max_relax * (close_p - median) / max(close_p - far_p, 1e-6)
+        tier = "mid"
+
+    high_adj = max(base_high - relax, 1.0)
+    med_adj = max(base_med - relax, 1.0)
+    CLASSIFY_THRESHOLDS["high_min_identity"] = high_adj
+    CLASSIFY_THRESHOLDS["medium_min_identity"] = med_adj
+    info.update(
+        tier=tier, relax=relax, high_min_identity=high_adj,
+        medium_min_identity=med_adj, manual_review=(tier == "far"),
+    )
+
+    if relax > 0:
+        logger.info(
+            f"[{genome_name}] §1g distance auto-tune: median flanking identity "
+            f"{median:.1f}% over {n} genes -> tier={tier}, relax={relax:.1f} pts "
+            f"(HIGH {base_high:.0f}->{high_adj:.0f}, MEDIUM {base_med:.0f}->{med_adj:.0f})"
+            + ("  [manual_review]" if tier == "far" else "")
+        )
+    else:
+        logger.info(
+            f"[{genome_name}] §1g distance auto-tune: median flanking identity "
+            f"{median:.1f}% over {n} genes -> tier=close; thresholds unchanged "
+            f"(HIGH {base_high:.0f}, MEDIUM {base_med:.0f})."
+        )
+    return info
+
+
 def _should_skip_weak_goi_emission(
     evidence_type: str,
     identity: float,
@@ -1442,7 +1552,121 @@ def collapse_flanking_cds_to_gene_span(gff_lines: List[str]) -> List[str]:
     return output
 
 
-def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000):
+# ---------------------------------------------------------------------------
+# Collinearity-aware seed placement (docs/TODO.md §1m — proper fix for the
+# "fumble", replacing the §17 hull rescue's after-the-fact patch).
+#
+# The home flanking genes have a fixed order on the home chromosome. A genuine
+# syntenic block reproduces that order (forward or reversed) in the target; a
+# coincidental cluster of paralog cross-hits does not. Two consequences:
+#   (#1) gap-bridging: two same-chromosome clusters separated by a large gap are
+#        kept in ONE block when the flanking continue the same home-order run
+#        across the gap — so a GOI whose immediate neighbours are rearranged
+#        (and therefore sits in a flanking gap, e.g. cow decorin at chr5:21 Mb)
+#        is inside the search window from the start, no rescue pass needed.
+#   (#3) scoring: blocks are ranked by the length of their collinear run, not by
+#        raw gene count, so the true ordered block outranks a scrambled
+#        paralog-neighbourhood cluster (the source of the biglycan false call).
+#
+# `home_rank` maps a flanking gene's base ID -> its ordinal position in home
+# genomic order (built once from the pristine initial_db; see build_home_rank).
+# When `home_rank` is falsy every helper degrades to the legacy behaviour, so
+# importers/tests that call identify_synteny_blocks without it are unaffected.
+# ---------------------------------------------------------------------------
+def _longest_collinear_run(ranks):
+    """Longest monotonic (non-decreasing OR non-increasing) subsequence over a
+    list of integer home-ranks. `None` entries (GOI proxies, unknown genes) are
+    ignored. Returns (length, direction) with direction '+' for increasing and
+    '-' for decreasing; ties favour '+'.
+    """
+    vals = [r for r in ranks if r is not None]
+    n = len(vals)
+    if n <= 1:
+        return n, '+'
+
+    def _lis_non_decreasing(seq):
+        m = len(seq)
+        dp = [1] * m
+        best = 1
+        for i in range(m):
+            for j in range(i):
+                if seq[j] <= seq[i] and dp[j] + 1 > dp[i]:
+                    dp[i] = dp[j] + 1
+            if dp[i] > best:
+                best = dp[i]
+        return best
+
+    inc = _lis_non_decreasing(vals)
+    dec = _lis_non_decreasing(list(reversed(vals)))  # non-increasing on original
+    return (inc, '+') if inc >= dec else (dec, '-')
+
+
+def _block_anchor_ranks(block, home_rank):
+    """Home ranks of the anchored (non-GOI, known) loci in a block, in the block's
+    existing target order."""
+    out = []
+    for locus in block:
+        r = home_rank.get(extract_base_gene_id(locus.get('query', '')))
+        if r is not None:
+            out.append(r)
+    return out
+
+
+def _can_bridge(block, candidate, home_rank, max_rank_gap, min_anchors):
+    """True if `candidate` (the next locus after a large genomic gap) collinearly
+    continues `block`'s home-order run — i.e. the gap is an insertion/rearrangement
+    inside one conserved neighbourhood, not the boundary to an unrelated cluster.
+
+    Conservative by design: requires the block to already carry `min_anchors`
+    distinct anchored flanking genes (so a lone spurious hit can't seed a giant
+    bridged block) and only bridges a candidate that extends BEYOND the furthest
+    rank the block has reached, in the block's own direction, by at most
+    `max_rank_gap` positions (a few un-mapped flanking genes tolerated).
+    Inversions are deliberately not bridged.
+    """
+    cand_rank = home_rank.get(extract_base_gene_id(candidate.get('query', '')))
+    if cand_rank is None:
+        return False
+    anchors = _block_anchor_ranks(block, home_rank)
+    if len(set(anchors)) < min_anchors:
+        return False
+    _, direction = _longest_collinear_run(anchors)
+    if direction == '+':
+        frontier = max(anchors)
+        return frontier < cand_rank <= frontier + max_rank_gap
+    frontier = min(anchors)
+    return frontier - max_rank_gap <= cand_rank < frontier
+
+
+def build_home_rank(initial_db_path):
+    """Map each flanking gene's base ID -> ordinal rank in home genomic order.
+
+    PREPARE_INITIAL_DB writes the flanking genes first, in the order produced by
+    extract_flanking_genes (sorted by chrom,start), then appends GOI proxy
+    sequences. We rank flanking (non-GOI) base IDs by first appearance and skip
+    GOI entries (they are not synteny anchors). Built from the pristine
+    initial_db — NOT the expanding per-wave DB, whose order is not stable.
+    Returns {} on any failure (collinearity then disabled, legacy behaviour).
+    """
+    home_rank = {}
+    try:
+        rank = 0
+        for _header, clean_id, _seq in parse_fasta(initial_db_path):
+            if is_goi_query_id(clean_id):
+                continue
+            base = extract_base_gene_id(clean_id)
+            if base not in home_rank:
+                home_rank[base] = rank
+                rank += 1
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"build_home_rank failed ({exc}); collinearity scoring disabled.")
+        return {}
+    return home_rank
+
+
+def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
+                            home_rank=None, bridge_max_gap=0,
+                            bridge_max_rank_gap=5, bridge_min_anchors=3):
     """
     Identify all synteny blocks from hits.
     
@@ -1452,15 +1676,31 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000):
     - Score blocks by number of unique flanking genes found
     
     Updated to handle exon-level queries like "gene-LOC726866|exon_1"
-    
+
+    Collinearity (§1m): when `home_rank` is supplied, two refinements activate
+    (otherwise behaviour is identical to the legacy gene-count version):
+      - gap-bridging (#1): a large genomic gap between two same-chromosome
+        clusters is NOT split into separate blocks when the flanking continue the
+        same home-order run across it (see _can_bridge), so a GOI sitting in such
+        a gap is inside the search window.
+      - collinear scoring (#3): blocks are ranked by the length of their longest
+        collinear run of flanking genes, then by gene count, so a genuine ordered
+        block outranks a scrambled paralog-neighbourhood cluster.
+
     Args:
         hits: List of hit dictionaries
         max_intron: Maximum distance between exons of same gene (bp)
         cluster_distance: Maximum distance to cluster genes into synteny block (bp)
-    
+        home_rank: {flanking_base_id: ordinal home-order rank} or None/{} (legacy)
+        bridge_max_gap: max bp gap to bridge when collinear (0 disables bridging)
+        bridge_max_rank_gap: max home-rank jump still treated as a continuation
+        bridge_min_anchors: min distinct anchored flanking genes before bridging
+
     Returns:
-        List of dictionaries (blocks), sorted by score (descending).
+        List of dictionaries (blocks), sorted by score (descending). Each block
+        carries 'collinear_chain_len'/'collinear_direction'/'bridged'.
     """
+    use_collinearity = bool(home_rank)
     if not hits:
         return []
         
@@ -1508,41 +1748,71 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000):
     if not all_loci: 
         return []
         
+    bridging_on = use_collinearity and bridge_max_gap > 0
     synteny_blocks = []
     current_block = [all_loci[0]]
-    
+
     for locus in all_loci[1:]:
         last_locus = current_block[-1]
-        
-        # Same chromosome and within clustering distance
-        if (locus['chrom'] == last_locus['chrom'] and 
-            locus['start'] - last_locus['end'] < cluster_distance):
+        same_chrom = locus['chrom'] == last_locus['chrom']
+        gap = locus['start'] - last_locus['end'] if same_chrom else None
+
+        if same_chrom and gap < cluster_distance:
+            # Normal clustering: genes close together = same neighbourhood.
+            current_block.append(locus)
+        elif (bridging_on and same_chrom and gap < bridge_max_gap and
+              _can_bridge(current_block, locus, home_rank,
+                          bridge_max_rank_gap, bridge_min_anchors)):
+            # #1 gap-bridging: the flanking continue the home-order run across a
+            # large gap (a local rearrangement that the GOI may sit inside), so
+            # keep one block spanning the gap instead of dropping the interior.
             current_block.append(locus)
         else:
             synteny_blocks.append(current_block)
             current_block = [locus]
     synteny_blocks.append(current_block)
-    
-    # --- Step 4: Format and Sort Blocks ---
+
+    # --- Step 4: Format, Score (collinearity) and Sort Blocks ---
     final_blocks = []
     for block in synteny_blocks:
         chrom = block[0]['chrom']
         start = min(l['start'] for l in block)
         end = max(l['end'] for l in block)
         genes_list = list(set(extract_base_gene_id(l['query']) for l in block))
-        
+
+        if use_collinearity:
+            ranks = [home_rank.get(extract_base_gene_id(l.get('query', '')))
+                     for l in block]
+            chain_len, direction = _longest_collinear_run(ranks)
+            # A block "bridged" if any adjacent loci span >= cluster_distance.
+            bridged = any(
+                block[i + 1]['chrom'] == block[i]['chrom'] and
+                (block[i + 1]['start'] - block[i]['end']) >= cluster_distance
+                for i in range(len(block) - 1)
+            )
+        else:
+            chain_len, direction, bridged = 0, '+', False
+
         final_blocks.append({
             'chrom': chrom,
             'start': start,
             'end': end,
             'genes_count': len(genes_list),
             'loci_count': len(block),
-            'genes': genes_list
+            'genes': genes_list,
+            'collinear_chain_len': chain_len,
+            'collinear_direction': direction,
+            'bridged': bridged,
         })
 
-    # Sort by 'genes_count' descending
-    final_blocks.sort(key=lambda x: x['genes_count'], reverse=True)
-    
+    if use_collinearity:
+        # #3: rank by collinear-run length first, gene count as tiebreak.
+        final_blocks.sort(key=lambda x: (x['collinear_chain_len'], x['genes_count']),
+                          reverse=True)
+    else:
+        # Legacy: sort by raw gene count (unchanged for callers without home_rank).
+        final_blocks.sort(key=lambda x: x['genes_count'], reverse=True)
+
     return final_blocks
 
 
@@ -3592,6 +3862,13 @@ def merge_synteny_blocks(blocks, padding):
             current_block['genes_count'] = current_block.get('genes_count', 0) + next_block.get('genes_count', 0)
             # Max score (best local evidence)
             current_block['score'] = max(current_block.get('score', 0), next_block.get('score', 0))
+            # Preserve the stronger collinear-run length so the §1m cap re-sort
+            # (process_single_genome) still ranks merged blocks correctly.
+            current_block['collinear_chain_len'] = max(
+                current_block.get('collinear_chain_len', 0),
+                next_block.get('collinear_chain_len', 0))
+            current_block['bridged'] = bool(
+                current_block.get('bridged') or next_block.get('bridged'))
             
             # 3. Combine hits if present
             if 'hits' in next_block:
@@ -3861,7 +4138,17 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         c_dist = args.cluster_distance
         if c_dist <= 0:
             c_dist = estimate_cluster_distance(genome_path)
-            
+
+        # §1m collinearity-aware seed placement. home_rank is built once in main()
+        # from the pristine initial_db and rides on `args`; disable_synteny_collinearity
+        # falls fully back to the legacy gene-count clustering/scoring.
+        _collinearity_on = not getattr(args, 'disable_synteny_collinearity', False)
+        home_rank = getattr(args, 'home_rank', None) if _collinearity_on else None
+        home_rank = home_rank or None  # treat empty dict as "off"
+        _bridge_max_gap = getattr(args, 'synteny_bridge_max_gap', 0)
+        _bridge_max_rank_gap = getattr(args, 'synteny_bridge_max_rank_gap', 5)
+        _bridge_min_anchors = getattr(args, 'synteny_bridge_min_anchors', 3)
+
         # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
         mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
             db_path=db_path,
@@ -3906,12 +4193,29 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         else:
             logger.info(f"[{genome_name}] No flanking anchors found; falling back to GOI/mixed hits for block seeding.")
 
+        # §1g: estimate this target's phylogenetic distance from the median identity
+        # of its flanking-gene matches and relax the GOI classify identity bars for
+        # distant targets (no-op for close relatives). Must run before any GOI
+        # classification for this genome (process_region_block below).
+        _dist_info = _apply_distance_adaptive_thresholds(args, flanking_seed_hits, genome_name)
+
         synteny_blocks = identify_synteny_blocks(
             seed_hits,
             max_intron=args.max_intron,
-            cluster_distance=c_dist
+            cluster_distance=c_dist,
+            home_rank=home_rank,
+            bridge_max_gap=_bridge_max_gap,
+            bridge_max_rank_gap=_bridge_max_rank_gap,
+            bridge_min_anchors=_bridge_min_anchors,
         )
-        
+        if home_rank:
+            _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
+            if _n_bridged:
+                logger.info(
+                    f"[{genome_name}] §1m collinearity: bridged a flanking gap in "
+                    f"{_n_bridged} block(s) (home-order continuation across rearrangement)."
+                )
+
         if not synteny_blocks:
             logger.info(f"[{genome_name}] No valid syntenic region found.")
             return genome_name, [], [], None
@@ -3955,9 +4259,24 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             synteny_blocks = identify_synteny_blocks(
                 seed_hits,
                 max_intron=args.max_intron,
-                cluster_distance=c_dist
+                cluster_distance=c_dist,
+                home_rank=home_rank,
+                bridge_max_gap=_bridge_max_gap,
+                bridge_max_rank_gap=_bridge_max_rank_gap,
+                bridge_min_anchors=_bridge_min_anchors,
             )
             synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
+
+        # §1m: when capping bites, keep the most collinear blocks (merge re-sorted
+        # by position). GOI-proxy blocks (e.g. gene-LY6E) are protected first so a
+        # low-collinearity proxy seed is never dropped by the cap.
+        if home_rank and len(synteny_blocks) > 1:
+            def _cap_key(b):
+                is_proxy = bool(set(b.get('genes', [])) & goi_proxy_flanking_parents)
+                return (1 if is_proxy else 0,
+                        b.get('collinear_chain_len', 0),
+                        b.get('genes_count', 0))
+            synteny_blocks.sort(key=_cap_key, reverse=True)
 
         # Hard cap per genome to prevent pathological runtimes.
         if args.max_blocks_per_genome > 0 and len(synteny_blocks) > args.max_blocks_per_genome:
@@ -4600,6 +4919,24 @@ def main():
         default=2,
         help="Minimum unique anchor genes required for a synteny block"
     )
+    # §1m collinearity-aware seed placement (proper fix for the flanking-gap fumble).
+    parser.add_argument(
+        "--disable_synteny_collinearity", type=str2bool, default=False,
+        help="Disable collinearity-aware block scoring + gap-bridging (legacy gene-count clustering)."
+    )
+    parser.add_argument(
+        "--synteny_bridge_max_gap", type=int, default=6000000,
+        help="Max bp gap between two same-chromosome clusters to bridge into one "
+             "block when the flanking continue the home-order run (0 disables bridging)."
+    )
+    parser.add_argument(
+        "--synteny_bridge_max_rank_gap", type=int, default=5,
+        help="Max home-rank jump still treated as a collinear continuation when bridging."
+    )
+    parser.add_argument(
+        "--synteny_bridge_min_anchors", type=int, default=3,
+        help="Min distinct anchored flanking genes a block needs before it may bridge a gap."
+    )
     parser.add_argument(
         "--max_consecutive_empty_blocks",
         type=int,
@@ -4666,6 +5003,18 @@ def main():
                         help="TM-score above this can boost MEDIUM → HIGH")
     parser.add_argument("--structural_max_length", type=int, default=700,
                         help="Max sequence length for ESMFold (VRAM safety, default 700)")
+
+    # §1g: per-target phylogenetic-distance auto-tune of the GOI classify bars.
+    parser.add_argument("--disable_distance_autotune", type=str2bool, default=False,
+                        help="§1g: disable per-target stringency auto-tune (keep one global stringency)")
+    parser.add_argument("--distance_autotune_close_pct", type=float, default=70.0,
+                        help="§1g: median flanking identity (pct) >= this -> no relaxation (close relative)")
+    parser.add_argument("--distance_autotune_far_pct", type=float, default=40.0,
+                        help="§1g: median flanking identity (pct) <= this -> full relaxation + manual_review")
+    parser.add_argument("--distance_autotune_max_relax", type=float, default=10.0,
+                        help="§1g: max identity-points subtracted from the HIGH/MEDIUM bars for distant targets")
+    parser.add_argument("--distance_autotune_min_flanking", type=int, default=3,
+                        help="§1g: minimum flanking genes needed to trust the distance estimate")
 
     args = parser.parse_args()
 
@@ -4739,7 +5088,22 @@ def main():
             f"aggressive (see EXTRACT_FLANKING_GENES logs)."
         )
         sys.exit(1)
-    
+
+    # §1m: build the home-order rank map ONCE from the pristine initial_db (flanking
+    # genes are written first, in home genomic order). Attached to `args` so it
+    # pickles to every ProcessPoolExecutor worker (process_single_genome). When
+    # disabled or empty, process_single_genome falls back to legacy clustering.
+    if args.disable_synteny_collinearity:
+        args.home_rank = {}
+        logger.info("§1m collinearity-aware seed placement: DISABLED (legacy gene-count clustering).")
+    else:
+        args.home_rank = build_home_rank(args.initial_db)
+        logger.info(
+            f"§1m collinearity-aware seed placement: ENABLED "
+            f"({len(args.home_rank)} flanking anchors ranked; "
+            f"bridge_max_gap={args.synteny_bridge_max_gap} bp)."
+        )
+
     # 3. Validate parameters are in valid ranges
     if args.min_identity < 0 or args.min_identity > 100:
         logger.error(f"Invalid min_identity: {args.min_identity}. Must be between 0 and 100")
