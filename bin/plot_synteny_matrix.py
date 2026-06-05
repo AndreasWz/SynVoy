@@ -398,7 +398,7 @@ def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None):
         (display_label, summary_dict, is_home, tree_species_key, clade_color)
     rooted_tree:  midpoint-rooted TreeNode (or None for placeholder ladder).
     """
-    cell_w, cell_h = 38, 28
+    cell_w, cell_h = 46, 30
     name_w = 240
     tree_w = 170
     header_h = 110
