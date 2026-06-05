@@ -3486,8 +3486,8 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     GRID_STRIPE = "#0f172a"
 
     MARGIN_TOP, HEADER_H, AXIS_H = 68, 130, 50
-    ROW_H, ARROW_H = 40, 18
-    COL_W, GOI_COL_W, RIGHT, LEGEND_H = 36, 58, 56, 112
+    ROW_H, ARROW_H = 42, 20
+    COL_W, GOI_COL_W, RIGHT, LEGEND_H = 46, 68, 56, 112
 
     labels = [_svg_esc(re.sub(r"<[^>]+>", "", (t.get("label") or "")).strip())
               for t in all_tracks]
@@ -3619,9 +3619,9 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
             # can't read as a full-length ortholog. Always dark text with a thin
             # white halo (paint-order:stroke) so it reads on any fill shade.
             if coverage is not None:
-                num, fsz = f"{identity:.0f}/{coverage*100:.0f}", "7.5"
+                num, fsz = f"{identity:.0f}/{coverage*100:.0f}", "8.5"
             else:
-                num, fsz = f"{identity:.0f}", "9"
+                num, fsz = f"{identity:.0f}", "10"
             inner.append(
                 f'<text x="{(x0+x1)/2:.1f}" y="{yb + ARROW_H/2 + 3:.1f}" '
                 f'text-anchor="middle" font-size="{fsz}" fill="#15181f" '
