@@ -18,6 +18,8 @@ process PLOT_SYNTENY {
     path "*_synteny_plot.svg", emit: pub_plot, optional: true
     path "*_synteny_plot_view.svg", emit: view_plot, optional: true
     path "*_synteny_matrix.svg", emit: matrix_plot, optional: true
+    path "*_anchor_grid.html", emit: anchor_grid, optional: true
+    path "*_anchor_grid.svg", emit: anchor_grid_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
     path "plot_inputs_*", emit: inputs, optional: true
 
@@ -91,6 +93,7 @@ process PLOT_SYNTENY {
         $homo_arg \\
         --tree $tree \\
         $species_arg \\
+        --home_species "${home_species ?: ''}" \\
         $hide_absent_arg \
         $pub_svg_arg \\
         --gap_threshold ${params.gap_threshold} \\
