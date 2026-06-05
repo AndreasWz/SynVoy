@@ -129,6 +129,12 @@ def parse_target_gff(path, candidate_regions=None):
             except ValueError:
                 ident = 0.0
             try:
+                qcov = float(attrs.get("QueryCoverage", "nan"))
+                if qcov != qcov:  # NaN -> unknown
+                    qcov = None
+            except (ValueError, TypeError):
+                qcov = None
+            try:
                 start = int(p[3]) - 1
                 end = int(p[4])
             except ValueError:
@@ -148,6 +154,7 @@ def parse_target_gff(path, candidate_regions=None):
                 "evidence_type": attrs.get("EvidenceType", ""),
                 "model_status": attrs.get("ModelStatus", ""),
                 "exons": attrs.get("Exons", ""),
+                "query_coverage": qcov,
             })
     return cells
 
@@ -622,13 +629,20 @@ def _draw_cell(out, x, y, w, h, slot, cell, is_home, n_copies=1):
         f'<title>{_esc(title)}</title></polygon>'
     )
     # Suppress the identity number on the home row — it's the reference,
-    # not a measurement. Showing "100" everywhere is misleading.
+    # not a measurement. Showing "100" everywhere is misleading. For targets,
+    # show "%identity / %query-coverage" so a short high-identity hit can't
+    # masquerade as a full-length ortholog.
     if not is_home and ident >= 30:
+        qcov = cell.get("query_coverage")
+        if qcov is not None:
+            num, fsz = f"{ident:.0f}/{qcov*100:.0f}", "7.5"
+        else:
+            num, fsz = f"{ident:.0f}", "9"
         out.append(
             f'<text x="{x + w/2:.1f}" y="{y + h/2 + 3:.1f}" '
-            f'text-anchor="middle" font-size="9" fill="{txt_fill}" '
+            f'text-anchor="middle" font-size="{fsz}" fill="{txt_fill}" '
             f'font-weight="{("700" if conf == "HIGH" else "500")}" '
-            f'pointer-events="none">{ident:.0f}</text>'
+            f'pointer-events="none">{num}</text>'
         )
     if n_copies > 1:
         # Small "×N" badge in the upper-right corner.
