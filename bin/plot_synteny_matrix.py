@@ -635,9 +635,9 @@ def _draw_cell(out, x, y, w, h, slot, cell, is_home, n_copies=1):
     if not is_home and ident >= 30:
         qcov = cell.get("query_coverage")
         if qcov is not None:
-            num, fsz = f"{ident:.0f}/{qcov*100:.0f}", "8.5"
+            num, fsz = f"{ident:.0f}/{qcov*100:.0f}", "7.5"
         else:
-            num, fsz = f"{ident:.0f}", "10"
+            num, fsz = f"{ident:.0f}", "9"
         out.append(
             f'<text x="{x + w/2:.1f}" y="{y + h/2 + 3:.1f}" '
             f'text-anchor="middle" font-size="{fsz}" fill="{txt_fill}" '
