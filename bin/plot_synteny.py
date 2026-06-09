@@ -28,6 +28,7 @@ Output
 """
 
 import argparse
+import collections
 import colorsys
 import json
 import math
@@ -1096,6 +1097,43 @@ def _is_dark_hex(hexc):
 
 def _get_coords(gene):
     return gene.get("start_plot", gene["start"]), gene.get("end_plot", gene["end"])
+
+
+def _dominant_chrom_span(items, goi_chrom=None):
+    """Pick a single representative scaffold for a row's gene-position gutter.
+
+    ``items`` is a list of ``(chrom, mid)`` pairs (one per recovered gene). On a
+    fragmented assembly a neighbourhood can straddle >1 scaffold; rather than
+    blanking the accession (the old behaviour, which left rows like *Bombus
+    impatiens* showing only "1.51-1.68 Mb"), pick the scaffold carrying the GOI
+    (if present) else the one carrying the most genes, and restrict lo/hi to that
+    scaffold so the range stays meaningful. Returns
+    ``(chrom, lo, hi, n_other_scaffolds)`` — ``n_other`` is how many *additional*
+    scaffolds the row's genes fall on (0 = contiguous)."""
+    items = [(c, m) for c, m in items if m is not None]
+    if not items:
+        return "", 0.0, 0.0, 0
+    chrom_counts = collections.Counter(c for c, _ in items if c)
+    if goi_chrom and goi_chrom in chrom_counts:
+        primary = goi_chrom
+    elif chrom_counts:
+        primary = max(chrom_counts, key=lambda c: (chrom_counts[c], c))  # most genes; name tie-break
+    else:
+        primary = ""
+    on = [m for c, m in items if c == primary] if primary else [m for _, m in items]
+    lo, hi = (min(on), max(on)) if on else (0.0, 0.0)
+    n_other = sum(1 for c in chrom_counts if c != primary)
+    return primary, lo, hi, n_other
+
+
+def _span_gutter_label(chrom, lo, hi, n_other=0):
+    """Format a right-gutter location label, e.g. ``NC_037641.1: 12.37-12.44 Mb``.
+    A single gene collapses to one coordinate; extra scaffolds add ``(+N)``."""
+    if hi <= lo and not chrom:
+        return ""
+    rng = f"{lo/1e6:.2f}-{hi/1e6:.2f} Mb" if hi > lo else f"{lo/1e6:.2f} Mb"
+    extra = f" (+{n_other})" if n_other else ""
+    return f"{chrom + ': ' if chrom else ''}{rng}{extra}"
 
 
 def _goi_colour_for_genome(genome_id, goi_genome_colours):
@@ -3900,25 +3938,22 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     def _row_span(ri):
         if ri == 0:
             mids = [(a["start"] + a["end"]) / 2.0 for a in anchors if a["start"]]
-            return home_chrom, (min(mids) if mids else 0), (max(mids) if mids else 0)
+            return home_chrom, (min(mids) if mids else 0), (max(mids) if mids else 0), 0
         tmap = target_maps[ri - 1]
-        mids, chroms = [], []
+        items, goi_chrom = [], ""
         for a in anchors:
             entry = tmap.get(a["key"])
             if not entry:
                 continue
             gs, ge = _get_coords(entry["best"])
-            mids.append((gs + ge) / 2.0)
-            chroms.append(entry["best"].get("chrom", ""))
-        if not mids:
-            return "", 0, 0
-        chrom = chroms[0] if chroms and len(set(c for c in chroms if c)) == 1 else ""
-        return chrom, min(mids), max(mids)
+            ch = entry["best"].get("chrom", "")
+            items.append((ch, (gs + ge) / 2.0))
+            if a["is_goi"] and ch:
+                goi_chrom = ch
+        return _dominant_chrom_span(items, goi_chrom)
     def _span_text(ri):
-        c, lo, hi = _row_span(ri)
-        if hi <= lo:
-            return ""
-        return f"{c + ': ' if c else ''}{lo/1e6:.2f}-{hi/1e6:.2f} Mb"
+        c, lo, hi, n_other = _row_span(ri)
+        return _span_gutter_label(c, lo, hi, n_other)
     span_texts = [_span_text(ri) for ri in range(n_rows)]
     _max_span = max((len(s) for s in span_texts), default=0)
     SPAN_W = (max(150, int(_max_span * 6.0 + 26)) if _max_span else 10)
@@ -4258,6 +4293,7 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
     anchor_label = {a["key"]: a["label"] for a in anchors}
     anchor_strand = {a["key"]: a["strand"] for a in anchors}
     target_maps = [_grid_target_map(t, anchor_keys, goi_key) for t in targets]
+    home_chrom = next((g.get("chrom", "") for g in home_track.get("genes", [])), "")
 
     # Per-row points: each is (x_real_bp, key, colour, is_goi, ident, conf,
     # strand, n_copies, label, chrom).
@@ -4270,7 +4306,7 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                 pts.append({"x": (a["start"] + a["end"]) / 2.0, "key": a["key"],
                             "colour": a["colour"], "is_goi": a["is_goi"],
                             "ident": 100.0, "conf": "HIGH", "strand": a["strand"],
-                            "n": 1, "label": a["label"], "chrom": ""})
+                            "n": 1, "label": a["label"], "chrom": home_chrom})
             return pts
         tmap = target_maps[ri - 1]
         for key, entry in tmap.items():
@@ -4304,13 +4340,13 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
     # LONGEST actual label (accession + range) so long scaffold/contig names
     # (e.g. 'WUUM01000001.1: 9.44–9.58 Mb') aren't clipped at the canvas edge.
     def _span_label_len(ri):
-        xs = [p["x"] for p in row_pts[ri]]
-        if len(xs) < 2 or max(xs) <= min(xs):
+        pts = row_pts[ri]
+        if not pts:
             return 0
-        chroms = [p["chrom"] for p in row_pts[ri] if p["chrom"]]
-        chrom = chroms[0] if chroms and len(set(chroms)) == 1 else ""
-        return len(f"{chrom + ': ' if chrom else ''}"
-                   f"{min(xs) / 1e6:.2f}–{max(xs) / 1e6:.2f} Mb")
+        goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
+        c, lo, hi, n_other = _dominant_chrom_span(
+            [(p["chrom"], p["x"]) for p in pts], goi_ch)
+        return len(_span_gutter_label(c, lo, hi, n_other))
     max_span_len = max((_span_label_len(ri) for ri in range(len(row_tracks))),
                        default=14)
     SPAN_W = max(150, int(max_span_len * 6.0 + 30))
@@ -4364,6 +4400,14 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                      f'text-anchor="middle" font-size="10" fill="#aab2c0" '
                      f'font-style="italic">no orthologs mapped</text>')
             continue
+        # On a fragmented assembly a row's genes can straddle >1 scaffold; mixing
+        # their coordinates on one normalised line is meaningless, so keep the
+        # dominant (or GOI-bearing) scaffold and note any dropped ones as "(+N)".
+        goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
+        prim, _plo, _phi, n_other = _dominant_chrom_span(
+            [(p["chrom"], p["x"]) for p in pts], goi_ch)
+        if prim:
+            pts = [p for p in pts if p["chrom"] == prim] or pts
         xs = [p["x"] for p in pts]
         lo, hi = min(xs), max(xs)
         def _px(xr):
@@ -4376,11 +4420,8 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                  f'y2="{cy:.1f}" stroke="{GRID_BACKBONE}" stroke-width="1.6"/>')
 
         # Coordinate-span label in the right gutter.
-        if hi > lo:
-            chroms = [p["chrom"] for p in pts if p["chrom"]]
-            chrom = chroms[0] if chroms and len(set(chroms)) == 1 else ""
-            span_txt = (f"{chrom + ': ' if chrom else ''}"
-                        f"{lo / 1e6:.2f}–{hi / 1e6:.2f} Mb")
+        span_txt = _span_gutter_label(prim, lo, hi, n_other)
+        if span_txt:
             P.append(f'<text x="{grid_x1 + 10:.1f}" y="{cy + 3.5:.1f}" font-size="9" '
                      f'fill="{GRID_AXIS_TEXT}">{_svg_esc(span_txt)}</text>')
 
@@ -4530,18 +4571,20 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     n_cols = len(anchors)
     row_tracks = [home_track] + targets
     n_rows = len(row_tracks)
+    home_chrom = next((g.get("chrom", "") for g in home_track.get("genes", [])), "")
 
     # ---- per-row present points (col index + true midpoint + the gene) ----
     def _row_points(ri):
-        pts, chroms = [], []
+        pts = []
         if ri == 0:
             for i, a in enumerate(anchors):
                 if not a["start"]:
                     continue
                 pts.append({"i": i, "key": a["key"], "mid": (a["start"] + a["end"]) / 2.0,
                             "ident": 0.0, "conf": "", "strand": a["strand"], "n": 1,
-                            "cov": None, "is_goi": a["is_goi"], "label": a["label"]})
-            return pts, ""
+                            "cov": None, "is_goi": a["is_goi"], "label": a["label"],
+                            "chrom": home_chrom})
+            return pts, home_chrom, 0
         tmap = target_maps[ri - 1]
         for i, a in enumerate(anchors):
             entry = tmap.get(a["key"])
@@ -4549,18 +4592,24 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
                 continue
             g = entry["best"]
             gs, ge = _get_coords(g)
-            chroms.append(g.get("chrom", ""))
             pts.append({"i": i, "key": a["key"], "mid": (gs + ge) / 2.0,
                         "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
                         "strand": g.get("strand", "+"), "n": entry["n"],
                         "cov": g.get("query_coverage"), "is_goi": a["is_goi"],
-                        "label": a["label"]})
-        chrom = chroms[0] if chroms and len(set(c for c in chroms if c)) == 1 else ""
-        return pts, chrom
-    row_pts, row_chrom = [], []
+                        "label": a["label"], "chrom": g.get("chrom", "")})
+        # On a fragmented assembly a row can straddle >1 scaffold; keep the
+        # dominant (or GOI-bearing) one so the position line + label stay coherent.
+        goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
+        prim, _lo, _hi, n_other = _dominant_chrom_span(
+            [(p["chrom"], p["mid"]) for p in pts], goi_ch)
+        if prim:
+            pts = [p for p in pts if p["chrom"] == prim] or pts
+        return pts, prim, n_other
+    row_pts, row_chrom, row_other = [], [], []
     for ri in range(n_rows):
-        p, c = _row_points(ri); row_pts.append(p); row_chrom.append(c)
+        p, c, no = _row_points(ri)
+        row_pts.append(p); row_chrom.append(c); row_other.append(no)
 
     # ---- geometry ----
     GRID_HEADER = "#f5f7fb"; GRID_FRAME = "#d8dee8"
@@ -4592,10 +4641,9 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     # per-row span label (chrom: lo-hi Mb) → adaptive right gutter
     def _span_text(ri):
         mids = [p["mid"] for p in row_pts[ri]]
-        if len(mids) < 2 or max(mids) <= min(mids):
+        if not mids:
             return ""
-        c = row_chrom[ri]
-        return (f"{c + ': ' if c else ''}{min(mids)/1e6:.2f}-{max(mids)/1e6:.2f} Mb")
+        return _span_gutter_label(row_chrom[ri], min(mids), max(mids), row_other[ri])
     span_texts = [_span_text(ri) for ri in range(n_rows)]
     max_span = max((len(s) for s in span_texts), default=0)
     SPAN_W = (max(150, int(max_span * 6.0 + 26)) if max_span else 10)

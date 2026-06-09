@@ -284,3 +284,35 @@ def test_shade_by_identity_fades_to_white_for_divergent():
     fr = tuple(int(faded.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
     br = tuple(int(base.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
     assert all(f >= b for f, b in zip(fr, br))
+
+
+def test_dominant_chrom_span_single_scaffold():
+    items = [("NC_1", 1_000_000), ("NC_1", 1_200_000), ("NC_1", 900_000)]
+    c, lo, hi, n_other = ps._dominant_chrom_span(items)
+    assert c == "NC_1" and lo == 900_000 and hi == 1_200_000 and n_other == 0
+
+
+def test_dominant_chrom_span_picks_majority_and_restricts_range():
+    # 3 genes on scaffold A (coords ~1.5 Mb), 1 stray gene on B at 40 Mb.
+    items = [("A", 1_500_000), ("A", 1_550_000), ("A", 1_600_000), ("B", 40_000_000)]
+    c, lo, hi, n_other = ps._dominant_chrom_span(items)
+    assert c == "A"                       # majority scaffold wins
+    assert hi == 1_600_000                 # range stays on A — no 40 Mb skew
+    assert n_other == 1                    # one extra scaffold noted
+
+
+def test_dominant_chrom_span_prefers_goi_scaffold():
+    # GOI sits on the minority scaffold; it should still be chosen.
+    items = [("A", 1_000_000), ("A", 1_100_000), ("B", 5_000_000)]
+    c, lo, hi, n_other = ps._dominant_chrom_span(items, goi_chrom="B")
+    assert c == "B" and n_other == 1
+
+
+def test_span_gutter_label_always_has_accession_when_known():
+    # The fragmented-assembly case that used to render a bare "1.51-1.68 Mb".
+    assert ps._span_gutter_label("NT_1", 1_510_000, 1_680_000, n_other=1) == \
+        "NT_1: 1.51-1.68 Mb (+1)"
+    # Single gene collapses to one coordinate.
+    assert ps._span_gutter_label("NC_1", 2_000_000, 2_000_000) == "NC_1: 2.00 Mb"
+    # Nothing known → empty (caller skips drawing).
+    assert ps._span_gutter_label("", 0, 0) == ""
