@@ -138,6 +138,91 @@ def test_tandem_copy_badge():
     assert "×2" in html
 
 
+def test_coverage_shown_only_when_low():
+    # A full-length hit (cov 95%) shows the identity number alone; a short hit
+    # (cov 40%) appends the coverage in parens so it can't masquerade as a
+    # complete ortholog. Mirrors the COVERAGE_FLAG_THRESHOLD (= 0.80) rule.
+    home = {
+        "label": "Home", "is_home": True, "genome_id": "home", "offset": 0,
+        "breaks": [], "genes": [
+            _gene("gene-AAA", 1000, 2000), _gene("gene-BBB", 3000, 4000)],
+    }
+    g_full = _gene("o1", 100, 200, home_gene_id="gene-AAA", identity=92.0)
+    g_full["query_coverage"] = 0.95
+    g_short = _gene("o2", 300, 400, home_gene_id="gene-BBB", identity=88.0)
+    g_short["query_coverage"] = 0.40
+    tgt = {"label": "T", "is_home": False, "genome_id": "t", "offset": 0,
+           "breaks": [], "genes": [g_full, g_short]}
+    html = ps.render_anchor_grid([home, tgt], {}, {}, {}, _args())
+    assert ">92<" in html              # full-length: identity only
+    assert "88 (40)" in html           # short hit: identity + coverage flag
+    assert "92 (95)" not in html       # high coverage never annotated
+
+
+def test_positional_variant_valid_with_goi_diamond_and_backbone():
+    html = ps.render_anchor_grid_positional(_tracks(), {}, {}, {}, _args())
+    low = html.lower()
+    assert "<!doctype html>" in low
+    assert html.count("<svg") == 1 and html.count("</svg>") == 1
+    assert "Gene-position map" in html
+    # GOI rendered as a diamond <path …Z> in the GOI colour; backbone lines too.
+    assert ps.GOI_COLOUR in html
+    m = __import__("re").search(r"(<svg.*?</svg>)", html, __import__("re").DOTALL)
+    ET.fromstring(m.group(1))  # parses as XML
+
+
+def test_anchor_grid_tree_panel_present_with_newick(tmp_path):
+    nwk = tmp_path / "t.nwk"
+    nwk.write_text("(GOI_DCN|cow_fna_b0_l1_exon_ann:0.1,"
+                   "GOI_DCN|mouse_fna_b0_l1_exon_ann:0.2);")
+    args = SimpleNamespace(tree=str(nwk))
+    html = ps.render_anchor_grid(_tracks(), {}, {}, {}, args)
+    assert 'class="grid-tree"' in html      # cladogram panel rendered
+    assert "GOI phylogeny" in html
+    # Same tree wires into the positional variant.
+    pos = ps.render_anchor_grid_positional(_tracks(), {}, {}, {}, args)
+    assert 'class="grid-tree"' in pos
+
+
+def test_tree_panel_attaches_unplaced_rows(tmp_path):
+    # The GOI gene tree here only covers cow; the home reference and the mouse
+    # target have no leaf. Both *unplaced* rows must still be connected to the
+    # tree as a dashed basal polytomy, so the cladogram covers every row.
+    nwk = tmp_path / "t.nwk"
+    nwk.write_text("(GOI_DCN|cow_fna_b0_l1_exon_ann:0.1,OUTGROUP_x:0.2);")
+    args = SimpleNamespace(tree=str(nwk))
+    html = ps.render_anchor_grid(_tracks(), {}, {}, {}, args)
+    assert 'class="grid-tree"' in html
+    # dashed basal connectors for the unplaced rows (home + mouse) + a spine
+    assert html.count('stroke-dasharray="3,2.5"') >= 3
+
+
+def test_anchor_threaded_valid_with_arrows_dots_and_leaders():
+    html = ps.render_anchor_grid_threaded(_tracks(), {}, {}, {}, _args())
+    low = html.lower()
+    assert "<!doctype html>" in low
+    assert html.count("<svg") == 1 and html.count("</svg>") == 1
+    assert "Anchor positions" in html
+    assert ">DCN<" in html                  # GOI column label
+    assert ps.GOI_COLOUR in html
+    m = __import__("re").search(r"(<svg.*?</svg>)", html, __import__("re").DOTALL)
+    root = ET.fromstring(m.group(1))        # parses as XML
+    assert root.tag.endswith("svg")
+    # aligned-column arrows AND the real-position dot-line + leaders are drawn
+    assert html.count("<circle") >= 3       # per-row true-position dots
+    assert html.count("<path") >= 5         # arrows + leaders
+
+
+def test_anchor_threaded_tree_panel_present_with_newick(tmp_path):
+    nwk = tmp_path / "t.nwk"
+    nwk.write_text("(GOI_DCN|cow_fna_b0_l1_exon_ann:0.1,"
+                   "GOI_DCN|mouse_fna_b0_l1_exon_ann:0.2);")
+    args = SimpleNamespace(tree=str(nwk))
+    html = ps.render_anchor_grid_threaded(_tracks(), {}, {}, {}, args)
+    assert 'class="grid-tree"' in html
+    assert "GOI phylogeny" in html
+
+
 def test_goi_display_label_prefers_alpha_symbol():
     # 'GOI_DCN' -> 'DCN'; coordinate-style 'GOI_NC_000012.12_91140483' rejected.
     tracks = [{"genes": [

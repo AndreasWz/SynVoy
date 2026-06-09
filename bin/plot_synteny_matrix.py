@@ -237,7 +237,14 @@ def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index):
     # Strip "gene-" prefix from labels; carry the raw name as id for joins.
     slots = []
     for row in sorted(home_bed_rows, key=lambda r: r["start"]):
-        label, product = _label_and_product(row["name"], home_gff_index)
+        # Skip synthetic GOI placeholder rows (e.g. "GOI_NC_000012.12_91140483")
+        # carried in the home BED — the GOI gets its own dedicated slot below,
+        # so keeping this row would draw a second, redundant GOI column whose
+        # long raw name overflows the header band.
+        rn = row["name"]
+        if rn.startswith("GOI_") or rn.startswith("gene-GOI"):
+            continue
+        label, product = _label_and_product(rn, home_gff_index)
         slots.append({
             "id": row["name"], "label": label, "product": product,
             "start": row["start"], "end": row["end"],
@@ -454,7 +461,10 @@ def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None):
         rotation = -55
         weight = "700" if slot["is_goi"] else "500"
         fill = COL_GOI if slot["is_goi"] else COL_TEXT
-        label = _esc(slot["label"])
+        # Truncate over-long names so a rotated header can't shoot off the top
+        # of the canvas (the header band only has room for ~22 chars).
+        _raw = slot["label"]
+        label = _esc(_raw if len(_raw) <= 22 else _raw[:21] + "…")
         tooltip = _esc(slot.get("product", ""))
         out.append(
             f'<g transform="translate({x:.1f},{text_y}) rotate({rotation})">'
@@ -628,21 +638,24 @@ def _draw_cell(out, x, y, w, h, slot, cell, is_home, n_copies=1):
         f'stroke="{stroke}" stroke-width="0.9"{stroke_dash}>'
         f'<title>{_esc(title)}</title></polygon>'
     )
-    # Suppress the identity number on the home row — it's the reference,
-    # not a measurement. Showing "100" everywhere is misleading. For targets,
-    # show "%identity / %query-coverage" so a short high-identity hit can't
-    # masquerade as a full-length ortholog.
+    # Suppress the identity number on the home row — it's the reference, not a
+    # measurement. For targets show the identity number alone (clean, never
+    # clips); append "(cov%)" only when coverage is low (< 80%), so a short
+    # high-identity hit can't masquerade as a full-length ortholog. Matches the
+    # anchor-grid convention.
     if not is_home and ident >= 30:
         qcov = cell.get("query_coverage")
-        if qcov is not None:
-            num, fsz = f"{ident:.0f}/{qcov*100:.0f}", "7.5"
+        if qcov is not None and qcov < 0.80:
+            num = f"{ident:.0f} ({qcov*100:.0f})"
         else:
-            num, fsz = f"{ident:.0f}", "9"
+            num = f"{ident:.0f}"
+        fsz = max(7.0, min(10.0, (w - 6) / (len(num) * 0.60)))
         out.append(
             f'<text x="{x + w/2:.1f}" y="{y + h/2 + 3:.1f}" '
-            f'text-anchor="middle" font-size="{fsz}" fill="{txt_fill}" '
+            f'text-anchor="middle" font-size="{fsz:.1f}" fill="{txt_fill}" '
             f'font-weight="{("700" if conf == "HIGH" else "500")}" '
-            f'pointer-events="none">{num}</text>'
+            f'pointer-events="none" '
+            f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.2">{num}</text>'
         )
     if n_copies > 1:
         # Small "×N" badge in the upper-right corner.
