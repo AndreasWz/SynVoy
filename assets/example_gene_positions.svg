@@ -1,0 +1,344 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg class="grid-svg" width="1506" height="990" viewBox="0 0 1506 990" xmlns="http://www.w3.org/2000/svg">
+<style type="text/css"><![CDATA[
+
+:root {
+    --bg-1: #f3f5fa;
+    --bg-2: #eef1f6;
+    --panel: #ffffff;
+    --panel-border: #e1e6ef;
+    --text: #1a1d26;
+    --muted: #6b7280;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: radial-gradient(1200px 600px at 15% 10%, #f9fafc 0%, #f3f5fa 45%, #eef1f6 100%);
+    font-family: "IBM Plex Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
+    color: #1a1d26;
+}
+.plot-wrapper { width: 100%; overflow: auto; padding: 20px 24px 30px; }
+.grid-svg {
+    background: #ffffff;
+    border-radius: 14px;
+    border: 1px solid #e1e6ef;
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.06);
+    display: block;
+}
+.grid-svg text {
+    font-family: "IBM Plex Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
+    letter-spacing: 0.1px;
+}
+.grid-title {
+    font-family: "Source Serif 4", "Georgia", "Times New Roman", serif;
+    letter-spacing: 0.2px;
+}
+.grid-subtitle {
+    font-family: "IBM Plex Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
+    letter-spacing: 0.1px;
+}
+.acell { transition: opacity 0.15s ease; }
+.acell:hover { opacity: 0.65; }
+.acol-lbl { font-family: inherit; letter-spacing: 0.15px; }
+@media (max-width: 1100px) {
+    .plot-wrapper { padding: 12px; }
+    .grid-svg { border-radius: 10px; }
+}
+
+]]></style>
+<rect x="0" y="0" width="1506" height="990" fill="#ffffff"/>
+<text class="grid-title" x="504.0" y="30" font-size="17" font-weight="700" fill="#1a1d26">Gene-position map - GOI: Melt</text>
+<text class="grid-subtitle" x="504.0" y="48" font-size="11" fill="#6b7280">12 home genes x 20 genomes | true genomic positions per row</text>
+<rect x="496.0" y="54.0" width="954.0" height="840.0" fill="#f5f7fb" stroke="#d8dee8" stroke-width="1" rx="8"/>
+<rect x="504.0" y="94.0" width="938.0" height="40.0" fill="#eef2f7"/>
+<text x="152.0" y="118.0" font-size="12" fill="#1a1d26" font-weight="700">Apis mellifera (honey bee) (NC_037641.1)</text>
+<line x1="520.0" y1="114.0" x2="1228.0" y2="114.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="117.5" font-size="9" fill="#6b7280">12.37–12.44 Mb</text>
+<g class="acell"><title>LOC726817</title><circle cx="520.0" cy="114.0" r="4.6" fill="#4e79a7" stroke="#2e4864" stroke-width="1"/></g>
+<g class="acell"><title>LOC409662</title><circle cx="550.2" cy="114.0" r="4.6" fill="#f28e2b" stroke="#915519" stroke-width="1"/></g>
+<g class="acell"><title>LOC726827</title><circle cx="643.6" cy="114.0" r="4.6" fill="#59a14f" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726855</title><circle cx="734.0" cy="114.0" r="4.6" fill="#b07aa1" stroke="#694960" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866</title><circle cx="848.1" cy="114.0" r="4.6" fill="#76b7b2" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368</title><circle cx="1036.6" cy="114.0" r="4.6" fill="#edc948" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC113218734</title><circle cx="1146.4" cy="114.0" r="4.6" fill="#ff9da7" stroke="#995e64" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898</title><circle cx="1167.7" cy="114.0" r="4.6" fill="#9c755f" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466</title><circle cx="1198.0" cy="114.0" r="4.6" fill="#86bcb6" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578330</title><circle cx="1199.4" cy="114.0" r="4.6" fill="#e15759" stroke="#873435" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659</title><circle cx="1228.0" cy="114.0" r="4.6" fill="#8cd17d" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt</title><path d="M792.7,107.6 L799.1,114.0 L792.7,120.4 L786.3,114.0 Z" fill="#e31a1c" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="134.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="158.0" font-size="12" fill="#1a1d26" font-weight="600">Tetragonula carbonaria (Tetragonula_carbonaria)</text>
+<line x1="520.0" y1="154.0" x2="1228.0" y2="154.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="157.5" font-size="9" fill="#6b7280">R3_1: 12.52–12.62 Mb</text>
+<g class="acell"><title>LOC726827 — identity 75%, HIGH</title><circle cx="520.0" cy="154.0" r="4.6" fill="#76b26e" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726855 — identity 30%, HIGH</title><circle cx="641.0" cy="154.0" r="4.6" fill="#d6bbcf" stroke="#694960" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH</title><circle cx="900.8" cy="154.0" r="4.6" fill="#78b8b3" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 66%, HIGH</title><circle cx="1029.9" cy="154.0" r="4.6" fill="#f1d673" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 88%, HIGH</title><circle cx="1187.9" cy="154.0" r="4.6" fill="#a4806c" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 98%, HIGH</title><circle cx="1207.0" cy="154.0" r="4.6" fill="#87bdb7" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 83%, HIGH</title><circle cx="1228.0" cy="154.0" r="4.6" fill="#9ad68c" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 50%, MEDIUM</title><path d="M599.6,147.6 L606.0,154.0 L599.6,160.4 L593.2,154.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="174.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="198.0" font-size="12" fill="#1a1d26" font-weight="600">Melipona beecheii (Melipona_beecheii)</text>
+<line x1="520.0" y1="194.0" x2="1228.0" y2="194.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="197.5" font-size="9" fill="#6b7280">contig_140: 1.51–1.54 Mb</text>
+<g class="acell"><title>LOC726817 — identity 72%, HIGH</title><circle cx="1197.8" cy="194.0" r="4.6" fill="#7193b8" stroke="#2e4864" stroke-width="1"/></g>
+<g class="acell"><title>LOC409662 — identity 96%, HIGH</title><circle cx="1228.0" cy="194.0" r="4.6" fill="#f29131" stroke="#915519" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 36%, LOW, 3× copies</title><path d="M520.0,187.6 L526.4,194.0 L520.0,200.4 L513.6,194.0 Z" fill="#f29899" stroke="#8b0000" stroke-width="1.3"/><text x="525.6" y="188.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×3</text></g>
+<rect x="504.0" y="214.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="238.0" font-size="12" fill="#1a1d26" font-weight="600">Bombus impatiens (Bombus_impatiens)</text>
+<line x1="520.0" y1="234.0" x2="1228.0" y2="234.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="237.5" font-size="9" fill="#6b7280">1.51–1.68 Mb</text>
+<g class="acell"><title>LOC726827 — identity 79%, HIGH</title><circle cx="520.0" cy="234.0" r="4.6" fill="#72af69" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH</title><circle cx="636.1" cy="234.0" r="4.6" fill="#78b8b3" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 66%, HIGH</title><circle cx="687.8" cy="234.0" r="4.6" fill="#f1d673" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 85%, HIGH</title><circle cx="751.4" cy="234.0" r="4.6" fill="#a68370" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 97%, HIGH</title><circle cx="763.0" cy="234.0" r="4.6" fill="#88bdb7" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 85%, HIGH</title><circle cx="776.6" cy="234.0" r="4.6" fill="#98d68b" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>LOC726817 — identity 75%, HIGH</title><circle cx="1221.3" cy="234.0" r="4.6" fill="#6d90b6" stroke="#2e4864" stroke-width="1"/></g>
+<g class="acell"><title>LOC409662 — identity 98%, HIGH</title><circle cx="1228.0" cy="234.0" r="4.6" fill="#f2902e" stroke="#915519" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 52%, MEDIUM, 3× copies</title><path d="M637.3,227.6 L643.7,234.0 L637.3,240.4 L630.9,234.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="642.9" y="228.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×3</text></g>
+<rect x="504.0" y="254.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="278.0" font-size="12" fill="#1a1d26" font-weight="600">Bombus terrestris (Bombus_terrestris)</text>
+<line x1="520.0" y1="274.0" x2="1228.0" y2="274.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="277.5" font-size="9" fill="#6b7280">NC_063272.1: 15.55–15.61 Mb</text>
+<g class="acell"><title>LOC726827 — identity 79%, HIGH</title><circle cx="520.0" cy="274.0" r="4.6" fill="#72af69" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH</title><circle cx="852.1" cy="274.0" r="4.6" fill="#78b8b3" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 66%, HIGH</title><circle cx="986.1" cy="274.0" r="4.6" fill="#f1d673" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 84%, HIGH</title><circle cx="1155.2" cy="274.0" r="4.6" fill="#a78571" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 97%, HIGH</title><circle cx="1188.6" cy="274.0" r="4.6" fill="#89beb8" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 84%, HIGH</title><circle cx="1228.0" cy="274.0" r="4.6" fill="#99d68c" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 59%, MEDIUM, 2× copies</title><path d="M607.8,267.6 L614.2,274.0 L607.8,280.4 L601.4,274.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="613.4" y="268.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×2</text></g>
+<rect x="504.0" y="294.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="318.0" font-size="12" fill="#1a1d26" font-weight="600">Apis cerana (Apis_cerana)</text>
+<line x1="520.0" y1="314.0" x2="1228.0" y2="314.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="317.5" font-size="9" fill="#6b7280">NC_083855.1: 12.18–12.24 Mb</text>
+<g class="acell"><title>LOC726817 — identity 92%, HIGH</title><circle cx="520.0" cy="314.0" r="4.6" fill="#5880ac" stroke="#2e4864" stroke-width="1"/></g>
+<g class="acell"><title>LOC409662 — identity 100%, HIGH</title><circle cx="537.5" cy="314.0" r="4.6" fill="#f28e2b" stroke="#915519" stroke-width="1"/></g>
+<g class="acell"><title>LOC726827 — identity 94%, HIGH</title><circle cx="634.7" cy="314.0" r="4.6" fill="#60a556" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726855 — identity 63%, HIGH</title><circle cx="730.2" cy="314.0" r="4.6" fill="#c59db9" stroke="#694960" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 99%, HIGH</title><circle cx="912.3" cy="314.0" r="4.6" fill="#77b7b2" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 94%, HIGH</title><circle cx="1018.2" cy="314.0" r="4.6" fill="#eecb50" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 99%, HIGH</title><circle cx="1166.2" cy="314.0" r="4.6" fill="#9c7660" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 100%, HIGH</title><circle cx="1195.1" cy="314.0" r="4.6" fill="#86bcb6" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 97%, HIGH</title><circle cx="1228.0" cy="314.0" r="4.6" fill="#8ed280" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 100%, MEDIUM, 2× copies</title><path d="M785.6,307.6 L792.0,314.0 L785.6,320.4 L779.2,314.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="791.2" y="308.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×2</text></g>
+<rect x="504.0" y="334.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="358.0" font-size="12" fill="#1a1d26" font-weight="600">Apis florea (Apis_florea)</text>
+<line x1="520.0" y1="354.0" x2="1228.0" y2="354.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="357.5" font-size="9" fill="#6b7280">NW_003789285.1: 0.83–0.89 Mb</text>
+<g class="acell"><title>LOC409659 — identity 95%, HIGH, inverted</title><circle cx="520.0" cy="354.0" r="4.6" fill="#90d381" stroke="#547d4b" stroke-width="1"/><circle cx="520.0" cy="354.0" r="7.0" fill="none" stroke="#547d4b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC102655466 — identity 100%, HIGH, inverted</title><circle cx="552.6" cy="354.0" r="4.6" fill="#86bcb6" stroke="#50706d" stroke-width="1"/><circle cx="552.6" cy="354.0" r="7.0" fill="none" stroke="#50706d" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC412898 — identity 98%, HIGH, inverted</title><circle cx="581.8" cy="354.0" r="4.6" fill="#9d7761" stroke="#5d4639" stroke-width="1"/><circle cx="581.8" cy="354.0" r="7.0" fill="none" stroke="#5d4639" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC100578368 — identity 89%, HIGH, inverted</title><circle cx="744.4" cy="354.0" r="4.6" fill="#eecd56" stroke="#8e782b" stroke-width="1"/><circle cx="744.4" cy="354.0" r="7.0" fill="none" stroke="#8e782b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726866 — identity 100%, HIGH, inverted</title><circle cx="836.5" cy="354.0" r="4.6" fill="#76b7b2" stroke="#466d6a" stroke-width="1"/><circle cx="836.5" cy="354.0" r="7.0" fill="none" stroke="#466d6a" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726855 — identity 72%, LOW, inverted</title><circle cx="1008.6" cy="354.0" r="4.6" fill="#dbc3d5" stroke="#694960" stroke-width="1"/><circle cx="1008.6" cy="354.0" r="7.0" fill="none" stroke="#694960" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726827 — identity 90%, HIGH, inverted</title><circle cx="1109.0" cy="354.0" r="4.6" fill="#64a75b" stroke="#35602f" stroke-width="1"/><circle cx="1109.0" cy="354.0" r="7.0" fill="none" stroke="#35602f" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC409662 — identity 99%, HIGH, inverted</title><circle cx="1210.1" cy="354.0" r="4.6" fill="#f28f2c" stroke="#915519" stroke-width="1"/><circle cx="1210.1" cy="354.0" r="7.0" fill="none" stroke="#915519" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726817 — identity 92%, HIGH, inverted</title><circle cx="1228.0" cy="354.0" r="4.6" fill="#5881ac" stroke="#2e4864" stroke-width="1"/><circle cx="1228.0" cy="354.0" r="7.0" fill="none" stroke="#2e4864" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>Melt — identity 84%, HIGH, 6× copies</title><path d="M961.6,347.6 L968.0,354.0 L961.6,360.4 L955.2,354.0 Z" fill="#e63335" stroke="#8b0000" stroke-width="1.3"/><text x="967.2" y="348.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×6</text></g>
+<rect x="504.0" y="374.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="398.0" font-size="12" fill="#1a1d26" font-weight="600">Euglossa dilemma (Euglossa_dilemma)</text>
+<line x1="520.0" y1="394.0" x2="1228.0" y2="394.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="397.5" font-size="9" fill="#6b7280">NIJG01000031.1: 0.42–0.46 Mb</text>
+<g class="acell"><title>LOC726827 — identity 77%, HIGH</title><circle cx="520.0" cy="394.0" r="4.6" fill="#74b06b" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 98%, HIGH</title><circle cx="808.6" cy="394.0" r="4.6" fill="#78b8b3" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 63%, HIGH</title><circle cx="934.6" cy="394.0" r="4.6" fill="#f2d777" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 81%, HIGH</title><circle cx="1134.6" cy="394.0" r="4.6" fill="#a98774" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 98%, HIGH</title><circle cx="1178.7" cy="394.0" r="4.6" fill="#87bdb7" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 82%, HIGH</title><circle cx="1228.0" cy="394.0" r="4.6" fill="#9bd78d" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 23%, LOW</title><path d="M520.9,387.6 L527.3,394.0 L520.9,400.4 L514.5,394.0 Z" fill="#f29899" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="414.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="438.0" font-size="12" fill="#1a1d26" font-weight="600">Xylocopa violacea (Xylocopa_violacea)</text>
+<line x1="520.0" y1="434.0" x2="1228.0" y2="434.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="437.5" font-size="9" fill="#6b7280">scaffold-133: 0.37–0.39 Mb</text>
+<g class="acell"><title>LOC726817 — identity 74%, HIGH</title><circle cx="1177.6" cy="434.0" r="4.6" fill="#6f92b7" stroke="#2e4864" stroke-width="1"/></g>
+<g class="acell"><title>LOC409662 — identity 95%, HIGH</title><circle cx="1228.0" cy="434.0" r="4.6" fill="#f29233" stroke="#915519" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 28%, LOW</title><path d="M520.0,427.6 L526.4,434.0 L520.0,440.4 L513.6,434.0 Z" fill="#f29899" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="454.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="478.0" font-size="12" fill="#1a1d26" font-weight="600">Osmia bicornis (Osmia_bicornis)</text>
+<line x1="520.0" y1="474.0" x2="1228.0" y2="474.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="477.5" font-size="9" fill="#6b7280">NC_060218.1: 1.74–1.79 Mb</text>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH</title><circle cx="801.9" cy="474.0" r="4.6" fill="#78b8b3" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 62%, HIGH</title><circle cx="953.1" cy="474.0" r="4.6" fill="#f2d879" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 85%, HIGH</title><circle cx="1146.9" cy="474.0" r="4.6" fill="#a68370" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 98%, HIGH</title><circle cx="1185.6" cy="474.0" r="4.6" fill="#87bdb7" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 82%, HIGH</title><circle cx="1228.0" cy="474.0" r="4.6" fill="#9ad78d" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 36%, MEDIUM</title><path d="M520.0,467.6 L526.4,474.0 L520.0,480.4 L513.6,474.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="494.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="518.0" font-size="12" fill="#1a1d26" font-weight="600">Megachile rotundata (Megachile_rotundata)</text>
+<line x1="520.0" y1="514.0" x2="1228.0" y2="514.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="517.5" font-size="9" fill="#6b7280">NW_003797369.1: 0.23–0.29 Mb</text>
+<g class="acell"><title>LOC726827 — identity 74%, HIGH</title><circle cx="571.0" cy="514.0" r="4.6" fill="#77b26f" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH</title><circle cx="848.7" cy="514.0" r="4.6" fill="#79b9b4" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 65%, HIGH</title><circle cx="985.4" cy="514.0" r="4.6" fill="#f1d675" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 81%, HIGH</title><circle cx="1162.4" cy="514.0" r="4.6" fill="#a98774" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 98%, HIGH</title><circle cx="1194.0" cy="514.0" r="4.6" fill="#88bdb7" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 80%, HIGH</title><circle cx="1228.0" cy="514.0" r="4.6" fill="#9dd890" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 35%, MEDIUM</title><path d="M520.0,507.6 L526.4,514.0 L520.0,520.4 L513.6,514.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="534.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="558.0" font-size="12" fill="#1a1d26" font-weight="600">Colletes gigas (Colletes_gigas)</text>
+<line x1="520.0" y1="554.0" x2="1228.0" y2="554.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="557.5" font-size="9" fill="#6b7280">WUUM01000001.1: 9.44–9.58 Mb</text>
+<g class="acell"><title>LOC409659 — identity 78%, HIGH, inverted</title><circle cx="520.0" cy="554.0" r="4.6" fill="#9ed891" stroke="#547d4b" stroke-width="1"/><circle cx="520.0" cy="554.0" r="7.0" fill="none" stroke="#547d4b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC102655466 — identity 96%, HIGH, inverted</title><circle cx="535.4" cy="554.0" r="4.6" fill="#8abeb8" stroke="#50706d" stroke-width="1"/><circle cx="535.4" cy="554.0" r="7.0" fill="none" stroke="#50706d" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC412898 — identity 82%, HIGH, inverted</title><circle cx="557.1" cy="554.0" r="4.6" fill="#a88673" stroke="#5d4639" stroke-width="1"/><circle cx="557.1" cy="554.0" r="7.0" fill="none" stroke="#5d4639" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC100578368 — identity 62%, HIGH, inverted</title><circle cx="712.4" cy="554.0" r="4.6" fill="#f2d778" stroke="#8e782b" stroke-width="1"/><circle cx="712.4" cy="554.0" r="7.0" fill="none" stroke="#8e782b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726866 — identity 97%, HIGH, inverted</title><circle cx="826.8" cy="554.0" r="4.6" fill="#79b9b4" stroke="#466d6a" stroke-width="1"/><circle cx="826.8" cy="554.0" r="7.0" fill="none" stroke="#466d6a" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726827 — identity 74%, HIGH, inverted</title><circle cx="1064.0" cy="554.0" r="4.6" fill="#77b26f" stroke="#35602f" stroke-width="1"/><circle cx="1064.0" cy="554.0" r="7.0" fill="none" stroke="#35602f" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC409662 — identity 94%, HIGH, inverted</title><circle cx="1220.2" cy="554.0" r="4.6" fill="#f39334" stroke="#915519" stroke-width="1"/><circle cx="1220.2" cy="554.0" r="7.0" fill="none" stroke="#915519" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726817 — identity 72%, HIGH, inverted</title><circle cx="1228.0" cy="554.0" r="4.6" fill="#7093b8" stroke="#2e4864" stroke-width="1"/><circle cx="1228.0" cy="554.0" r="7.0" fill="none" stroke="#2e4864" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>Melt — identity 59%, MEDIUM, 2× copies</title><path d="M1009.1,547.6 L1015.5,554.0 L1009.1,560.4 L1002.7,554.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="1014.7" y="548.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×2</text></g>
+<rect x="504.0" y="574.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="598.0" font-size="12" fill="#1a1d26" font-weight="600">Nomia melanderi (Nomia_melanderi)</text>
+<line x1="520.0" y1="594.0" x2="1228.0" y2="594.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="597.5" font-size="9" fill="#6b7280">NW_022341388.1: 0.81–0.88 Mb</text>
+<g class="acell"><title>LOC726827 — identity 75%, HIGH</title><circle cx="520.0" cy="594.0" r="4.6" fill="#76b26e" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH</title><circle cx="890.7" cy="594.0" r="4.6" fill="#7bb9b5" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 52%, HIGH</title><circle cx="1034.3" cy="594.0" r="4.6" fill="#f3db86" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 80%, HIGH</title><circle cx="1168.7" cy="594.0" r="4.6" fill="#aa8875" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 97%, HIGH</title><circle cx="1199.2" cy="594.0" r="4.6" fill="#89beb8" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 80%, HIGH</title><circle cx="1228.0" cy="594.0" r="4.6" fill="#9dd890" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 43%, MEDIUM, 3× copies</title><path d="M621.2,587.6 L627.6,594.0 L621.2,600.4 L614.8,594.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="626.8" y="588.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×3</text></g>
+<rect x="504.0" y="614.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="638.0" font-size="12" fill="#1a1d26" font-weight="600">Vespa velutina (Vespa_velutina)</text>
+<line x1="520.0" y1="634.0" x2="1228.0" y2="634.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="637.5" font-size="9" fill="#6b7280">NC_062198.1: 4.50–4.54 Mb</text>
+<g class="acell"><title>LOC409659 — identity 73%, HIGH, inverted</title><circle cx="520.0" cy="634.0" r="4.6" fill="#a2da96" stroke="#547d4b" stroke-width="1"/><circle cx="520.0" cy="634.0" r="7.0" fill="none" stroke="#547d4b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC102655466 — identity 94%, HIGH, inverted</title><circle cx="594.4" cy="634.0" r="4.6" fill="#8bbfb9" stroke="#50706d" stroke-width="1"/><circle cx="594.4" cy="634.0" r="7.0" fill="none" stroke="#50706d" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC412898 — identity 72%, HIGH, inverted</title><circle cx="646.6" cy="634.0" r="4.6" fill="#b0907f" stroke="#5d4639" stroke-width="1"/><circle cx="646.6" cy="634.0" r="7.0" fill="none" stroke="#5d4639" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC100578368 — identity 52%, HIGH, inverted</title><circle cx="1228.0" cy="634.0" r="4.6" fill="#f3db86" stroke="#8e782b" stroke-width="1"/><circle cx="1228.0" cy="634.0" r="7.0" fill="none" stroke="#8e782b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>Melt — identity 31%, LOW</title><path d="M1016.2,627.6 L1022.6,634.0 L1016.2,640.4 L1009.8,634.0 Z" fill="#f29899" stroke="#8b0000" stroke-width="1.3"/></g>
+<rect x="504.0" y="654.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="678.0" font-size="12" fill="#1a1d26" font-weight="600">Polistes canadensis (Polistes_canadensis)</text>
+<line x1="520.0" y1="674.0" x2="1228.0" y2="674.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="677.5" font-size="9" fill="#6b7280">0.64–0.83 Mb</text>
+<g class="acell"><title>LOC726827 — identity 73%, HIGH</title><circle cx="532.2" cy="674.0" r="4.6" fill="#78b370" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH</title><circle cx="641.0" cy="674.0" r="4.6" fill="#7bb9b5" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 51%, HIGH</title><circle cx="1088.8" cy="674.0" r="4.6" fill="#f3dc87" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 71%, HIGH</title><circle cx="1218.0" cy="674.0" r="4.6" fill="#b0917f" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 94%, HIGH</title><circle cx="1228.0" cy="674.0" r="4.6" fill="#8bbfb9" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 71%, MEDIUM, 4× copies</title><path d="M520.0,667.6 L526.4,674.0 L520.0,680.4 L513.6,674.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="525.6" y="668.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×4</text></g>
+<rect x="504.0" y="694.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="718.0" font-size="12" fill="#1a1d26" font-weight="600">Vollenhovia emeryi (Vollenhovia_emeryi)</text>
+<line x1="520.0" y1="714.0" x2="1228.0" y2="714.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="717.5" font-size="9" fill="#6b7280">NW_011967086.1: 0.06–0.22 Mb</text>
+<g class="acell"><title>LOC726827 — identity 73%, HIGH</title><circle cx="520.0" cy="714.0" r="4.6" fill="#78b370" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH</title><circle cx="855.2" cy="714.0" r="4.6" fill="#7bb9b5" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 56%, HIGH</title><circle cx="1013.6" cy="714.0" r="4.6" fill="#f3da80" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 63%, HIGH</title><circle cx="1228.0" cy="714.0" r="4.6" fill="#b69988" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 79%, MEDIUM, 4× copies</title><path d="M953.3,707.6 L959.7,714.0 L953.3,720.4 L946.9,714.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="958.9" y="708.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×4</text></g>
+<rect x="504.0" y="734.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="758.0" font-size="12" fill="#1a1d26" font-weight="600">Tetramorium bicarinatum (Tetramorium_bicarinatum)</text>
+<line x1="520.0" y1="754.0" x2="1228.0" y2="754.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="757.5" font-size="9" fill="#6b7280">OV788322.1: 15.48–15.66 Mb</text>
+<g class="acell"><title>LOC409659 — identity 72%, HIGH, inverted</title><circle cx="520.0" cy="754.0" r="4.6" fill="#a3da97" stroke="#547d4b" stroke-width="1"/><circle cx="520.0" cy="754.0" r="7.0" fill="none" stroke="#547d4b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC102655466 — identity 94%, HIGH, inverted</title><circle cx="535.8" cy="754.0" r="4.6" fill="#8bbfb9" stroke="#50706d" stroke-width="1"/><circle cx="535.8" cy="754.0" r="7.0" fill="none" stroke="#50706d" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC412898 — identity 68%, HIGH, inverted</title><circle cx="562.4" cy="754.0" r="4.6" fill="#b29483" stroke="#5d4639" stroke-width="1"/><circle cx="562.4" cy="754.0" r="7.0" fill="none" stroke="#5d4639" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC100578368 — identity 55%, HIGH, inverted</title><circle cx="732.4" cy="754.0" r="4.6" fill="#f3da82" stroke="#8e782b" stroke-width="1"/><circle cx="732.4" cy="754.0" r="7.0" fill="none" stroke="#8e782b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH, inverted</title><circle cx="859.1" cy="754.0" r="4.6" fill="#7bbab5" stroke="#466d6a" stroke-width="1"/><circle cx="859.1" cy="754.0" r="7.0" fill="none" stroke="#466d6a" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726827 — identity 72%, HIGH, inverted</title><circle cx="1228.0" cy="754.0" r="4.6" fill="#7ab472" stroke="#35602f" stroke-width="1"/><circle cx="1228.0" cy="754.0" r="7.0" fill="none" stroke="#35602f" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>Melt — identity 40%, MEDIUM, 2× copies</title><path d="M899.8,747.6 L906.2,754.0 L899.8,760.4 L893.4,754.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="905.4" y="748.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×2</text></g>
+<rect x="504.0" y="774.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="798.0" font-size="12" fill="#1a1d26" font-weight="600">Cardiocondyla obscurior (Cardiocondyla_obscurior)</text>
+<line x1="520.0" y1="794.0" x2="1228.0" y2="794.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="797.5" font-size="9" fill="#6b7280">NC_091864.1: 10.58–10.70 Mb</text>
+<g class="acell"><title>LOC102655466 — identity 95%, HIGH, inverted</title><circle cx="520.0" cy="794.0" r="4.6" fill="#8abeb8" stroke="#50706d" stroke-width="1"/><circle cx="520.0" cy="794.0" r="7.0" fill="none" stroke="#50706d" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC412898 — identity 67%, HIGH</title><circle cx="552.4" cy="794.0" r="4.6" fill="#b39584" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 54%, HIGH, inverted</title><circle cx="789.5" cy="794.0" r="4.6" fill="#f3db84" stroke="#8e782b" stroke-width="1"/><circle cx="789.5" cy="794.0" r="7.0" fill="none" stroke="#8e782b" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH, inverted</title><circle cx="955.5" cy="794.0" r="4.6" fill="#7bbab5" stroke="#466d6a" stroke-width="1"/><circle cx="955.5" cy="794.0" r="7.0" fill="none" stroke="#466d6a" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>LOC726827 — identity 73%, HIGH, inverted</title><circle cx="1228.0" cy="794.0" r="4.6" fill="#78b370" stroke="#35602f" stroke-width="1"/><circle cx="1228.0" cy="794.0" r="7.0" fill="none" stroke="#35602f" stroke-width="0.9" stroke-dasharray="1.5,1.5"/></g>
+<g class="acell"><title>Melt — identity 34%, MEDIUM, 3× copies</title><path d="M783.4,787.6 L789.8,794.0 L783.4,800.4 L777.0,794.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="789.0" y="788.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×3</text></g>
+<rect x="504.0" y="814.0" width="938.0" height="40.0" fill="#ffffff"/>
+<text x="152.0" y="838.0" font-size="12" fill="#1a1d26" font-weight="600">Solenopsis invicta (Solenopsis_invicta)</text>
+<line x1="520.0" y1="834.0" x2="1228.0" y2="834.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="837.5" font-size="9" fill="#6b7280">NC_052668.1: 15.56–15.73 Mb</text>
+<g class="acell"><title>LOC726827 — identity 73%, HIGH</title><circle cx="520.0" cy="834.0" r="4.6" fill="#79b371" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 95%, HIGH</title><circle cx="790.3" cy="834.0" r="4.6" fill="#7bbab5" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 56%, HIGH</title><circle cx="954.6" cy="834.0" r="4.6" fill="#f3da81" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 67%, HIGH</title><circle cx="1183.8" cy="834.0" r="4.6" fill="#b39584" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 95%, HIGH</title><circle cx="1211.3" cy="834.0" r="4.6" fill="#8abeb9" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>LOC409659 — identity 75%, HIGH</title><circle cx="1228.0" cy="834.0" r="4.6" fill="#a0d994" stroke="#547d4b" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 38%, MEDIUM, 3× copies</title><path d="M892.8,827.6 L899.2,834.0 L892.8,840.4 L886.4,834.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="898.4" y="828.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×3</text></g>
+<rect x="504.0" y="854.0" width="938.0" height="40.0" fill="#f8f9fc"/>
+<text x="152.0" y="878.0" font-size="12" fill="#1a1d26" font-weight="600">Formica selysi (Formica_selysi)</text>
+<line x1="520.0" y1="874.0" x2="1228.0" y2="874.0" stroke="#c2cad6" stroke-width="1.6"/>
+<text x="1254.0" y="877.5" font-size="9" fill="#6b7280">CM020811.1: 5.86–6.02 Mb</text>
+<g class="acell"><title>LOC726827 — identity 73%, HIGH</title><circle cx="520.0" cy="874.0" r="4.6" fill="#78b370" stroke="#35602f" stroke-width="1"/></g>
+<g class="acell"><title>LOC726866 — identity 96%, HIGH</title><circle cx="817.9" cy="874.0" r="4.6" fill="#7ab9b4" stroke="#466d6a" stroke-width="1"/></g>
+<g class="acell"><title>LOC100578368 — identity 55%, HIGH</title><circle cx="1026.1" cy="874.0" r="4.6" fill="#f3da82" stroke="#8e782b" stroke-width="1"/></g>
+<g class="acell"><title>LOC412898 — identity 69%, HIGH</title><circle cx="1209.5" cy="874.0" r="4.6" fill="#b19381" stroke="#5d4639" stroke-width="1"/></g>
+<g class="acell"><title>LOC102655466 — identity 96%, HIGH</title><circle cx="1228.0" cy="874.0" r="4.6" fill="#8abeb8" stroke="#50706d" stroke-width="1"/></g>
+<g class="acell"><title>Melt — identity 41%, MEDIUM, 2× copies</title><path d="M622.9,867.6 L629.3,874.0 L622.9,880.4 L616.5,874.0 Z" fill="#eb5f60" stroke="#8b0000" stroke-width="1.3"/><text x="628.5" y="868.4" font-size="7.5" fill="#880f10" font-weight="700" style="paint-order:stroke;stroke:#fff;stroke-width:1.6">×2</text></g>
+<g class="grid-tree" fill="none">
+<line x1="12.0" y1="374.0" x2="12.0" y2="794.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="12.0" y1="374.0" x2="36.0" y2="374.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="294.0" x2="36.0" y2="594.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="294.0" x2="60.0" y2="294.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="274.0" x2="60.0" y2="434.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="274.0" x2="84.0" y2="274.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="174.0" x2="84.0" y2="394.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="174.0" x2="108.0" y2="174.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="154.0" x2="108.0" y2="194.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="154.0" x2="132.0" y2="154.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="154.0" x2="138.0" y2="154.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="108.0" y1="194.0" x2="132.0" y2="194.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="194.0" x2="138.0" y2="194.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="84.0" y1="254.0" x2="108.0" y2="254.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="234.0" x2="108.0" y2="274.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="234.0" x2="132.0" y2="234.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="234.0" x2="138.0" y2="234.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="108.0" y1="274.0" x2="132.0" y2="274.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="274.0" x2="138.0" y2="274.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="84.0" y1="334.0" x2="108.0" y2="334.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="314.0" x2="108.0" y2="354.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="314.0" x2="132.0" y2="314.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="314.0" x2="138.0" y2="314.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="108.0" y1="354.0" x2="132.0" y2="354.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="132.0" y1="354.0" x2="138.0" y2="354.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="84.0" y1="394.0" x2="108.0" y2="394.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="108.0" y1="394.0" x2="138.0" y2="394.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="60.0" y1="434.0" x2="84.0" y2="434.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="434.0" x2="138.0" y2="434.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="36.0" y1="494.0" x2="60.0" y2="494.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="474.0" x2="60.0" y2="514.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="474.0" x2="84.0" y2="474.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="474.0" x2="138.0" y2="474.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="60.0" y1="514.0" x2="84.0" y2="514.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="514.0" x2="138.0" y2="514.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="36.0" y1="554.0" x2="60.0" y2="554.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="554.0" x2="138.0" y2="554.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="36.0" y1="594.0" x2="60.0" y2="594.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="594.0" x2="138.0" y2="594.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="12.0" y1="654.0" x2="36.0" y2="654.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="634.0" x2="36.0" y2="674.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="634.0" x2="60.0" y2="634.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="634.0" x2="138.0" y2="634.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="36.0" y1="674.0" x2="60.0" y2="674.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="674.0" x2="138.0" y2="674.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="12.0" y1="794.0" x2="36.0" y2="794.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="774.0" x2="36.0" y2="874.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="36.0" y1="774.0" x2="60.0" y2="774.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="714.0" x2="60.0" y2="834.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="714.0" x2="84.0" y2="714.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="714.0" x2="138.0" y2="714.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="60.0" y1="754.0" x2="84.0" y2="754.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="754.0" x2="138.0" y2="754.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="60.0" y1="794.0" x2="84.0" y2="794.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="794.0" x2="138.0" y2="794.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="60.0" y1="834.0" x2="84.0" y2="834.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="84.0" y1="834.0" x2="138.0" y2="834.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="36.0" y1="874.0" x2="60.0" y2="874.0" stroke="#9aa3b2" stroke-width="1.2"/>
+<line x1="60.0" y1="874.0" x2="138.0" y2="874.0" stroke="#9aa3b2" stroke-width="0.7" stroke-dasharray="1,2" opacity="0.65"/>
+<line x1="12.0" y1="114.0" x2="12.0" y2="514.0" stroke="#9aa3b2" stroke-width="1.0" stroke-dasharray="3,2.5" opacity="0.7"/>
+<line x1="12.0" y1="114.0" x2="138.0" y2="114.0" stroke="#9aa3b2" stroke-width="1.0" stroke-dasharray="3,2.5" opacity="0.7"/>
+</g>
+<text x="72.0" y="88.0" text-anchor="middle" font-size="9.5" fill="#6b7280" font-style="italic">Species tree</text>
+<rect x="504.0" y="94.0" width="938.0" height="800.0" fill="none" stroke="#d8dee8" stroke-width="1"/>
+<text x="504.0" y="912.0" font-size="10.5" fill="#8c95a6">Each genome normalised to its own neighbourhood   ·   dot = gene (colour = home ortholog)   ·   ◆ = GOI   ·   ring = inverted vs home</text>
+<circle cx="510.0" cy="930.0" r="4.6" fill="#547eaa" stroke="#2e4864" stroke-width="1"/>
+<text x="524.0" y="933.0" font-size="10" fill="#42495a">flanking ortholog</text>
+<path d="M658.0,923.6 L664.4,930.0 L658.0,936.4 L651.6,930.0 Z" fill="#e42224" stroke="#8b0000" stroke-width="1.2"/>
+<text x="674.0" y="933.0" font-size="10" fill="#42495a">GOI</text>
+<circle cx="727.0" cy="930.0" r="4.6" fill="#a6bcd3" stroke="#2e4864" stroke-width="1"/>
+<circle cx="727.0" cy="930.0" r="7.0" fill="none" stroke="#2e4864" stroke-width="0.9" stroke-dasharray="1.5,1.5"/>
+<text x="743.0" y="933.0" font-size="10" fill="#42495a">inverted vs home   ·   shade = % identity</text></svg>
