@@ -20,6 +20,10 @@ process PLOT_SYNTENY {
     path "*_synteny_matrix.svg", emit: matrix_plot, optional: true
     path "*_anchor_grid.html", emit: anchor_grid, optional: true
     path "*_anchor_grid.svg", emit: anchor_grid_svg, optional: true
+    path "*_gene_positions.html", emit: gene_positions, optional: true
+    path "*_gene_positions.svg", emit: gene_positions_svg, optional: true
+    path "*_anchor_positions.html", emit: anchor_positions, optional: true
+    path "*_anchor_positions.svg", emit: anchor_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
     path "plot_inputs_*", emit: inputs, optional: true
 
@@ -103,21 +107,25 @@ process PLOT_SYNTENY {
         --plot_width ${params.plot_width} \\
         --output ${home_bed.baseName}_synteny_plot.html
 
-    # Phylogeny-anchored matrix view (paper-ready SVG). Runs offline so it
-    # cannot stall on NCBI common-name lookups inside the Nextflow task.
-    ${projectDir}/bin/plot_synteny_matrix.py \\
-        --home_bed $home_bed \\
-        --query_bed $query_bed \\
-        --home_gff "\$FINAL_HOME_GFF" \\
-        $gffs_arg \\
-        $names_arg \\
-        $homo_arg \\
-        $cands_arg \\
-        --tree $tree \\
-        $species_arg \\
-        --home_species "${home_species ?: 'Home'}" \\
-        --common_names scientific \\
-        --no_network \\
-        --output ${home_bed.baseName}_synteny_matrix.svg
+    # Phylogeny-anchored matrix view (paper-ready SVG). Opt-in: the anchor-grid
+    # (aligned columns + species tree) and the gene-position map cover the same
+    # ground more compactly, so this is off unless --enable_matrix_plot is set.
+    # Runs offline so it can't stall on NCBI common-name lookups in the task.
+    if [ "${params.enable_matrix_plot}" = "true" ]; then
+        ${projectDir}/bin/plot_synteny_matrix.py \\
+            --home_bed $home_bed \\
+            --query_bed $query_bed \\
+            --home_gff "\$FINAL_HOME_GFF" \\
+            $gffs_arg \\
+            $names_arg \\
+            $homo_arg \\
+            $cands_arg \\
+            --tree $tree \\
+            $species_arg \\
+            --home_species "${home_species ?: 'Home'}" \\
+            --common_names scientific \\
+            --no_network \\
+            --output ${home_bed.baseName}_synteny_matrix.svg
+    fi
     """
 }

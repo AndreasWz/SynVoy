@@ -524,7 +524,21 @@ def build_taxonomy_tree_newick(species_list, allow_network: bool = True):
     share a genus node, etc.), which makes the matrix's tree column show
     who-is-related-to-who rather than per-locus sequence similarity.
     """
+    # Python 3.13 removed the stdlib `cgi` module, which ete3's webplugin
+    # imports at package-init — so a bare `from ete3 import NCBITaxa` raises
+    # ModuleNotFoundError on 3.13 and the WHOLE taxonomy tree silently fell back
+    # to the (scrambled) GOI gene tree. We don't need the webplugin, so inject a
+    # minimal `cgi` stub just long enough for the import to succeed.
     try:
+        import sys as _sys
+        import types as _types
+        if "cgi" not in _sys.modules:
+            try:
+                import cgi  # noqa: F401
+            except ModuleNotFoundError:
+                _shim = _types.ModuleType("cgi")
+                _shim.escape = lambda s, quote=True: s  # only symbol ete3 touches
+                _sys.modules["cgi"] = _shim
         from ete3 import NCBITaxa  # type: ignore
     except ImportError:
         return None
