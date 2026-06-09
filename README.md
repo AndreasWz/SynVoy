@@ -23,27 +23,27 @@ Instead of relying on the gene's sequence alone, it uses the **conserved order o
 > **Validated finding.** Run with melittin against ant genomes, SynVoy independently re-finds **U11-myrmicitoxin-Tb1a** (UniProt `A0A6M3Z554`) at the right locus in *Tetramorium bicarinatum* — a 26 % identity hit that standard homology search drops, but synteny correctly anchors. This is a known myrmicitoxin from the same melittin-derived family.
 
 <p align="center">
-  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor-grid — melittin orthologs aligned across 19 bee + outgroup genomes" width="820"/>
+  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor-grid — melittin orthologs aligned across 19 bee + outgroup genomes" width="860"/>
 </p>
-<p align="center"><sub><b>Anchor-grid view</b> — melittin orthologs across 19 bee + outgroup genomes. Each <b>row</b> is a species (phylogenetic order); each <b>column</b> is a home-genome gene, so an orthologue is read from its <i>vertical alignment</i> rather than a tangle of ribbons. Each cell is a directional arrow (pointing in the coding strand; an arrow against its home column = a local inversion), shaded by % identity and labelled <code>%identity / %query-coverage</code>. The GOI ("Melt") is the emphasised red column. Confidence is encoded by the arrow style: <b>solid</b> = HIGH, <b>dashed</b> = MEDIUM, <b>striped</b> = LOW (likely false positive); an open dashed circle = the gene was not recovered in that species.</sub></p>
+<p align="center"><sub><b>Anchor-grid view</b> — melittin orthologs across 19 bee + outgroup genomes. Each <b>row</b> is a species (NCBI-taxonomy order, tree at left); each <b>column</b> is a home-genome gene, so an orthologue is read from its <i>vertical alignment</i> rather than a tangle of ribbons. Each cell is a directional arrow (pointing in the coding strand; an arrow against its home column = a local inversion), shaded by % identity and labelled <code>%identity / %query-coverage</code>. The GOI ("Melt") is the emphasised red column; the gutter at right gives each row's chromosome/scaffold and coordinate span. Confidence is encoded by the arrow style: <b>solid</b> = HIGH, <b>dashed</b> = MEDIUM, <b>striped</b> = LOW (likely false positive); an open dashed circle = the gene was not recovered in that species.</sub></p>
 
 <details>
-<summary><b>Matrix view</b> (cladogram-anchored heatmap — click to expand)</summary>
+<summary><b>Gene-position map</b> (true coordinates per species — click to expand)</summary>
 
 <p align="center">
-  <img src="assets/example_synteny_plot.svg" alt="SynVoy synteny matrix — melittin across 19 bee + outgroup genomes" width="780"/>
+  <img src="assets/example_gene_positions.svg" alt="SynVoy gene-position map — melittin neighbourhood at real coordinates across 19 bee + outgroup genomes" width="860"/>
 </p>
-<p align="center"><sub><b>Matrix view</b> — same melittin run. Each row is a species; each column is a home-genome flanking-gene slot, with the GOI ("Melt") highlighted. Cells are shaded by % identity and labelled <code>%identity / %query-coverage</code>; confidence is encoded as <b>solid</b> = HIGH, <b>lightly dotted</b> = MEDIUM, <b>hatched</b> = LOW (likely false positive). The cladogram on the left is an NCBI-taxonomy species tree colour-grouped into Hymenoptera families (Apinae, other bees, Vespidae, Formicidae).</sub></p>
+<p align="center"><sub><b>Gene-position map</b> — same melittin run. The anchor grid aligns genes into shared columns; this view instead plots each gene at its <i>real, normalised genomic position</i> along each species' row (dots coloured by home-gene identity, GOI "Melt" as a red diamond), so you can see local rearrangements, expansions, and gaps directly. The NCBI-taxonomy species tree is on the left and each row's chromosome/scaffold + coordinate span is on the right.</sub></p>
 
 </details>
 
 <details>
-<summary><b>Track view</b> (per-locus arrow plot — click to expand)</summary>
+<summary><b>Synteny track plot</b> (per-locus arrow plot with ribbons — click to expand)</summary>
 
 <p align="center">
-  <img src="assets/example_legacy_synteny_plot.svg" alt="SynVoy synteny tracks — melittin locus across bee genomes" width="520"/>
+  <img src="assets/example_synteny_plot.svg" alt="SynVoy synteny tracks — melittin locus across bee genomes" width="520"/>
 </p>
-<p align="center"><sub><b>Track view</b> (interactive HTML; static SVG export shown). Same melittin run, but per-locus: each species gets a horizontal track of gene arrows drawn at their real genomic positions, ribbons connect orthologous flanking genes between adjacent species, and resolved vs. ambiguous GOIs are visually distinct (solid green/red = resolved, hatched = ambiguous family member). Open the live HTML for tooltips on hover, left-click on a gene to highlight its orthologs across all tracks, and right-click to pin a label for that gene.</sub></p>
+<p align="center"><sub><b>Synteny track plot</b> (interactive HTML; static SVG export shown). Same melittin run, per-locus: each species gets a horizontal track of gene arrows drawn at their real genomic positions, ribbons connect orthologous flanking genes between adjacent species, and resolved vs. ambiguous GOIs are visually distinct (solid green/red = resolved, hatched = ambiguous family member). Open the live HTML for tooltips on hover, left-click on a gene to highlight its orthologs across all tracks, right-click to pin a label, and use the track manager to hide/restore individual species (the plot reflows to close the gap).</sub></p>
 
 </details>
 
@@ -164,8 +164,10 @@ Results land in the directory passed to `--outdir`. Quick orientation:
 | `*_synteny_plot.html` | Interactive track-style visualisation per locus (with tooltips, ortholog click-highlighting). |
 | `*_synteny_plot_view.svg` | Static SVG mirror of the HTML view — visually identical, paper- and README-ready. Auto-emitted with every run. |
 | `*_synteny_plot.svg` | Narrow publication-format SVG (only when `--pub_svg` is passed). |
-| `*_anchor_grid.html` / `*_anchor_grid.svg` | Anchor-grid view — orthologues aligned into shared home-gene columns, one row per species (the first figure above). Auto-emitted; skip with `--no_anchor_grid`. |
-| `*_synteny_matrix.svg` | Phylogeny-anchored matrix across all species — paper-ready SVG (`bin/plot_synteny_matrix.py`). |
+| `*_anchor_grid.html` / `*_anchor_grid.svg` | Anchor-grid view — orthologues aligned into shared home-gene columns, one row per species, NCBI-taxonomy species tree at left (the first figure above). Auto-emitted; skip with `--no_anchor_grid`. |
+| `*_gene_positions.html` / `*_gene_positions.svg` | Gene-position map — each gene at its real normalised coordinate per species (shows rearrangements/gaps directly). Auto-emitted. |
+| `*_anchor_positions.html` / `*_anchor_positions.svg` | Hybrid view — aligned anchor columns with a faint per-row true-position track beneath each. Auto-emitted. |
+| `*_synteny_matrix.svg` | Phylogeny-anchored matrix across all species — paper-ready SVG (`bin/plot_synteny_matrix.py`); opt-in with `--enable_matrix_plot`. |
 | `*_tree.html` / `_tree.nwk` | Phylogenetic tree of GOI sequences (midpoint-rooted, clade-coloured). |
 | `synvoy_report.json` | One-shot machine-readable run summary. |
 | `intermediate/` | Per-phase artifacts (debugging only). |
