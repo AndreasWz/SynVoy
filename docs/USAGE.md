@@ -219,6 +219,13 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 | `--max_blocks_per_genome` | `80` | Safety cap on candidate blocks per target genome |
 | `--min_block_genes` | `2` | Minimum flanking-gene hits in a block to keep it |
 | `--max_consecutive_empty_blocks` | `25` | Stop expanding after this many consecutive empty blocks |
+| `--disable_synteny_collinearity` | `false` | Disable collinearity-aware block scoring + gap-bridging (revert to legacy gene-count clustering). When on (default), blocks are ranked by their longest run of home-ordered flanking genes and a GOI sitting in a rearrangement gap between two collinear clusters is kept inside one searched block. |
+| `--synteny_bridge_max_gap` | `6000000` | Max bp gap between two same-chromosome flanking clusters to bridge into one block when they collinearly continue the home gene order. `0` disables bridging. |
+| `--synteny_bridge_max_rank_gap` | `5` | Max home-rank jump still treated as a collinear continuation when bridging. |
+| `--synteny_bridge_min_anchors` | `3` | Min anchored flanking genes a block needs before it may bridge a gap. |
+| `--seed_on_flanking_support` | `false` | **(opt-in)** Also seed the expanding query DB (and thus later waves) with a HIGH/MEDIUM GOI feature regardless of its `goi_class` (e.g. a `tandem_goi_copy`) when flanking support and query coverage clear the floors below. Lets a close relative's perfect/divergent ortholog bridge to a more divergent species in the next wave. |
+| `--seed_flanking_min_count` | `2` | Min flanking-gene support required for `--seed_on_flanking_support`. |
+| `--seed_flanking_min_qcov` | `0.5` | Min query coverage required for `--seed_on_flanking_support`. |
 
 ### Smith-Waterman Local Search
 
@@ -244,6 +251,9 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--aug_relaxed_length_div` | `2` | Divide normal length threshold by this in relaxed mode |
 | `--aug_relaxed_length_min` | `15` | Absolute minimum alignment length in relaxed mode |
 | `--aug_dedup_bin_bp` | `100` | Bin size (bp) for deduplicating overlapping relaxed hits |
+| `--fallback_short_query_len` | `150` | Queries shorter than this (aa) gate their GOI fallback on aligned length + bitscore instead of query coverage — a short mature peptide in a longer precursor (e.g. melittin) is structurally low-coverage even on a perfect hit. `0` = legacy coverage gate for all queries. |
+| `--fallback_short_min_aln_aa` | `15` | Minimum aligned length (aa) for a short-query GOI fallback. Rejects micro-window overcalls while admitting short mature peptides. |
+| `--fallback_short_min_bits` | `30` | Minimum bitscore for a short-query GOI fallback. Lets a high-bitscore divergent hit pass where low coverage would have vetoed it. |
 
 ### MMseqs2
 
@@ -253,6 +263,7 @@ Controls the increasingly permissive search passes used for highly divergent tar
 | `--mmseqs_split_memory_limit` | `8G` | MMseqs2 memory limit for database splitting. Override to `3G` or `1G` on memory-constrained machines. |
 | `--mmseqs_verbosity` | `1` | MMseqs2 log verbosity (0 = silent) |
 | `--min_gene_identity` | `30` | Minimum identity (%) for flanking-gene MMseqs2 matches |
+| `--deterministic_goi_search` | `true` | Force the per-region augmented GOI MMseqs2 search to `--threads 1` so marginal/divergent GOI calls are reproducible run-to-run (regions are tiny, so the speed cost is small). Set `false` for the legacy multithreaded (non-deterministic) path. |
 
 ### Annotation & Gene Prediction
 
@@ -284,6 +295,7 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--strict_goi_family` | `false` | Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated `TargetGene`/`TargetProduct` does not contain a family token. Useful for multi-paralog queries (e.g. TP53 family). |
 | `--goi_family_tokens` | _(auto)_ | Comma-separated family name tokens for `--strict_goi_family`. If empty, auto-derived from query FASTA header (`GN=`, UniProt entry name). |
 | `--classify_tandem_min_identity` | `40.0` | Min identity (%) for MEDIUM-confidence tandem copies. Below this, tandem copies are labeled LOW. |
+| `--classify_tandem_min_qcov` | `0.35` | Min query coverage for a MEDIUM tandem copy. A high-identity but short local window (its true low coverage now recorded) is demoted to LOW — stops a 7–20 aa micro-window from masquerading as a full tandem copy. |
 | `--classify_fragment_max_qcov` | `0.4` | Query coverage below this marks a gene model as `fragment` in the ModelStatus field |
 | `--classify_complete_min_qcov` | `0.7` | Query coverage above this (with multi-exon evidence) marks a model as `complete` |
 

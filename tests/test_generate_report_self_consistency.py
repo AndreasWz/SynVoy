@@ -162,6 +162,39 @@ class TestUnit(unittest.TestCase):
         # tests/test_reciprocal_best_paralog.py::test_self_consistency_threads_paralog_flags_through.
         self.assertIn("paralog_confusion", out_lo["deferred_checks"])
 
+    def test_identity_coverage_decoupled_flag(self):
+        # docs/TODO_JUN.md QW3: a high-%identity GOI call with missing/low query
+        # coverage is a short high-identity local window masquerading as a confident
+        # match (Vollenhovia "79% melittin" = ~23% over the full query). Generic +
+        # advisory. A genuinely divergent ortholog with real high coverage
+        # (Tetramorium OV788322, 40% id) is BELOW the identity floor and must NOT trip.
+        annos = [
+            # high identity, low coverage -> flagged
+            {"genome": "Vollenhovia", "source": "l1", "chrom": "NW1", "start": 1,
+             "end": 2, "confidence": "MEDIUM", "identity": "79.4", "query_cov": "0.30",
+             "mrna_id": "GOI_copy_3"},
+            # high identity, coverage not recorded (None) -> flagged
+            {"genome": "Polistes", "source": "l1", "chrom": "NW2", "start": 1,
+             "end": 2, "confidence": "MEDIUM", "identity": "71.4", "query_cov": "",
+             "mrna_id": "GOI_Melt"},
+            # below the identity floor (the real Tetramorium ortholog) -> NOT flagged
+            {"genome": "Tetramorium", "source": "l1", "chrom": "OV788322", "start": 1,
+             "end": 2, "confidence": "MEDIUM", "identity": "40.1", "query_cov": "0.76",
+             "mrna_id": "GOI_Melt"},
+            # high identity AND high coverage (a real full-length call) -> NOT flagged
+            {"genome": "Apis_florea", "source": "l1", "chrom": "NW3", "start": 1,
+             "end": 2, "confidence": "HIGH", "identity": "84.3", "query_cov": "1.0",
+             "mrna_id": "GOI_Melt"},
+        ]
+        out = build_self_consistency(annos, {"records": []}, {})
+        dec = [f for f in out["flags"] if f["type"] == "identity_coverage_decoupled"]
+        self.assertEqual({f["genome"] for f in dec}, {"Vollenhovia", "Polistes"})
+        self.assertEqual(out["summary"]["n_identity_coverage_decoupled"], 2)
+        self.assertIn("identity_coverage_decoupled", out["checks_performed"])
+        # None coverage is preserved as None (not coerced to 0.0) for honesty.
+        polistes = next(f for f in dec if f["genome"] == "Polistes")
+        self.assertIsNone(polistes["query_coverage"])
+
 
 if __name__ == "__main__":
     unittest.main()

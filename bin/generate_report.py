@@ -20,6 +20,13 @@ KNOWN_SUFFIXES = [
     ".gff",
     ".faa",
     ".fna",
+    # ".fasta"/".fa" must follow ".faa"/".fna" so the longer FASTA suffixes match
+    # first. Without ".fa", Pro-mode "<genome>.fa" inputs canonicalize to
+    # "<genome>.fa" while the (bare-stem) hull-rescue GFF "<genome>.hull_rescue.gff"
+    # canonicalizes to "<genome>" — splitting one genome into a real record + an
+    # empty phantom that falsely lands in goi_absent_genomes (docs/TODO_JUN.md QW1).
+    ".fasta",
+    ".fa",
     ".m8",
     # Rescue-pass GFFs (§1e strong-synteny, §1m/§17 hull) are named
     # "<genome>.rescue.gff" / "<genome>.hull_rescue.gff". Strip the infix so they
@@ -273,6 +280,7 @@ def _process_gffs_unified(gff_files):
                             "confidence": confidence,
                             "goi_class": goi_class,
                             "identity": (attrs.get("Identity", "") or "").strip(),
+                            "query_cov": (attrs.get("QueryCoverage", "") or "").strip(),
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
                             "mrna_id": model_id,
@@ -916,7 +924,9 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                            paralog_flags=None, paralog_per_call=None,
                            paralog_modal_per_locus=None,
                            paralog_min_gap=5.0,
-                           ownership_flags=None, ownership_summary=None):
+                           ownership_flags=None, ownership_summary=None,
+                           identity_decoupled_min_identity=50.0,
+                           identity_decoupled_max_qcov=0.35):
     """End-of-run sanity checks (docs/TODO.md §1j).
 
     Currently emits two flag types:
@@ -980,6 +990,37 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "note": "same gene identically modeled from multiple home loci; collapsed into one record (§1h)",
             })
 
+    # QW3 (docs/TODO_JUN.md): identity<->coverage decoupling. A GOI call with high
+    # %identity but missing/low query coverage is a short high-identity local window
+    # masquerading as a confident call — e.g. Vollenhovia "79% melittin" that is
+    # really ~23% over the full query (the tandem-copy pident is a local-window
+    # identity; QW2 now records its true QueryCoverage). Generic + advisory: no
+    # demotion, no biology. Tetramorium's OV788322 ortholog (40% id) is below the
+    # identity floor so it never trips here.
+    for a in goi_annotations:
+        ident = _safe_float(a.get("identity"), 0.0)
+        if ident < identity_decoupled_min_identity:
+            continue
+        qc_raw = (a.get("query_cov") or "").strip()
+        qc = _safe_float(qc_raw, None) if qc_raw else None
+        if qc is None or qc < identity_decoupled_max_qcov:
+            flags.append({
+                "type": "identity_coverage_decoupled",
+                "genome": a.get("genome"),
+                "chrom": a.get("chrom"),
+                "start": a.get("start"),
+                "end": a.get("end"),
+                "mrna_id": a.get("mrna_id"),
+                "identity": ident,
+                "query_coverage": qc,  # None = coverage not recorded for this call
+                "confidence": a.get("confidence"),
+                "advice": (
+                    "High %identity but missing/low query coverage — likely a short "
+                    "high-identity local window, not a full-length match. Treat the "
+                    "identity as unreliable and inspect the alignment span/coverage."
+                ),
+            })
+
     # §1j Phase B paralog confusion flags (computed in build_paralog_confusion_flags
     # and threaded through; we only attach them here so the existing flag-summary
     # plumbing carries them).
@@ -994,7 +1035,8 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     ownership_summary = ownership_summary or {}
     flags.extend(ownership_flags)
 
-    checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate"]
+    checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate",
+                        "identity_coverage_decoupled"]
     deferred_checks = []
     if paralog_per_call:
         checks_performed.append("paralog_confusion")
@@ -1011,6 +1053,8 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
         "thresholds": {
             "strong_flanking_min": strong_flanking_min,
             "paralog_confusion_min_gap": paralog_min_gap,
+            "identity_decoupled_min_identity": identity_decoupled_min_identity,
+            "identity_decoupled_max_qcov": identity_decoupled_max_qcov,
         },
         "flags": flags,
         # Carry the full per-call paralog alignment table so the paper can
@@ -1028,6 +1072,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
             "n_locus_reattributed": sum(1 for f in flags if f["type"] == "locus_reattributed"),
             "n_goi_owner_search_fumble": sum(1 for f in flags if f["type"] == "goi_owner_search_fumble"),
             "n_paralog_misassignment": sum(1 for f in flags if f["type"] == "paralog_misassignment"),
+            "n_identity_coverage_decoupled": sum(1 for f in flags if f["type"] == "identity_coverage_decoupled"),
             "total_flags": len(flags),
         },
     }
