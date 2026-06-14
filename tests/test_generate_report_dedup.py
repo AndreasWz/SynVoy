@@ -78,6 +78,22 @@ class TestStagingPrefixParsing(unittest.TestCase):
         self.assertEqual(canonical_genome_id("cow.hull_rescue.gff"),
                          canonical_genome_id("cow.fna"))
 
+    def test_canonical_genome_id_strips_fa_fasta(self):
+        # docs/TODO_JUN.md QW1: Pro-mode ".fa"/".fasta" genomes must collapse like
+        # ".fna"/".faa" — otherwise "Colletes_gigas.fa.gff" -> "Colletes_gigas.fa"
+        # while the bare-stem hull-rescue "Colletes_gigas.hull_rescue.gff" ->
+        # "Colletes_gigas" split one genome into a real record + an empty phantom
+        # that falsely populated summary.goi_absent_genomes (melittin_full: all 5
+        # solitary/stingless bees read as "melittin absent").
+        self.assertEqual(canonical_genome_id("Colletes_gigas.fa.gff"), "Colletes_gigas")
+        self.assertEqual(canonical_genome_id("Xylocopa_violacea.fasta.gff"), "Xylocopa_violacea")
+        # The bug: the hull-rescue (bare stem) and the main .fa GFF MUST agree now.
+        self.assertEqual(canonical_genome_id("Colletes_gigas.hull_rescue.gff"),
+                         canonical_genome_id("Colletes_gigas.fa.gff"))
+        # ".fa" must NOT over-strip ".faa"/".fasta"/".fna" (longer suffixes win).
+        self.assertEqual(canonical_genome_id("Apis_mellifera.faa"), "Apis_mellifera")
+        self.assertEqual(canonical_genome_id("GCF_123.1.fa"), "GCF_123.1")
+
     def test_staging_source_label(self):
         self.assertEqual(staging_source_label("locus_12__GCA_1.1.fna.gff"), "locus_12")
         self.assertEqual(staging_source_label("3__GCA_1.1.fna.gff"), "3")

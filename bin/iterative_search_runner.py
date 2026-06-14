@@ -162,6 +162,9 @@ CLASSIFY_THRESHOLDS = {
     "fallback_strong_min_identity": 35.0,
     # tandem_copy -> MEDIUM vs LOW
     "tandem_min_identity": 40.0,
+    # A2 (TODO_JUN): a tandem copy needs real query coverage too, not just a
+    # high local-window identity (QW2 surfaces the true coverage).
+    "tandem_min_qcov": 0.35,
     # model_status thresholds
     "fragment_max_qcov": 0.4,
     "complete_min_qcov": 0.7,
@@ -524,6 +527,13 @@ def parse_hits(
             f"parse_hits({os.path.basename(hits_file)}): skipped {skipped_lines}/{total_lines} "
             f"malformed lines (first: {first_error})"
         )
+    # A0 reproducibility: mmseqs/tblastn .m8 row order varies run-to-run under
+    # --threads>1, which flips downstream STABLE-sort tie-breaks. Impose a total
+    # order here so every consumer sees a run-independent hit sequence
+    # (TODO_JUN §A0 task 2b).
+    hits.sort(key=lambda h: (
+        h['query'], h['chrom'], h['start'], h['end'], h['strand'], -h['bits']
+    ))
     return hits
 
 def create_locus_object(query_id, hits):
@@ -892,9 +902,16 @@ def _classify_goi_evidence(
     ct = CLASSIFY_THRESHOLDS
 
     if evidence_type == "tandem_copy":
-        if identity >= ct["tandem_min_identity"]:
+        # A2 (TODO_JUN): MEDIUM requires BOTH identity AND real query coverage.
+        # A short high-identity local window (e.g. a 7-aa micro-window or a 23-aa
+        # hit on a 70-aa query — Vollenhovia/Polistes "79%"/"71%" overcalls) now
+        # carries its true low qcov (QW2) and is demoted to LOW. Missing/zero
+        # coverage is treated as failing the floor.
+        if identity >= ct["tandem_min_identity"] and qcov >= ct.get("tandem_min_qcov", 0.0):
             return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
-        return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_identity"
+        if identity < ct["tandem_min_identity"]:
+            return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_identity"
+        return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_coverage"
 
     if evidence_type == "exon_annotation":
         if (exon_count >= ct["high_min_exons"]
@@ -2132,13 +2149,18 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         
         os.makedirs(aug_tmp_dir, exist_ok=True)
         
+        # A0: the augmented GOI search runs over a tiny per-block region, so
+        # forcing it single-threaded costs little but removes mmseqs' multithread
+        # marginal-hit jitter — the root of the GOI confidence flips that cascade
+        # through the wave seed set (TODO_JUN §A0, pinned source #2).
+        aug_threads = 1 if getattr(args, 'deterministic_goi_search', True) else threads
         mmseqs_ok, mmseqs_details = run_augmented_mmseqs_with_retries(
             variants_fasta=variants_fasta,
             region_fasta=region_fasta,
             aug_hits_file=aug_hits_file,
             aug_tmp_dir=aug_tmp_dir,
             args=args,
-            threads=threads,
+            threads=aug_threads,
             genome_name=genome_name,
         )
 
@@ -2370,7 +2392,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 if 'bits' not in h: h['bits'] = 0.0
                 h['bits'] = float(h['bits'])
             
-            all_hits.sort(key=lambda x: (-x['bits'], x['evalue']))
+            all_hits.sort(key=lambda x: (-x['bits'], x['evalue'],
+                                         x['chrom'], x['start'], x['end'], x['query']))
             
             kept_hits = []
             for hit in all_hits:
@@ -2657,6 +2680,41 @@ def batch_rbh_check(
              shutil.rmtree(tmp_subdir, ignore_errors=True)
                           
     return valid_ids
+
+
+def is_valid_fallback(
+    ordered_hit_count: int,
+    qcov: float,
+    single_aln: int,
+    aln_total: int,
+    best_bits: float,
+    query_len: int,
+    short_query_len: int,
+    short_min_aln_aa: int,
+    short_min_bits: float,
+) -> bool:
+    """A1 "the fumble" (TODO_JUN §A1, maps §1.2): decide if a GOI fallback model is emitted.
+
+    The legacy gate vetoed on query COVERAGE, which is structurally low for a
+    short precursor whose conserved mature peptide is only a fraction of the
+    query (melittin: a 26-aa mature region in a 70-aa preprotein). A real
+    high-bitscore divergent hit (Xylocopa b0, 50%/bits≈91) was rejected at
+    qcov≈0.18 while a spurious high-coverage/low-bitscore other-block artifact
+    (b1, 28%) passed at qcov=0.40 — so the GOI was emitted in the WRONG block.
+
+    For short queries (< ``short_query_len``) we instead gate on absolute aligned
+    length + bitscore (no coverage veto), so the real model is emitted in its own
+    flanking-seeded block. Long queries keep the coverage floor (LY6/TP53
+    unaffected); Tetramorium (76% cov) clears either path. ``short_query_len <= 0``
+    reverts to the legacy coverage gate for every query.
+    """
+    if 0 < short_query_len and query_len < short_query_len:
+        aln_for_gate = single_aln if ordered_hit_count == 1 else aln_total
+        return aln_for_gate >= short_min_aln_aa and best_bits >= short_min_bits
+    if ordered_hit_count == 1:
+        return not (qcov < 0.25 or single_aln < 25)
+    return not (qcov < 0.25 and aln_total < 35 and best_bits < 60.0)
+
 
 def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, genome_name, args, unique_id,
                          threads_per_job, native_annot_index=None):
@@ -2959,14 +3017,19 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
                                     print(f"[DEBUG FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}", flush=True)
 
-                                    valid_fallback = True
-                                    if len(ordered_hits) == 1:
-                                        # Less strict coverage constraint for GOI fragments matching strongly
-                                        if qcov < 0.25 or int(ordered_hits[0].get('alnlen', 0)) < 25:
-                                            valid_fallback = False
-                                    else:
-                                        if qcov < 0.25 and aln_total < 35 and best_bits < 60.0:
-                                            valid_fallback = False
+                                    # A1 "the fumble": short queries gate on aligned length +
+                                    # bitscore, not coverage (see is_valid_fallback).
+                                    valid_fallback = is_valid_fallback(
+                                        ordered_hit_count=len(ordered_hits),
+                                        qcov=qcov,
+                                        single_aln=int(ordered_hits[0].get('alnlen', 0)),
+                                        aln_total=aln_total,
+                                        best_bits=best_bits,
+                                        query_len=query_len,
+                                        short_query_len=args.fallback_short_query_len,
+                                        short_min_aln_aa=args.fallback_short_min_aln_aa,
+                                        short_min_bits=args.fallback_short_min_bits,
+                                    )
 
                                     # Span sanity check: reject fallback hits whose
                                     # genomic span is wildly disproportionate to the
@@ -3042,6 +3105,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                 'start': global_start,
                                                 'end': global_end,
                                                 'score': avg_pident,
+                                                # A1: carry bitscore + flanking support so GOI
+                                                # candidate ranking honours flanking-supported
+                                                # bitscore, not raw coverage/identity.
+                                                'bits': best_bits,
+                                                'flanking_support': block_flanking_support,
                                                 'record': {
                                                     'id': copy_id,
                                                     'seq': flank_protein,
@@ -3058,6 +3126,17 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 global_end = w_start + copy['gend']
                                 strand = copy.get('strand', '+')
                                 copy_id = f"{copy['id']}|{clean_gname}_b{block_idx}_l{locus_idx}"
+                                # QW2 (docs/TODO_JUN.md): record the copy's TRUE query
+                                # coverage so a short high-identity local window (e.g. a
+                                # 23-aa hit on a 70-aa query) can't masquerade as a full
+                                # tandem copy. Confidence is unchanged — the tandem_copy
+                                # branch of _classify_goi_evidence keys only on identity;
+                                # this only surfaces QueryCoverage/ModelStatus honestly.
+                                _qlen = len(parent_query_seq) if parent_query_seq else 0
+                                _qs, _qe = copy.get('qstart'), copy.get('qend')
+                                copy_qcov = None
+                                if _qlen and _qs is not None and _qe is not None:
+                                    copy_qcov = max(0.0, min(1.0, (int(_qe) - int(_qs) + 1) / _qlen))
                                 raw_candidates.append({
                                     'start': global_start,
                                     'end': global_end,
@@ -3074,7 +3153,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'gff': [
                                         f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
                                         f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=None, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=copy_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
                                     ]
                                 })
                         else:
@@ -3753,8 +3832,12 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
     # Greedy non-overlapping selection for GOI/tandem candidates.
     if raw_candidates:
+        # A1: among GOI candidates, break identity/length ties by flanking-supported
+        # bitscore so a real divergent model outranks a coverage-inflated artifact.
         raw_candidates.sort(
-            key=lambda x: (x.get('score', 0), x['end'] - x['start']),
+            key=lambda x: (x.get('score', 0), x['end'] - x['start'],
+                           x.get('flanking_support', 0), x.get('bits', 0),
+                           x.get('start', 0), x.get('record', {}).get('id', '')),
             reverse=True
         )
 
@@ -3789,7 +3872,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     # Add flanking candidates without interfering with GOI selection.
     if flanking_candidates:
         flanking_candidates.sort(
-            key=lambda x: (x.get('score', 0), x['end'] - x['start']),
+            key=lambda x: (x.get('score', 0), x['end'] - x['start'],
+                           x.get('start', 0), x.get('record', {}).get('id', '')),
             reverse=True
         )
         flanking_intervals = []
@@ -4041,7 +4125,22 @@ _SEED_QUALIFYING_CLASSES = {"confident_goi", "probable_goi"}
 _TREE_QUALIFYING_CONFIDENCE = {"HIGH", "MEDIUM"}
 
 
-def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn):
+def _safe_float(value, default=None):
+    """Parse a GFF-attr string ("" / "0.37" / "5") to float; default on failure."""
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _classify_goi_for_seed_and_tree(
+    all_genes, feature_meta, is_goi_query_id_fn,
+    seed_on_flanking_support=False,
+    seed_min_flanking=2,
+    seed_min_qcov=0.5,
+):
     """Split GOI-role genes into (seed, tree_extra, suppressed_count).
 
     Seed genes feed `expanded_db.faa` (used as the next wave's MMseqs2 query DB
@@ -4053,6 +4152,17 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
     seeding (typically `tandem_goi_copy`). They appear in MAFFT/IQ-TREE so
     species like Apis cerana — which only carry tandem-duplicate evidence —
     are not silently dropped from the phylogeny.
+
+    A3 (TODO_JUN, opt-in via ``seed_on_flanking_support``): the strict class
+    filter "neutered" the wave — divergent/tandem orthologs (e.g. Apis cerana's
+    100%-identical melittin, classed `tandem_goi_copy`) never seeded the next
+    wave, so a close relative's perfect copy couldn't bridge to a more divergent
+    bee. When enabled, a HIGH/MEDIUM GOI feature ALSO seeds — regardless of
+    goi_class — on a generic synteny signal: strong flanking support
+    (``block_flanking_support >= seed_min_flanking``) AND real query coverage
+    (``query_coverage >= seed_min_qcov``). It keys on coverage+flanking, not
+    identity, so it doesn't preferentially admit paralogs; §1m collinearity and
+    §1m ownership remain the drift backstops.
 
     Suppressed_count is the total of GOI-role genes that did NOT qualify for
     seeding (used for logging).
@@ -4068,8 +4178,16 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
             continue
         confidence = meta.get("confidence", "")
         goi_class = meta.get("goi_class", "")
-        if (confidence in _TREE_QUALIFYING_CONFIDENCE
-                and goi_class in _SEED_QUALIFYING_CLASSES):
+        qualifies = (confidence in _TREE_QUALIFYING_CONFIDENCE
+                     and goi_class in _SEED_QUALIFYING_CLASSES)
+        if (not qualifies and seed_on_flanking_support
+                and confidence in _TREE_QUALIFYING_CONFIDENCE):
+            fs = _safe_float(meta.get("block_flanking_support"))
+            qc = _safe_float(meta.get("query_coverage"))
+            if (fs is not None and qc is not None
+                    and fs >= seed_min_flanking and qc >= seed_min_qcov):
+                qualifies = True
+        if qualifies:
             seed.append(g)
         else:
             suppressed += 1
@@ -4839,7 +4957,12 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # calls are still reported in GFF/plots but should not recursively seed
         # later waves.
         new_genes, tree_extra_genes, suppressed_seed_count = (
-            _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id)
+            _classify_goi_for_seed_and_tree(
+                all_genes, feature_meta, is_goi_query_id,
+                seed_on_flanking_support=getattr(args, 'seed_on_flanking_support', False),
+                seed_min_flanking=getattr(args, 'seed_flanking_min_count', 2),
+                seed_min_qcov=getattr(args, 'seed_flanking_min_qcov', 0.5),
+            )
         )
         if all_genes:
             logger.info(
@@ -4880,6 +5003,13 @@ def main():
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
+    parser.add_argument(
+        "--deterministic_goi_search", type=str2bool, default=True,
+        help="A0 reproducibility: force the per-region augmented GOI MMseqs search to "
+             "--threads 1 so marginal/divergent GOI hits don't jitter run-to-run "
+             "(tblastn is already single-threaded; regions are tiny so the speed cost "
+             "is small). Set false to restore the multithreaded (non-deterministic) path."
+    )
     parser.add_argument("--min_gene_identity", type=float, default=25.0, help="Minimum identity for RBH validation")
     parser.add_argument("--region_padding", type=int, default=100000, help="Default padding around synteny block")
     parser.add_argument("--padding_min", type=int, default=50000, help="Minimum adaptive padding")
@@ -4937,6 +5067,25 @@ def main():
         "--synteny_bridge_min_anchors", type=int, default=3,
         help="Min distinct anchored flanking genes a block needs before it may bridge a gap."
     )
+    # §A1 (TODO_JUN) — "the fumble": short-query fallback gate keyed on aligned
+    # length + bitscore instead of query coverage (a short mature peptide in a
+    # longer precursor is structurally low-coverage even on a perfect hit).
+    parser.add_argument(
+        "--fallback_short_query_len", type=int, default=150,
+        help="§A1: queries shorter than this (aa) gate their GOI fallback on aligned "
+             "length + bitscore, NOT query coverage (the mature peptide may be a small "
+             "fraction of a precursor). 0 = legacy coverage gate for all queries."
+    )
+    parser.add_argument(
+        "--fallback_short_min_aln_aa", type=int, default=15,
+        help="§A1: minimum aligned length (aa) for a short-query GOI fallback; rejects "
+             "micro-window overcalls while admitting short mature peptides (e.g. 26-aa melittin)."
+    )
+    parser.add_argument(
+        "--fallback_short_min_bits", type=float, default=30.0,
+        help="§A1: minimum bitscore for a short-query GOI fallback (significance floor that "
+             "lets a high-bitscore divergent hit pass where coverage would have vetoed it)."
+    )
     parser.add_argument(
         "--max_consecutive_empty_blocks",
         type=int,
@@ -4961,6 +5110,21 @@ def main():
                              "(lowered from 45 to accommodate divergent orthologs)")
     parser.add_argument("--classify_tandem_min_identity", type=float, default=40.0,
                         help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
+    parser.add_argument("--classify_tandem_min_qcov", type=float, default=0.35,
+                        help="§A2: min query coverage for MEDIUM tandem_copy; a high-identity "
+                             "but short local window (true low qcov) is demoted to LOW.")
+    # §A3 (TODO_JUN) — un-neuter the wave seed (opt-in). A HIGH/MEDIUM GOI feature
+    # seeds the expanding DB on strong flanking + real coverage regardless of
+    # goi_class, so a close relative's tandem/divergent ortholog can bridge to a
+    # more divergent species in the next wave.
+    parser.add_argument("--seed_on_flanking_support", type=str2bool, default=False,
+                        help="§A3: also seed the next wave with a HIGH/MEDIUM GOI feature "
+                             "(any goi_class, incl. tandem_goi_copy) when flanking support and "
+                             "query coverage clear the floors below. Default off until validated.")
+    parser.add_argument("--seed_flanking_min_count", type=int, default=2,
+                        help="§A3: min flanking-gene support for flanking-supported seeding.")
+    parser.add_argument("--seed_flanking_min_qcov", type=float, default=0.5,
+                        help="§A3: min query coverage for flanking-supported seeding.")
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
@@ -5022,6 +5186,7 @@ def main():
     CLASSIFY_THRESHOLDS["high_min_identity"] = args.classify_high_min_identity
     CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
     CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
+    CLASSIFY_THRESHOLDS["tandem_min_qcov"] = args.classify_tandem_min_qcov
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
@@ -5518,19 +5683,28 @@ def main():
 
         wave_results = []
         wave_errors = []
+        # A0 reproducibility: collect each genome's contribution keyed by name
+        # and assemble in the wave's fixed order AFTER the pool drains, instead
+        # of in as_completed() order. A run-dependent expanded_db.faa byte-order
+        # otherwise flips marginal-hit tie-breaks in the next wave's mmseqs
+        # query DB → seed-set cascade (TODO_JUN §A0, pinned source #1).
+        # Keyed by wave-position index (not name) so duplicate genome names in a
+        # single wave can't collide and silently drop a genome's genes.
+        wave_new_genes_by_idx = {}
+        wave_tree_extras_by_idx = {}
         wave_start_time = time.time()
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
-            for entry in wave:
+            for idx, entry in enumerate(wave):
                 future = executor.submit(
                     process_single_genome,
                     entry['path'], latest_db, args, args.home_db_dir, prefix, threads_per_job
                 )
-                futures[future] = entry
+                futures[future] = (idx, entry)
 
             completed = 0
             for future in concurrent.futures.as_completed(futures):
-                entry = futures[future]
+                idx, entry = futures[future]
                 completed += 1
                 cumulative_genome_idx += 1
                 gbase = os.path.basename(entry['name'])
@@ -5560,18 +5734,29 @@ def main():
                             f"({cumulative_genome_idx}/{total_genomes} overall)"
                         )
                     if new_genes:
-                        wave_results.extend(new_genes)
+                        wave_new_genes_by_idx[idx] = new_genes
                     if tree_extras:
-                        for g in tree_extras:
-                            gid = g.get('id', '')
-                            if gid and gid not in tree_extras_seen_ids:
-                                tree_extras_seen_ids.add(gid)
-                                tree_extras_total.append(g)
+                        wave_tree_extras_by_idx[idx] = tree_extras
                 except Exception as exc:
                     wave_errors.append((entry.get('name', 'unknown'), str(exc)))
                     logger.error(
                         f"  ✗ {gbase} CRASHED ({cumulative_genome_idx}/{total_genomes}): {exc}"
                     )
+
+        # A0: deterministic assembly — walk the wave in its fixed genome order
+        # and sort each genome's genes by id, so wave_results (→ expanded_db.faa
+        # → next wave's mmseqs query) is byte-identical run-to-run.
+        for idx in range(len(wave)):
+            ng = wave_new_genes_by_idx.get(idx)
+            if ng:
+                wave_results.extend(sorted(ng, key=lambda g: g.get('id', '')))
+            te = wave_tree_extras_by_idx.get(idx)
+            if te:
+                for g in sorted(te, key=lambda g: g.get('id', '')):
+                    gid = g.get('id', '')
+                    if gid and gid not in tree_extras_seen_ids:
+                        tree_extras_seen_ids.add(gid)
+                        tree_extras_total.append(g)
 
         wave_elapsed = time.time() - wave_start_time
 

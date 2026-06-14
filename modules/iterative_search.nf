@@ -35,6 +35,7 @@ process ITERATIVE_SEARCH {
         --mmseqs_sens ${sensitivity} \\
         --mmseqs_split_memory_limit ${params.mmseqs_split_memory_limit} \\
         --mmseqs_verbosity ${params.mmseqs_verbosity} \\
+        --deterministic_goi_search ${params.deterministic_goi_search} \\
         --evalue ${params.search_evalue} \\
         --min_identity ${settings.min_hit_identity} \\
         --min_length ${settings.min_hit_length} \\
@@ -71,11 +72,18 @@ process ITERATIVE_SEARCH {
         --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
         --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
+        --fallback_short_query_len ${params.fallback_short_query_len} \\
+        --fallback_short_min_aln_aa ${params.fallback_short_min_aln_aa} \\
+        --fallback_short_min_bits ${params.fallback_short_min_bits} \\
         --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --classify_high_min_identity ${settings.classify_high_min_identity} \\
         --classify_medium_min_identity ${settings.classify_medium_min_identity} \\
         --classify_tandem_min_identity ${settings.classify_tandem_min_identity} \\
+        --classify_tandem_min_qcov ${params.classify_tandem_min_qcov} \\
+        --seed_on_flanking_support ${params.seed_on_flanking_support} \\
+        --seed_flanking_min_count ${params.seed_flanking_min_count} \\
+        --seed_flanking_min_qcov ${params.seed_flanking_min_qcov} \\
         --disable_distance_autotune ${params.disable_distance_autotune} \\
         --distance_autotune_close_pct ${params.distance_autotune_close_pct} \\
         --distance_autotune_far_pct ${params.distance_autotune_far_pct} \\
