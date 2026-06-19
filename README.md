@@ -1,153 +1,119 @@
-<h1 align="center">SynVoy &mdash; Synteny Voyager</h1>
+# SynVoy — Synteny Voyager
 
-<p align="center">
-  <em>Find orthologous genes that BLAST can't.</em>
-</p>
+Synteny-guided discovery of divergent orthologs that sequence-similarity search misses.
 
-<p align="center">
-  <a href="https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml"><img src="https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml/badge.svg" alt="test"/></a>
-  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/status-early%20development-orange" alt="status"/>
-</p>
+[![test](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml/badge.svg)](https://github.com/AndreasWz/SynVoy/actions/workflows/test.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 ---
 
-## What SynVoy does
+## What it does
 
-SynVoy is a Nextflow pipeline for finding **orthologous genes across evolutionary distances** when standard sequence-similarity searches fail — e.g. on highly divergent toxins or short micro-exon genes. Instead of relying on the gene's sequence alone, it uses the **conserved order of its neighbouring genes (macro-synteny)** to locate the right genomic neighbourhood in target species, then runs a localised search inside that region.
+SynVoy finds the ortholog of a gene in other species **when the gene is too divergent or too short for a normal BLAST/MMseqs2 search to find it**. Instead of matching the gene's sequence directly, it uses the gene's **neighbouring genes** — whose order tends to be conserved across species — to locate the right region in each target genome, then searches only inside that region.
 
-> **Example.** Give SynVoy honeybee melittin (a UniProt accession) and a list of bee genomes. It maps melittin's flanking genes into each target to find the homologous neighbourhood, then recovers the divergent melittin orthologs that pure BLAST/MMseqs2 misses. Run against ant genomes it independently re-finds **U11-myrmicitoxin-Tb1a** (`A0A6M3Z554`) at the right locus in *Tetramorium bicarinatum* — a 26 % identity hit that homology search drops but synteny anchors.
-
-<p align="center">
-  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor-grid — melittin orthologs across 19 bee + outgroup genomes" width="860"/>
-</p>
-<p align="center"><sub><b>Anchor-grid view.</b> Each <b>row</b> is a species (NCBI-taxonomy order, tree at left); each <b>column</b> is a home-genome gene, so an orthologue reads off its vertical alignment. Cells are directional arrows shaded by % identity and labelled <code>%id / %query-cov</code>; the GOI is the red column. Arrow style = confidence (solid HIGH, dashed MEDIUM, striped LOW; open circle = not recovered).</sub></p>
-
-<details>
-<summary><b>Alternative views</b> (gene-position map &amp; synteny tracks — click to expand)</summary>
+It is built for **divergent, single-copy genes** (e.g. toxins, micro-exon genes). For large multi-gene families it returns ranked *candidates*, not asserted orthologs — see [Scope](#scope).
 
 <p align="center">
-  <img src="assets/example_gene_positions.svg" alt="SynVoy gene-position map" width="860"/>
+  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor-grid — melittin-family candidates across 19 Hymenoptera" width="860"/>
 </p>
-<p align="center"><sub><b>Gene-position map</b> — each gene at its real, normalised genomic position per species (GOI as a red diamond), so rearrangements, expansions, and gaps are visible directly.</sub></p>
-
-<p align="center">
-  <img src="assets/example_synteny_plot.svg" alt="SynVoy synteny tracks" width="520"/>
-</p>
-<p align="center"><sub><b>Synteny track plot</b> (interactive HTML; SVG export shown) — per-locus gene-arrow tracks at real positions, with ribbons connecting orthologous flanking genes between adjacent species. The live HTML has hover tooltips, click-to-highlight orthologs, and a show/hide track manager.</sub></p>
-
-</details>
+<p align="center"><sub>Example: searching honeybee <b>melittin</b> across 19 Hymenoptera. Each row is a species; each column is a gene. The red column is the searched gene; flanking columns are its neighbours. Arrows are shaded by % identity; arrow style is confidence (solid = HIGH, dashed = MEDIUM, striped = LOW, open circle = not found). Only solid (HIGH) cells are confident orthologs; the rest are candidates to curate.</sub></p>
 
 ---
 
-## When to use SynVoy
+## Install
 
-| Scenario | Use SynVoy? |
-|---|---|
-| Standard tblastn / MMseqs2 already finds clean orthologs | No — you don't need it. |
-| Target gene is short / micro-exon / highly divergent | **Yes** — synteny anchors the search. |
-| Targets are unannotated / freshly assembled genomes | **Yes** — Pro Mode handles raw FASTA. |
-| Ortholog vs. paralog resolution within a family | **Yes** — `--expand_goi_similar` puts paralogs in the tree. |
-| Whole-genome ortholog inference across many species | Use OrthoFinder / TOGA — SynVoy is gene-centric. |
-
----
-
-## Quick install
-
-Requires Linux/macOS and Conda or Mamba. Nextflow and OpenJDK 17 ship inside the env.
+You need Linux or macOS and [conda or mamba](https://github.com/conda-forge/miniforge). Nextflow and Java are installed for you into the environment.
 
 ```bash
 git clone https://github.com/AndreasWz/SynVoy.git
 cd SynVoy
-mamba env create -f environment.yml      # or: conda env create -f environment.yml
-conda activate synvoy_env
-nextflow -version                         # sanity check
+./install.sh
 ```
 
-Docker/Singularity and HPC setup: **[docs/INSTALL.md](docs/INSTALL.md)**.
+`./install.sh` creates the `synvoy_env` environment from `environment.yml` and checks that every tool is present. To update SynVoy later, run `git pull` from the `SynVoy` folder. Docker, Singularity, and HPC setups: [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 
-## Quick start
+## Run
 
-> **New here?** **[docs/QUICKSTART.md](docs/QUICKSTART.md)** is a 20–30 min end-to-end melittin walkthrough on NCBI-fetched bee genomes — no local data needed.
+You run SynVoy with a single command — **`./run_synvoy.sh`** — from inside the `SynVoy` folder. It checks your installation and uses laptop-safe settings by default, so it works without tuning.
 
-### Easy Mode — automated genome retrieval
+First decide how you give SynVoy your data:
 
-Give an accession (or `--query` FASTA / `--query_seq` inline); SynVoy fetches the reference and target genomes and runs everything:
+- **Easy Mode** — you have a gene accession, and you want SynVoy to download the genomes. *(Most common.)*
+- **Pro Mode** — you have your own genome files (e.g. unpublished assemblies).
+
+### Easy Mode
 
 ```bash
-nextflow run main.nf \
-  --mode easy --query_id Q16553 \
-  --max_genomes 5 --outdir results/ly6e_easy \
-  -profile standard
+./run_synvoy.sh --mode easy --query_id P01501 --max_genomes 5 --outdir results/my_run
 ```
 
-> **Unsure how to tune it?** Use `-profile auto` (same local+conda run, but it auto-picks the query preset and enables the auto-tuning stack). Small machine: `-profile auto,low_mem`.
+| Option | What it is |
+|---|---|
+| `--query_id` | A UniProt or NCBI **protein accession** for your gene (here, `P01501` = honeybee melittin). |
+| `--max_genomes` | How many related species to download and search. Start with `5`. |
+| `--outdir` | Where to write the results. |
 
-Common overrides: `--home_species "Homo sapiens"`, `--target_species "Gallus gallus,Mus musculus"`.
+SynVoy reads the species from the accession and downloads its reference genome plus related genomes automatically. Two optional flags, only if the automatic choice isn't what you want:
 
-### Pro Mode — local files
+- `--home_species "Apis mellifera"` — name the reference species yourself. Use this if SynVoy can't read the species from your accession (it will tell you).
+- `--target_species "Bombus terrestris,Nomia melanderi"` — pick the comparison species yourself instead of letting SynVoy choose related ones.
+
+### Pro Mode
 
 ```bash
-nextflow run main.nf \
-  --mode pro --query queries/melittin.faa \
-  --home_genome apis_mellifera.fna --home_gff apis_mellifera.gff \
-  --target_genomes "targets/*.fna" \
-  --outdir results/melittin_pro -profile standard
+./run_synvoy.sh --mode pro \
+  --query gene.faa \
+  --home_genome reference.fna \
+  --home_gff reference.gff \
+  --target_genomes "genomes/*.fna" \
+  --outdir results/my_run
 ```
 
-> `--home_gff` is optional but strongly recommended (much better flanking-gene extraction than Prodigal alone). Use `-resume` to restart from the last successful step.
-> **Low-RAM:** add `,laptop_safe` (16 GB) or `,low_mem` (8 GB) to the profile to lower the MMseqs split-memory ceiling. See [USAGE.md § Memory tiers](docs/USAGE.md#memory-tiers-combine-with-an-execution-backend).
+| Option | What it is |
+|---|---|
+| `--query` | Your gene as a **protein FASTA** file. |
+| `--home_genome` | The genome the gene comes from (FASTA). |
+| `--home_gff` | That genome's **gene annotation** (a GFF3 file listing where its genes are). *Optional but recommended:* with it, SynVoy reads the real neighbouring genes; without it, it predicts them, which is less accurate. |
+| `--target_genomes` | The genomes to search, as a quoted path pattern. Quote it so your shell doesn't expand it. |
+
+### On a powerful machine
+
+The defaults are tuned for laptops (and skip the phylogenetic tree to save memory). On a server or workstation, add `-profile standard` for full speed and the tree:
+
+```bash
+./run_synvoy.sh -profile standard --mode easy --query_id P01501 --max_genomes 10 --outdir results/my_run
+```
 
 ---
 
-## How it works
+## Results
 
-```
-query (UniProt/FASTA)
-   │
-   ▼
-[1] Resolve & normalise query   ──►  protein FASTA
-[2] Stage genomes               ──►  home + targets (Easy: auto-fetch | Pro: local)
-[3] Locate GOI in home genome   ──►  tblastn + MMseqs2
-[4] Extract flanking genes      ──►  n up/downstream, GOI-similar filtered
-[5] Order targets by distance   ──►  closest first
-[6] Per target: map flanking    ──►  syntenic blocks → localised search
-                                     (tblastn + miniprot + Smith-Waterman)
-[7] Cluster & score regions     ──►  rank by conserved-flank fraction
-[8] Tree + plots                ──►  MAFFT + IQ-TREE, anchor grid, track plot
-```
-
-The iterative per-target search is **deterministic run-to-run** (`--deterministic_goi_search`, default on). Full algorithm details: [USAGE.md § Algorithm Overview](docs/USAGE.md#3-algorithm-overview).
-
----
-
-## Output
-
-Results land under `--outdir`. The ones you'll usually open:
+Everything is written under `--outdir`. The files you will usually open:
 
 | File | What it is |
 |---|---|
-| `plot_inputs_*/X.homology.tsv` | **Canonical per-target ortholog calls.** Filter `confidence=HIGH` for paper-quality results. |
-| `plot_inputs_*/X.gff` | Per-target gene/mRNA/CDS coordinates with SynVoy attributes. |
-| `regions/X.scores.tsv` | Synteny score / p-value / flanking recovery per candidate region. |
-| `*_anchor_grid.html` / `.svg` | Anchor-grid view (the figure above). Auto-emitted; skip with `--no_anchor_grid`. |
-| `*_synteny_plot.html` | Interactive per-locus track plot (tooltips, ortholog highlighting). |
-| `*_tree.html` / `_tree.nwk` | Phylogenetic tree of GOI sequences. |
-| `synvoy_report.json` | One-shot machine-readable run summary. |
+| `plot_inputs_*/*.homology.tsv` | The ortholog calls, one row per target gene, with a `confidence` column. **`HIGH` = confident orthologs; `MEDIUM`/`LOW` = candidates to check.** |
+| `*_anchor_grid.html` | The interactive version of the figure above (hover for details). |
+| `synvoy_report.json` | A machine-readable summary of the whole run. |
 
-Other plots (`*_gene_positions`, `*_anchor_positions`, `*_synteny_matrix`, static SVGs) and full column definitions: **[docs/OUTPUT.md](docs/OUTPUT.md)**.
+A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ---
 
-## Further reading
+## Scope
 
-- **[docs/INSTALL.md](docs/INSTALL.md)** — Setup, Docker, Singularity.
-- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** — End-to-end melittin walkthrough.
-- **[docs/OUTPUT.md](docs/OUTPUT.md)** — Output file guide ("I want X, open Y").
-- **[docs/USAGE.md](docs/USAGE.md)** — Profiles, full parameter reference, HPC/SLURM, troubleshooting.
-- **[docs/PARAMETERS.md](docs/PARAMETERS.md)** — Per-parameter tuning guide with biological rationale.
+SynVoy is for **divergent, low-copy genes** located by conserved gene order. It is validated on cases like melittin and LY6. It is **not** a general ortholog finder for large paralog families or repeat-domain superfamilies: for those, treat `MEDIUM`/`LOW` calls as leads that need manual curation, not findings. For genome-wide ortholog inference, use OrthoFinder or TOGA instead.
+
+---
+
+## Documentation
+
+- [docs/QUICKSTART.md](docs/QUICKSTART.md) — a guided first run (melittin, ~20–30 min).
+- [docs/OUTPUT.md](docs/OUTPUT.md) — what each output file contains.
+- [docs/USAGE.md](docs/USAGE.md) — every option, all profiles, and HPC/SLURM.
+- [docs/PARAMETERS.md](docs/PARAMETERS.md) — parameter tuning, with the biological reasoning.
 
 ---
 
@@ -171,5 +137,3 @@ Distributed under the **[GNU AGPLv3](LICENSE)**. If SynVoy contributes to your r
 ```
 
 </details>
-
-If SynVoy is useful to you, please consider starring the repo.

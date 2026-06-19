@@ -1,7 +1,8 @@
 # SynVoy — Usage & Reference Manual
 
-Detailed reference for running and configuring SynVoy.  
-For initial setup instructions, see the [README](README.md).
+Complete reference for running and configuring SynVoy. For setup, see the [README](../README.md).
+
+> **The normal way to run SynVoy is the `./run_synvoy.sh` launcher** ([README → Run](../README.md#run)) — it checks your environment and applies laptop-safe defaults. This manual documents the underlying `nextflow run main.nf` form, which is what the launcher calls. Run `nextflow run main.nf` directly only when you need to drive profiles/parameters yourself; anything you pass after `./run_synvoy.sh` is forwarded to it unchanged, so the two are equivalent.
 
 ---
 

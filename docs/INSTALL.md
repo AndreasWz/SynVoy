@@ -1,6 +1,6 @@
 # Installation Guide
 
-Full setup instructions for SynVoy. For a 5-line quick install, see the [README](../README.md#quick-install).
+Full setup instructions for SynVoy. For the short version, see the [README](../README.md#install).
 
 ---
 
@@ -30,18 +30,23 @@ cd SynVoy
 
 ## 2. Set Up the Conda Environment
 
-The environment bundles **Nextflow**, **OpenJDK 17**, all bioinformatics tools (MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies. This is the single canonical install path.
+The environment bundles **Nextflow**, **OpenJDK 17**, all bioinformatics tools (MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE, samtools), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
+
+**One step (recommended):**
+
+```bash
+./install.sh
+```
+
+`install.sh` creates the `synvoy_env` environment from `environment.yml` and verifies every tool is present. Equivalent manual steps:
 
 ```bash
 # Create the environment (mamba is faster if available)
 mamba env create -f environment.yml
 # or: conda env create -f environment.yml
-
-# Activate it (must be done in every new terminal before running the pipeline)
-conda activate synvoy_env
 ```
 
-> The environment is named `synvoy_env` (defined in `environment.yml`).
+> The environment is named `synvoy_env` (defined in `environment.yml`). The `./run_synvoy.sh` launcher activates it for you; if you call `nextflow run main.nf` directly, activate it first with `conda activate synvoy_env`.
 
 ## 3. Verify the Installation
 

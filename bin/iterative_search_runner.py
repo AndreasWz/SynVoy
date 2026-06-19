@@ -1001,6 +1001,60 @@ def _classify_goi_evidence(
     return "LOW", "ambiguous_goi_family_member", f"unclassified_{evidence_type or 'goi'}"
 
 
+# Methods whose per-hit pident / bits / qcov are SYNTHETIC proxies (ProtT5 cosine
+# or Foldseek fident/TM-score scaled to look like alignment statistics) rather
+# than real sequence-alignment values. Feeding those into the identity/coverage
+# branches of _classify_goi_evidence conflates embedding/structural similarity
+# with sequence identity, which can manufacture a confident GOI call for a
+# same-fold non-homolog. Such hits are routed through the dedicated embedding/
+# structural rescue branches instead (which additionally require flanking support).
+ML_DISCOVERY_METHODS = frozenset({"plm_embedding", "foldseek_structural"})
+
+
+def _resolve_fallback_signals(
+    ordered_hits: List[Dict[str, Any]],
+) -> Tuple[float, Optional[float], Optional[float], bool]:
+    """Separate real-sequence identity from ML-discovery similarity for a
+    fallback locus.
+
+    Returns ``(seq_identity, embedding_similarity, structural_similarity,
+    ml_only)``:
+
+      * ``seq_identity`` — mean pident of the NON-ML (real alignment) hits, or
+        0.0 if the locus is supported only by ML-discovery seeds. This is the
+        value that should be written as the model Identity and passed to the
+        identity-based classifier — never the synthetic cosine/TM proxy.
+      * ``embedding_similarity`` / ``structural_similarity`` — the best ML signal
+        among contributing ML hits (or ``None``), surfaced so classification can
+        use the principled rescue path.
+      * ``ml_only`` — ``True`` when the locus has no real-sequence support, in
+        which case the caller should also suppress the (synthetic) query
+        coverage so MEDIUM can only be reached via the ML rescue branch.
+
+    No-op by construction when PLM/structural search is off: with no ML hits,
+    ``seq_identity`` equals the prior ``mean(pident)`` and ``ml_only`` is False.
+    """
+    seq_hits = [h for h in ordered_hits if h.get("method") not in ML_DISCOVERY_METHODS]
+    ml_hits = [h for h in ordered_hits if h.get("method") in ML_DISCOVERY_METHODS]
+
+    if seq_hits:
+        seq_identity = sum(float(h.get("pident", 0) or 0.0) for h in seq_hits) / len(seq_hits)
+    else:
+        seq_identity = 0.0
+
+    embedding_similarity: Optional[float] = None
+    structural_similarity: Optional[float] = None
+    for h in ml_hits:
+        es = h.get("embedding_similarity")
+        if es is not None:
+            embedding_similarity = float(es) if embedding_similarity is None else max(embedding_similarity, float(es))
+        ss = h.get("structural_similarity")
+        if ss is not None:
+            structural_similarity = float(ss) if structural_similarity is None else max(structural_similarity, float(ss))
+
+    return seq_identity, embedding_similarity, structural_similarity, (not seq_hits and bool(ml_hits))
+
+
 def _classify_flanking_evidence(
     evidence_type: str,
     identity: float = 0.0,
@@ -2716,6 +2770,37 @@ def is_valid_fallback(
     return not (qcov < 0.25 and aln_total < 35 and best_bits < 60.0)
 
 
+def assign_waves_by_rank(genome_entries):
+    """§A4 (TODO_JUN): rank/quantile wave binning.
+
+    ``genome_entries`` must already be sorted closest-first (PHYLO_SORT order).
+    The legacy absolute-distance binning collapses for a tight clade whose phylo
+    distances saturate — e.g. all 19 bees land at dist≈0.99 after max-normalization
+    — producing ~4 undifferentiated waves with no close→far gradient. Binning by
+    RANK instead always grades: the closest genomes go in small (serial) waves so
+    their GOI seeds reach ``expanded_db.faa`` before the divergent genomes are
+    searched (the §A3 precondition for closest-first seeding), while distant
+    genomes go in larger waves for parallelism. Pure function of the sorted order
+    → deterministic (A0-safe). Returns a list of waves (each a list of entries).
+    """
+    n = len(genome_entries)
+    waves = []
+    i = 0
+    while i < n:
+        q = i / max(1, n - 1)   # rank-quantile in [0, 1]; 0.0 = closest
+        if q < 0.10:
+            size = 1            # closest tier: strictly serial (max seeding)
+        elif q < 0.35:
+            size = 2
+        elif q < 0.70:
+            size = 3
+        else:
+            size = 5            # farthest tier: parallelize
+        waves.append(genome_entries[i:i + size])
+        i += size
+    return waves
+
+
 def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, genome_name, args, unique_id,
                          threads_per_job, native_annot_index=None):
     """
@@ -2905,7 +2990,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     'alnlen': hit.get('alnlen', 0),
                     'bits': hit.get('bits', 0),
                     'strand': hit.get('strand', '+'),
-                    'chrom': chrom
+                    'chrom': chrom,
+                    # Preserve ML-discovery provenance: PLM/structural hits carry a
+                    # SYNTHETIC pident (cosine*100 / fident*100) and bits — these must
+                    # NOT be read as sequence identity downstream (see
+                    # _resolve_fallback_signals). The real embedding/TM-score signal
+                    # rides along separately so classification can use the principled
+                    # rescue path instead.
+                    'method': hit.get('method'),
+                    'embedding_similarity': hit.get('embedding_similarity'),
+                    'structural_similarity': hit.get('structural_similarity'),
                 })
 
             exon_parents = set()
@@ -3083,15 +3177,26 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             flank_protein = ''.join(coding_frags)
                                             global_start = w_start + min(s for s, _ in cds_intervals) + 1
                                             global_end = w_start + max(e for _, e in cds_intervals)
-                                            avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
-                                            
+                                            # Keep the model Identity derived ONLY from real
+                                            # sequence hits; route ML-discovery (PLM/structural)
+                                            # signal through the dedicated rescue branch so a
+                                            # synthetic cosine/TM proxy can't masquerade as
+                                            # sequence identity (see _resolve_fallback_signals).
+                                            avg_pident, fb_embed_sim, fb_struct_sim, fb_ml_only = \
+                                                _resolve_fallback_signals(ordered_hits)
+                                            # For an ML-only locus the per-hit query coverage is
+                                            # also synthetic (PLM hits report full coverage), so
+                                            # suppress it — MEDIUM must come from the ML rescue
+                                            # branch (similarity + flanking), not fake qcov.
+                                            classify_qcov = None if fb_ml_only else qcov
+
                                             copy_id = f"{parent_id}|{clean_gname}_b{block_idx}_l{locus_idx}_fallback"
-                                            
+
                                             cand_gff = [
                                                 (
                                                     f"{chrom}\tfallback_hits\tmRNA\t{global_start}\t{global_end}\t"
                                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=classify_qcov, flanking_support=block_flanking_support, embedding_similarity=fb_embed_sim, structural_similarity=fb_struct_sim), global_start, global_end, strand)}"
                                                 )
                                             ]
                                             for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -5125,6 +5230,17 @@ def main():
                         help="§A3: min flanking-gene support for flanking-supported seeding.")
     parser.add_argument("--seed_flanking_min_qcov", type=float, default=0.5,
                         help="§A3: min query coverage for flanking-supported seeding.")
+    # §A4 (TODO_JUN) — rank/quantile wave binning (opt-in). The phylo-distance
+    # metric saturates for tight clades (all bees → dist≈0.99 after max-norm),
+    # collapsing absolute-threshold binning into ~4 undifferentiated waves with
+    # no close→far gradient. When on, waves are assigned by RANK (genome_entries
+    # is pre-sorted closest-first): closest genomes in small serial waves for
+    # maximum seed propagation (the §A3 precondition), distant genomes in larger
+    # waves for parallelism. Deterministic (pure function of the sorted order).
+    parser.add_argument("--rank_wave_binning", type=str2bool, default=False,
+                        help="§A4: bin waves by phylo-distance RANK/quantile instead of "
+                             "absolute-distance thresholds, so a saturated distance metric "
+                             "(tight clade) still grades close→far. Default off.")
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
@@ -5560,42 +5676,52 @@ def main():
             logger.info(f"Normalized phylogenetic distances by max {max_dist:.3f}")
     
     # Define Waves
-    waves = []
+    if args.rank_wave_binning:
+        # §A4 (TODO_JUN): bin by phylo-distance RANK so a saturated metric
+        # (tight clade, all dist≈0.99) still grades close→far.
+        waves = assign_waves_by_rank(genome_entries)
+        logger.info(
+            "§A4 rank/quantile wave binning: ENABLED — "
+            f"{len(waves)} graded waves (closest serial → farthest parallel), "
+            "robust to saturated phylo-distance."
+        )
+    else:
+        waves = []
 
-    # IMPROVED WAVEFRONT STRATEGY:
-    # - Closest genomes (dist < 0.05): Process strictly serially for maximum sensitivity
-    # - Medium distance (0.05 - 0.15): Small waves (2-3 genomes)
-    # - Distant genomes (> 0.15): Larger waves (can parallelize more)
-    
-    i = 0
-    while i < len(genome_entries):
-        curr = genome_entries[i]
-        
-        if curr['dist'] < 0.05:
-            # Very close: Serial processing (wave of 1)
-            waves.append([curr])
-            i += 1
-        elif curr['dist'] < 0.15:
-            # Medium distance: Small waves of 2-3 genomes with similar distance
-            wave = [curr]
-            i += 1
-            while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.01:
-                wave.append(genome_entries[i])
+        # IMPROVED WAVEFRONT STRATEGY (legacy absolute-distance binning):
+        # - Closest genomes (dist < 0.05): Process strictly serially for maximum sensitivity
+        # - Medium distance (0.05 - 0.15): Small waves (2-3 genomes)
+        # - Distant genomes (> 0.15): Larger waves (can parallelize more)
+
+        i = 0
+        while i < len(genome_entries):
+            curr = genome_entries[i]
+
+            if curr['dist'] < 0.05:
+                # Very close: Serial processing (wave of 1)
+                waves.append([curr])
                 i += 1
-                if len(wave) >= 3:  # Max 3 per wave for medium distance
-                    break
-            waves.append(wave)
-        else:
-            # Distant: Can parallelize more (waves of up to 5)
-            wave = [curr]
-            i += 1
-            while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.02:
-                wave.append(genome_entries[i])
+            elif curr['dist'] < 0.15:
+                # Medium distance: Small waves of 2-3 genomes with similar distance
+                wave = [curr]
                 i += 1
-                if len(wave) >= 5:  # Max 5 per wave for distant genomes
-                    break
-            waves.append(wave)
-    
+                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.01:
+                    wave.append(genome_entries[i])
+                    i += 1
+                    if len(wave) >= 3:  # Max 3 per wave for medium distance
+                        break
+                waves.append(wave)
+            else:
+                # Distant: Can parallelize more (waves of up to 5)
+                wave = [curr]
+                i += 1
+                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.02:
+                    wave.append(genome_entries[i])
+                    i += 1
+                    if len(wave) >= 5:  # Max 5 per wave for distant genomes
+                        break
+                waves.append(wave)
+
     logger.info(f"Defined {len(waves)} waves of execution.")
 
     # ── PLM: Pre-compute GOI embeddings before waves start ──
@@ -5668,10 +5794,11 @@ def main():
             continue
 
         wave_genome_names = [e['name'] for e in wave]
+        rank_q = cumulative_genome_idx / max(1, total_genomes - 1)
         logger.info(
             f"═══ Wave {i+1}/{len(waves)} "
             f"[genomes {cumulative_genome_idx+1}-{cumulative_genome_idx+len(wave)}/{total_genomes}] "
-            f"({len(wave)} genome(s), dist≈{wave[0]['dist']:.3f}) ═══"
+            f"({len(wave)} genome(s), dist≈{wave[0]['dist']:.3f}, rank≈{rank_q:.2f}) ═══"
         )
         for entry in wave:
             gbase = os.path.basename(entry['name'])
