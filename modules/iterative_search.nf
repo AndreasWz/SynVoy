@@ -13,6 +13,8 @@ process ITERATIVE_SEARCH {
     // §1f: preset-affected params resolved at runtime (see RESOLVE_EFFECTIVE_PARAMS).
     // All other params still read directly from `params.X`.
     val settings
+    // Home GOI structure (goi_info.json) → data-driven GOI fallback max-intron.
+    path goi_info
 
     output:
     tuple val(locus_id), path("iterative_results/expanded_db.faa"), emit: expanded_db
@@ -40,6 +42,9 @@ process ITERATIVE_SEARCH {
         --min_identity ${settings.min_hit_identity} \\
         --min_length ${settings.min_hit_length} \\
         --max_intron ${params.max_intron} \\
+        --goi_info $goi_info \\
+        --goi_fallback_intron_margin ${params.goi_fallback_intron_margin} \\
+        --goi_fallback_intron_floor ${params.goi_fallback_intron_floor} \\
         --cluster_distance ${params.cluster_distance} \\
         --min_gene_identity ${params.min_gene_identity} \\
         --region_padding ${params.region_padding} \\
