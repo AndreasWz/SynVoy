@@ -23,6 +23,7 @@ dependencies:
   - augustus >=3.4.0       # eukaryotic gene prediction (default)
   - mafft >=7.505
   - miniprot
+  - samtools >=1.15        # samtools faidx — strong-synteny / GOI-hull rescue windows
   - iqtree >=2.2.0         # binary may be `iqtree2` or `iqtree` depending on package version
 
   # Genome fetching (easy mode)
@@ -41,16 +42,12 @@ dependencies:
   # Utilities
   - unzip
 
-  # Optional: PLM embedding search (--enable_plm_search true)
-  # Uncomment these or install separately:
-  #   pip install torch transformers sentencepiece
-  # - pytorch::pytorch >=2.0
-  # - transformers >=4.30
-  # - sentencepiece
-
-  # Optional: Structural search (--enable_structural_search true)
-  # Requires Foldseek binary + ESMFold (torch + transformers).
-  # ESMFold needs GPU with >=8GB VRAM for proteins up to ~400 aa.
-  #   conda install -c bioconda foldseek
-  #   pip install torch transformers
-  # - foldseek >=9
+  # Optional ML search layers (off by default):
+  #   --enable_plm_search true        (ProtT5 embedding search)
+  #   --enable_structural_search true (ESMFold + Foldseek structural search)
+  # These deps (torch + CUDA, transformers, sentencepiece, foldseek) are large
+  # and GPU/driver-specific, so they live in a separate overlay rather than here.
+  # Install on top of an existing env when you want them:
+  #   mamba env update -n synvoy_env -f environment-ml.yml
+  # See environment-ml.yml (LRZ AI Systems / GPU notes) and the `lrz_ai` profile
+  # in nextflow.config. ESMFold needs a GPU with >=8 GB VRAM for ~400 aa proteins.

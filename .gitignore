@@ -45,6 +45,7 @@ tests/ground_truth_test/output_unified/
 secrets/
 
 # Personal / binary files
+LRZ_CHEATSHEET.md
 melettin_paper.pdf
 ideas_from_human_user.txt
 feature_ideas.txt
@@ -62,3 +63,4 @@ tests/benchmark_truth/
 tmp/
 .claude/
 CLAUDE.md
+meeting_notes.txt

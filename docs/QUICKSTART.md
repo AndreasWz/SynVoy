@@ -41,14 +41,16 @@ Before starting:
 From the repository root:
 
 ```bash
-nextflow run main.nf \
-    -profile standard \
+./run_synvoy.sh \
     --mode easy \
     --query_id P01501 \
     --max_genomes 5 \
-    --outdir results/quickstart_melittin \
-    --auto_params false --multi_profile false
+    --outdir results/quickstart_melittin
 ```
+
+`./run_synvoy.sh` is the single entry point: it checks your version and
+environment, then launches with a memory-safe profile by default — so this
+command works on a laptop with no extra tuning.
 
 Notes on the flags:
 
@@ -59,12 +61,11 @@ Notes on the flags:
 - `--max_genomes 5` — cap the NCBI taxonomy walk at 5 related bee
   assemblies. Fewer genomes → faster run, less informative tree;
   more genomes → the opposite.
-- `--auto_params false --multi_profile false` — disables the LLM
-  parameter advisor for reproducibility. You can enable it later
-  (see [Going further](#going-further)).
 
-If your laptop has <16 GB RAM, add `-profile laptop_safe` instead of
-`-profile standard`.
+On a powerful machine, add `-profile standard` for full speed and the
+phylogenetic tree: `./run_synvoy.sh -profile standard --mode easy ...`.
+For the full parameter and profile reference (LLM advisor, presets, HPC),
+see [USAGE.md](USAGE.md) and [PARAMETERS.md](PARAMETERS.md).
 
 ## What you should see
 

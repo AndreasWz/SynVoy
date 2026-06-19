@@ -11,6 +11,16 @@ process COMPUTE_TREE {
 
     script:
     """
+    # --skip_tree (forced on by the low_mem profile): emit the same placeholder
+    # newick the process produces for <3 sequences and skip MAFFT/IQ-TREE
+    # entirely. Plotting tolerates this placeholder. Saves the per-locus tree
+    # cost on weak laptops — the #1 avoidable RAM/time sink after the locus cap.
+    if [ "${params.skip_tree}" = "true" ]; then
+        echo "skip_tree=true: COMPUTE_TREE disabled for this profile; writing placeholder tree"
+        echo "(GOI_placeholder:0.0);" > ${locus_id}_tree.nwk
+        exit 0
+    fi
+
     # Concatenate all fasta files
     cat ${fasta_files} > all_sequences.faa
     
