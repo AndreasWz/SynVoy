@@ -534,6 +534,34 @@ def _quick_protein_identity(seq1, seq2):
     return similarity
 
 
+def compute_genomic_footprint(exons):
+    """Home GOI genomic footprint from annotated exons.
+
+    Returns ``(genomic_span_bp, max_intron_bp)`` — the gene's start-to-end span
+    and its largest intron (gap between consecutive exons). Used downstream to
+    derive a data-driven max-intron for the GOI fallback hit-chain. Reads each
+    exon's genomic interval from ``gstart``/``gend`` or ``coords`` (mirrors the
+    BED-writing logic). Returns ``(None, None)`` when no exon carries coords.
+    """
+    intervals = []
+    for e in exons:
+        if 'gstart' in e and 'gend' in e:
+            s, t = int(e['gstart']), int(e['gend'])
+        elif e.get('coords'):
+            s, t = int(e['coords'][0]), int(e['coords'][1])
+        else:
+            continue
+        intervals.append((min(s, t), max(s, t)))
+    if not intervals:
+        return None, None
+    intervals.sort()
+    genomic_span_bp = intervals[-1][1] - intervals[0][0]
+    max_intron_bp = 0
+    for (_s0, e0), (s1, _e1) in zip(intervals, intervals[1:]):
+        max_intron_bp = max(max_intron_bp, s1 - e0)
+    return genomic_span_bp, max_intron_bp
+
+
 def extract_exons_from_gff_match(match, genome_file, query_seq=None):
     """
     Extract individual CDS/exon protein sequences from a GFF match.
@@ -1520,11 +1548,19 @@ def main():
         for rec in bed_records:
             f.write(rec + '\n')
 
+    # Home GOI genomic footprint. Downstream (iterative_search_runner) scales the
+    # home GOI's OWN largest intron by a margin to bound the GOI fallback hit-chain,
+    # so two far-apart spurious hits can't be stitched into one gene — instead of a
+    # hand-tuned --max_intron.
+    genomic_span_bp, max_intron_bp = compute_genomic_footprint(exons)
+
     # Write info JSON
     info = {
         'query_id': query_id,
         'query_length': len(query_seq),
         'method': method_used,
+        'genomic_span_bp': genomic_span_bp,
+        'max_intron_bp': max_intron_bp,
         'num_exons': len(exons),
         'exons': [{
             'id': e['id'],

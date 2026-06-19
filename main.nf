@@ -1056,7 +1056,8 @@ workflow {
             params.n_flanking_genes,
             params.min_synteny_score,
             params.mmseqs_sensitivity,
-            effective_settings_ch  // §1f: resolved preset-affected params
+            effective_settings_ch,  // §1f: resolved preset-affected params
+            ANNOTATE_GOI.out.info.first()  // home GOI structure → data-driven fallback max-intron
         )
         
         ITERATIVE_SEARCH.out.expanded_db.view { locus, db ->

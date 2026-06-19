@@ -1383,6 +1383,7 @@ def _split_models_into_loci(
 def _longest_monotonic_query_chain(
     ordered_hits: List[Dict[str, Any]],
     strand: str,
+    max_gap: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Keep the longest genomic-order/query-order-consistent hit chain.
@@ -1390,6 +1391,15 @@ def _longest_monotonic_query_chain(
     `ordered_hits` must already be sorted by genomic start.
     For '+' strands, query centers should increase with genomic position.
     For '-' strands, query centers should decrease with genomic position.
+
+    When ``max_gap`` is set (the max-intron distance), two hits are only chained
+    as consecutive exons of one gene if the genomic gap between them is
+    <= ``max_gap``. This stops two far-apart spurious hits — e.g. two ~15-aa
+    melittin matches sitting 60 kb apart on *different* genes — from being
+    stitched into a single multi-exon mRNA whose span is almost entirely empty
+    intron (the "two seqs far apart called one gene" failure). If the gap bound
+    leaves only single-hit chains, the single best hit (highest bitscore, then
+    aligned length) is returned so a genuine compact locus is still emitted.
     """
     n = len(ordered_hits)
     if n <= 1:
@@ -1401,6 +1411,10 @@ def _longest_monotonic_query_chain(
         qe = h.get("qend", 0)
         qcenters.append(0.5 * (min(qs, qe) + max(qs, qe)))
 
+    def _quality(idx: int):
+        h = ordered_hits[idx]
+        return (float(h.get("bits", 0.0)), int(h.get("alnlen", 0)))
+
     dp = [1] * n
     prev = [-1] * n
     best_idx = 0
@@ -1408,10 +1422,18 @@ def _longest_monotonic_query_chain(
     for i in range(n):
         for j in range(i):
             ok = qcenters[j] <= qcenters[i] if strand != "-" else qcenters[j] >= qcenters[i]
+            if ok and max_gap is not None:
+                # Hits are sorted by genomic start, so a j->i transition makes j
+                # the immediate upstream exon of i; bound the intron between them.
+                gap = int(ordered_hits[i].get("gstart", 0)) - int(ordered_hits[j].get("gend", 0))
+                if gap > max_gap:
+                    ok = False
             if ok and dp[j] + 1 > dp[i]:
                 dp[i] = dp[j] + 1
                 prev[i] = j
-        if dp[i] > dp[best_idx]:
+        # Prefer the longest chain; break ties toward the higher-quality
+        # endpoint so a broken (all length-1) chain returns the best single hit.
+        if dp[i] > dp[best_idx] or (dp[i] == dp[best_idx] and _quality(i) > _quality(best_idx)):
             best_idx = i
 
     chain_idx = []
@@ -1733,6 +1755,44 @@ def build_home_rank(initial_db_path):
         logger.warning(f"build_home_rank failed ({exc}); collinearity scoring disabled.")
         return {}
     return home_rank
+
+
+def derive_goi_fallback_max_gap(goi_info_path, margin, floor, default_max_gap):
+    """Data-driven max-intron for the GOI fallback hit-chain.
+
+    The fallback chain (``_longest_monotonic_query_chain``) joins hits into one
+    multi-exon gene; without a gap bound two far-apart spurious hits (e.g. two
+    ~15-aa melittin matches 60 kb apart on unrelated genes) get stitched into one
+    mRNA. Rather than a hand-set ``--max_intron``, scale the home GOI's OWN largest
+    intron (from ANNOTATE_GOI's ``goi_info.json``) by a generous ``margin`` — the
+    home annotation tells us this gene's natural intron sizes, so a big margin
+    covers intron expansion in divergent targets while still rejecting the
+    pathological joins. ``floor`` keeps a sane minimum for compact / single-exon
+    genes (whose home ``max_intron_bp`` may be ~0). Falls back to
+    ``default_max_gap`` (the static ``--max_intron``) when the home GOI structure
+    is unavailable (no GFF / alignment-only with no coords).
+
+    Returns ``(max_gap_bp, reason)``.
+    """
+    if not goi_info_path or not os.path.exists(goi_info_path):
+        return default_max_gap, f"no goi_info; using --max_intron={default_max_gap}"
+    try:
+        with open(goi_info_path) as fh:
+            info = json.load(fh)
+    except Exception as exc:
+        return default_max_gap, f"goi_info unreadable ({exc}); using --max_intron={default_max_gap}"
+    home_max_intron = info.get("max_intron_bp")
+    if home_max_intron is None:
+        return default_max_gap, f"goi_info has no max_intron_bp; using --max_intron={default_max_gap}"
+    try:
+        derived = int(round(float(home_max_intron) * float(margin)))
+    except (TypeError, ValueError):
+        return default_max_gap, f"bad max_intron_bp={home_max_intron!r}; using --max_intron={default_max_gap}"
+    max_gap = max(int(floor), derived)
+    return max_gap, (
+        f"home_max_intron={home_max_intron} bp x margin={margin} = {derived} bp, "
+        f"floored at {floor} -> {max_gap} bp"
+    )
 
 
 def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
@@ -3101,7 +3161,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 key=lambda h: h.get('gstart', 0)
                             )
                             if ordered_hits:
-                                ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand)
+                                # GOI-only branch (is_goi_parent gate above): bound the
+                                # inter-exon gap by the home-GOI-derived max-intron so two
+                                # far-apart spurious hits aren't stitched into one gene.
+                                _goi_gap = getattr(args, 'goi_fallback_max_gap', args.max_intron)
+                                ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=_goi_gap)
                                 if ordered_hits:
                                     qmin = min(min(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
                                     qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
@@ -3565,7 +3629,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         continue
 
                     # Keep only the longest chain consistent with query-order direction.
-                    ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand)
+                    ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=args.max_intron)
                     if not ordered_hits:
                         continue
 
@@ -4819,7 +4883,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                             [h for h in local_hits if h.get('strand', '+') == strand],
                             key=lambda h: h.get('gstart', 0)
                         )
-                        ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand) if ordered_hits else []
+                        ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=args.max_intron) if ordered_hits else []
 
                         if ordered_hits:
                             coding_frags = []
@@ -5103,6 +5167,17 @@ def main():
     parser.add_argument("--min_identity", type=float, default=40.0)
     parser.add_argument("--min_length", type=int, default=50)
     parser.add_argument("--max_intron", type=int, default=20000)
+    parser.add_argument("--goi_info", default=None,
+                        help="ANNOTATE_GOI goi_info.json — supplies the home GOI's "
+                             "genomic footprint so the GOI fallback hit-chain max-gap "
+                             "is derived from the gene's own introns instead of a fixed "
+                             "--max_intron. Optional; falls back to --max_intron when absent.")
+    parser.add_argument("--goi_fallback_intron_margin", type=float, default=5.0,
+                        help="Multiplier applied to the home GOI's largest intron to "
+                             "bound the GOI fallback hit-chain (big = lenient).")
+    parser.add_argument("--goi_fallback_intron_floor", type=int, default=10000,
+                        help="Minimum GOI fallback hit-chain max-gap (bp); covers compact "
+                             "or single-exon home genes whose largest intron is ~0.")
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
     parser.add_argument("--cluster_distance", type=int, default=-1, help="Auto-detect if -1")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
@@ -5384,6 +5459,17 @@ def main():
             f"({len(args.home_rank)} flanking anchors ranked; "
             f"bridge_max_gap={args.synteny_bridge_max_gap} bp)."
         )
+
+    # GOI fallback hit-chain max-gap: derived from the home GOI's own largest
+    # intron (goi_info.json) x margin, not a hand-set --max_intron. Attached to
+    # `args` so it pickles to every ProcessPoolExecutor worker, like home_rank.
+    args.goi_fallback_max_gap, _gap_reason = derive_goi_fallback_max_gap(
+        getattr(args, "goi_info", None),
+        args.goi_fallback_intron_margin,
+        args.goi_fallback_intron_floor,
+        args.max_intron,
+    )
+    logger.info(f"GOI fallback chain max-gap (data-driven max-intron): {_gap_reason}")
 
     # 3. Validate parameters are in valid ranges
     if args.min_identity < 0 or args.min_identity > 100:
