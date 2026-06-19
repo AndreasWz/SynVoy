@@ -185,6 +185,36 @@ def flattenNestedList(value) {
     return out
 }
 
+// Resolve --target_genomes (a folder | glob | comma-list | Nextflow list) to a
+// flat list of existing genome FASTA files. A bare folder is expanded to the
+// FASTAs inside it (.fna/.fa/.fasta, plain or .gz) so users can simply point at
+// a genome directory; any GFF/TSV/other files in the folder are ignored. Defined
+// at script scope (not inside workflow{}) to keep the workflow method small.
+def resolveTargetGenomeFiles(tg) {
+    def out = []
+    if (tg instanceof List) {
+        tg.each { p -> out += resolveTargetGenomeFiles(p) }
+        return out
+    }
+    def s = tg.toString().trim()
+    if (s.contains(',')) {
+        s.split(',').each { p -> out += resolveTargetGenomeFiles(p) }
+        return out
+    }
+    boolean hasGlob = s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[')
+    if (!hasGlob && file(s).isDirectory()) {
+        s = "${s}/*.{fna,fa,fasta,fna.gz,fa.gz,fasta.gz}"   // folder → FASTAs inside
+        hasGlob = true
+    }
+    def resolved = file(s)   // glob → (possibly empty) List; plain path → single Path
+    if (resolved instanceof List) {
+        out += resolved
+    } else if (resolved.exists()) {
+        out << resolved      // a Path is Iterable over its name parts; << adds the file itself, not its segments
+    }
+    return out
+}
+
 def normalizeCombineRecord(record, int leftWidth) {
     if (!(record instanceof List)) {
         return null
@@ -349,30 +379,16 @@ workflow {
         if (!params.target_genomes) {
             validationWarnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
         } else {
-            // Resolve the glob / list / comma-separated string up front so
+            // Resolve the folder / glob / list / comma-separated string up front so
             // students don't see a silent "0 target genomes" downstream.
-            def tg = params.target_genomes
             def matches = []
             try {
-                if (tg instanceof List) {
-                    tg.each { p -> if (file(p).exists()) matches << p }
-                } else if (tg.toString().contains(',')) {
-                    tg.toString().split(',').collect { item -> item.trim() }.each { p ->
-                        if (file(p).exists()) matches << p
-                    }
-                } else {
-                    def resolved = file(tg.toString())
-                    if (resolved instanceof List) {
-                        matches = resolved
-                    } else if (resolved.exists()) {
-                        matches = [resolved]
-                    }
-                }
+                matches = resolveTargetGenomeFiles(params.target_genomes)
             } catch (Exception e) {
-                validationWarnings << "Could not pre-resolve --target_genomes pattern '${tg}': ${e.message}"
+                validationWarnings << "Could not pre-resolve --target_genomes '${params.target_genomes}': ${e.message}"
             }
             if (matches.isEmpty()) {
-                validationErrors << "Target genomes pattern '${tg}' matched zero files. Check the path (relative paths are resolved against the Nextflow launch dir), the glob (quote it to prevent shell expansion: --target_genomes \"path/to/*.fa\"), and that the files exist."
+                validationErrors << "No target genomes found for --target_genomes '${params.target_genomes}'. Pass a folder containing genome FASTAs (.fna/.fa/.fasta), a quoted glob (\"path/to/*.fna\"), or a comma-separated list. Relative paths resolve against the Nextflow launch dir; quote globs so the shell doesn't expand them."
             }
         }
     }
@@ -618,19 +634,10 @@ workflow {
         // 3. Target Genomes Setup
         if (params.target_genomes) {
             uiStatus('RUN ', 'STAGE_GENOMES', 'Loading target genomes list')
-            // Support both glob patterns ("genomes/*.fna") and comma-separated
-            // lists ("a.fna,b.fna,c.fna") as well as Nextflow list syntax.
-            def tg = params.target_genomes
-            if (tg instanceof List) {
-                target_genomes_list = channel.fromPath(tg).collect()
-            } else if (tg.toString().contains(',')) {
-                target_genomes_list = channel
-                    .fromPath(tg.toString().split(',').collect { target_path -> target_path.trim() })
-                    .collect()
-            } else {
-                target_genomes_list = channel.fromPath(tg).collect()
-            }
-            
+            // Accept a folder of genomes, a glob ("genomes/*.fna"), a comma-separated
+            // list ("a.fna,b.fna"), or Nextflow list syntax (see resolveTargetGenomeFiles).
+            target_genomes_list = channel.fromPath(resolveTargetGenomeFiles(params.target_genomes)).collect()
+
             // Show count
             target_genomes_list.view { genomes ->
                 "${c.green}[OK  ]${c.reset} ${c.white}${'STAGE_GENOMES'.padRight(24)}${c.reset} staged ${genomes.size()} target genomes"

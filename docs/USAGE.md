@@ -83,15 +83,16 @@ nextflow run main.nf \
 | `--mode pro` | Select Pro Mode |
 | `--query` | Path to query protein FASTA (DNA sequences are auto-translated to the best ORF) |
 | `--home_genome` | Path to reference genome FASTA (`.fna` or `.fna.gz`) |
-| `--target_genomes` | Glob pattern or comma-separated list matching target genome FASTAs |
+| `--target_genomes` | A folder of genome FASTAs, a glob pattern, or a comma-separated list of target genome FASTAs |
 
 **Optional:**
 
 | Flag | Description |
 |---|---|
+| `--home_species` | Reference species (e.g. `"Apis mellifera"`), used for taxonomy ordering. Inferred from the `--home_genome` filename when it *is* a species name (e.g. `apis_mellifera.fna`); SynVoy **errors out with a clear message if it can't infer one** (a name like `reference.fna`). Pass it explicitly, or set `--allow_unknown_species true` to proceed with `kingdom=Unknown` / phylo distance 999 (mis-tunes per-target stringency). |
 | `--home_gff` | GFF annotation for the home genome. Highly recommended — provides much better flanking-gene extraction than Prodigal fallback. |
 
-> **Tip:** `--target_genomes` accepts globs (`"genomes/*.fna"`), comma-separated paths (`"a.fna,b.fna"`), or Nextflow list syntax.
+> **Tip:** `--target_genomes` accepts a **folder** of genomes (`genomes/` — every `.fna`/`.fa`/`.fasta` inside is used; GFF/TSV/other files are ignored), a glob (`"genomes/*.fna"` — match your extension: `*.fa`, `*.fasta`), a comma-separated list (`"a.fna,b.fna"`), or Nextflow list syntax. SynVoy errors clearly if no genomes are found.
 
 ---
 
@@ -337,10 +338,11 @@ These control per-process resource allocation. Override them for your hardware.
 | Parameter | Default | Description |
 |---|---|---|
 | `--iterative_search_cpus` | `2` | CPUs for ITERATIVE_SEARCH tasks |
-| `--iterative_search_memory` | `10 GB` | RAM for ITERATIVE_SEARCH tasks (auto-raised to 12 GB on HPC profiles) |
+| `--iterative_search_memory` | `10 GB` | RAM for ITERATIVE_SEARCH tasks (lowered to 8 GB / 4 GB by the `laptop_safe` / `low_mem` tiers; `docker_max` sizes it from host RAM) |
 | `--iterative_search_max_forks` | `1` | Max parallel ITERATIVE_SEARCH tasks |
 | `--locate_gene_cpus` | `1` | CPUs for LOCATE_GENE |
 | `--locate_gene_memory` | `3 GB` | RAM for LOCATE_GENE |
+| `--skip_tree` | `false` | Skip the per-locus MAFFT + IQ-TREE phylogeny (`COMPUTE_TREE`) to save time/RAM on weak machines. Emits a placeholder newick (`(GOI_placeholder:0.0);`) so plotting still works. Forced on by the `low_mem` profile (and thus by the launcher's default `auto,low_mem`). |
 
 ### Output
 
@@ -438,6 +440,7 @@ All output goes into `--outdir` (default: `results/`):
 
 | Path | Description |
 |---|---|
+| `*_anchor_grid.html` | **Primary figure.** Species × gene grid (rows = species with the phylo tree at left, columns = home genes; the GOI is the red column). Emitted by default; disable with `--no_anchor_grid`. |
 | `*_synteny_plot.html` | Interactive HTML visualization. Open in a browser — shows syntenic blocks, gene arrows, homology links, and a phylogenetic tree. |
 | `*_tree.nwk` | Newick-format phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes (multiple per genome when paralogs are found). |
 | `regions/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome. |

@@ -65,18 +65,20 @@ SynVoy reads the species from the accession and downloads its reference genome p
 ```bash
 ./run_synvoy.sh --mode pro \
   --query gene.faa \
+  --home_species "Genus species" \
   --home_genome reference.fna \
   --home_gff reference.gff \
-  --target_genomes "genomes/*.fna" \
+  --target_genomes genomes/ \
   --outdir results/my_run
 ```
 
 | Option | What it is |
 |---|---|
 | `--query` | Your gene as a **protein FASTA** file. |
+| `--home_species` | The reference species, e.g. `"Apis mellifera"` — used for taxonomy ordering. SynVoy can infer it when the `--home_genome` filename *is* the species name (e.g. `Apis_mellifera.fna`), but **stops with a clear error if it can't** (a name like `reference.fna` is not inferable). Pass it explicitly unless your filename is the species name. |
 | `--home_genome` | The genome the gene comes from (FASTA). |
 | `--home_gff` | That genome's **gene annotation** (a GFF3 file listing where its genes are). *Optional but recommended:* with it, SynVoy reads the real neighbouring genes; without it, it predicts them, which is less accurate. |
-| `--target_genomes` | The genomes to search, as a quoted path pattern. Quote it so your shell doesn't expand it. |
+| `--target_genomes` | The genomes to search. Simplest: a **folder** of genome FASTAs — `genomes/` uses every `.fna`/`.fa`/`.fasta` inside it (other files like GFF/TSV are ignored). You can also pass a quoted glob (`"genomes/*.fna"`) or a comma-separated list. SynVoy stops with a clear error if it finds no genomes. |
 
 ### On a powerful machine
 

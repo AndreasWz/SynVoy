@@ -128,6 +128,7 @@ print(f'Confidence: {d[\"annotations\"][\"goi_confidence_counts\"]}')
 
 | File | When to use |
 |---|---|
+| `<locus>_anchor_grid.html` | **The headline figure.** Species × gene grid — rows are species (NCBI-tax order, tree at left), columns are home-genome genes, the GOI in red. Arrows shaded by % identity, styled by confidence (solid HIGH / dashed MEDIUM / striped LOW / open circle = not found). The fastest "which species have the ortholog, and where does it sit in the neighbourhood?" view. Emitted by default (`--no_anchor_grid` to skip). |
 | `<locus>_synteny_plot.html` | Interactive track-style plot (legacy). Best for an exploratory single-locus view with ribbons between flanking orthologs. Resolved-vs-ambiguous GOIs distinguished by hatched fill. |
 | `<locus>_synteny_plot_view.svg` | **Static SVG mirror of the HTML** (auto-generated). Same layout, same colours, drops cleanly into READMEs / Word / Inkscape. CSS is CDATA-embedded so the file is fully standalone. |
 | `<locus>_synteny_plot.svg` | Narrow publication-format SVG. Render with `--pub_svg`. Different layout (vertical, condensed) optimised for two-column journal figures. |
@@ -164,7 +165,7 @@ behaved unexpectedly:
 | "Which species have the GOI ortholog?" | `plot_inputs_*/X.homology.tsv` filtered by `role=goi` and `confidence=HIGH` |
 | "Where in the target genome?" | `plot_inputs_*/X.gff` (gene/mRNA/CDS coordinates) |
 | "How good is the synteny in species Y?" | `regions/Y.scores.tsv` |
-| "Visual overview of all species at once" | matrix plot (run `plot_synteny_matrix.py`) |
+| "Visual overview of all species at once" | `<locus>_anchor_grid.html` (or the matrix plot — run `plot_synteny_matrix.py`) |
 | "Detailed per-locus visual" | `<locus>_synteny_plot.html` |
 | "Ortholog phylogeny" | `<locus>_tree.html` (or `*_tree.nwk` for tools) |
 | "One-line health check" | `synvoy_report.json` → `summary` |

@@ -84,16 +84,24 @@ Under `results/quickstart_melittin/` you should find roughly:
 
 ```
 results/quickstart_melittin/
-├── synvoy_report.json          # structured summary (see below)
-├── locus_1_tree.nwk            # phylogenetic tree of the orthologs
+├── synvoy_report.json                        # structured summary (see below)
+├── synteny_block_locus_1_anchor_grid.html    # main figure (species × gene grid)
 ├── synteny_block_locus_1_synteny_plot.html   # interactive synteny plot
-├── synteny_block_locus_1_tree.html           # interactive tree
+├── plot_inputs_synteny_block_locus_1/        # per-species .homology.tsv + GFFs (the ortholog calls)
+├── locus_1_tree.nwk                          # ortholog tree — PLACEHOLDER on the default profile (see note)
+├── synteny_block_locus_1_tree.html           # interactive tree — only with -profile standard
 ├── regions/
 │   ├── <species_1>.fna.regions.bed
 │   ├── <species_2>.fna.regions.bed
 │   └── ...
 └── qc/
 ```
+
+> **Note — the phylogenetic tree is skipped by default.** The launcher's default
+> profile is `auto,low_mem`, and `low_mem` sets `--skip_tree` to save memory, so
+> `locus_1_tree.nwk` is a placeholder (`(GOI_placeholder:0.0);`) and
+> `synteny_block_locus_1_tree.html` may be absent. Re-run with `-profile standard`
+> for the real MAFFT + IQ-TREE phylogeny.
 
 The exact species set depends on what NCBI has available when you run
 (the taxonomy walk picks the best-quality assemblies at run time), so
@@ -102,8 +110,9 @@ filenames and scaffold IDs will vary. What to verify qualitatively:
 - Several (typically 3–5) `*.regions.bed` files under `regions/`, one
   per target species returned.
 - Each BED file has at least one row with a score > 0.3.
-- `locus_1_tree.nwk` has one leaf per target species that produced a
-  candidate, plus the query.
+- *(only with `-profile standard`)* `locus_1_tree.nwk` has one leaf per
+  target species that produced a candidate, plus the query. On the default
+  laptop profile this file is a placeholder (the tree step is skipped).
 - `synvoy_report.json` summary shows `total_annotations > 0` and
   `total_goi_annotations > 0`.
 - `staging_diagnostics.empty` is `false`.
@@ -143,7 +152,7 @@ tooltips show gene names and identities.
 ## Going further
 
 - **Try a different gene.** Pass any UniProt accession via `--query_id`
-  (e.g. `Q16553` for human LY6E — the README's default example).
+  (e.g. `Q16553` for human LY6E).
 - **Switch to Pro Mode** to supply your own genomes and a home GFF —
   see [USAGE.md § 1](USAGE.md#pro-mode). Pro Mode is reproducible
   (no taxonomy walk) and is what the paper's benchmarks use.
