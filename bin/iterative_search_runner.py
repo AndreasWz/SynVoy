@@ -110,8 +110,12 @@ try:
         embed_proteins,
     )
     PLM_IMPORT_OK = True
-except ImportError:
+except Exception as _plm_import_err:  # ImportError, or broken deps (e.g. AttributeError from a damaged numpy)
     PLM_IMPORT_OK = False
+    sys.stderr.write(
+        f"[plm] optional PLM search unavailable, continuing without it: "
+        f"{type(_plm_import_err).__name__}: {_plm_import_err}\n"
+    )
 
     def check_plm_available():
         return False
@@ -129,8 +133,12 @@ try:
         load_structure_index,
     )
     STRUCTURAL_IMPORT_OK = True
-except ImportError:
+except Exception as _struct_import_err:  # ImportError, or broken deps (e.g. AttributeError from a damaged numpy)
     STRUCTURAL_IMPORT_OK = False
+    sys.stderr.write(
+        f"[struct] optional structural search unavailable, continuing without it: "
+        f"{type(_struct_import_err).__name__}: {_struct_import_err}\n"
+    )
 
     def check_structural_search_available():
         return False

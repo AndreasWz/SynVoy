@@ -46,7 +46,17 @@ include { ESTIMATE_PARAMS } from './modules/estimate_params.nf'
 // ==============================================================================
 
 // ANSI color codes as a function (NF 26.x forbids top-level variable declarations)
+// Honour NO_COLOR (https://no-color.org/) and NXF_ANSI_LOG=false so that
+// redirected logs / non-ANSI terminals don't get raw escape codes. run_synvoy.sh
+// sets these from a TTY check; a direct `nextflow run` in a pipe can export
+// NO_COLOR=1 to the same effect.
 def colors() {
+    if (System.getenv('NO_COLOR') || System.getenv('NXF_ANSI_LOG') == 'false') {
+        return [
+            reset:'', bold:'', dim:'', black:'', red:'', green:'', yellow:'',
+            blue:'', purple:'', cyan:'', white:''
+        ]
+    }
     return [
         reset:  "\033[0m",
         bold:   "\033[1m",
@@ -78,6 +88,13 @@ def uiStatus(String level, String task, String detail = '') {
         'FAIL': c.red
     ]
     def key = (level ?: 'INFO').padRight(4).substring(0, 4)
+    // Quiet mode (params.quiet, default true): drop the high-frequency per-step
+    // [RUN]/[SKIP] announcements so they don't each force a full reprint of
+    // Nextflow's live status table. [OK]/[INFO]/[WARN]/[FAIL] still print.
+    // `--quiet false` restores the verbose stream (paramBool maps "false" → false).
+    if (paramBool(params.quiet) && key in ['RUN ', 'SKIP']) {
+        return
+    }
     def levelColor = levelColors.get(key, c.white)
     def taskCol = task ? "${c.white}${task.padRight(24)}${c.reset}" : ''
     def detailCol = detail ?: ''
@@ -94,6 +111,11 @@ def uiStatus(String level, String task, String detail = '') {
 }
 
 def uiPhase(int idx, String title) {
+    // Phase banners are suppressed in quiet mode (default) for the same reason
+    // as the [RUN]/[SKIP] lines above — see params.quiet in nextflow.config.
+    if (paramBool(params.quiet)) {
+        return
+    }
     def c = colors()
     log.info ""
     log.info uiRule()

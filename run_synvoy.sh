@@ -165,6 +165,29 @@ case " $* " in
        ;;
 esac
 
+# ── 5b. terminal output mode ───────────────────────────────────────────────
+# Nextflow's TTY auto-detection misfires in wrapped terminals (VS Code, tmux),
+# falling back to the plain log that re-prints the whole status block on every
+# task change. Set the mode explicitly so the live status table is rendered
+# once and updated IN PLACE:
+#   • interactive terminal → ANSI live table (clean, no reprinting)
+#   • piped/redirected      → plain log + strip our own colours, so log files
+#                             and CI output stay free of escape codes.
+# Never override a value the user already exported, or an explicit -ansi-log.
+case " $* " in
+    *" -ansi-log "*) : ;;                                  # user controls it
+    *)
+        if [ -z "${NXF_ANSI_LOG:-}" ]; then
+            if [ -t 1 ]; then
+                export NXF_ANSI_LOG=true
+            else
+                export NXF_ANSI_LOG=false
+                : "${NO_COLOR:=1}"; export NO_COLOR        # honoured by main.nf colors()
+            fi
+        fi
+        ;;
+esac
+
 echo
 echo "${BOLD}Launching:${RST} nextflow run main.nf ${PROFILE_ARGS[*]} $*"
 echo
