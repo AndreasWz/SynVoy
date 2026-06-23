@@ -11,9 +11,24 @@ process STAGE_GENOMES {
     script:
     """
     mkdir staged_genomes
-    # Copy files into directory
-    # Use cp -r to handle potential directories or multiple files
-    cp -f -L -r $genomes staged_genomes/
+    # Link (don't copy) the input genomes into one directory. Nextflow already
+    # staged them into this task dir, so the old `cp -f -L -r` dereferenced those
+    # stage-symlinks into full byte copies — duplicating tens of GB of FASTA and,
+    # on a slow shared filesystem, blowing past the per-process wall-clock limit
+    # (the reported "staging exceeded the 1h cutoff"). `readlink -f` resolves to
+    # the real user file so the link is stable; downstream consumers use
+    # `find -L`, so symlinks are transparent to them.
+    for src in $genomes; do
+        if [ -d "\$src" ]; then
+            # Defensive: a directory slipped through (resolveTargetGenomeFiles
+            # normally flattens folders to files). Link each FASTA inside it.
+            for inner in "\$src"/*; do
+                [ -f "\$inner" ] && ln -sf "\$(readlink -f "\$inner")" "staged_genomes/\$(basename "\$inner")"
+            done
+        elif [ -f "\$src" ]; then
+            ln -sf "\$(readlink -f "\$src")" "staged_genomes/\$(basename "\$src")"
+        fi
+    done
 
     # Build species_mapping.tsv (key = filename-derived accession, value = species).
     # Strategy: prefer organism binomial from FASTA header (NCBI-style:
