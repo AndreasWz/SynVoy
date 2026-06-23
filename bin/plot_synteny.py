@@ -570,7 +570,7 @@ def parse_target_gff(gff_file):
     # annotations (especially without target GFFs) scattered across many
     # chromosomes.  Keeping all of them clutters the plot with noisy
     # connections.  Retain the best MAX_GOI_PER_GENOME entries.
-    MAX_GOI_PER_GENOME = 10
+    MAX_GOI_PER_GENOME = _MAX_GOI_PER_GENOME
     goi_genes = [g for g in genes if _is_goi_target_gene(g)]
     if len(goi_genes) > MAX_GOI_PER_GENOME:
         goi_genes.sort(key=_goi_priority_key, reverse=True)
@@ -816,6 +816,10 @@ def parse_tree_clade_colours(tree_file):
 
 # Module-level set populated during main() with names of GOI genes
 _GOI_NAMES = set()
+
+# Max GOI/toxin entries drawn per genome (set from --max_goi_per_genome in main()).
+# Raise for tandem-array loci (e.g. a 31-copy GR1 toxin cluster) so the array isn't truncated.
+_MAX_GOI_PER_GENOME = 10
 
 
 def is_goi(name):
@@ -1307,6 +1311,84 @@ def get_anchor_center(genes):
     return (start + end) / 2
 
 
+def _reverse_complement_track(track):
+    """Reflect a track around its anchor (offset) so it reads in the opposite
+    direction: mirror every gene's plotted position, flip its strand/arrow, and
+    mirror its exon model within the gene. Used to align a natively
+    reverse-oriented scaffold to the home reference (see _orient_tracks_to_home).
+    """
+    off = track.get("offset", 0.0)
+    for g in track["genes"]:
+        s_plot, e_plot = g["start_plot"], g["end_plot"]
+        g["start_plot"] = 2 * off - e_plot
+        g["end_plot"]   = 2 * off - s_plot
+        g["strand"]     = "-" if g.get("strand", "+") == "+" else "+"
+        # Mirror the exon/intron model within the gene's own native span so the
+        # fine structure (and terminal-exon arrow tip) reads in the new direction.
+        ex = g.get("exon_coords") or []
+        if ex:
+            gs, ge = g["start"], g["end"]
+            g["exon_coords"] = [(gs + (ge - ee), gs + (ge - es)) for (es, ee) in reversed(ex)]
+    for brk in track.get("breaks", []):
+        brk["x"] = 2 * off - brk["x"]
+    track["flipped"] = True
+
+
+def _orient_tracks_to_home(all_tracks, min_anchors=4, min_concordance=0.15):
+    """Reverse-complement (in plot space) any target track whose flanking-anchor
+    order runs opposite to the home reference, so no row appears mirror-imaged.
+
+    Orientation is decided from the *flanking* genes only (toxin/GOI copies have
+    mixed strands and are unreliable): for genes shared with home, we measure the
+    rank concordance between each track's plotted order and the home's. Negative
+    concordance ⇒ the scaffold is assembled antiparallel to home ⇒ flip it.
+    Tracks with too few shared anchors or an ambiguous (|concordance| small)
+    signal are left untouched. Returns the number of tracks flipped.
+    """
+    if not all_tracks:
+        return 0
+    home = all_tracks[0]
+    home_center = {}
+    for g in home["genes"]:
+        nm = g.get("name")
+        if nm and nm not in home_center:
+            home_center[nm] = (g["start_plot"] + g["end_plot"]) / 2.0
+
+    def _concordance(pairs):
+        conc = disc = 0
+        for i in range(len(pairs)):
+            ti, hi = pairs[i]
+            for j in range(i + 1, len(pairs)):
+                tj, hj = pairs[j]
+                dt, dh = ti - tj, hi - hj
+                if dt == 0 or dh == 0:
+                    continue
+                if (dt > 0) == (dh > 0):
+                    conc += 1
+                else:
+                    disc += 1
+        tot = conc + disc
+        return (conc - disc) / tot if tot else 0.0
+
+    n_flipped = 0
+    for track in all_tracks[1:]:
+        if track.get("is_home"):
+            continue
+        pairs = []
+        for g in track["genes"]:
+            if _is_goi_target_gene(g) or is_goi(g.get("name")):
+                continue  # flanking only
+            hid = g.get("home_gene_id", "")
+            if hid in home_center:
+                pairs.append(((g["start_plot"] + g["end_plot"]) / 2.0, home_center[hid]))
+        if len(pairs) < min_anchors:
+            continue
+        if _concordance(pairs) < -min_concordance:
+            _reverse_complement_track(track)
+            n_flipped += 1
+    return n_flipped
+
+
 def _widen_sparse_plot(all_tracks, target_coverage=0.25, max_factor=4.0):
     """Inflate every gene's visual width around its center when the plot has
     pixel headroom — i.e. when the median per-track gene coverage of the plot
@@ -1693,20 +1775,54 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
 
     # ---- Compute x range ----
     all_x_bp = []
+    goi_x_bp = []      # centered-bp extents of GOI/toxin genes (for local zoom)
     for track in all_tracks:
         x_off = track["offset"]
         for g in track["genes"]:
-            all_x_bp.append(g["start_plot"] - x_off)
-            all_x_bp.append(g["end_plot"] - x_off)
+            s_c = g["start_plot"] - x_off
+            e_c = g["end_plot"] - x_off
+            all_x_bp.append(s_c)
+            all_x_bp.append(e_c)
+            is_goi_g = (_is_goi_target_gene(g) if not track["is_home"]
+                        else (is_goi(g.get("name")) or is_goi(g.get("home_gene_id", ""))))
+            if is_goi_g:
+                goi_x_bp.extend((s_c, e_c))
+
+    # ---- Local GOI-window magnification (piecewise-linear 'broken' axis) ----
+    # The genomic scale (px/bp) is multiplied by `goi_zoom` inside the band
+    # spanned by GOI/toxin genes and left at 1x outside, so tandem toxin arrays
+    # spread apart (stop overlapping) without stretching the flanking regions.
+    # Every coordinate is routed through `_stretch` *before* the linear px map,
+    # so genes, ribbons, breaks and the guide line all stay consistent.
+    _zoom = max(1.0, float(getattr(args, "goi_zoom", 1.0) or 1.0))
+    if _zoom > 1.0 and goi_x_bp:
+        _gpad = 800.0  # bp of context kept at zoom on each side of the toxin band
+        _w_lo = min(goi_x_bp) - _gpad
+        _w_hi = max(goi_x_bp) + _gpad
+        _w_span = max(1.0, _w_hi - _w_lo)
+
+        def _stretch(b):
+            if b <= _w_lo:
+                return b
+            if b >= _w_hi:
+                return _w_lo + _w_span * _zoom + (b - _w_hi)
+            return _w_lo + (b - _w_lo) * _zoom
+    else:
+        def _stretch(b):
+            return b
 
     if not all_x_bp:
         x_min_bp, x_max_bp = -1000, 1000
+        raw_range = 2000.0
     else:
-        x_min_bp, x_max_bp = min(all_x_bp), max(all_x_bp)
+        _sx = [_stretch(b) for b in all_x_bp]
+        x_min_bp, x_max_bp = min(_sx), max(_sx)
+        raw_range = max(1.0, max(all_x_bp) - min(all_x_bp))
 
     pad_bp = (x_max_bp - x_min_bp) * 0.05 + 5000
     x_min_bp -= pad_bp
     x_max_bp += pad_bp
+    raw_range += 2 * pad_bp  # keep raw/stretched on the same padded footing
 
     # ---- Plot dimensions ----
     # Dynamic left margin: measure longest track label and allow more room
@@ -1725,9 +1841,24 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
         est = max(1200, int((x_max_bp - x_min_bp) / 350))
         plot_w = min(6000, est)
 
-    available_w = plot_w - LEFT_MARGIN - RIGHT_MARGIN
     bp_range = max(1, x_max_bp - x_min_bp)
-    scale = available_w / bp_range  # px per bp
+    if _zoom > 1.0 and goi_x_bp:
+        # Local magnification: anchor px/bp to the *flanking* (raw) scale so the
+        # flanking regions keep their normal density, and grow the canvas to fit
+        # the widened toxin band — the plot gets a bit wider rather than squashing
+        # the flanking genes.
+        available_w = plot_w - LEFT_MARGIN - RIGHT_MARGIN
+        scale = available_w / raw_range            # px per bp at flanking scale
+        plot_w_needed = LEFT_MARGIN + RIGHT_MARGIN + bp_range * scale
+        if plot_w_needed > 9000:                    # hard cap; shrink scale to fit
+            plot_w = 9000
+            scale = (plot_w - LEFT_MARGIN - RIGHT_MARGIN) / bp_range
+        else:
+            plot_w = int(round(plot_w_needed))
+        available_w = plot_w - LEFT_MARGIN - RIGHT_MARGIN
+    else:
+        available_w = plot_w - LEFT_MARGIN - RIGHT_MARGIN
+        scale = available_w / bp_range  # px per bp
 
     # ---- Track heights & y positions ----
     track_heights = []
@@ -1747,17 +1878,33 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     if args.plot_height > 0:
         total_h = max(total_h, args.plot_height)
 
+    # Optional caption block pinned below the plot content (e.g. conserved-locus
+    # / no-toxin / off-contig notes). Reserve extra canvas height for it.
+    _caption_lines = []
+    if getattr(args, "caption_file", None) and os.path.exists(args.caption_file):
+        _caption_lines = [ln.rstrip("\n") for ln in open(args.caption_file, encoding="utf-8")
+                          if ln.strip()]
+    _content_bottom = total_h
+    total_h += (len(_caption_lines) * 15 + 26) if _caption_lines else 0
+
     # ---- Coordinate helpers (closures) ----
     def bp2px(bp_val):
-        return LEFT_MARGIN + (bp_val - x_min_bp) * scale
+        # bp_val is centered bp (gene start_plot/end_plot minus track offset);
+        # apply the local GOI magnification, then the linear px map.
+        return LEFT_MARGIN + (_stretch(bp_val) - x_min_bp) * scale
 
     def gene_px(gene, track):
         x_off = track["offset"]
         x0 = bp2px(gene["start_plot"] - x_off)
         x1 = bp2px(gene["end_plot"] - x_off)
-        if x1 - x0 < MIN_GENE_PX:
+        # GOI/toxin genes are tiny (~200 bp) at locus scale; give them a larger floor so
+        # the exon/intron model (drawn relative to the box, needs w_px > 25) renders.
+        floor = MIN_GENE_PX
+        if getattr(args, "goi_min_px", 0) and _is_goi_target_gene(gene):
+            floor = max(MIN_GENE_PX, args.goi_min_px)
+        if x1 - x0 < floor:
             mid = (x0 + x1) / 2
-            x0, x1 = mid - MIN_GENE_PX / 2, mid + MIN_GENE_PX / 2
+            x0, x1 = mid - floor / 2, mid + floor / 2
         return x0, x1
 
     def gene_yb(ti, gene):
@@ -2309,7 +2456,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     scale_len_bp = args.scale_bar_len
     sb_x1_px = bp2px(x_max_bp - pad_bp * 0.5)
     sb_x0_px = sb_x1_px - scale_len_bp * scale
-    sb_y = total_h - BOTTOM_MARGIN + 20
+    sb_y = _content_bottom - BOTTOM_MARGIN + 20
     svg_parts.append('<g class="scale-bar-group">')
     svg_parts.append(
         f'<line x1="{sb_x0_px:.1f}" y1="{sb_y:.1f}" '
@@ -2428,6 +2575,23 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             f'class="plot-subtitle" style="font-size:{sub_fs:.1f}px">'
             f'{_svg_esc(sub_text)}</text>'
         )
+
+    # ---- Caption block (bottom) ----
+    if _caption_lines:
+        svg_parts.append('<g class="plot-caption">')
+        svg_parts.append(
+            f'<line x1="{LEFT_MARGIN}" y1="{_content_bottom + 4:.1f}" '
+            f'x2="{plot_w - RIGHT_MARGIN}" y2="{_content_bottom + 4:.1f}" '
+            f'stroke="#dddddd" stroke-width="1"/>'
+        )
+        for i, line in enumerate(_caption_lines):
+            weight = "600" if i == 0 else "400"
+            svg_parts.append(
+                f'<text x="{LEFT_MARGIN}" y="{_content_bottom + 18 + i * 15:.1f}" '
+                f'style="font-size:10px;fill:#444;font-weight:{weight}">'
+                f'{_svg_esc(line)}</text>'
+            )
+        svg_parts.append('</g>')
 
     # ---- Per-track geometry for the JS reflow ----
     # When a genome is removed, the JS reclaims its vertical space by re-laying
@@ -4922,6 +5086,27 @@ def main():
     ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
     ap.add_argument("--plot_width",     type=int, default=0, help="Total width of the output HTML plot (0=auto)")
     ap.add_argument("--plot_height",    type=int, default=0, help="Total height of the output HTML plot (0=auto)")
+    ap.add_argument("--goi_min_px",     type=int, default=0,
+                    help="Minimum on-screen width (px) for GOI/toxin genes so their exon "
+                         "structure is visible at locus scale (0=off; ~30 shows notches). "
+                         "Exons scale to the enlarged box; lengths become schematic for GOIs.")
+    ap.add_argument("--caption_file",   default=None,
+                    help="Path to a UTF-8 text file whose lines are rendered as a caption "
+                         "block at the bottom of the figure (e.g. conserved-locus/no-toxin notes).")
+    ap.add_argument("--max_goi_per_genome", type=int, default=10,
+                    help="Max GOI/toxin genes drawn per genome (default 10). Raise for tandem-array "
+                         "loci so large copy-number clusters (e.g. 31-copy GR1) aren't truncated.")
+    ap.add_argument("--goi_zoom",       type=float, default=1.0,
+                    help="Local magnification factor for the GOI/toxin window only: the genomic "
+                         "scale (px/bp) is multiplied by this factor inside the band spanned by GOI "
+                         "genes and left at 1x for flanking regions (piecewise-linear 'broken' axis). "
+                         "Spreads tandem toxin arrays apart so they stop overlapping while keeping "
+                         "flanking spacing compact (1.0=off; ~8-12 for dense arrays).")
+    ap.add_argument("--orient_to_home", action="store_true",
+                    help="Reverse-complement (in plot space) any target track whose flanking-anchor "
+                         "order runs opposite to the home reference, so every track reads in the same "
+                         "left-to-right orientation (no mirror-imaged 'flipped' rows). Reflects gene "
+                         "positions, flips strands/arrows, and mirrors the exon model per gene.")
     ap.add_argument("--max_legend_entries", type=int, default=25, help="Maximum number of flanking genes to show in legend")
     ap.add_argument("--ribbon_alpha_dense", type=float, default=0.20, help="Alpha for flanking ribbons")
     ap.add_argument("--hide_goi_absent", action="store_true",
@@ -4955,6 +5140,9 @@ def main():
                          "clade is rendered with a distinct colour from "
                          "the colour-blind-safe CLADE_PALETTE.")
     args = ap.parse_args()
+
+    global _MAX_GOI_PER_GENOME
+    _MAX_GOI_PER_GENOME = max(1, args.max_goi_per_genome)
 
     # Initialize common-name resolver up front (cheap; just reads cache).
     if args.common_names != "off":
@@ -5299,6 +5487,16 @@ def main():
         all_tracks.append(track)
 
     n_tracks = len(all_tracks)
+
+    # -- 4a. Orient every track to the home reference --------------------
+    # Natively reverse-assembled scaffolds otherwise render mirror-imaged
+    # (genes + arrows on the opposite side, ribbons crossing). Flip those so
+    # all rows read left-to-right the same way. Anchor centres are preserved,
+    # so the GOI guide line and ribbon endpoints stay aligned.
+    if getattr(args, "orient_to_home", False):
+        n_flipped = _orient_tracks_to_home(all_tracks)
+        if n_flipped:
+            print(f"[plot] Oriented {n_flipped} track(s) to home (reverse-complemented)")
 
     # -- 4b. Adaptive widening for sparse plots --------------------------
     # When most tracks have few genes spread across a wide bp range, the
