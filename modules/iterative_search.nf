@@ -52,6 +52,7 @@ process ITERATIVE_SEARCH {
         --padding_max ${params.padding_max} \\
         --enable_smith_waterman ${params.enable_smith_waterman} \\
         --sw_method ${params.sw_method} \\
+        --allow_missing_smith_waterman ${params.allow_missing_smith_waterman} \\
         --sw_min_score ${settings.sw_min_score} \\
         --sw_min_identity ${settings.sw_min_identity} \\
         --sw_timeout_seconds ${params.sw_timeout_seconds} \\
@@ -86,6 +87,7 @@ process ITERATIVE_SEARCH {
         --classify_medium_min_identity ${settings.classify_medium_min_identity} \\
         --classify_tandem_min_identity ${settings.classify_tandem_min_identity} \\
         --classify_tandem_min_qcov ${params.classify_tandem_min_qcov} \\
+        --classify_high_min_collinear ${params.classify_high_min_collinear} \\
         --seed_on_flanking_support ${params.seed_on_flanking_support} \\
         --seed_flanking_min_count ${params.seed_flanking_min_count} \\
         --seed_flanking_min_qcov ${params.seed_flanking_min_qcov} \\

@@ -17,7 +17,11 @@
 
 process BUILD_HOME_PARALOG_PANEL {
     tag "home_paralog_panel"
-    errorStrategy 'ignore'  // a missing/odd home GFF must not block the run
+    // An odd/missing home GFF is handled inside the script (exit 0 + empty panel), so a
+    // NON-zero exit here means a genuine failure (e.g. parasail missing → the §1m ownership
+    // safety net silently dies). Fail loud by default; --require_paralog_panel false (or
+    // --disable_locus_ownership) opts back into tolerating it.
+    errorStrategy { params.require_paralog_panel ? 'terminate' : 'ignore' }
 
     input:
     path home_gff

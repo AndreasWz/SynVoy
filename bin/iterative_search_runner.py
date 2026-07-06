@@ -39,6 +39,29 @@ def has_parasail_available() -> bool:
         return False
 
 
+class SmithWatermanUnavailable(RuntimeError):
+    """Raised when SW is requested (auto mode) but parasail is unavailable and the
+    degraded path was not explicitly allowed. Callers turn this into a loud exit."""
+
+
+def resolve_smith_waterman_enabled(enable: bool, sw_method: str,
+                                   parasail_available: bool,
+                                   allow_missing: bool) -> bool:
+    """Pure decision for the auto-mode SW/parasail guard (testable in isolation).
+
+    SW is the load-bearing tier for divergent GOI recovery, so an auto-mode request that
+    can't be honoured (no parasail) must FAIL LOUD rather than silently drop to
+    mmseqs/tblastn — unless the caller explicitly opts into the degraded path.
+    Returns the resolved ``enable_smith_waterman`` flag, or raises
+    ``SmithWatermanUnavailable`` when it must fail loud.
+    """
+    if enable and sw_method == "auto" and not parasail_available:
+        if allow_missing:
+            return False
+        raise SmithWatermanUnavailable("parasail unavailable for requested Smith-Waterman")
+    return enable
+
+
 def _tail_lines(text: str, n: int = 20) -> str:
     if not text:
         return ""
@@ -149,6 +172,28 @@ except Exception as _struct_import_err:  # ImportError, or broken deps (e.g. Att
     def check_foldseek_available():
         return False
 
+# Import the main-process GPU augmentation phase (PLM + Foldseek). The GPU work
+# used to run inside the forked ProcessPoolExecutor workers, but a fork cannot
+# re-initialise CUDA once the parent has ("Cannot re-initialize CUDA in forked
+# subprocess"), so every fold/embed died silently on GPU (LRZ job 5699498:
+# 1501/1501 folds failed, 0 structural scores). It now runs once in the main
+# process after the wave loop — see run_gpu_augment_phase() and gpu_augment.py.
+try:
+    import gpu_augment
+    GPU_AUGMENT_OK = True
+except Exception as _gpu_aug_err:  # optional deps; mirror the guards above
+    GPU_AUGMENT_OK = False
+    sys.stderr.write(
+        f"[gpu_augment] optional GPU augmentation module unavailable: "
+        f"{type(_gpu_aug_err).__name__}: {_gpu_aug_err}\n"
+    )
+
+# GPU inference (ProtT5 / ESMFold) must NOT run inside the forked workers (see
+# above). This kill-switch keeps the legacy in-worker code paths present but
+# disabled; the PLM/structural layers run via run_gpu_augment_phase() instead.
+# Flip to True only for reference/experiments on a CUDA-free (CPU) device.
+GPU_IN_WORKER = False
+
 # Classification thresholds for GOI confidence assignment.  Populated from
 # CLI args in main() so that they can be tuned per-run via nextflow.config.
 CLASSIFY_THRESHOLDS = {
@@ -156,6 +201,13 @@ CLASSIFY_THRESHOLDS = {
     "high_min_exons": 2,
     "high_min_identity": 50.0,
     "high_min_flanking": 2,
+    # §1 (2026-07-01): synteny ORDER, not just count. When the block has >= this many
+    # flanking genes, HIGH additionally requires the longest collinear run of home-ordered
+    # flanking to reach it — so a GOI in a SCRAMBLED paralog neighbourhood (same flanking
+    # count, wrong order — the biglycan-as-decorin signature) is demoted to MEDIUM instead
+    # of crowned HIGH on identity+count alone. Waived when there are fewer than this many
+    # flanking (can't judge order) or when collinearity is unavailable (no home_rank).
+    "high_min_collinear": 3,
     # exon_annotation -> MEDIUM
     "medium_min_identity": 35.0,
     "medium_min_flanking": 1,
@@ -888,6 +940,7 @@ def _classify_goi_evidence(
     flanking_support: int = 0,
     embedding_similarity: Optional[float] = None,
     structural_similarity: Optional[float] = None,
+    collinear_support: Optional[int] = None,
 ) -> Tuple[str, str, str]:
     """
     Assign a conservative confidence/class label to GOI-derived candidates.
@@ -909,6 +962,16 @@ def _classify_goi_evidence(
 
     ct = CLASSIFY_THRESHOLDS
 
+    # §1 synteny-ORDER gate: the flanking are collinear enough to trust the neighbourhood as
+    # this GOI's true (orthologous) locus, not a scrambled paralog neighbourhood. Waived when
+    # collinearity is unavailable (collinear_support is None → no home_rank / feature off) or
+    # when the block has too few flanking to judge order (< high_min_collinear).
+    collinear_ok = (
+        collinear_support is None
+        or flanking_support < ct["high_min_collinear"]
+        or collinear_support >= ct["high_min_collinear"]
+    )
+
     if evidence_type == "tandem_copy":
         # A2 (TODO_JUN): MEDIUM requires BOTH identity AND real query coverage.
         # A short high-identity local window (e.g. a 7-aa micro-window or a 23-aa
@@ -925,7 +988,12 @@ def _classify_goi_evidence(
         if (exon_count >= ct["high_min_exons"]
                 and identity >= ct["high_min_identity"]
                 and flanking_support >= ct["high_min_flanking"]):
-            return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
+            if collinear_ok:
+                return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
+            # §1: HIGH-quality model + enough flanking, but the flanking are NOT in conserved
+            # home order → likely a paralog neighbourhood, not the true ortholog locus. Demote
+            # to MEDIUM (still a probable GOI) rather than assert HIGH on identity+count alone.
+            return "MEDIUM", "probable_goi", "high_identity_but_flanking_not_collinear"
         if identity >= ct["medium_min_identity"] and (
                 flanking_support >= ct["medium_min_flanking"]
                 or qcov >= ct["medium_min_qcov"]):
@@ -1095,6 +1163,7 @@ def _goi_feature_attrs(
     flanking_support: int = 0,
     embedding_similarity: Optional[float] = None,
     structural_similarity: Optional[float] = None,
+    collinear_support: Optional[int] = None,
 ) -> Dict[str, Any]:
     confidence, goi_class, reason = _classify_goi_evidence(
         evidence_type=evidence_type,
@@ -1104,6 +1173,7 @@ def _goi_feature_attrs(
         flanking_support=flanking_support,
         embedding_similarity=embedding_similarity,
         structural_similarity=structural_similarity,
+        collinear_support=collinear_support,
     )
     attrs = dict(base_attrs)
     attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
@@ -1114,6 +1184,8 @@ def _goi_feature_attrs(
     attrs["ModelStatus"] = _model_status(query_cov, exon_count, evidence_type)
     attrs["SyntenyContext"] = _synteny_context_label(flanking_support)
     attrs["BlockFlankingSupport"] = str(max(0, int(flanking_support or 0)))
+    if collinear_support is not None:
+        attrs["BlockCollinearSupport"] = str(max(0, int(collinear_support)))
     attrs["InferenceReason"] = reason
     if query_cov is not None:
         attrs["QueryCoverage"] = _format_attr_float(query_cov)
@@ -2397,7 +2469,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         # ========== 4. PLM Embedding Search ==========
         # Use ProtT5 protein language model to find ORFs that are functionally
         # similar to the GOI even when sequence identity is undetectable (<15%).
-        if getattr(args, 'enable_plm_search', False) and PLM_IMPORT_OK and check_plm_available():
+        if (GPU_IN_WORKER and getattr(args, 'enable_plm_search', False)
+                and PLM_IMPORT_OK and check_plm_available()):
             try:
                 goi_emb_path = os.path.join(args.output_dir, "goi_embeddings.npz")
                 if os.path.exists(goi_emb_path):
@@ -2444,7 +2517,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         # single short helices (e.g. melittin, defensins).
         _max_goi_len = max(goi_query_lengths.values()) if goi_query_lengths else 0
         _struct_too_short = 0 < _max_goi_len < 50
-        if (getattr(args, 'enable_structural_search', False)
+        if (GPU_IN_WORKER and getattr(args, 'enable_structural_search', False)
                 and STRUCTURAL_IMPORT_OK and check_structural_search_available()
                 and _struct_too_short):
             print(
@@ -2453,7 +2526,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 flush=True,
             )
 
-        if (getattr(args, 'enable_structural_search', False)
+        if (GPU_IN_WORKER and getattr(args, 'enable_structural_search', False)
                 and STRUCTURAL_IMPORT_OK and check_structural_search_available()
                 and not _struct_too_short):
             try:
@@ -2908,6 +2981,26 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         for h in relevant_hits
         if h.get('query') and not is_goi_query_id(h.get('query', ''))
     })
+    # §1 synteny ORDER: longest collinear run of the block's flanking genes in home order
+    # (one representative position per flanking gene, sorted by TARGET position → home ranks
+    # → LIS). Feeds _classify_goi_evidence so a scrambled paralog neighbourhood can't reach
+    # HIGH on flanking COUNT alone. None when collinearity is unavailable (no home_rank /
+    # --disable_synteny_collinearity) → the classifier waives the order gate (legacy behaviour).
+    home_rank = getattr(args, 'home_rank', None)
+    if home_rank:
+        flank_first_pos: Dict[str, int] = {}
+        for h in relevant_hits:
+            q = h.get('query', '')
+            if q and not is_goi_query_id(q):
+                gid = extract_base_gene_id(q)
+                pos = int(h.get('start', 0) or 0)
+                if gid not in flank_first_pos or pos < flank_first_pos[gid]:
+                    flank_first_pos[gid] = pos
+        ordered_ranks = [home_rank.get(gid) for gid, _pos
+                         in sorted(flank_first_pos.items(), key=lambda kv: kv[1])]
+        block_collinear_support, _dir = _longest_collinear_run(ordered_ranks)
+    else:
+        block_collinear_support = None
     unique_queries = set(extract_base_gene_id(h['query']) for h in relevant_hits)
 
     found_queries = []
@@ -3268,7 +3361,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                 (
                                                     f"{chrom}\tfallback_hits\tmRNA\t{global_start}\t{global_end}\t"
                                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=classify_qcov, flanking_support=block_flanking_support, embedding_similarity=fb_embed_sim, structural_similarity=fb_struct_sim), global_start, global_end, strand)}"
+                                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=classify_qcov, flanking_support=block_flanking_support, embedding_similarity=fb_embed_sim, structural_similarity=fb_struct_sim, collinear_support=block_collinear_support), global_start, global_end, strand)}"
                                                 )
                                             ]
                                             for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -3330,7 +3423,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'gff': [
                                         f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
                                         f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=copy_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=copy_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
                                     ]
                                 })
                         else:
@@ -3352,7 +3445,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 (
                                     f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support), global_start, global_end, strand)}"
+                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
                                 )
                             ]
                             for eidx, exon in enumerate(exons, 1):
@@ -3435,7 +3528,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             'description': f"coords:{gs}-{ge} parent:{parent_id} type:rescued_exon"
                                         },
                                         'gff': [
-                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': raw_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='rescued_exon', identity=hit.get('pident', 0), exon_count=1, query_cov=hit_qcov, flanking_support=block_flanking_support), gs, ge, hit.get('strand','+'))}",
+                                            f"{chrom}\trescued_exon\tmRNA\t{gs}\t{ge}\t{hit.get('pident',0):.1f}\t{hit.get('strand','+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': raw_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='rescued_exon', identity=hit.get('pident', 0), exon_count=1, query_cov=hit_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), gs, ge, hit.get('strand','+'))}",
                                             f"{chrom}\trescued_exon\tCDS\t{gs}\t{ge}\t.\t{hit.get('strand','+')}\t0\tID={raw_id}_CDS1;Parent={raw_id}"
                                         ]
                                     })
@@ -3500,7 +3593,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     'description': f"coords:{nt_s}-{nt_e} parent:{parent_id} identity:{hit.get('pident', 0):.1f}"
                                 },
                                 'gff': [
-                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='raw_hit', identity=hit.get('pident', 0), exon_count=1, query_cov=qcov, flanking_support=block_flanking_support), nt_s, nt_e, hit.get('strand', '+'))}",
+                                    f"{chrom}\traw_hit\tmRNA\t{nt_s}\t{nt_e}\t{hit.get('pident', 0):.1f}\t{hit.get('strand', '+')}\t.\t{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='raw_hit', identity=hit.get('pident', 0), exon_count=1, query_cov=qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), nt_s, nt_e, hit.get('strand', '+'))}",
                                     f"{chrom}\traw_hit\tCDS\t{nt_s}\t{nt_e}\t.\t{hit.get('strand', '+')}\t0\tID={new_id}_CDS1;Parent={new_id}"
                                 ]
                             })
@@ -3782,7 +3875,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     # ── PLM re-ranking: batch-embed GOI model proteins, compute embedding
     #    similarity, re-run classification where PLM boost applies, and
     #    update GFF attributes accordingly. ──
-    if (getattr(args, 'enable_plm_search', False)
+    if (GPU_IN_WORKER and getattr(args, 'enable_plm_search', False)
             and PLM_IMPORT_OK and check_plm_available()
             and raw_candidates):
         try:
@@ -3889,7 +3982,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     # ── Structural re-ranking: fold GOI candidate proteins with ESMFold,
     #    compare against GOI structures via Foldseek, re-run classification
     #    where structural boost applies, and update GFF attributes. ──
-    if (getattr(args, 'enable_structural_search', False)
+    if (GPU_IN_WORKER and getattr(args, 'enable_structural_search', False)
             and STRUCTURAL_IMPORT_OK and check_structural_search_available()
             and raw_candidates):
         try:
@@ -5163,6 +5256,254 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return genome_name, new_genes, tree_extra_genes, error_message
+
+
+# ---------------------------------------------------------------------------
+# Main-process GPU augmentation phase (PLM + Foldseek), run AFTER the wave loop.
+#
+# GPU inference can't live in the forked workers (CUDA-in-fork), so it runs here
+# once, in a single CUDA context, over the GOI candidate models the workers
+# already wrote to regions/<genome>.gff + regions/<genome>.faa. gpu_augment
+# loads ProtT5 then ESMFold sequentially (freeing each) and folds with
+# domain-preserving windows, then Foldseek-compares — producing an
+# embedding_similarity / structural_similarity per candidate, which we feed back
+# through _classify_goi_evidence to boost/rescue confidence in the GFF.
+# ---------------------------------------------------------------------------
+
+def _select_goi_candidates_from_region(gff_path, faa_path):
+    """Return [(mrna_id, protein_seq)] for GOI candidate models in a region GFF."""
+    id_to_seq = {clean_id: seq for _h, clean_id, seq in parse_fasta(faa_path)}
+    out = []
+    seen = set()
+    with open(gff_path) as fh:
+        for line in fh:
+            if line.startswith('#') or '\t' not in line:
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 9 or parts[2] != 'mRNA':
+                continue
+            attrs = _parse_gff_attributes(parts[8])
+            mid = attrs.get('ID')
+            if not mid or mid in seen:
+                continue
+            is_goi = (attrs.get('SynVoyRole') == 'goi'
+                      or is_goi_query_id(mid)
+                      or bool(attrs.get('GOIClass')))
+            if not is_goi:
+                continue
+            seq = id_to_seq.get(mid)
+            if seq and len(seq) >= 10:
+                out.append((mid, seq))
+                seen.add(mid)
+    return out
+
+
+def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_similarity):
+    """Attach ML scores to a candidate mRNA GFF line and re-classify confidence.
+
+    Mirrors the legacy in-worker re-rank (a strict superset of it): ML signals
+    only ever *raise* confidence (LOW/MEDIUM → higher). Idempotent — will not
+    double-append EmbeddingSimilarity/StructuralSimilarity. Returns
+    (new_line, boosted:int)."""
+    cols = mRNA_line.split('\t')
+    if len(cols) < 9:
+        return mRNA_line, 0
+    attrs_str = cols[8]
+    attr_kv = {}
+    for pair in attrs_str.split(';'):
+        if '=' in pair:
+            k, v = pair.split('=', 1)
+            attr_kv[k.strip()] = v.strip()
+
+    old_conf = attr_kv.get('Confidence', '')
+    ev_type = attr_kv.get('EvidenceType', '')
+    try:
+        ident = float(attr_kv.get('Identity', 0))
+    except (ValueError, TypeError):
+        ident = 0.0
+    try:
+        exons = int(attr_kv.get('Exons', 1))
+    except (ValueError, TypeError):
+        exons = 1
+    try:
+        qcov = float(attr_kv.get('QueryCoverage', 0))
+    except (ValueError, TypeError):
+        qcov = None
+    try:
+        fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
+    except (ValueError, TypeError):
+        fl_sup = 0
+
+    new_conf, new_class, new_reason = _classify_goi_evidence(
+        evidence_type=ev_type,
+        identity=ident,
+        exon_count=exons,
+        query_cov=qcov,
+        flanking_support=fl_sup,
+        embedding_similarity=embedding_similarity,
+        structural_similarity=structural_similarity,
+    )
+
+    updated = attrs_str
+    if embedding_similarity is not None and 'EmbeddingSimilarity=' not in attrs_str:
+        updated += f";EmbeddingSimilarity={embedding_similarity:.3f}"
+    if structural_similarity is not None and 'StructuralSimilarity=' not in attrs_str:
+        updated += f";StructuralSimilarity={structural_similarity:.3f}"
+
+    boosted = 0
+    if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM'):
+        updated = updated.replace(f"Confidence={old_conf}", f"Confidence={new_conf}")
+        old_reason = attr_kv.get('InferenceReason', '')
+        if old_reason:
+            updated = updated.replace(
+                f"InferenceReason={old_reason}", f"InferenceReason={new_reason}")
+        old_class = attr_kv.get('GOIClass', '')
+        if old_class:
+            updated = updated.replace(f"GOIClass={old_class}", f"GOIClass={new_class}")
+        boosted = 1
+
+    cols[8] = updated
+    return '\t'.join(cols), boosted
+
+
+def _apply_scores_to_region_gff(gff_path, scores):
+    """Rewrite a region GFF, attaching ML scores + re-classifying. Returns
+    (n_attached, n_boosted)."""
+    with open(gff_path) as fh:
+        lines = fh.readlines()
+    out = []
+    attached = 0
+    boosted = 0
+    for line in lines:
+        if line.startswith('#') or '\t' not in line:
+            out.append(line)
+            continue
+        parts = line.rstrip('\n').split('\t')
+        if len(parts) < 9 or parts[2] != 'mRNA':
+            out.append(line)
+            continue
+        attrs = _parse_gff_attributes(parts[8])
+        mid = attrs.get('ID')
+        sc = scores.get(mid) if mid else None
+        if not sc:
+            out.append(line)
+            continue
+        new_line, did_boost = _apply_ml_scores_to_mrna_line(
+            line.rstrip('\n'),
+            sc.get('embedding_similarity'),
+            sc.get('structural_similarity'),
+        )
+        out.append(new_line + '\n')
+        attached += 1
+        boosted += did_boost
+    if attached:
+        with open(gff_path, 'w') as fh:
+            fh.writelines(out)
+    return attached, boosted
+
+
+def run_gpu_augment_phase(args):
+    """Score GOI candidate models with ProtT5 + ESMFold/Foldseek in the main
+    process (no fork), and fold the scores back into the region GFFs.
+
+    Opt-in via --enable_plm_search / --enable_structural_search. Fail-loud by
+    default (--gpu_augment_fail_loud) so a requested-but-broken GPU layer errors
+    rather than silently producing no ML evidence (the old fork-CUDA no-op)."""
+    if not (getattr(args, 'enable_plm_search', False)
+            or getattr(args, 'enable_structural_search', False)):
+        return
+
+    fail_loud = getattr(args, 'gpu_augment_fail_loud', True)
+    if not GPU_AUGMENT_OK:
+        msg = ("[gpu_augment] GPU augmentation requested but the gpu_augment "
+               "module / its deps are unavailable.")
+        if fail_loud:
+            raise RuntimeError(msg)
+        logger.warning("%s Continuing without ML scores.", msg)
+        return
+
+    regions_dir = os.path.join(args.output_dir, "regions")
+    if not os.path.isdir(regions_dir):
+        logger.info("[gpu_augment] no regions/ dir; nothing to score.")
+        return
+
+    items = []
+    genome_gffs = {}
+    for fn in sorted(os.listdir(regions_dir)):
+        if not fn.endswith(".gff"):
+            continue
+        genome = fn[:-4]
+        gff_path = os.path.join(regions_dir, fn)
+        faa_path = os.path.join(regions_dir, genome + ".faa")
+        if not os.path.exists(faa_path):
+            continue
+        genome_gffs[genome] = gff_path
+        for cid, seq in _select_goi_candidates_from_region(gff_path, faa_path):
+            items.append(gpu_augment.WorkItem("candidate", cid, seq, genome))
+
+    if not items:
+        logger.info("[gpu_augment] no GOI candidate models to score; skipping.")
+        return
+
+    # Ensure nothing is resident so gpu_augment loads models sequentially.
+    try:
+        import plm_search as _p
+        import structural_search as _s
+        _p.unload_model()
+        _s.unload_esmfold()
+    except Exception:
+        pass
+
+    device = (args.structural_device if getattr(args, 'enable_structural_search', False)
+              else getattr(args, 'plm_device', 'cpu'))
+    work_dir = os.path.join(args.output_dir, "gpu_augment_work")
+    logger.info(
+        "[gpu_augment] scoring %d GOI candidate model(s) across %d genome(s) "
+        "on device=%s (PLM=%s, structural=%s) ...",
+        len(items), len(genome_gffs), device,
+        getattr(args, 'enable_plm_search', False),
+        getattr(args, 'enable_structural_search', False),
+    )
+    try:
+        result = gpu_augment.run_augmentation(
+            db_fasta=args.initial_db,
+            items=items,
+            work_dir=work_dir,
+            device=device,
+            do_plm=getattr(args, 'enable_plm_search', False),
+            do_structural=getattr(args, 'enable_structural_search', False),
+            require=fail_loud,
+            plm_threshold=getattr(args, 'plm_similarity_threshold', 0.5),
+            structural_tm_threshold=getattr(args, 'structural_tm_threshold', 0.3),
+            fold_window=getattr(args, 'structural_fold_window', 380),
+            fold_overlap=getattr(args, 'structural_fold_overlap', 60),
+            threads=getattr(args, 'threads', 1),
+        )
+    except Exception as exc:
+        if fail_loud:
+            raise
+        logger.warning("[gpu_augment] phase failed (continuing): %s", exc)
+        return
+
+    scores = result.get("scores", {})
+    try:
+        with open(os.path.join(args.output_dir, "gpu_augment_report.json"), 'w') as fh:
+            json.dump(result.get("diagnostics", {}), fh, indent=2)
+    except Exception:
+        pass
+
+    total_attached = 0
+    total_boosted = 0
+    for genome, gff_path in sorted(genome_gffs.items()):
+        attached, boosted = _apply_scores_to_region_gff(gff_path, scores)
+        total_attached += attached
+        total_boosted += boosted
+
+    logger.info(
+        "[gpu_augment] scored %d candidate(s); attached ML scores to %d model(s), "
+        "confidence-boosted %d.", len(scores), total_attached, total_boosted)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Iterative Genome Search Runner (Wavefront Parallel)")
     parser.add_argument("--initial_db", required=True)
@@ -5204,6 +5545,10 @@ def main():
     parser.add_argument("--padding_max", type=int, default=200000, help="Maximum adaptive padding")
     parser.add_argument("--enable_smith_waterman", type=str2bool, default=True, help="Enable Smith-Waterman search")
     parser.add_argument("--sw_method", type=str, default="auto", help="Smith-Waterman backend (auto, parasail, ssearch36)")
+    parser.add_argument("--allow_missing_smith_waterman", type=str2bool, default=False,
+                        help="Proceed (with only mmseqs/tblastn) when SW is requested but parasail is "
+                             "unavailable, instead of failing loud. SW is load-bearing for divergent "
+                             "GOI recovery, so this degrades results silently — opt in deliberately.")
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=300)
@@ -5298,6 +5643,11 @@ def main():
                              "(lowered from 45 to accommodate divergent orthologs)")
     parser.add_argument("--classify_tandem_min_identity", type=float, default=40.0,
                         help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
+    parser.add_argument("--classify_high_min_collinear", type=int, default=3,
+                        help="§1: HIGH also requires the longest collinear run of home-ordered "
+                             "flanking to reach this, once a block has >= this many flanking "
+                             "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
+                             "Set 0 to disable the order gate (count-only, legacy).")
     parser.add_argument("--classify_tandem_min_qcov", type=float, default=0.35,
                         help="§A2: min query coverage for MEDIUM tandem_copy; a high-identity "
                              "but short local window (true low qcov) is demoted to LOW.")
@@ -5366,6 +5716,16 @@ def main():
                         help="TM-score above this can boost MEDIUM → HIGH")
     parser.add_argument("--structural_max_length", type=int, default=700,
                         help="Max sequence length for ESMFold (VRAM safety, default 700)")
+    parser.add_argument("--structural_fold_window", type=int, default=380,
+                        help="Windowed-fold size for the main-process GPU phase; long "
+                             "proteins are tiled into overlapping windows (each <= VRAM "
+                             "cap) so no domain is truncated (default 380)")
+    parser.add_argument("--structural_fold_overlap", type=int, default=60,
+                        help="Overlap between fold windows (default 60)")
+    parser.add_argument("--gpu_augment_fail_loud", type=str2bool, default=True,
+                        help="Fail the run if PLM/structural search is requested but its "
+                             "deps/GPU are unavailable or every fold/embed fails, instead "
+                             "of silently producing no ML scores (default True)")
 
     # §1g: per-target phylogenetic-distance auto-tune of the GOI classify bars.
     parser.add_argument("--disable_distance_autotune", type=str2bool, default=False,
@@ -5386,6 +5746,10 @@ def main():
     CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
     CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
     CLASSIFY_THRESHOLDS["tandem_min_qcov"] = args.classify_tandem_min_qcov
+    # §1: 0 disables the order gate. Use a value larger than any real block so the
+    # `flanking_support < high_min_collinear` waiver always fires (→ order never gates).
+    CLASSIFY_THRESHOLDS["high_min_collinear"] = (
+        args.classify_high_min_collinear if args.classify_high_min_collinear > 0 else 10 ** 9)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
@@ -5564,14 +5928,42 @@ def main():
         logger.error(f"sw_timeout_seconds must be >= 1 (got {args.sw_timeout_seconds})")
         sys.exit(1)
 
-    # In auto mode, only keep SW enabled when parasail is available.
-    # This avoids per-block fallback overhead on very large block sets.
-    if args.enable_smith_waterman and args.sw_method == "auto" and not has_parasail_available():
-        logger.warning(
-            "parasail not available in auto mode; disabling Smith-Waterman for this run. "
-            "Set --sw_method ssearch36 to force the slower fallback."
+    # SW is the load-bearing tier for divergent GOI recovery (e.g. re-finding a 26-40 %
+    # myrmicitoxin from a melittin query). Silently dropping it on a missing-parasail env —
+    # the classic case is a `.venv` shadowing the conda env on PATH — changes results on
+    # exactly the hard cases SynVoy exists for, with no loud signal. So in auto mode, a
+    # requested-but-unavailable SW is a HARD ERROR unless the user explicitly opts into the
+    # degraded path.
+    _sw_before = args.enable_smith_waterman
+    try:
+        args.enable_smith_waterman = resolve_smith_waterman_enabled(
+            _sw_before, args.sw_method,
+            has_parasail_available(), args.allow_missing_smith_waterman,
         )
-        args.enable_smith_waterman = False
+        if _sw_before and not args.enable_smith_waterman:  # degraded path was opted into
+            logger.warning(
+                "parasail not available in auto mode; Smith-Waterman DISABLED for this run "
+                "(--allow_missing_smith_waterman set). Divergent GOI recovery is degraded to "
+                "mmseqs/tblastn only."
+            )
+    except SmithWatermanUnavailable:
+        venv_hint = os.environ.get("VIRTUAL_ENV")
+        env_note = (
+            f"\n  NOTE: a Python virtualenv is active (VIRTUAL_ENV={venv_hint}); it is likely "
+            f"shadowing the conda env that has parasail. Deactivate it / strip it from PATH."
+            if venv_hint else ""
+        )
+        logger.error(
+            "Smith-Waterman was requested (--enable_smith_waterman true, --sw_method auto) "
+            "but parasail is not importable in this environment. SW is load-bearing for "
+            "divergent GOI recovery, so refusing to silently continue without it." + env_note +
+            "\n  Fix one of:\n"
+            "    - install parasail into the run's env  (conda install -c bioconda parasail-python)\n"
+            "    - --sw_method ssearch36                 (use the slower FASTA/ssearch36 backend)\n"
+            "    - --enable_smith_waterman false         (deliberately search without SW)\n"
+            "    - --allow_missing_smith_waterman true   (proceed degraded, keep SW auto-off)"
+        )
+        sys.exit(1)
 
     # Gene predictor validation
     if args.gene_predictor not in ("auto", "augustus", "prodigal"):
@@ -5819,7 +6211,11 @@ def main():
     logger.info(f"Defined {len(waves)} waves of execution.")
 
     # ── PLM: Pre-compute GOI embeddings before waves start ──
-    if args.enable_plm_search:
+    # (Legacy in-worker path only. The main-process phase — run_gpu_augment_phase
+    #  — prepares templates itself, sequentially, so we do NOT pre-load models
+    #  here: co-resident ProtT5+ESMFold is exactly what forced the 400 aa
+    #  truncation on a 16 GB card.)
+    if GPU_IN_WORKER and args.enable_plm_search:
         goi_emb_path = os.path.join(args.output_dir, "goi_embeddings.npz")
         if not os.path.exists(goi_emb_path):
             logger.info("Pre-computing GOI embeddings with ProtT5 ...")
@@ -5842,7 +6238,8 @@ def main():
             logger.info(f"Using cached GOI embeddings: {goi_emb_path}")
 
     # ── Structural: Pre-fold GOI structures before waves start ──
-    if args.enable_structural_search:
+    # (Legacy in-worker path only — see the PLM note above.)
+    if GPU_IN_WORKER and args.enable_structural_search:
         goi_struct_index = os.path.join(args.output_dir, "goi_structure_index.tsv")
         if not os.path.exists(goi_struct_index):
             logger.info("Pre-folding GOI structures with ESMFold ...")
@@ -6032,6 +6429,11 @@ def main():
                 'last_db': latest_db,
                 'total_waves': len(waves)
             }, cf)
+
+    # ── GPU augmentation (PLM + Foldseek), main process, single CUDA context ──
+    # Runs after all waves so every genome's regions/<g>.gff + .faa exist. No-op
+    # unless --enable_plm_search / --enable_structural_search.
+    run_gpu_augment_phase(args)
 
     expanded_db = f"{args.output_dir}/expanded_db.faa"
     if os.path.exists(latest_db):

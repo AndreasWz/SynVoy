@@ -110,5 +110,42 @@ class TestRecommendedChunkSize(unittest.TestCase):
             self.assertEqual(ss._recommended_chunk_size("cuda", default=64), 64)
 
 
+class TestShouldHalveEsmTrunk(unittest.TestCase):
+    def test_cpu_never_halves(self):
+        ss = _import_ss()
+        # Probe must not even be consulted for CPU, but stub it to be safe.
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=4.0):
+            self.assertFalse(ss._should_halve_esm_trunk("cpu"))
+
+    def test_v100_16gb_halves(self):
+        ss = _import_ss()
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=16.0):
+            self.assertTrue(ss._should_halve_esm_trunk("cuda"))
+
+    def test_small_gpu_halves(self):
+        ss = _import_ss()
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=8.0):
+            self.assertTrue(ss._should_halve_esm_trunk("cuda"))
+
+    def test_large_gpu_keeps_fp32(self):
+        ss = _import_ss()
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=24.0):
+            self.assertFalse(ss._should_halve_esm_trunk("cuda"))
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=80.0):
+            self.assertFalse(ss._should_halve_esm_trunk("cuda"))
+
+    def test_boundary_is_strict_less_than_20(self):
+        ss = _import_ss()
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=19.99):
+            self.assertTrue(ss._should_halve_esm_trunk("cuda"))
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=20.0):
+            self.assertFalse(ss._should_halve_esm_trunk("cuda"))
+
+    def test_unreadable_probe_keeps_fp32(self):
+        ss = _import_ss()
+        with mock.patch.object(ss, "_probe_vram_gb", return_value=None):
+            self.assertFalse(ss._should_halve_esm_trunk("cuda"))
+
+
 if __name__ == "__main__":
     unittest.main()
