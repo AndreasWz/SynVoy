@@ -152,12 +152,17 @@ def _parse_newick(newick_str):
 # Colour palettes
 # ======================================================================
 
-# Tableau-20 style qualitative palette for flanking genes
+# Tableau-20 style qualitative palette for flanking genes.
+# RED (AND WARM ORANGE) IS RESERVED FOR THE GOI: the four warm-red/pink Tableau
+# hues (#ff9da7, #e15759, #d37295, #fabfd2) and the two saturated oranges
+# (#f28e2b, #ffbe7d) are deliberately swapped out for distinct non-red/non-orange
+# colours (cyan / indigo / olive / slate / violet / chartreuse) so no flanking gene
+# is ever rendered red — or close to red — and confused with the GOI (GOI_COLOUR below).
 GENE_PALETTE = [
-    "#4e79a7", "#f28e2b", "#59a14f", "#b07aa1", "#76b7b2",
-    "#edc948", "#ff9da7", "#9c755f", "#86bcb6", "#e15759",
-    "#8cd17d", "#499894", "#d4a6c8", "#a0cbe8", "#ffbe7d",
-    "#d37295", "#fabfd2", "#b6992d", "#7b848f", "#f1ce63",
+    "#4e79a7", "#9467bd", "#59a14f", "#b07aa1", "#76b7b2",
+    "#edc948", "#17becf", "#9c755f", "#86bcb6", "#393b79",
+    "#8cd17d", "#499894", "#d4a6c8", "#a0cbe8", "#bcbd22",
+    "#637939", "#5254a3", "#b6992d", "#7b848f", "#f1ce63",
 ]
 
 # Okabe-Ito / Wong 2011 colorblind-safe palette for publication SVG
@@ -2084,30 +2089,42 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 f'data-upper-track="{ti}" data-lower-track="{ti + 1}"/>'
             )
 
-        # Single GOI ribbon: best-resolved upper <-> best-resolved lower, drawn
-        # with a vertical gradient (upper colour -> lower colour).
+        # GOI ribbons: connect the best-resolved upper GOI to EVERY high-confidence
+        # (resolved) lower GOI — so multi-copy / tandem loci show a ribbon to each
+        # copy, not just one. The fan-out is 1 -> N (linear), and the whole GOI layer
+        # is composited once via the group opacity (see ribbons-goi group below), so
+        # the fan never piles into the muddy "black ribbon" mass the old every-copy-to-
+        # every-copy version did. Only high-confidence copies are connected; if none
+        # resolve, a single faint ribbon to the best copy is kept as a fallback.
         ug_goi = _best_goi_in(upper)
-        lg_goi = _best_goi_in(lower)
-        if ug_goi is not None and lg_goi is not None:
+        if ug_goi is not None:
+            lower_gois = [g for g in lower["genes"] if _gene_is_goi_in(lower, g)]
+            resolved_lower = [g for g in lower_gois
+                              if lower["is_home"] or _is_resolved_goi_target_gene(g)]
             up_col = _goi_colour_for_genome(upper["genome_id"], goi_genome_colours)
             lo_col = _goi_colour_for_genome(lower["genome_id"], goi_genome_colours)
-            path_d, y_ug_bot, y_lg_top = _ribbon_geom(ug_goi, lg_goi)
-            gid = f"goiRib{ti}"
-            grad_defs.append(
-                f'<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" '
-                f'x1="0" y1="{y_ug_bot:.1f}" x2="0" y2="{y_lg_top:.1f}">'
-                f'<stop offset="0" stop-color="{up_col}"/>'
-                f'<stop offset="1" stop-color="{lo_col}"/></linearGradient>'
-            )
-            op = 0.62
-            if not lower["is_home"] and not _is_resolved_goi_target_gene(lg_goi):
-                op = 0.32
-            goi_parts.append(
-                f'<path d="{path_d}" fill="url(#{gid})" opacity="{op:.2f}" '
-                f'stroke="{_hex_to_rgba(lo_col, 0.55)}" stroke-width="0.6" '
-                f'class="ribbon" data-homology="GOI" '
-                f'data-upper-track="{ti}" data-lower-track="{ti + 1}"/>'
-            )
+            # (gene, per-ribbon opacity); full opacity for resolved copies because the
+            # group opacity does the single composite. A lone unresolved fallback is
+            # drawn faint (it never overlaps, so no compounding).
+            ribbon_targets = ([(g, 1.0) for g in resolved_lower] if resolved_lower
+                              else ([(_best_goi_in(lower), 0.45)] if lower_gois else []))
+            for j, (lg_goi, op) in enumerate(ribbon_targets):
+                if lg_goi is None:
+                    continue
+                path_d, y_ug_bot, y_lg_top = _ribbon_geom(ug_goi, lg_goi)
+                gid = f"goiRib{ti}_{j}"
+                grad_defs.append(
+                    f'<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" '
+                    f'x1="0" y1="{y_ug_bot:.1f}" x2="0" y2="{y_lg_top:.1f}">'
+                    f'<stop offset="0" stop-color="{up_col}"/>'
+                    f'<stop offset="1" stop-color="{lo_col}"/></linearGradient>'
+                )
+                goi_parts.append(
+                    f'<path d="{path_d}" fill="url(#{gid})" opacity="{op:.2f}" '
+                    f'stroke="{_hex_to_rgba(lo_col, 0.55)}" stroke-width="0.6" '
+                    f'class="ribbon" data-homology="GOI" '
+                    f'data-upper-track="{ti}" data-lower-track="{ti + 1}"/>'
+                )
 
     if grad_defs:
         svg_parts.append('<defs>' + "".join(grad_defs) + '</defs>')
@@ -2115,8 +2132,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     svg_parts.append('<g class="ribbons ribbons-flank" opacity="0.5">')
     svg_parts.extend(flank_parts)
     svg_parts.append('</g>')
-    # GOI layer on top.
-    svg_parts.append('<g class="ribbons ribbons-goi">')
+    # GOI layer on top. Group opacity composites the whole fan once, so the 1->N
+    # ribbons converging on one upper anchor never darken where they overlap.
+    svg_parts.append('<g class="ribbons ribbons-goi" opacity="0.7">')
     svg_parts.extend(goi_parts)
     svg_parts.append('</g>')
 
@@ -2176,7 +2194,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             strand = gene.get("strand", "+")
 
             tooltip_json = _build_tooltip_json(gene, track, home_products)
-            goi_attr = ' data-is-goi="true"' if goi_like else ''
+            goi_attr = (' data-is-goi="true"' if goi_like else '') + \
+                       (' data-goi-resolved="true"'
+                        if (resolved_goi or (track["is_home"] and goi_like)) else '')
             hom_id_attr = _svg_esc(home_id)
             x0_attr = f'{x0:.1f}'
             x1_attr = f'{x1:.1f}'
@@ -3511,9 +3531,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const matches = upperByHomology.get(lg.dataset.homology) || [];
                 matches.forEach(ug => emitRibbon(ug, lg, du, dl, false, lg.dataset.homology));
             });
-            // ---- one GOI ribbon, best upper copy ↔ best lower copy ----
-            const ug = bestGoi(upperGenes), lg = bestGoi(lowerGenes);
-            if (ug && lg) emitRibbon(ug, lg, du, dl, true, 'GOI');
+            // ---- GOI ribbons: best upper copy ↔ EVERY high-confidence (resolved)
+            // lower copy, so multi-copy / tandem loci connect to each copy, not just
+            // one. Falls back to a single best ribbon when no copy is high-confidence.
+            const ug = bestGoi(upperGenes);
+            if (ug) {
+                let lowerGois = lowerGenes.filter(g => g.dataset.isGoi === 'true'
+                                                    && g.dataset.goiResolved === 'true');
+                if (lowerGois.length === 0) {
+                    const lb = bestGoi(lowerGenes);
+                    if (lb) lowerGois = [lb];
+                }
+                lowerGois.forEach(lg => emitRibbon(ug, lg, du, dl, true, 'GOI'));
+            }
         }
     }
 

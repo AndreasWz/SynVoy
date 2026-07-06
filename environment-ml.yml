@@ -30,5 +30,9 @@ dependencies:
   - foldseek >=9          # structural search (3Di structural alphabet)
   - pytorch >=2.0         # ESMFold + ProtT5 inference
   - transformers >=4.30   # EsmForProteinFolding + T5EncoderModel
-  - sentencepiece         # ProtT5 tokenizer
+  - sentencepiece         # ProtT5 tokenizer (SentencePiece model)
+  - protobuf              # required by transformers to convert the ProtT5
+                          #   SentencePiece tokenizer to fast format; without
+                          #   it T5Tokenizer.from_pretrained() aborts with
+                          #   "SentencePieceExtractor requires the protobuf library"
   - pip

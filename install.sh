@@ -11,6 +11,16 @@ echo "==========================================="
 
 ENV_NAME="synvoy_env"
 
+# A Python virtualenv (.venv) active on PATH shadows the conda env at runtime — its python
+# lacks parasail etc., which silently disables Smith-Waterman and crashes the §1m panel when
+# you later run the pipeline. Warn loudly; SynVoy's binaries live in the conda env, not a venv.
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    echo "[!!] A Python virtualenv is active: VIRTUAL_ENV=${VIRTUAL_ENV}"
+    echo "     It can shadow the conda env at RUN time (parasail/SW silently drop out)."
+    echo "     Recommended: 'deactivate' this venv before installing and before running SynVoy."
+    echo ""
+fi
+
 if command -v mamba &> /dev/null; then
     CONDA_FRONTEND="mamba"
 else
@@ -135,12 +145,34 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# Python packages
-if python -c "import Bio, plotly, ete3, taxopy, parasail, psutil, numpy" 2>/dev/null; then
-    echo "  [ok] Python packages (biopython, plotly, ete3, taxopy, parasail, psutil, numpy)"
+# Python packages (granular — a bundled check hides which one is missing)
+if python -c "import Bio, plotly, ete3, taxopy, psutil, numpy" 2>/dev/null; then
+    echo "  [ok] Python packages (biopython, plotly, ete3, taxopy, psutil, numpy)"
     PASS=$((PASS + 1))
 else
-    echo "  [FAIL] One or more Python packages missing"
+    echo "  [FAIL] One or more of biopython/plotly/ete3/taxopy/psutil/numpy is missing:"
+    for pkg in Bio plotly ete3 taxopy psutil numpy; do
+        python -c "import $pkg" 2>/dev/null || echo "         - $pkg NOT importable"
+    done
+    FAIL=$((FAIL + 1))
+fi
+
+# parasail gets its OWN functional check: it is the load-bearing Smith-Waterman backend for
+# divergent GOI recovery (e.g. re-finding a 26-40% myrmicitoxin from a melittin query). It can
+# import but fail to load its C extension, and it is the dep most often shadowed by a stray
+# virtualenv — so test that an alignment actually runs, not just that the import succeeds.
+if python - <<'PY' 2>/dev/null
+import parasail
+r = parasail.sw_trace_striped_16("ACDEFGHIK", "ACDEFGHIK", 11, 1, parasail.blosum62)
+raise SystemExit(0 if r.score > 0 else 1)
+PY
+then
+    echo "  [ok] parasail (Smith-Waterman) — import + alignment functional"
+    PASS=$((PASS + 1))
+else
+    echo "  [FAIL] parasail not functional (import or C-extension load failed)."
+    echo "         SW is load-bearing for divergent GOI recovery; SynVoy fails loud without it."
+    echo "         Fix: ${CONDA_FRONTEND} install -n ${ENV_NAME} -c bioconda parasail-python"
     FAIL=$((FAIL + 1))
 fi
 

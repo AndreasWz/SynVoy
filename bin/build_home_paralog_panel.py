@@ -216,6 +216,25 @@ def main() -> None:
             q_records.sort(key=lambda kv: len(kv[1]), reverse=True)
             query_seq = q_records[0][1]
 
+    # Fail loud on a missing parasail *before* doing the panel work: with a query present we
+    # will Smith-Waterman-align (find_family_paralogs + GOI-gene identification), and a silent
+    # crash here (swallowed by the module's errorStrategy) leaves the §1m ownership safety net
+    # dead with no signal. The classic cause is a `.venv` shadowing the conda env on PATH.
+    if query_seq:
+        try:
+            import parasail  # type: ignore  # noqa: F401
+        except ImportError:
+            venv = os.environ.get("VIRTUAL_ENV")
+            logger.error(
+                "parasail is not importable, but the §1m home-paralog panel needs it for "
+                "Smith-Waterman alignment. The locus-ownership / paralog safety net cannot run."
+                + (f"\n  NOTE: a virtualenv is active (VIRTUAL_ENV={venv}); it is likely shadowing "
+                   f"the conda env that has parasail — deactivate it / strip it from PATH." if venv else "")
+                + "\n  Fix: conda install -c bioconda parasail-python, "
+                  "or --disable_locus_ownership to skip §1m deliberately."
+            )
+            sys.exit(1)
+
     # panel_id -> (gene_id, seq, locus_id, chrom, gstart, gend)
     panel: "Dict[str, Tuple[str, str, str, str, int, int]]" = {}
     gene_meta: Dict[str, Tuple[str, int, int]] = {}

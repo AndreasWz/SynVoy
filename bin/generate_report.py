@@ -657,6 +657,44 @@ def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
     return rows
 
 
+def build_gene_family_advisory(goi_class_counts, n_home_loci=0,
+                               family_ratio=0.4, family_min_ambiguous=5,
+                               family_min_loci=3):
+    """Detect a gene-family / multi-paralog query and advise honest interpretation
+    (docs/TODO.md §1.1). Purely data-driven from signals the report already has —
+    no search-side change. SynVoy is validated for divergent LOW-COPY genes via
+    conserved flanking synteny; inside a large paralog family ortholog-vs-paralog
+    assignment is unreliable, so we say so instead of asserting the GOI name.
+
+    Triggers (either):
+      - a large share of GOI calls are ``ambiguous_goi_family_member`` (the class the
+        classifier already uses for "this is in the family but I can't pin the ortholog"), or
+      - the query fanned out to many home loci (paralog cluster in the home genome).
+    """
+    counts = goi_class_counts or {}
+    ambiguous = counts.get("ambiguous_goi_family_member", 0)
+    total = sum(counts.values())
+    reasons = []
+    if total and ambiguous >= family_min_ambiguous and ambiguous >= family_ratio * total:
+        pct = round(100 * ambiguous / total)
+        reasons.append(
+            f"{ambiguous}/{total} GOI calls ({pct}%) are ambiguous family members")
+    if n_home_loci >= family_min_loci:
+        reasons.append(f"the query resolved to {n_home_loci} home loci (paralog cluster)")
+    is_family = bool(reasons)
+    return {
+        "is_gene_family_query": is_family,
+        "reasons": reasons,
+        "advice": (
+            "Gene-family / multi-paralog query detected. SynVoy is validated for "
+            "divergent LOW-COPY genes via conserved flanking synteny; within a large "
+            "paralog family, ortholog-vs-paralog assignment is unreliable. Treat GOI "
+            "calls as CANDIDATES needing manual curation and weight the §1m ownership / "
+            "§1j self-consistency flags over raw identity." if is_family else ""
+        ),
+    }
+
+
 def build_paralog_confusion_flags(paralog_rows, min_gap):
     """Emit a ``paralog_confusion`` flag for each call whose best home paralog
     differs from the modal best paralog at the same (genome, locus), provided
@@ -1208,6 +1246,14 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         ownership_summary=ownership_summary,
     )
 
+    # §1.1 honesty: detect a gene-family / multi-paralog query and advise treating GOI
+    # calls as candidates (SynVoy is validated for divergent low-copy genes, not large
+    # paralog families). Report-only, driven by the ambiguous-call share + home-locus count.
+    gene_family_advisory = build_gene_family_advisory(
+        annotation_summary.get("goi_class_counts", {}),
+        n_home_loci=len(flanking_per_locus or {}),
+    )
+
     report = {
         "genome_qc": qc_records,
         "qc_summary": {
@@ -1215,6 +1261,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "qc_fail_policy": qc_policy or "unspecified",
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
         },
+        "gene_family_advisory": gene_family_advisory,
         "synteny_results": {
             "genes_discovered": genes_added_per_genome,
             "synteny_hits_count": hits_per_genome,
@@ -1245,6 +1292,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "locus_reattributed_orthologs": self_consistency["summary"]["n_locus_reattributed"],
             "goi_owner_search_fumbles": self_consistency["summary"]["n_goi_owner_search_fumble"],
             "paralog_misassignments": self_consistency["summary"]["n_paralog_misassignment"],
+            "gene_family_query": gene_family_advisory["is_gene_family_query"],
             "low_confidence_goi": goi_low,
             "confident_goi_annotations": confident_goi,
             "resolved_goi_annotations": resolved_goi,
@@ -1327,6 +1375,14 @@ def main():
     # Surface the GOI headline so the run's terminal/log shows the real result rather
     # than only the (often-zero) raw-hit diagnostic. See docs/TODO.md §1k.
     print(f"  {report['summary']['headline']}")
+
+    # §1.1 honesty: loudly caveat a gene-family query so a user doesn't read paralog
+    # calls as confident orthologs.
+    advisory = report.get("gene_family_advisory", {})
+    if advisory.get("is_gene_family_query"):
+        print("  [!] GENE-FAMILY QUERY — " + advisory["advice"])
+        for reason in advisory["reasons"]:
+            print(f"      · {reason}")
 
     if report["staging_diagnostics"]["empty"]:
         msg = format_empty_staging_message(report["staging_diagnostics"])
