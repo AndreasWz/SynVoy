@@ -516,36 +516,64 @@ def find_closest_relative_genome(species_name):
     return None, False, species_name
 
 
-def filter_chromosomes_only(fna_path: Path) -> None:
+def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> None:
     """
-    If a FASTA contains both chromosome sequences (NC_/CM_ accession prefixes)
-    and unlocalized/placed scaffolds (NW_, NZ_, or other prefixes), rewrite the
-    file keeping only the chromosome sequences.
+    If a FASTA contains both chromosome sequences and unlocalized/placed
+    scaffolds, rewrite the file keeping only the chromosome-scale sequences.
+
+    A sequence is treated as a chromosome (kept) when EITHER:
+      * its accession has a chromosome prefix (NC_/CM_), OR
+      * it is large (>= ``min_chrom_len`` bp) and is NOT an explicit
+        scaffold/alt-locus accession (NW_/NZ_).
+
+    The length rule exists because the accession prefix alone is ambiguous:
+    in the *Drosophila melanogaster* RefSeq assembly the main chromosome arms
+    2L/2R/3L/3R are ``NT_`` records (20-32 Mb), whereas in human GRCh38 the
+    ``NT_`` records are sub-Mb unlocalized scaffolds. Prefix-only filtering
+    silently discarded the fly arms (and with them e.g. oskar on 3R). Keeping
+    ``NW_``/``NZ_`` on the always-drop list preserves the exact vertebrate
+    behaviour (their unplaced/alt scaffolds are NW_/NZ_ and stay dropped).
 
     If NO chromosome sequences are found (pure scaffold assembly), the file is
     left untouched so we do not discard all sequence data.
     """
     CHROM_PREFIXES = ("NC_", "CM")
+    DROP_PREFIXES = ("NW_", "NZ_")  # unplaced scaffolds / alt loci: always scaffolds
 
-    chrom_ids = []
-    non_chrom_ids = []
+    # First pass: record sequence order and length so large non-NC_ assembled
+    # molecules (e.g. fly NT_ chromosome arms) can be distinguished from small
+    # unlocalized scaffolds that happen to share the NT_ prefix (human).
+    order: list = []
+    lengths: dict = {}
+    cur = None
     try:
         with open(fna_path) as fh:
             for line in fh:
-                if not line.startswith(">"):
-                    continue
-                seq_id = line[1:].split()[0] if line.strip() else ""
-                if any(seq_id.startswith(p) for p in CHROM_PREFIXES):
-                    chrom_ids.append(seq_id)
-                else:
-                    non_chrom_ids.append(seq_id)
+                if line.startswith(">"):
+                    cur = line[1:].split()[0] if line.strip() else ""
+                    order.append(cur)
+                    lengths[cur] = 0
+                elif cur is not None:
+                    lengths[cur] += len(line.strip())
     except Exception as e:
         print(f"  [chr-filter] Warning: could not scan {fna_path}: {e}")
         return
 
+    chrom_ids = []
+    non_chrom_ids = []
+    for seq_id in order:
+        if any(seq_id.startswith(p) for p in CHROM_PREFIXES):
+            chrom_ids.append(seq_id)
+        elif any(seq_id.startswith(p) for p in DROP_PREFIXES):
+            non_chrom_ids.append(seq_id)
+        elif lengths.get(seq_id, 0) >= min_chrom_len:
+            chrom_ids.append(seq_id)  # large assembled molecule (e.g. fly NT_ arm)
+        else:
+            non_chrom_ids.append(seq_id)
+
     if not chrom_ids:
         print(
-            f"  [chr-filter] No NC_/CM_ chromosomes found — retaining all "
+            f"  [chr-filter] No chromosome-scale sequences found — retaining all "
             f"{len(non_chrom_ids)} sequences as-is (scaffold assembly)."
         )
         return

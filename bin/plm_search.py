@@ -94,6 +94,29 @@ def _chunk_sequence(seq: str, chunk_size: int, overlap: int) -> List[str]:
     return chunks
 
 
+def unload_model() -> None:
+    """Free the cached ProtT5 encoder and release its GPU memory.
+
+    Used by the two-phase GPU augmentation (gpu_augment.py) to reclaim VRAM
+    after embedding so ESMFold can be loaded next on a tight (e.g. 16 GB) card.
+    Safe to call when nothing is loaded.
+    """
+    if _model_cache["model"] is None:
+        return
+    _model_cache["model"] = None
+    _model_cache["tokenizer"] = None
+    _model_cache["device"] = None
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        pass
+    logger.info("ProtT5 model unloaded; GPU memory released.")
+
+
 def _ensure_model_loaded(device: str = "cpu") -> None:
     """Load ProtT5 encoder into the process-level cache (once)."""
     if _model_cache["model"] is not None:

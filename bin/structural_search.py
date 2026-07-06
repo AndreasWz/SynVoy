@@ -32,6 +32,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+# Reduce CUDA allocator fragmentation before torch initialises its caching
+# allocator (this env var is read once, at first CUDA use). `setdefault` keeps
+# any value the launcher/sbatch already exported. Belt-and-suspenders: the
+# `lrz_ai`/`lrz_ai_container` profiles also export it into the task env, which
+# is the guaranteed path when CUDA is initialised by an earlier step. Both the
+# legacy (`PYTORCH_CUDA_ALLOC_CONF`) and current (`PYTORCH_ALLOC_CONF`) names
+# are set so it works across torch versions.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 try:
     from sequence_utils import parse_fasta, write_fasta, setup_logging
 except ImportError:
@@ -83,6 +93,29 @@ _esmfold_cache: Dict[str, Any] = {
 }
 
 
+def unload_esmfold() -> None:
+    """Free the cached ESMFold model and release its GPU memory.
+
+    Counterpart to plm_search.unload_model(); used by gpu_augment.py to load
+    ProtT5 and ESMFold sequentially rather than co-resident, which is what makes
+    an un-truncated fold fit on a 16 GB card. Safe to call when nothing loaded.
+    """
+    if _esmfold_cache["model"] is None:
+        return
+    _esmfold_cache["model"] = None
+    _esmfold_cache["tokenizer"] = None
+    _esmfold_cache["device"] = None
+    try:
+        import gc
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        pass
+    logger.info("ESMFold model unloaded; GPU memory released.")
+
+
 def _ensure_esmfold_loaded(device: str = "cpu") -> None:
     """Load ESMFold into the process-level cache (once)."""
     if _esmfold_cache["model"] is not None:
@@ -95,10 +128,23 @@ def _ensure_esmfold_loaded(device: str = "cpu") -> None:
     tokenizer = AutoTokenizer.from_pretrained("facebook/esmfold_v1")
     model = EsmForProteinFolding.from_pretrained("facebook/esmfold_v1")
 
-    # Always use float32 — half precision causes NaN in pTM score
-    # computation for short sequences (transformers ≥5.x bug in
-    # openfold_utils/loss.py compute_tm).
+    # Keep the folding trunk + pTM head in float32 — a *full* model.half()
+    # causes NaN in pTM score computation for short sequences (transformers ≥5.x
+    # bug in openfold_utils/loss.py compute_tm).
     model = model.float()
+
+    # On tight-VRAM CUDA GPUs (e.g. the 16 GB V100 on LRZ AI Systems) the fp32
+    # ESM-2 language-model trunk alone (~11 GB) does not fit — ESMFold OOMs at
+    # `.to(device)` before a single fold. Cast *only* the language-model trunk to
+    # fp16 (the documented HF ESMFold recipe); the folding trunk + pTM head stay
+    # fp32 so pTM math is unaffected. Halve BEFORE the device transfer so the
+    # transfer itself is already reduced. Large GPUs (≥20 GB) keep full fp32.
+    if _should_halve_esm_trunk(device):
+        model.esm = model.esm.half()
+        logger.info(
+            "ESMFold: language-model trunk cast to fp16 for tight-VRAM GPU "
+            "(folding trunk + pTM head remain fp32)."
+        )
 
     model = model.to(torch.device(device)).eval()
 
@@ -190,6 +236,25 @@ def _recommended_chunk_size(device: str, default: int = 64) -> int:
         return default
     _, chunk = _vram_tier_caps(vram_gb)
     return chunk
+
+
+def _should_halve_esm_trunk(device: str) -> bool:
+    """Whether to run the ESM-2 language-model trunk in fp16.
+
+    ESMFold in full fp32 needs ~15+ GB just to load its weights, which does not
+    fit on 16 GB-class CUDA GPUs (e.g. the LRZ V100 — it OOMs at `.to(device)`).
+    Casting only the large language-model trunk to fp16 (folding trunk + pTM head
+    stay fp32) roughly halves the resident footprint without the NaN-pTM problem
+    of a full model.half(). Enabled only on CUDA GPUs whose VRAM we can positively
+    confirm is below the 20 GB "large GPU" tier boundary; on CPU, large GPUs, or
+    an unreadable VRAM probe we keep full fp32.
+    """
+    if device != "cuda":
+        return False
+    vram_gb = _probe_vram_gb()
+    if vram_gb is None:
+        return False
+    return vram_gb < 20
 
 
 def fold_protein(
@@ -318,6 +383,62 @@ def fold_proteins_batch(
 def _safe_filename(name: str) -> str:
     """Sanitise a sequence ID for use as a filename."""
     return re.sub(r"[^\w\-.]", "_", name)[:200]
+
+
+def fold_protein_windows(
+    seq_id: str,
+    sequence: str,
+    output_dir: str,
+    device: str = "cpu",
+    window: int = 380,
+    overlap: int = 60,
+) -> List[Tuple[str, str]]:
+    """Fold a protein, tiling it into overlapping windows if it is too long.
+
+    ESMFold memory scales ~quadratically in length, so on tight-VRAM GPUs the
+    single-shot fold is capped (``_effective_max_length`` → 400 aa on a 16 GB
+    card), which silently *truncates* multi-domain proteins and drops their
+    C-terminal domain (e.g. oskar's OSK/SGNH fold past residue ~400). Instead of
+    truncating, tile the sequence into overlapping windows that each stay under
+    the safe cap and together cover every residue — so no domain is lost, and
+    Foldseek can match a candidate against whichever window (domain) fits best.
+
+    The window is clamped to the VRAM-safe cap for this device, so each fold is
+    as safe as the old single-shot fold; a short protein yields a single window.
+
+    Returns a list of ``(window_id, pdb_path)`` for successful folds. The
+    window_id is the seq_id for a single window, else ``<seq_id>__w<k>``.
+    """
+    if not sequence or len(sequence) < 10:
+        return []
+
+    os.makedirs(output_dir, exist_ok=True)
+    safe_cap = _effective_max_length(device, window)
+    win = max(50, min(window, safe_cap))
+    ov = max(0, min(overlap, win - 1))
+    step = max(1, win - ov)
+
+    # Window start positions covering the whole sequence.
+    if len(sequence) <= win:
+        starts = [0]
+    else:
+        starts = list(range(0, len(sequence) - ov, step))
+        # Guarantee the C-terminus is covered by the last window.
+        last_start = len(sequence) - win
+        if starts[-1] < last_start:
+            starts.append(last_start)
+
+    results: List[Tuple[str, str]] = []
+    single = len(starts) == 1
+    for k, start in enumerate(starts):
+        sub = sequence[start:start + win]
+        win_id = seq_id if single else f"{seq_id}__w{k}"
+        pdb_path = os.path.join(output_dir, f"{_safe_filename(win_id)}.pdb")
+        # Pass the window length as max_length so no *further* truncation occurs.
+        out = fold_protein(sub, pdb_path, device=device, max_length=win)
+        if out:
+            results.append((win_id, out))
+    return results
 
 
 # ---------------------------------------------------------------------------

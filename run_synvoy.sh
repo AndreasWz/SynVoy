@@ -148,6 +148,27 @@ if [ -n "$ABSENT" ]; then
     warn "    (first run therefore needs internet + a few minutes to build the tool env)"
 fi
 
+# 4d. Virtualenv-shadow trap (the parasail killer). A `.venv` active on PATH shadows the
+# conda env that Nextflow's tasks inherit; its python lacks parasail, which SILENTLY disabled
+# Smith-Waterman (load-bearing for divergent GOI recovery) and crashed the §1m panel — for a
+# full run before anyone noticed. Now the pipeline fails loud on that, but catch it here in 1s.
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+    warn "a Python virtualenv is active: ${BOLD}VIRTUAL_ENV=${VIRTUAL_ENV}${RST}"
+    warn "  it can shadow the conda env in Nextflow tasks (parasail/Smith-Waterman drop out)."
+    warn "  recommended: run ${BOLD}deactivate${RST} first, then re-run this launcher."
+fi
+# Functional probe: can the python Nextflow tasks will most likely inherit import parasail?
+if command -v python3 >/dev/null 2>&1 && ! python3 -c "import parasail" >/dev/null 2>&1; then
+    PYBIN="$(command -v python3)"
+    die "parasail is NOT importable by the active python3 ($PYBIN).
+       SynVoy fails loud on this (Smith-Waterman is load-bearing for divergent genes). Fix:
+         ${BOLD}deactivate${RST}                                   # if a .venv is shadowing the conda env (see above)
+         ${BOLD}conda activate $ENV_NAME${RST}                     # ensure the SynVoy env is the active one
+         ${BOLD}conda install -n $ENV_NAME -c bioconda parasail-python${RST}   # if genuinely missing
+       Or launch with ${BOLD}--allow_missing_smith_waterman true${RST} to search WITHOUT SW (degraded, not advised)."
+fi
+say "parasail / Smith-Waterman backend importable"
+
 if [ "$CHECK_ONLY" -eq 1 ]; then
     echo
     say "${BOLD}--check-only: environment is healthy. You're ready to run.${RST}"
