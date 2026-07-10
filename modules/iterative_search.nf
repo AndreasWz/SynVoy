@@ -114,6 +114,20 @@ process ITERATIVE_SEARCH {
         --structural_medium_threshold ${params.structural_medium_threshold} \\
         --structural_high_threshold ${params.structural_high_threshold} \\
         --structural_max_length ${params.structural_max_length} \\
+        --enable_structural_discovery ${params.enable_structural_discovery} \\
+        --discovery_min_tm ${params.discovery_min_tm} \\
+        --discovery_min_len_ratio ${params.discovery_min_len_ratio} \\
+        --discovery_max_len_ratio ${params.discovery_max_len_ratio} \\
+        --discovery_min_goi_coverage ${params.discovery_min_goi_coverage} \\
+        --discovery_paralog_margin ${params.discovery_paralog_margin} \\
+        --discovery_min_block_flanking ${params.discovery_min_block_flanking} \\
+        --discovery_allow_offblock ${params.discovery_allow_offblock} \\
+        --enable_dispersed_goi_rescue ${params.enable_dispersed_goi_rescue} \\
+        --dispersed_goi_min_identity ${params.dispersed_goi_min_identity} \\
+        --dispersed_goi_max_evalue ${params.dispersed_goi_max_evalue} \\
+        --dispersed_goi_min_alnlen ${params.dispersed_goi_min_alnlen} \\
+        --dispersed_min_chrom_anchors ${params.dispersed_min_chrom_anchors} \\
+        --dispersed_envelope_margin ${params.dispersed_envelope_margin} \\
         --prefix ${locus_id} \\
         --resume
     """

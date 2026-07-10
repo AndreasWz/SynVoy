@@ -93,6 +93,23 @@ def parse_args():
              "'goi_missing_but_strong_synteny' region at MEDIUM confidence rather than "
              "being dropped (docs/TODO.md §1e). Set 0 to disable.",
     )
+    # Distant-macrosynteny rescue: recover a strong GOI hit that landed far from
+    # its flanking anchors because the neighbourhood dispersed (the Aedes oskar
+    # case — the ortholog hit at 45% id / e-29 but scored ~0 for lack of LOCAL
+    # flanking and was dropped). Gated on the target's rearrangement so a
+    # collinear genome stays strict; gated on identity+evalue and same-chromosome
+    # synteny so paralogs / fold-analogues (biglycan, the structdisc lipase) are
+    # still rejected. See target_rearrangement_score / qualifies_distant_macrosynteny_rescue.
+    parser.add_argument("--disable_distant_synteny_rescue", action="store_true",
+                        help="Disable the distant-macrosynteny GOI rescue (kill switch).")
+    parser.add_argument("--distant_synteny_min_identity", type=float, default=40.0,
+                        help="Min %%identity of the GOI hit to qualify for distant rescue.")
+    parser.add_argument("--distant_synteny_max_evalue", type=float, default=1e-10,
+                        help="Max e-value of the GOI hit to qualify for distant rescue.")
+    parser.add_argument("--distant_synteny_min_rearrangement", type=float, default=0.5,
+                        help="Min target rearrangement score (0-1) before distant rescue fires.")
+    parser.add_argument("--distant_synteny_rescue_score", type=float, default=0.45,
+                        help="Score floor a rescued region is promoted to (MEDIUM band).")
     parser.add_argument(
         "--species_map",
         default=None,
@@ -499,6 +516,80 @@ def cluster_overlaps_goi(cluster, goi_intervals):
     return False
 
 
+def target_rearrangement_score(hits, gene_map):
+    """How badly the home flanking ORDER is shattered in THIS target genome.
+
+    0.0 = the recovered flanking are collinear on one scaffold (synteny conserved
+    → be strict about where the GOI may sit); 1.0 = shattered across scaffolds
+    with adjacency destroyed (synteny loose → a GOI hit far from its anchors on a
+    shared chromosome is still plausibly the ortholog — see the Aedes oskar case,
+    where oskar's home-adjacent neighbours land on 5 scaffolds and oskar itself
+    is 62.8 Mb from its nearest anchor on the same chromosome).
+
+    Uses only the flanking hits (queries in gene_map, i.e. the home synteny BED)
+    — takes the single best (lowest-evalue) placement per home gene. Blend of:
+      * scaffold dispersal: 1 - (largest same-scaffold share)
+      * adjacency loss: fraction of home-consecutive flanking pairs that are NOT
+        near each other in the target (same scaffold within 2 Mb).
+    Returns 0.0 when fewer than 2 flanking genes are placed (can't judge)."""
+    best = {}   # home gene id -> (evalue, chrom, start)
+    for h in hits or []:
+        q = h.get("query", "")
+        base = q.split("|")[0]
+        rank = gene_map.get(base, gene_map.get(q))
+        if rank is None:
+            continue
+        if _is_goi_query_name(q):
+            continue
+        ev = h.get("evalue", 1.0)
+        if base not in best or ev < best[base][0]:
+            best[base] = (ev, h.get("chrom"), int(h.get("start", 0)), rank)
+    placed = list(best.values())
+    if len(placed) < 2:
+        return 0.0
+    # scaffold dispersal
+    from collections import Counter
+    chrom_counts = Counter(c for _ev, c, _s, _r in placed)
+    dominant = max(chrom_counts.values())
+    scaffold_dispersal = 1.0 - dominant / len(placed)
+    # adjacency loss (walk in home-rank order)
+    placed.sort(key=lambda t: t[3])
+    pairs = 0
+    broken = 0
+    for a, b in zip(placed, placed[1:]):
+        pairs += 1
+        same_near = (a[1] == b[1]) and abs(b[2] - a[2]) < 2_000_000
+        if not same_near:
+            broken += 1
+    adjacency_loss = (broken / pairs) if pairs else 0.0
+    return round(min(1.0, 0.5 * scaffold_dispersal + 0.5 * adjacency_loss), 4)
+
+
+def qualifies_distant_macrosynteny_rescue(best_identity, best_evalue, cluster_chrom,
+                                          flanking_chroms, rearrangement,
+                                          min_identity=40.0, max_evalue=1e-10,
+                                          min_rearrangement=0.5):
+    """Should an isolated-but-strong GOI hit be rescued on distant macrosynteny?
+
+    True only when ALL hold, which together separate a real dispersed ortholog
+    from a paralog / fold-analogue false positive:
+      * the GOI hit is ortholog-grade (identity >= min_identity AND evalue <=
+        max_evalue) — a 45%-id, e-29 oskar passes; a 28%-id fold analogue or a
+        weak twilight hit does not;
+      * the hit shares a chromosome with at least one flanking anchor
+        (cluster_chrom in flanking_chroms) — real macrosynteny. This is what
+        rejects biglycan: the decorin paralog sits on chrX while decorin's
+        flanking are on chr5, so it shares no chromosome with an anchor;
+      * the genome is demonstrably rearranged (rearrangement >= min_rearrangement)
+        — in a COLLINEAR genome an isolated GOI hit far from its flanking is
+        suspicious (likely a paralog), so we stay strict there.
+    """
+    return (best_identity >= min_identity
+            and best_evalue <= max_evalue
+            and cluster_chrom in (flanking_chroms or set())
+            and rearrangement >= min_rearrangement)
+
+
 def _anchor_score_for_confidence(confidence):
     """Map upstream classifier confidence to an anchor cluster score.
 
@@ -842,6 +933,7 @@ def main():
                         'start': t_start,
                         'end': t_end,
                         'strand': strand,
+                        'identity': float(row[2]),
                         'evalue': float(row[10])
                     }
                     hits.append(h)
@@ -890,7 +982,19 @@ def main():
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_distance)
     
     genome_len = get_genome_length(args.genome) if args.genome else 1
-    
+
+    # Distant-macrosynteny rescue context (per genome). rearrangement measures how
+    # shattered the home flanking order is in this target; flanking_chroms is the
+    # set of chromosomes carrying any flanking anchor (the macrosynteny signal).
+    rearrangement = target_rearrangement_score(hits, gene_map)
+    flanking_chroms = {h.get("chrom") for h in hits
+                       if h.get("chrom") and not _is_goi_query_name(h.get("query", ""))}
+    if not args.disable_distant_synteny_rescue:
+        print(f"INFO: Target rearrangement score = {rearrangement:.2f} "
+              f"(flanking on {len(flanking_chroms)} scaffold(s)); distant-macrosynteny "
+              f"rescue {'ARMED' if rearrangement >= args.distant_synteny_min_rearrangement else 'inactive'}.",
+              file=sys.stderr)
+
     scored_clusters = []
     for cl in clusters:
         unique_genes, consistency, strand_cons = score_flexible_synteny(cl, gene_map)
@@ -945,6 +1049,28 @@ def main():
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
 
+        # Distant-macrosynteny rescue: a strong GOI hit isolated from its local
+        # flanking (effective_unique <= 1) but on a chromosome that carries an
+        # anchor, in a rearranged genome, is a dispersed ortholog — promote it
+        # rather than let it die at the score floor. Rejects paralogs/fold-analogues
+        # via the identity/evalue + same-chromosome gates (see the helper).
+        distant_rescue = False
+        if (goi_overlap and not args.disable_distant_synteny_rescue
+                and not strong_synteny and effective_unique <= 1):
+            goi_hits_in = [h for h in cl if _is_goi_query_name(h.get("query", ""))]
+            if goi_hits_in:
+                best_goi_id = max(h.get("identity", 0.0) for h in goi_hits_in)
+                best_goi_e = min(h.get("evalue", 1.0) for h in goi_hits_in)
+                if qualifies_distant_macrosynteny_rescue(
+                        best_goi_id, best_goi_e, cluster_chrom, flanking_chroms,
+                        rearrangement,
+                        min_identity=args.distant_synteny_min_identity,
+                        max_evalue=args.distant_synteny_max_evalue,
+                        min_rearrangement=args.distant_synteny_min_rearrangement):
+                    distant_rescue = True
+                    goi_identity = max(goi_identity, best_goi_id)
+                    final_score = max(final_score, args.distant_synteny_rescue_score)
+
         p_val = estimate_pvalue(
             final_score, cl, hits, genome_len, args.cluster_distance,
             score_flexible_synteny, gene_map, total_genes_expected,
@@ -979,6 +1105,7 @@ def main():
             'strong_synteny': strong_synteny,
             'goi_block_flanking': goi_block_flanking,
             'goi_identity': goi_identity,
+            'distant_rescue': distant_rescue,
         })
 
     # Sort: block synteny support desc (true ortholog block beats a compact paralog
@@ -1106,6 +1233,13 @@ def main():
                 if goi_missing_strong and _CONF_RANK.get(confidence, 0) < _CONF_RANK["MEDIUM"]:
                     confidence = "MEDIUM"
 
+                # Distant-macrosynteny rescue: a dispersed ortholog is a MEDIUM call
+                # (real hit, but no LOCAL synteny to make it HIGH). Never downgrade a
+                # region that already scored HIGH on its own.
+                distant_rescue = bool(best.get("distant_rescue"))
+                if distant_rescue and _CONF_RANK.get(confidence, 0) < _CONF_RANK["MEDIUM"]:
+                    confidence = "MEDIUM"
+
                 # Determine Region Strand
                 plus_cnt = sum(1 for h in best['cluster'] if h['strand'] == '+')
                 minus_cnt = len(best['cluster']) - plus_cnt
@@ -1120,6 +1254,9 @@ def main():
                         f"Reg{i+1}_FLANKonly{best['high_flanking_count']}_"
                         f"C{confidence}_S{best['score']:.2f}"
                     )
+                elif distant_rescue:
+                    region_class = "goi_dispersed_macrosynteny"
+                    core_name = f"Reg{i+1}_DISP_C{confidence}_S{best['score']:.2f}"
                 elif best.get("goi_overlap"):
                     region_class = "goi_overlap"
                     core_name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
@@ -1130,6 +1267,8 @@ def main():
 
                 if goi_missing_strong:
                     selected_reason = "flanking_only_no_goi_call"
+                elif distant_rescue:
+                    selected_reason = "distant_macrosynteny_rescue"
                 elif args.max_regions > 0:
                     selected_reason = "user_cap"
                 elif best['score'] >= score_floor:
