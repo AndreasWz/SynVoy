@@ -237,6 +237,75 @@ def resolveTargetGenomeFiles(tg) {
     return out
 }
 
+// Resolve --target_gffs (folder | glob | comma-list | list) to annotation files.
+// Deliberately separate from resolveTargetGenomeFiles: --target_genomes stays
+// FASTA-only, so users keep genomes and annotations in separate folders. Defined
+// at script scope (like resolveTargetGenomeFiles) to keep the workflow method
+// under the JVM method-size limit.
+def resolveTargetGffFiles(tg) {
+    def out = []
+    if (tg == null) {
+        return out
+    }
+    if (tg instanceof List) {
+        tg.each { p -> out += resolveTargetGffFiles(p) }
+        return out
+    }
+    def s = tg.toString().trim()
+    if (!s) {
+        return out
+    }
+    if (s.contains(',')) {
+        s.split(',').each { p -> out += resolveTargetGffFiles(p) }
+        return out
+    }
+    boolean hasGlob = s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[')
+    if (!hasGlob && file(s).isDirectory()) {
+        s = "${s}/*.{gff,gff3,gtf,gff.gz,gff3.gz,gtf.gz}"   // folder -> annotations inside
+        hasGlob = true
+    }
+    def resolved = file(s)
+    if (resolved instanceof List) {
+        out += resolved
+    } else if (resolved.exists()) {
+        out << resolved
+    }
+    return out
+}
+
+// Value channel of target annotations, falling back to the NO_GFFS sentinel so
+// STAGE_GENOMES' `path target_gffs` input always has something to stage.
+def targetGffChannel() {
+    def files = resolveTargetGffFiles(params.target_gffs)
+    return files ? channel.value(files) : channel.value(file("${projectDir}/assets/sentinels/NO_GFFS"))
+}
+
+// Validate --target_gffs. Lives at script scope (NOT inlined into the workflow
+// body) because the main workflow{} method sits at the JVM method-size limit —
+// see docs/TODO.md §1m; long literal strings there have re-triggered
+// "UTF8 string too large" before. Appends to the caller's lists in place.
+def validateTargetGffs(List errors, List warnings) {
+    if (!params.target_gffs) {
+        return
+    }
+    if (params.mode == 'easy') {
+        warnings << "--target_gffs is a Pro-Mode option and is ignored in easy mode; SynVoy already downloads target annotations alongside each fetched genome."
+        return
+    }
+    // Resolve up front so a typo'd path fails at launch instead of silently
+    // producing a run with no TargetGene/TargetProduct on any target model.
+    def matches = []
+    try {
+        matches = resolveTargetGffFiles(params.target_gffs)
+    } catch (Exception e) {
+        warnings << "Could not pre-resolve --target_gffs '${params.target_gffs}': ${e.message}"
+        return
+    }
+    if (matches.isEmpty()) {
+        errors << "No target annotations found for --target_gffs '${params.target_gffs}'. Pass a folder of GFFs, a quoted glob (\"path/to/*.gff\"), or a comma-separated list. Each annotation is matched to its genome by filename stem (cow.fna <-> cow.gff) or assembly accession."
+    }
+}
+
 def normalizeCombineRecord(record, int leftWidth) {
     if (!(record instanceof List)) {
         return null
@@ -414,6 +483,7 @@ workflow {
             }
         }
     }
+    validateTargetGffs(validationErrors, validationWarnings)
 
     // --- Universal parameter range validation ---
     if (!(params.qc_fail_policy in ['drop', 'keep'])) {
@@ -665,7 +735,7 @@ workflow {
                 "${c.green}[OK  ]${c.reset} ${c.white}${'STAGE_GENOMES'.padRight(24)}${c.reset} staged ${genomes.size()} target genomes"
             }
             
-            STAGE_GENOMES(target_genomes_list)
+            STAGE_GENOMES(target_genomes_list, targetGffChannel())
             genomes_dir_ch = STAGE_GENOMES.out.dir
             species_map_ch = STAGE_GENOMES.out.species_map.first()
             
