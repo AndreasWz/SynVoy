@@ -285,6 +285,8 @@ def run_augmentation(
     fold_window: int = 380,
     fold_overlap: int = 60,
     threads: int = 1,
+    orf_fold_min_embedding: float = 0.4,
+    orf_fold_max: int = 40,
 ) -> Dict[str, Any]:
     """Run the GPU augmentation phase over `items`.
 
@@ -336,8 +338,26 @@ def run_augmentation(
             logger.warning("%s Skipping structural.", msg)
             diagnostics["structural"]["skipped"] = "unavailable"
         else:
+            # Re-rank candidates are always folded (few). Discovery ORFs are
+            # many, so fold only the promising ones: rank by ProtT5 embedding
+            # similarity (cheap, already computed) and keep the top orf_fold_max
+            # above orf_fold_min_embedding. If PLM is off (no embeddings) we
+            # can't pre-filter, so just cap the count.
+            fold_items = [w for w in items if w.kind != "orf"]
+            orf_items = [w for w in items if w.kind == "orf"]
+            if orf_items:
+                if emb_best:
+                    ranked = sorted(
+                        (w for w in orf_items if emb_best.get(w.wid, 0.0) >= orf_fold_min_embedding),
+                        key=lambda w: -emb_best.get(w.wid, 0.0))
+                else:
+                    ranked = orf_items
+                kept = ranked[:orf_fold_max]
+                fold_items.extend(kept)
+                diagnostics["structural"]["orf_candidates"] = len(orf_items)
+                diagnostics["structural"]["orf_folded"] = len(kept)
             goi_structs, item_structs, fold_diag = _fold_all(
-                goi_templates, items, work_dir, device, fold_window, fold_overlap)
+                goi_templates, fold_items, work_dir, device, fold_window, fold_overlap)
             diagnostics["structural"].update(fold_diag)
             tm_best = _foldseek_best_tm(goi_structs, item_structs, work_dir, threads)
             diagnostics["structural"]["scored"] = len(tm_best)

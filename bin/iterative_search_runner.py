@@ -4466,6 +4466,120 @@ def _classify_goi_for_seed_and_tree(
     return seed, tree_extra, suppressed
 
 
+# ---------------------------------------------------------------------------
+# §1o — dispersed-GOI rescue.
+#
+# Block seeding uses FLANKING hits only (see process_single_genome), then the GOI
+# is searched inside each flanking-seeded block. That silently discards a strong
+# GOI hit that dispersed away from its flanking anchors. Motivating case: Aedes
+# oskar hit at 45.3% id / e-2.8e-29 sat 62.8 Mb from its flanking anchors — which
+# are on the SAME chromosome (NC_035109.1) — so no block formed there and 0 GOI
+# models were emitted, even though the search had already found the real oskar.
+#
+# The neighbourhood being SHATTERED is what licenses trusting a distant same-
+# chromosome GOI hit: if the flanking order is destroyed, "the GOI must be next to
+# its flanking" is no longer a valid constraint. In a collinear (well-conserved)
+# genome an isolated GOI hit far from flanking is still treated as a paralog
+# (strict), so close-relative benchmarks are untouched. These two pure helpers
+# encode that decision; process_single_genome adds the qualifying hits to the
+# block seed set so they get modelled by the normal machinery (as LOW fallback).
+# ---------------------------------------------------------------------------
+
+def _flanking_anchor_positions(flanking_hits):
+    """Collapse the noisy raw hits to ONE canonical location per flanking gene
+    (its highest-scoring hit), grouped by chromosome. The raw m8 has many
+    partial/spurious flanking hits scattered genome-wide; the best hit per gene is
+    its real anchor. Returns {chrom: [(gene, mid, start, end), ...]}."""
+    best = {}
+    for h in flanking_hits:
+        q = h.get('query', '')
+        if not q or is_goi_query_id(q):
+            continue
+        g = extract_base_gene_id(q)
+        if g not in best or h.get('bits', 0) > best[g].get('bits', 0):
+            best[g] = h
+    by_chrom = defaultdict(list)
+    for g, h in best.items():
+        s, e = h.get('start', 0), h.get('end', 0)
+        by_chrom[h.get('chrom')].append((g, (s + e) // 2, s, e))
+    return by_chrom
+
+
+def compute_rearrangement_score(flanking_hits, min_genes=3):
+    """Diagnostic only: fraction of distinct flanking genes NOT on the dominant
+    chromosome (cross-chromosome scatter, [0,1]). Logged for context; the rescue
+    gate below is the per-chromosome flanking ENVELOPE, which validation showed to
+    be the correct, self-scaling signal (a stretched neighbourhood on ONE
+    chromosome — the real Aedes case — has LOW scatter but a WIDE envelope)."""
+    by_chrom = _flanking_anchor_positions(flanking_hits)
+    n = sum(len(v) for v in by_chrom.values())
+    if n < min_genes:
+        return 0.0
+    best = max((len(v) for v in by_chrom.values()), default=0)
+    return 1.0 - best / float(n)
+
+
+def select_dispersed_goi_seeds(hits, flanking_hits, *,
+                               min_identity=40.0, max_evalue=1e-10,
+                               min_alnlen=50, min_chrom_anchors=3,
+                               region_padding=50000, envelope_margin=200000):
+    """Rescue a strong GOI hit that dispersed WITHIN the flanking ENVELOPE of its
+    chromosome, so it can seed its own block.
+
+    The envelope — [min .. max] anchor position on a chromosome carrying
+    >= `min_chrom_anchors` distinct flanking genes — IS the data-driven,
+    per-target 'how far to trust a GOI hit' distance the flanking spacing implies:
+      * conserved target  -> tight envelope; a real GOI is right next to its
+        flanking (within region_padding), so the normal path already models it and
+        this is a NO-OP; a paralog Mb away is OUTSIDE the tight envelope -> rejected.
+      * rearranged target -> wide envelope (the Aedes oskar case: 11 anchors span
+        15-243 Mb on NC_035109.1); a dispersed-but-syntenic GOI inside it is
+        recovered.
+    A strong hit on a chromosome with too few anchors, or outside the envelope, is
+    rejected as a probable paralog / fold-analogue (the biglycan-on-chrX and
+    structdisc cases have no such envelope). Hits already within region_padding of
+    an anchor are skipped (handled by the normal block path).
+
+    Returns a list of GOI hit dicts to add to the block seed set.
+    """
+    by_chrom = _flanking_anchor_positions(flanking_hits)
+    envelopes = {}
+    for c, genes in by_chrom.items():
+        if len(genes) >= min_chrom_anchors:
+            lo = min(g[2] for g in genes) - envelope_margin
+            hi = max(g[3] for g in genes) + envelope_margin
+            envelopes[c] = (lo, hi, genes)
+    if not envelopes:
+        return []
+
+    seeds, seen = [], set()
+    for h in hits:
+        if not is_goi_query_id(h.get('query', '')):
+            continue
+        if h.get('pident', 0.0) < min_identity or h.get('evalue', 1.0) > max_evalue:
+            continue
+        if h.get('alnlen', 0) < min_alnlen:
+            continue
+        env = envelopes.get(h.get('chrom'))
+        if not env:                              # chromosome doesn't carry the neighbourhood
+            continue
+        lo, hi, genes = env
+        hs, he = h.get('start', 0), h.get('end', 0)
+        if he < lo or hs > hi:                   # outside the flanking envelope
+            continue
+        near_anchor = any(
+            not (he < s - region_padding or hs > e + region_padding)
+            for _g, _m, s, e in genes)
+        if near_anchor:                          # already covered by a flanking block
+            continue
+        key = (h.get('chrom'), hs // max(1, region_padding))
+        if key in seen:
+            continue
+        seen.add(key)
+        seeds.append(h)
+    return seeds
+
+
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
     """
     Worker function to search a single genome.
@@ -4581,6 +4695,31 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         else:
             logger.info(f"[{genome_name}] No flanking anchors found; falling back to GOI/mixed hits for block seeding.")
 
+        # §1o: rescue a strong GOI hit that dispersed away from its flanking
+        # anchors (same-chromosome macro-synteny) by adding it as a block seed, so
+        # the normal machinery models it. No-op unless the neighbourhood is
+        # shattered (rearrangement gate) — protects well-conserved benchmarks.
+        rescue_goi_genes = set()
+        if getattr(args, 'enable_dispersed_goi_rescue', True) and flanking_seed_hits:
+            _rscore = compute_rearrangement_score(flanking_seed_hits)
+            _disp_seeds = select_dispersed_goi_seeds(
+                hits, flanking_seed_hits,
+                min_identity=getattr(args, 'dispersed_goi_min_identity', 40.0),
+                max_evalue=getattr(args, 'dispersed_goi_max_evalue', 1e-10),
+                min_alnlen=getattr(args, 'dispersed_goi_min_alnlen', 50),
+                min_chrom_anchors=getattr(args, 'dispersed_min_chrom_anchors', 3),
+                region_padding=args.region_padding,
+                envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000))
+            if _disp_seeds:
+                seed_hits = seed_hits + _disp_seeds
+                rescue_goi_genes = {extract_base_gene_id(h.get('query', ''))
+                                    for h in _disp_seeds}
+                logger.info(
+                    f"[{genome_name}] §1o dispersed-GOI rescue: added "
+                    f"{len(_disp_seeds)} strong GOI hit(s) inside the flanking "
+                    f"envelope as rescue seed(s) (scatter={_rscore:.2f}, "
+                    f"id>={getattr(args, 'dispersed_goi_min_identity', 40.0)}).")
+
         # §1g: estimate this target's phylogenetic distance from the median identity
         # of its flanking-gene matches and relax the GOI classify identity bars for
         # distant targets (no-op for close relatives). Must run before any GOI
@@ -4631,6 +4770,11 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     _g in goi_proxy_flanking_parents for _g in _b.get('genes', [])
                 ):
                     proxy_blocks.append(_b)
+                elif any(is_goi_query_id(_g) or _g in rescue_goi_genes
+                         for _g in _b.get('genes', [])):
+                    # §1o: a GOI-seeded (dispersed-rescue) block is single-gene by
+                    # construction — keep it despite min_block_genes.
+                    proxy_blocks.append(_b)
             synteny_blocks = filtered_blocks + proxy_blocks
             logger.info(
                 f"[{genome_name}] Block filter (min_block_genes={args.min_block_genes}): "
@@ -4660,7 +4804,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # low-collinearity proxy seed is never dropped by the cap.
         if home_rank and len(synteny_blocks) > 1:
             def _cap_key(b):
-                is_proxy = bool(set(b.get('genes', [])) & goi_proxy_flanking_parents)
+                genes = set(b.get('genes', []))
+                is_proxy = (bool(genes & goi_proxy_flanking_parents)
+                            or bool(genes & rescue_goi_genes)
+                            or any(is_goi_query_id(g) for g in genes))
                 return (1 if is_proxy else 0,
                         b.get('collinear_chain_len', 0),
                         b.get('genes_count', 0))
@@ -5402,13 +5549,20 @@ def _apply_scores_to_region_gff(gff_path, scores):
     return attached, boosted
 
 
-def run_gpu_augment_phase(args):
+def run_gpu_augment_phase(args, genome_map=None):
     """Score GOI candidate models with ProtT5 + ESMFold/Foldseek in the main
     process (no fork), and fold the scores back into the region GFFs.
 
     Opt-in via --enable_plm_search / --enable_structural_search. Fail-loud by
     default (--gpu_augment_fail_loud) so a requested-but-broken GPU layer errors
-    rather than silently producing no ML evidence (the old fork-CUDA no-op)."""
+    rather than silently producing no ML evidence (the old fork-CUDA no-op).
+
+    With --enable_structural_discovery, also predicts ORFs in each syntenic
+    window (from the flanking genes), folds/embeds the promising ones, and
+    materialises any that structurally match the GOI as new gene models —
+    catching orthologs sequence search missed entirely. `genome_map` maps a
+    region-file stem (basename of the genome FASTA) to that FASTA path; required
+    for discovery (to read the target sequence), unused for re-rank."""
     if not (getattr(args, 'enable_plm_search', False)
             or getattr(args, 'enable_structural_search', False)):
         return
@@ -5441,8 +5595,71 @@ def run_gpu_augment_phase(args):
         for cid, seq in _select_goi_candidates_from_region(gff_path, faa_path):
             items.append(gpu_augment.WorkItem("candidate", cid, seq, genome))
 
+    # ── Discovery: predict ORFs in each syntenic window and queue them so the
+    #    GPU phase can find orthologs sequence search missed. Non-fatal per
+    #    genome (additive; a discovery bug must not sink the validated re-rank).
+    orf_records = {}   # wid -> (genome, gff_path, orf dict)
+    genome_synteny = {}  # genome -> {"flanking": [...], "seq_goi_chroms": set()}
+    if getattr(args, 'enable_structural_discovery', False) and genome_map:
+        try:
+            import discover_regions as dr
+        except Exception as _dr_err:
+            dr = None
+            logger.warning("[gpu_augment] discovery module unavailable: %s", _dr_err)
+        if dr is not None:
+            for genome, gff_path in sorted(genome_gffs.items()):
+                gfasta = genome_map.get(genome)
+                if not gfasta or not os.path.exists(gfasta):
+                    continue
+                try:
+                    flanking, existing = dr.read_region_features(gff_path)
+                    if not flanking:
+                        continue
+                    genome_synteny[genome] = {
+                        "flanking": flanking,
+                        "seq_goi_chroms": dr.seq_goi_chroms(gff_path, min_confidence="MEDIUM"),
+                    }
+                    genome_seqs = load_genome(gfasta)
+                    chrom_lengths = {c: len(s) for c, s in genome_seqs.items()}
+                    windows = dr.cluster_intervals(
+                        flanking,
+                        max_gap=getattr(args, 'discovery_window_gap', 100000),
+                        pad=getattr(args, 'discovery_window_pad', 20000),
+                        chrom_lengths=chrom_lengths)
+                    disc_work = os.path.join(args.output_dir, "gpu_augment_work",
+                                             "discovery", genome)
+                    for wi, window in enumerate(windows):
+                        orfs = dr.predict_region_orfs(
+                            genome_seqs, window,
+                            os.path.join(disc_work, f"w{wi}"),
+                            predictor='augustus',
+                            augustus_species=getattr(args, 'augustus_species', 'fly'),
+                            min_aa=getattr(args, 'discovery_min_aa', 30))
+                        for orf in orfs:
+                            if not orf.get('seq') or len(orf['seq']) < 20:
+                                continue
+                            if dr.orf_overlaps_any(orf, existing, min_frac=0.3):
+                                continue  # already modelled (re-rank owns it)
+                            wid = ("%s__disc__%s_%d_%d_%s" %
+                                   (genome, orf['chrom'], orf['start'],
+                                    orf['end'], orf['strand']))
+                            if wid in orf_records:
+                                continue
+                            items.append(gpu_augment.WorkItem(
+                                'orf', wid, orf['seq'], genome,
+                                {'chrom': orf['chrom'], 'start': orf['start'],
+                                 'end': orf['end'], 'strand': orf['strand']}))
+                            orf_records[wid] = (genome, gff_path, orf)
+                    del genome_seqs
+                except Exception as exc:
+                    logger.error("[gpu_augment] discovery failed for %s "
+                                 "(continuing): %s", genome, exc)
+            if orf_records:
+                logger.info("[gpu_augment] discovery: %d ORF candidate(s) queued "
+                            "across %d genome(s).", len(orf_records), len(genome_gffs))
+
     if not items:
-        logger.info("[gpu_augment] no GOI candidate models to score; skipping.")
+        logger.info("[gpu_augment] no candidate models or ORFs to score; skipping.")
         return
 
     # Ensure nothing is resident so gpu_augment loads models sequentially.
@@ -5478,6 +5695,8 @@ def run_gpu_augment_phase(args):
             fold_window=getattr(args, 'structural_fold_window', 380),
             fold_overlap=getattr(args, 'structural_fold_overlap', 60),
             threads=getattr(args, 'threads', 1),
+            orf_fold_min_embedding=getattr(args, 'discovery_orf_fold_min_embedding', 0.4),
+            orf_fold_max=getattr(args, 'discovery_orf_fold_max', 40),
         )
     except Exception as exc:
         if fail_loud:
@@ -5498,6 +5717,114 @@ def run_gpu_augment_phase(args):
         attached, boosted = _apply_scores_to_region_gff(gff_path, scores)
         total_attached += attached
         total_boosted += boosted
+
+    # ── Materialise structural discovery hits as new GOI gene models ──
+    # Conservative: only a strong structural match (TM >= discovery_min_tm,
+    # default = structural_high_threshold) becomes a model, so discovery cannot
+    # pollute a clean close-relative run with false positives. Appends AFTER the
+    # re-rank rewrite so the new models survive.
+    disc_hits = result.get("discovery_hits", [])
+    materialised = 0
+    if disc_hits and orf_records:
+        try:
+            import discover_regions as dr
+        except Exception:
+            dr = None
+        if dr is not None:
+            from collections import defaultdict
+            tm_bar = getattr(args, 'discovery_min_tm',
+                             getattr(args, 'structural_high_threshold', 0.7))
+            # GOI templates for the sequence guards (coverage/length/paralog).
+            # Use only the FULL-length GOI template(s); the exon-split fragments
+            # (`GOI_osk|exon_N`, as short as 33 aa) would let a shared-domain FP
+            # score ~100% coverage against a tiny fragment and slip guard 2.
+            try:
+                _all_goi = gpu_augment.load_goi_templates_from_fasta(args.initial_db)
+            except Exception:
+                _all_goi = []
+            goi_templates = [(cid, seq) for cid, seq in _all_goi
+                             if "exon" not in cid.lower()]
+            if not goi_templates:            # all were fragments → fall back
+                goi_templates = _all_goi
+            # Optional home-paralog panel (guard 3). Absent by default → guard 3
+            # is a no-op; guards 1/2/4 still fire.
+            panel = None
+            panel_path = getattr(args, 'home_paralog_panel', None)
+            if panel_path and os.path.exists(panel_path):
+                try:
+                    panel = [(cid, seq) for _h, cid, seq in parse_fasta(panel_path) if seq]
+                except Exception:
+                    panel = None
+            guard_rejects = defaultdict(int)   # reason -> count
+            new_by_genome = defaultdict(list)   # genome -> [(gff_lines, (id,seq))]
+            gff_for_genome = {}
+            for hit in disc_hits:
+                rec = orf_records.get(hit.get("id"))
+                if not rec:
+                    continue
+                tm = hit.get("structural_similarity")
+                if tm is None or tm < tm_bar:
+                    continue
+                genome, gff_path, orf = rec
+                # ── Discovery guards: reject promiscuous-fold false positives ──
+                syn = genome_synteny.get(genome, {})
+                flank = syn.get("flanking", [])
+                sgc = syn.get("seq_goi_chroms", set())
+                flank_support = dr.count_flanking_support(
+                    orf, flank,
+                    window_bp=getattr(args, 'discovery_window_gap', 100000))
+                ok, reason, gmetrics = dr.validate_discovery_hit(
+                    orf, goi_templates,
+                    panel=panel,
+                    flanking_support=flank_support,
+                    genome_has_seq_goi=bool(sgc),
+                    seq_goi_chroms=sgc,
+                    min_len_ratio=getattr(args, 'discovery_min_len_ratio', 0.5),
+                    max_len_ratio=getattr(args, 'discovery_max_len_ratio', 2.0),
+                    min_goi_coverage=getattr(args, 'discovery_min_goi_coverage', 0.5),
+                    paralog_margin=getattr(args, 'discovery_paralog_margin', 1.0),
+                    min_block_flanking=getattr(args, 'discovery_min_block_flanking', 2),
+                    require_same_chrom_as_seq_goi=not getattr(
+                        args, 'discovery_allow_offblock', False))
+                if not ok:
+                    guard_rejects[reason] += 1
+                    logger.info("[gpu_augment] discovery hit %s rejected (%s): "
+                                "%s", hit.get("id"), reason,
+                                {k: gmetrics[k] for k in
+                                 ("orf_len", "goi_len", "goi_coverage",
+                                  "flanking_support") if k in gmetrics})
+                    continue
+                conf = dr.confidence_from_scores(
+                    tm, hit.get("embedding_similarity"),
+                    tm_high=getattr(args, 'structural_high_threshold', 0.7),
+                    tm_medium=getattr(args, 'structural_medium_threshold', 0.5))
+                idx = len(new_by_genome[genome])
+                gff_lines, faa = dr.build_discovery_gff(
+                    orf, genome, idx, tm, hit.get("embedding_similarity"), conf)
+                new_by_genome[genome].append((gff_lines, faa))
+                gff_for_genome[genome] = gff_path
+                materialised += 1
+            if guard_rejects:
+                logger.info("[gpu_augment] discovery guards rejected %d hit(s): %s",
+                            sum(guard_rejects.values()), dict(guard_rejects))
+                result.setdefault("diagnostics", {})["discovery_guard_rejects"] = \
+                    dict(guard_rejects)
+            for genome, entries in new_by_genome.items():
+                gpath = gff_for_genome[genome]
+                fpath = gpath[:-4] + ".faa"
+                with open(gpath, 'a') as gf:
+                    for gff_lines, _faa in entries:
+                        for gl in gff_lines:
+                            gf.write(gl + "\n")
+                with open(fpath, 'a') as ff:
+                    for _gl, (mid, seq) in entries:
+                        ff.write(f">{mid}\n")
+                        for i in range(0, len(seq), 80):
+                            ff.write(seq[i:i + 80] + "\n")
+            if materialised:
+                logger.info("[gpu_augment] discovery: materialised %d structural "
+                            "model(s) (TM>=%.2f).", materialised, tm_bar)
+    result.setdefault("diagnostics", {})["discovery_materialised"] = materialised
 
     logger.info(
         "[gpu_augment] scored %d candidate(s); attached ML scores to %d model(s), "
@@ -5726,6 +6053,66 @@ def main():
                         help="Fail the run if PLM/structural search is requested but its "
                              "deps/GPU are unavailable or every fold/embed fails, instead "
                              "of silently producing no ML scores (default True)")
+    # Structural/PLM DISCOVERY: predict ORFs in each syntenic window, fold the
+    # promising ones, and materialise strong structural matches as new GOI models
+    # (finds orthologs sequence search missed — Run-2 divergence ladder). Opt-in.
+    parser.add_argument("--enable_structural_discovery", type=str2bool, default=False,
+                        help="Predict + fold region ORFs to discover sequence-invisible "
+                             "GOI orthologs (needs --enable_structural_search; default off)")
+    parser.add_argument("--discovery_window_gap", type=int, default=100000,
+                        help="Merge flanking genes within this bp into one discovery window")
+    parser.add_argument("--discovery_window_pad", type=int, default=20000,
+                        help="Pad each discovery window by this many bp")
+    parser.add_argument("--discovery_min_aa", type=int, default=30,
+                        help="Minimum ORF length (aa) for discovery")
+    parser.add_argument("--discovery_min_tm", type=float, default=0.7,
+                        help="Minimum Foldseek TM-score to materialise a discovery model "
+                             "(conservative default = structural_high_threshold)")
+    parser.add_argument("--discovery_orf_fold_min_embedding", type=float, default=0.4,
+                        help="Only fold discovery ORFs whose ProtT5 cosine >= this (cost guard)")
+    parser.add_argument("--discovery_orf_fold_max", type=int, default=40,
+                        help="Cap on discovery ORFs folded per run (top by embedding)")
+    # Discovery GUARDS — a structural TM match alone cannot tell an ortholog from
+    # a fold analogue (oskar's OSK domain is a lipase fold; a 2187-aa lipase folded
+    # to TM 0.80 and was materialised as a HIGH 'oskar' at 5.8% query coverage).
+    # These add the sequence + synteny sanity the fold score lacks.
+    parser.add_argument("--discovery_min_len_ratio", type=float, default=0.5,
+                        help="Guard 1: reject a discovery ORF shorter than this x the GOI length")
+    parser.add_argument("--discovery_max_len_ratio", type=float, default=2.0,
+                        help="Guard 1: reject a discovery ORF longer than this x the GOI length")
+    parser.add_argument("--discovery_min_goi_coverage", type=float, default=0.5,
+                        help="Guard 2: SW alignment must span >= this fraction of the GOI "
+                             "(separates a diverged ortholog from a shared-domain fold analogue)")
+    parser.add_argument("--discovery_paralog_margin", type=float, default=1.0,
+                        help="Guard 3: GOI SW score must beat the best home-paralog score by "
+                             "this factor (needs --home_paralog_panel; else no-op)")
+    parser.add_argument("--discovery_min_block_flanking", type=int, default=2,
+                        help="Guard 4a: require >= this many flanking anchors near the ORF's window")
+    parser.add_argument("--discovery_allow_offblock", type=str2bool, default=False,
+                        help="Guard 4b: if True, allow discovery on a chromosome without a "
+                             "sequence-found GOI even when the genome has one elsewhere (default off)")
+    parser.add_argument("--home_paralog_panel", default=None,
+                        help="Optional home-paralog panel FASTA for discovery guard 3 (RBH). "
+                             "When absent, guard 3 is skipped and guards 1/2/4 still apply.")
+    # §1o — dispersed-GOI rescue: recover a strong GOI hit that drifted away from
+    # its flanking anchors (same-chromosome macro-synteny) in a shattered
+    # neighbourhood. Gated by rearrangement score so it is a no-op on well-
+    # conserved targets (the melittin/LY6/TP53 benchmarks).
+    parser.add_argument("--enable_dispersed_goi_rescue", type=str2bool, default=True,
+                        help="§1o: seed a block from a strong GOI hit that dispersed away "
+                             "from flanking but shares a chromosome with an anchor, when the "
+                             "neighbourhood is rearranged (default on)")
+    parser.add_argument("--dispersed_goi_min_identity", type=float, default=40.0,
+                        help="§1o: minimum %%identity for a dispersed GOI hit to be rescued")
+    parser.add_argument("--dispersed_goi_max_evalue", type=float, default=1e-10,
+                        help="§1o: maximum e-value for a dispersed GOI hit to be rescued")
+    parser.add_argument("--dispersed_goi_min_alnlen", type=int, default=50,
+                        help="§1o: minimum alignment length (aa/bp) for a dispersed GOI hit")
+    parser.add_argument("--dispersed_min_chrom_anchors", type=int, default=3,
+                        help="§1o: a chromosome must carry >= this many distinct flanking "
+                             "genes to define a rescue envelope (macro-synteny evidence)")
+    parser.add_argument("--dispersed_envelope_margin", type=int, default=200000,
+                        help="§1o: pad the flanking envelope by this many bp on each side")
 
     # §1g: per-target phylogenetic-distance auto-tune of the GOI classify bars.
     parser.add_argument("--disable_distance_autotune", type=str2bool, default=False,
@@ -6432,8 +6819,11 @@ def main():
 
     # ── GPU augmentation (PLM + Foldseek), main process, single CUDA context ──
     # Runs after all waves so every genome's regions/<g>.gff + .faa exist. No-op
-    # unless --enable_plm_search / --enable_structural_search.
-    run_gpu_augment_phase(args)
+    # unless --enable_plm_search / --enable_structural_search. genome_map lets the
+    # discovery path read each target FASTA (keyed by the region-file stem =
+    # basename of the genome path).
+    genome_map = {os.path.basename(e['path']): e['path'] for e in genome_entries}
+    run_gpu_augment_phase(args, genome_map)
 
     expanded_db = f"{args.output_dir}/expanded_db.faa"
     if os.path.exists(latest_db):

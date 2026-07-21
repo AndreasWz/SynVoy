@@ -3,7 +3,12 @@ process STAGE_GENOMES {
     
     input:
     path genomes
-    
+    // Pro-Mode target annotations (may be the NO_GFFS sentinel when unset).
+    // Easy Mode gets these for free: fetch_related_genomes.py already writes
+    // {accession}.gff next to {accession}.fna, which is exactly where
+    // iterative_search_runner.find_native_annotation_path() probes.
+    path target_gffs
+
     output:
     path "staged_genomes", emit: dir
     path "species_mapping.tsv", emit: species_map
@@ -69,5 +74,20 @@ process STAGE_GENOMES {
             printf '%s\\t%s\\tgenome\\n' "\$acc" "\$species" >> species_mapping.tsv
         fi
     done
+
+    # Link user-supplied target annotations in AFTER the species map is built —
+    # the loop above walks staged_genomes/* untyped, so a .gff present at that
+    # point would be recorded as a bogus "genome" row.
+    #
+    # stage_target_gffs.py names each annotation Path(genome).with_suffix('.gff')
+    # (cow.fna -> cow.gff). That is deliberate: cluster_regions.nf resolves the
+    # genome with `find -name "<genome_name>*"` WITHOUT an extension filter, and
+    # <genome_name> carries the extension, so cow.fna.gff would be returned in
+    # place of the genome. cow.gff is invisible to that glob and is also the
+    # first path find_native_annotation_path() probes.
+    stage_target_gffs.py \\
+        --genomes_dir staged_genomes \\
+        ${params.allow_unmatched_target_gffs ? '--allow_unmatched' : ''} \\
+        --gffs $target_gffs
     """
 }
