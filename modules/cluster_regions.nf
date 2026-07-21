@@ -25,8 +25,13 @@ process CLUSTER_REGIONS {
     """
     mkdir -p regions
 
-    # Resolve genome file
-    target_genome=\$(find -L $genomes_dir -name "${genome_name}*" -type f | head -n 1)
+    # Resolve genome file. The extension filter matters: the genomes dir also holds
+    # target annotations (<genome>.gff — fetched in easy mode, staged from
+    # --target_gffs in pro mode), and an unfiltered "${genome_name}*" glob can
+    # return one of those instead of the genome. Same guard as the rescue modules.
+    target_genome=\$(find -L $genomes_dir -name "${genome_name}*" -type f \\
+        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" -o -name "*.fasta.gz" \\) \\
+        | head -n 1)
 
     cluster_grs.py \\
         --hits $hits_file \\

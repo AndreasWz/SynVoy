@@ -147,6 +147,50 @@ class TestScoreAssembly(unittest.TestCase):
         self.assertEqual(res["discovery_hits"], [])
 
 
+class TestOrfFoldPrefilter(unittest.TestCase):
+    """Discovery must not fold every ORF — only the top ones by embedding."""
+
+    def _run(self, items, emb_best, **kw):
+        import tempfile
+        d = tempfile.mkdtemp()
+        db = os.path.join(d, "db.faa")
+        _write(db, ">GOI_osk\nMKAYILGGVQ\n")
+        captured = {}
+
+        def fake_fold_all(goi, fold_items, *a, **k):
+            captured["folded"] = [w.wid for w in fold_items]
+            return ({"GOI_osk": "x.pdb"}, {}, {"folded_items": len(fold_items)})
+
+        with mock.patch.object(g, "plm_available", return_value=True), \
+             mock.patch.object(g, "structural_available", return_value=True), \
+             mock.patch.object(g, "_embed_all", return_value=(emb_best, {})), \
+             mock.patch.object(g, "_fold_all", side_effect=fake_fold_all), \
+             mock.patch.object(g, "_foldseek_best_tm", return_value={}):
+            g.run_augmentation(db, items, os.path.join(d, "w"),
+                               do_plm=True, do_structural=True, require=True, **kw)
+        return captured["folded"]
+
+    def test_candidates_always_folded_orfs_prefiltered(self):
+        items = [
+            g.WorkItem("candidate", "cand", "MKAYIL", "g1"),
+            g.WorkItem("orf", "orf_hi", "MKAYIL", "g1"),
+            g.WorkItem("orf", "orf_lo", "MKAYIL", "g1"),
+        ]
+        folded = self._run(items, {"orf_hi": 0.8, "orf_lo": 0.2},
+                           orf_fold_min_embedding=0.4)
+        self.assertIn("cand", folded)      # candidate always folded
+        self.assertIn("orf_hi", folded)    # above threshold
+        self.assertNotIn("orf_lo", folded)  # below threshold -> skipped
+
+    def test_orf_fold_cap(self):
+        items = [g.WorkItem("orf", f"orf_{i}", "MKAYIL", "g1") for i in range(10)]
+        emb = {f"orf_{i}": 0.5 + i * 0.01 for i in range(10)}
+        folded = self._run(items, emb, orf_fold_min_embedding=0.4, orf_fold_max=3)
+        self.assertEqual(len([f for f in folded if f.startswith("orf_")]), 3)
+        # kept the 3 highest-embedding ORFs
+        self.assertIn("orf_9", folded)
+
+
 class TestSilentNoOpGuard(unittest.TestCase):
     def test_fold_all_raises_when_all_items_fail(self):
         """_fold_all must raise if a non-empty item set yields zero structures
