@@ -91,8 +91,25 @@ nextflow run main.nf \
 |---|---|
 | `--home_species` | Reference species (e.g. `"Apis mellifera"`), used for taxonomy ordering. Inferred from the `--home_genome` filename when it *is* a species name (e.g. `apis_mellifera.fna`); SynVoy **errors out with a clear message if it can't infer one** (a name like `reference.fna`). Pass it explicitly, or set `--allow_unknown_species true` to proceed with `kingdom=Unknown` / phylo distance 999 (mis-tunes per-target stringency). |
 | `--home_gff` | GFF annotation for the home genome. Highly recommended — provides much better flanking-gene extraction than Prodigal fallback. |
+| `--target_gffs` | Annotations for the **target** genomes (folder, glob, or comma-list). Lets SynVoy read each target's existing gene names/products instead of judging hits by sequence alone. Easy Mode downloads these automatically. |
+| `--allow_unmatched_target_gffs` | `true` to warn instead of failing when a supplied GFF matches no genome. Default `false`. |
 
 > **Tip:** `--target_genomes` accepts a **folder** of genomes (`genomes/` — every `.fna`/`.fa`/`.fasta` inside is used; GFF/TSV/other files are ignored), a glob (`"genomes/*.fna"` — match your extension: `*.fa`, `*.fasta`), a comma-separated list (`"a.fna,b.fna"`), or Nextflow list syntax. SynVoy errors clearly if no genomes are found.
+
+> **Tip:** Because `--target_genomes` is FASTA-only, target annotations are passed **separately** via `--target_gffs` — keep genomes and GFFs in two folders:
+>
+> ```bash
+> nextflow run main.nf --mode pro \
+>   --query queries/decorin.faa \
+>   --home_genome /data/human.fna --home_gff /data/human.gff \
+>   --home_species "Homo sapiens" \
+>   --target_genomes /data/targets/genomes \
+>   --target_gffs    /data/targets/gffs
+> ```
+>
+> Each GFF is matched to its genome by **filename stem** (`cow.fna` ↔ `cow.gff`) or by **assembly accession** (`GCF_002263795.1.fna` ↔ `GCF_002263795.1_ARS-UCD1.2_genomic.gff`). Annotating only *some* targets is fine. A GFF that matches no genome is a **hard error** by default — pass `--allow_unmatched_target_gffs true` to downgrade it to a warning. `.gff`, `.gff3`, `.gtf` and their `.gz` forms are accepted.
+>
+> **What it buys you:** matched target models gain `TargetGene` / `TargetProduct` / `TargetID` attributes in the output GFF and the `target_gene` / `target_product` report columns — i.e. you can see *which annotated gene* a call landed on. This is read-out evidence, not a scoring input: annotations do not move synteny blocks, region scores, or confidence. The only mechanism that acts on them is the family-consistency gate (`--strict_goi_family`, default `false`), which can **demote** a weak call whose target gene name disagrees with `--goi_family_tokens`. If you enable it, set `--goi_family_tokens` for your gene explicitly — the automatic derivation does not work (see PARAMETERS.md).
 
 ---
 
