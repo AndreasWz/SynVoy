@@ -30,11 +30,15 @@ None of the above? → run with defaults; the defaults are tuned for divergent
 toxin recovery and work as a sensible middle ground.
 ```
 
-`<execution>` is one of `standard`, `docker`, `singularity`, `laptop_safe`, `docker_max`, `slurm`, `hpc_singularity`, `hpc_conda` — see the [Profiles] section of the README. Presets compose with execution profiles via comma.
+`<execution>` is one of `auto`, `standard`, `conda`, `docker`, `docker_max`, `singularity`,
+`slurm`, `hpc_singularity`, `hpc_conda`, `lrz_ai`, `lrz_ai_container` — see
+[USAGE.md § 2](USAGE.md#2-execution-profiles) for the full table. A memory tier
+(`laptop_safe` / `low_mem`) is a *separate* axis you may add on top; presets compose with
+both via comma, e.g. `-profile auto,low_mem,preset_short_peptide`.
 
 Equivalent invocation with `-c` (no profile composition):
 ```
-nextflow run main.nf -c conf/presets/<preset_name>.config ...
+./run_synvoy.sh -c conf/presets/<preset_name>.config ...
 ```
 
 Preset source files live in [`conf/presets/`](../conf/presets/) — copy and edit them as a starting point for query-specific tweaks. The full reference below documents every individual parameter for users who need finer control.
@@ -79,6 +83,14 @@ The Python `PRESET_OVERRIDES` table in `bin/resolve_effective_params.py` is the 
 17. [LLM Parameter Estimation](#17-llm-parameter-estimation)
 18. [Advanced & Output](#18-advanced--output)
 19. [Auto-Apply Preset, Self-Consistency & Rescue](#19-auto-apply-preset-self-consistency--rescue)
+
+> **Not everything is in this file.** Several newer parameter groups are documented as
+> tables in [USAGE.md § 4](USAGE.md#4-full-parameter-reference) rather than as long-form
+> entries here: home-locus selection and the multi-locus cap (`--max_loci`,
+> `--enable_name_locus`), the rescue passes (strong-synteny, GOI hull, dispersed-GOI),
+> locus ownership and paralog discrimination, distance auto-tuning, structural
+> discovery, and the publication-figure switches (`--pub_svg`, `--enable_matrix_plot`).
+> Between the two documents every parameter in `nextflow.config` is covered.
 
 ---
 
@@ -769,7 +781,7 @@ The directory where all pipeline output files are written. This includes synteny
 ### `keep_intermediate`
 **Type:** Boolean | **Default:** `false`
 
-When enabled, intermediate files from each pipeline stage are preserved in the output directory. This includes per-target MMseqs2 hit tables, tblastn alignments, miniprot output, Augustus/Prodigal predictions, Smith-Waterman alignment results, flanking gene FASTAs, and per-target GFF annotations. These files are invaluable for debugging unexpected results — for example, examining the raw tblastn output for a target where no GOI was found, or inspecting the flanking gene sequences to understand why synteny scores are low. The default of `false` keeps only the final output files (plots, trees, reports) to minimize disk usage. Intermediate files can be large (hundreds of MB for multi-genome analyses), so enable this judiciously. Note that Nextflow's `work/` directory always contains intermediate files for cached tasks, regardless of this setting — `keep_intermediate` controls what is copied to `outdir`.
+**Currently inert — setting it changes nothing.** The parameter is declared in `nextflow.config` but is not read by `main.nf`, any module, or any script, so it gates no behaviour. In practice `intermediate/` is **always** published: each stage carries an unconditional `publishDir "${params.outdir}/intermediate/<stage>"`. That directory holds per-target MMseqs2 hit tables, tblastn alignments, miniprot output, Augustus/Prodigal predictions, Smith-Waterman results, flanking gene FASTAs, and per-target GFFs — invaluable for debugging (e.g. reading the raw tblastn output for a target where no GOI was found), and it can reach hundreds of MB on multi-genome analyses. Budget disk for it rather than expecting this flag to suppress it. Nextflow's `work/` directory separately retains everything for cached tasks. The parameter is kept so existing command lines do not break; either wire it up or drop it before treating it as a real control.
 
 ### `max_retries`
 **Type:** Integer | **Default:** `3`
@@ -779,7 +791,7 @@ The maximum number of times a failed Nextflow process is retried before the pipe
 ### `docker_container`
 **Type:** String | **Default:** `'synvoy-local:latest'`
 
-The Docker/Singularity container image used for running pipeline processes when a container profile is active. The default expects a locally built image tagged `synvoy-local:latest`. Build it from the project Dockerfile: `docker build -t synvoy-local:latest .`. The container bundles all dependencies (MMseqs2, tblastn, Augustus, Prodigal, miniprot, parasail, MAFFT, IQ-TREE, Python with BioPython, etc.) in a reproducible environment. Override this to use a pre-built remote image (e.g., from Docker Hub or a private registry). The `beforeScript` directive ensures workspace scripts in `bin/` override any scripts packaged inside the container, so local code changes take effect immediately without rebuilding. This parameter is only used when a Docker or Singularity profile is active — Conda profiles ignore it entirely.
+The Docker/Singularity container image used for running pipeline processes when a container profile is active. The default expects a locally built image tagged `synvoy-local:latest`. Build it from the project Dockerfile: `docker build -t synvoy-local:latest .`. The container bundles all dependencies (MMseqs2, tblastn, Augustus, Prodigal, miniprot, samtools, parasail, MAFFT, IQ-TREE, and the Python stack) in a reproducible environment. Override this to use a pre-built remote image (e.g., from Docker Hub or a private registry). The `beforeScript` directive ensures workspace scripts in `bin/` override any scripts packaged inside the container, so local code changes take effect immediately without rebuilding. This parameter is only used when a Docker or Singularity profile is active — Conda profiles ignore it entirely.
 
 ---
 

@@ -53,16 +53,21 @@ tree-building switches to a method that produces different branch
 lengths), regenerate with:
 
 ```bash
-nextflow run main.nf \
+./run_synvoy.sh \
     --mode pro \
     --query local_data/queries/mellettin/GOI_melittin.fasta \
     --home_genome local_data/ground_truth/melettin/home/Apis_mellifera.fa \
     --home_gff local_data/ground_truth/melettin/home/Apis_mellifera.gff \
+    --home_species "Apis mellifera" \
     --target_genomes "local_data/ground_truth/melettin/targets/*.fa" \
     --outdir results/melettin_gt_v4 \
     --n_flanking_genes 5 \
-    --auto_params false --multi_profile false
+    --auto_params false --multi_profile false \
+    -profile standard
 ```
+
+`-profile standard` matters here: the launcher's default is `auto,low_mem`, which sets
+`--skip_tree` and would emit a placeholder newick instead of the tree this fixture pins.
 
 Then:
 ```bash
@@ -81,6 +86,12 @@ fixture.
   (`Reg1_G7_CMEDIUM_S0.47`). Regenerated fixtures will include a
   species prefix (`Colletes_gigas|Reg1_G7_CMEDIUM_S0.47`) because
   `cluster_grs.py` now consumes `species_mapping.tsv`.
+- The name's middle field is the region *class*, and there are now five:
+  `G<n>` (synteny cluster, `n` unique flanking hits), `GOI_anchor`
+  (region anchored on a GOI hit), `FLANKonly<n>` (strong flanking, no GOI
+  model — the §1e case), `DISP` (dispersed-GOI rescue), and the same
+  `G<n>` form for GOI-overlapping regions. A class change between fixture
+  and rerun is a behaviour change to explain, not necessarily a break.
 - `scripts/validate_melettin_gt_v3.py` does not compare the `name`
   column directly, so both formats are acceptable for regression
   diffing.
@@ -105,6 +116,19 @@ which:
    sequences from the tree-building step. Example: in v5 smoke runs,
    Euglossa's GOI sequence falls below the new tree-inclusion bar
    even though the BED region is still emitted.
+
+3. **Collinearity-aware seed placement (2026-06-04)** widened the region
+   windows to the full block neighbourhood, and added two region
+   classes. Verified against the 5-species regression run: Euglossa,
+   Tetragonula and Xylocopa moved `Reg1_G7_CMEDIUM_S0.47` →
+   `Reg1_G8_CMEDIUM_S0.55` (one more flanking gene captured, so a higher
+   score); Colletes gained a `Reg1_GOI_anchor_…` row above the fixture's
+   region, which became `Reg2_FLANKonly6_…`; Melipona's became
+   `Reg1_FLANKonly7_CMEDIUM_S0.40`. **The recovered GOI coordinates did
+   not change** — this is a wider window around the same call, which is
+   the intended effect. Bridging fired once (on Colletes, whose melittin
+   family genuinely spans a flanking gap); it is not a strict no-op on
+   this benchmark, but it is benign here.
 
 Both are intentional changes, not regressions — but the validator
 will report (1) as informational notes and (2) as a hard FAIL because

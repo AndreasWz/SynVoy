@@ -161,11 +161,11 @@ tooltips show gene names and identities.
   ```bash
   # Google Gemini (free tier available at aistudio.google.com)
   export GOOGLE_API_KEY=your_key
-  nextflow run main.nf ... --auto_params true
+  ./run_synvoy.sh ... --auto_params true
 
   # OpenAI
   export OPENAI_API_KEY=your_key
-  nextflow run main.nf ... --auto_params true --llm_provider openai
+  ./run_synvoy.sh ... --auto_params true --llm_provider openai
   ```
   Without an API key, `--auto_params true` falls back to built-in
   heuristics (still useful, just not LLM-quality).
@@ -184,6 +184,10 @@ documented in [USAGE.md § 8](USAGE.md#8-troubleshooting), especially:
   → you're running large (vertebrate-scale) targets on a small machine. Add
   `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem`
   (8 GB RAM). See [USAGE.md § Memory tiers](USAGE.md#memory-tiers-combine-with-an-execution-backend).
-- `parasail` import error → re-create the `synvoy_env` environment;
-  Python must be `<3.13` because `ete3` is not Python 3.13-ready yet.
+- `parasail` import error → the run **aborts**, by design: Smith-Waterman is
+  load-bearing for divergent genes, so SynVoy refuses to search without it rather
+  than quietly returning fewer hits. The usual cause is a `.venv` shadowing the
+  conda env (VS Code activates one automatically) — run `deactivate` and relaunch.
+  Otherwise re-create `synvoy_env`; Python must be `<3.13` because `ete3` is not
+  Python 3.13-ready yet.
 - `-resume` reruns everything → check that paths and params didn't change.
