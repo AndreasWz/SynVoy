@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import csv
 import subprocess
 import os
 import shutil
@@ -102,6 +103,7 @@ try:
         parse_gff, get_feature_id, load_genome, reverse_complement, translate,
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
+        longest_collinear_run as _shared_longest_collinear_run,
     )
     from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
 except ImportError:
@@ -112,6 +114,7 @@ except ImportError:
         parse_gff, get_feature_id, load_genome, reverse_complement, translate,
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
+        longest_collinear_run as _shared_longest_collinear_run,
     )
     from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
 
@@ -220,6 +223,20 @@ CLASSIFY_THRESHOLDS = {
     "fallback_strong_min_flanking": 5,
     "fallback_strong_min_qcov": 0.25,
     "fallback_strong_min_identity": 35.0,
+    # §1v / F6 — ABSOLUTE identity floor for the strong-flanking fallback clause.
+    # That clause is (flanking >= 5) AND (qcov >= 0.25 OR identity >= 35): the qcov
+    # arm has no identity requirement at all, so a hit at ANY identity reached MEDIUM
+    # as long as it sat in a flanking-rich block. Because flanking_support is a
+    # property of the BLOCK, every junk hit anywhere inside that block inherited it —
+    # this is the mechanism behind the yeast STE2 run's 32 MEDIUM calls at 21-27 %
+    # identity against 3 real orthologs, and Drosophila Defensin's 170 GOI calls for 3.
+    #
+    # Calibrated, not guessed: the real Tetramorium melittin call that this clause
+    # legitimately rescues sits at 34.7 % (fallback_span_with_strong_flanking_support,
+    # BlockFlankingSupport=7, QueryCoverage=0.686), while the yeast false positives run
+    # 21-27 %. A floor of 30 keeps the former and rejects the latter with margin on
+    # both sides. Set 0 to restore the old un-floored behaviour.
+    "fallback_strong_min_identity_floor": 30.0,
     # tandem_copy -> MEDIUM vs LOW
     "tandem_min_identity": 40.0,
     # A2 (TODO_JUN): a tandem copy needs real query coverage too, not just a
@@ -1043,6 +1060,7 @@ def _classify_goi_evidence(
         # because the signal peptide exon is too diverged to align; the flanking
         # gene context provides orthology evidence beyond per-alignment statistics.
         if (flanking_support >= ct["fallback_strong_min_flanking"]
+                and identity >= ct.get("fallback_strong_min_identity_floor", 0.0)
                 and (qcov >= ct["fallback_strong_min_qcov"]
                      or identity >= ct["fallback_strong_min_identity"])):
             return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
@@ -1747,31 +1765,10 @@ def collapse_flanking_cds_to_gene_span(gff_lines: List[str]) -> List[str]:
 # importers/tests that call identify_synteny_blocks without it are unaffected.
 # ---------------------------------------------------------------------------
 def _longest_collinear_run(ranks):
-    """Longest monotonic (non-decreasing OR non-increasing) subsequence over a
-    list of integer home-ranks. `None` entries (GOI proxies, unknown genes) are
-    ignored. Returns (length, direction) with direction '+' for increasing and
-    '-' for decreasing; ties favour '+'.
-    """
-    vals = [r for r in ranks if r is not None]
-    n = len(vals)
-    if n <= 1:
-        return n, '+'
-
-    def _lis_non_decreasing(seq):
-        m = len(seq)
-        dp = [1] * m
-        best = 1
-        for i in range(m):
-            for j in range(i):
-                if seq[j] <= seq[i] and dp[j] + 1 > dp[i]:
-                    dp[i] = dp[j] + 1
-            if dp[i] > best:
-                best = dp[i]
-        return best
-
-    inc = _lis_non_decreasing(vals)
-    dec = _lis_non_decreasing(list(reversed(vals)))  # non-increasing on original
-    return (inc, '+') if inc >= dec else (dec, '-')
+    """Thin alias — the implementation lives in sequence_utils so the region scorer
+    (cluster_grs.py) measures collinearity the same way this search core does. See
+    F5 in docs/STATE_OF_THE_PROJECT.md."""
+    return _shared_longest_collinear_run(ranks)
 
 
 def _block_anchor_ranks(block, home_rank):
@@ -1795,7 +1792,16 @@ def _can_bridge(block, candidate, home_rank, max_rank_gap, min_anchors):
     bridged block) and only bridges a candidate that extends BEYOND the furthest
     rank the block has reached, in the block's own direction, by at most
     `max_rank_gap` positions (a few un-mapped flanking genes tolerated).
-    Inversions are deliberately not bridged.
+
+    NB the direction is the BLOCK's own, taken from `_longest_collinear_run` over
+    its anchors — not a fixed ascending order. A uniformly inverted neighbourhood
+    therefore bridges normally; what is refused is a direction REVERSAL across the
+    gap. Verified 2026-07-21 (see tests/test_synteny_collinearity.py):
+
+        A B C … D E F  (forward, continues forward)   -> bridged
+        F E D … C B A  (inverted, continues inverted) -> bridged
+        D E F … C B A  (direction reverses at the gap)-> NOT bridged
+        A B   … D E F  (only 2 anchors < min_anchors) -> NOT bridged
     """
     cand_rank = home_rank.get(extract_base_gene_id(candidate.get('query', '')))
     if cand_rank is None:
@@ -4519,10 +4525,61 @@ def compute_rearrangement_score(flanking_hits, min_genes=3):
     return 1.0 - best / float(n)
 
 
+def _nearest_anchor(chrom, hs, he, by_chrom):
+    """(distance_bp, gene_id) to the closest flanking anchor anywhere in the genome.
+
+    Distance is 0 when the hit overlaps an anchor. Same-chromosome anchors always win
+    over any off-chromosome one, so the number answers "how far is this hit from the
+    neighbourhood *on its own scaffold*" and falls back to the global nearest only when
+    the chromosome carries no anchor at all.
+    """
+    best = (None, "", False)  # dist, gene, same_chrom
+    for c, genes in by_chrom.items():
+        same = (c == chrom)
+        for gene, _m, s, e in genes:
+            d = 0 if not (he < s or hs > e) else min(abs(s - he), abs(hs - e))
+            if best[0] is None or (same, -d) > (best[2], -best[0]):
+                best = (d, gene, same)
+    return best[0], best[1], best[2]
+
+
+NONSYNTENIC_COLUMNS = [
+    'genome', 'query', 'chrom', 'start', 'end', 'identity', 'evalue', 'alnlen',
+    'rejected_by', 'nearest_anchor_gene', 'nearest_anchor_bp',
+    'nearest_anchor_same_chrom',
+]
+
+
+def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
+    """§1x: write the refused-but-strong GOI candidates next to the raw hits.
+
+    Written INTO `hits/`, which `modules/generate_report.nf` already stages wholesale
+    (`cp -r "$d"/* staged_results/hits/`). That means the report picks these up with no
+    new Nextflow channel and no edit to `main.nf`'s `workflow {}` — which matters,
+    because that method body is at the JVM 64 kB limit (CLAUDE.md §17).
+    """
+    if not records:
+        return
+    path = os.path.join(args.output_dir, 'hits',
+                        f"{prefix}{genome_name}.nonsyntenic.tsv")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=NONSYNTENIC_COLUMNS, delimiter='\t')
+            w.writeheader()
+            for r in records:
+                w.writerow({k: r.get(k, '') for k in NONSYNTENIC_COLUMNS})
+        logger.info(f"[{genome_name}] §1x wrote {len(records)} non-syntenic GOI "
+                    f"candidate(s) to {os.path.basename(path)}")
+    except OSError as exc:
+        logger.warning(f"[{genome_name}] §1x could not write {path}: {exc}")
+
+
 def select_dispersed_goi_seeds(hits, flanking_hits, *,
                                min_identity=40.0, max_evalue=1e-10,
                                min_alnlen=50, min_chrom_anchors=3,
-                               region_padding=50000, envelope_margin=200000):
+                               region_padding=50000, envelope_margin=200000,
+                               rejected_out=None, genome_name=""):
     """Rescue a strong GOI hit that dispersed WITHIN the flanking ENVELOPE of its
     chromosome, so it can seed its own block.
 
@@ -4541,8 +4598,51 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
     an anchor are skipped (handled by the normal block path).
 
     Returns a list of GOI hit dicts to add to the block seed set.
+
+    §1x — `rejected_out`: when a list is passed, every hit that CLEARS the quality bar
+    (identity / e-value / alignment length) but is then refused by a SYNTENY gate is
+    appended to it as a record. Refusing such a hit is correct — at long divergences a
+    translocated ortholog is genuinely indistinguishable from a paralog by synteny alone
+    — but refusing it *silently* is not: the run reports "no ortholog" while holding a
+    54-72 % hit inside the real gene (the Anopheles defensin case). The caller writes
+    these to `hits/<genome>.nonsyntenic.tsv` so the report can say "found, not syntenic"
+    instead of "absent".
     """
     by_chrom = _flanking_anchor_positions(flanking_hits)
+
+    def _reject(h, gate):
+        if rejected_out is None:
+            return
+        hs, he = h.get('start', 0), h.get('end', 0)
+        dist, anchor, same = _nearest_anchor(h.get('chrom'), hs, he, by_chrom)
+        rejected_out.append({
+            'genome': genome_name,
+            'query': h.get('query', ''),
+            'chrom': h.get('chrom', ''),
+            'start': hs,
+            'end': he,
+            'identity': round(float(h.get('pident', 0.0) or 0.0), 2),
+            'evalue': h.get('evalue', ''),
+            'alnlen': h.get('alnlen', 0),
+            'rejected_by': gate,
+            'nearest_anchor_gene': anchor,
+            'nearest_anchor_bp': dist if dist is not None else '',
+            'nearest_anchor_same_chrom': bool(same),
+        })
+        logger.info(
+            f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({gate}): "
+            f"{h.get('chrom')}:{hs}-{he} id={h.get('pident', 0):.1f}% "
+            f"e={h.get('evalue')} aln={h.get('alnlen')} — nearest flanking anchor "
+            + (f"{anchor} at {dist:,} bp"
+               + ("" if same else " on a DIFFERENT chromosome") if dist is not None
+               else "none in this genome"))
+
+    def _clears_quality(h):
+        return (is_goi_query_id(h.get('query', ''))
+                and h.get('pident', 0.0) >= min_identity
+                and h.get('evalue', 1.0) <= max_evalue
+                and h.get('alnlen', 0) >= min_alnlen)
+
     envelopes = {}
     for c, genes in by_chrom.items():
         if len(genes) >= min_chrom_anchors:
@@ -4550,6 +4650,12 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             hi = max(g[3] for g in genes) + envelope_margin
             envelopes[c] = (lo, hi, genes)
     if not envelopes:
+        # No chromosome carries enough anchors to define an envelope anywhere. Strong
+        # GOI hits still deserve reporting — this is the "we could not judge synteny at
+        # all" case, which is different again from "judged and refused".
+        for h in hits:
+            if _clears_quality(h):
+                _reject(h, 'no_flanking_envelope_in_genome')
         return []
 
     seeds, seen = [], set()
@@ -4562,10 +4668,12 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             continue
         env = envelopes.get(h.get('chrom'))
         if not env:                              # chromosome doesn't carry the neighbourhood
+            _reject(h, 'chromosome_lacks_min_anchors')
             continue
         lo, hi, genes = env
         hs, he = h.get('start', 0), h.get('end', 0)
         if he < lo or hs > hi:                   # outside the flanking envelope
+            _reject(h, 'outside_flanking_envelope')
             continue
         near_anchor = any(
             not (he < s - region_padding or hs > e + region_padding)
@@ -4700,6 +4808,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # the normal machinery models it. No-op unless the neighbourhood is
         # shattered (rearrangement gate) — protects well-conserved benchmarks.
         rescue_goi_genes = set()
+        # §1x: collect the strong-but-non-syntenic candidates the gate refuses, so the
+        # run can distinguish "no ortholog here" from "found one, could not place it".
+        _nonsyntenic = [] if getattr(args, 'report_nonsyntenic_candidates', True) else None
         if getattr(args, 'enable_dispersed_goi_rescue', True) and flanking_seed_hits:
             _rscore = compute_rearrangement_score(flanking_seed_hits)
             _disp_seeds = select_dispersed_goi_seeds(
@@ -4709,7 +4820,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 min_alnlen=getattr(args, 'dispersed_goi_min_alnlen', 50),
                 min_chrom_anchors=getattr(args, 'dispersed_min_chrom_anchors', 3),
                 region_padding=args.region_padding,
-                envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000))
+                envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000),
+                rejected_out=_nonsyntenic, genome_name=genome_name)
+            _write_nonsyntenic_candidates(args, prefix, genome_name, _nonsyntenic)
             if _disp_seeds:
                 seed_hits = seed_hits + _disp_seeds
                 rescue_goi_genes = {extract_base_gene_id(h.get('query', ''))
@@ -5975,6 +6088,19 @@ def main():
                              "flanking to reach this, once a block has >= this many flanking "
                              "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
                              "Set 0 to disable the order gate (count-only, legacy).")
+    parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
+                        help="§1x: record GOI hits that clear the quality bar but are "
+                             "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
+                             "so the report can distinguish 'no ortholog found' from "
+                             "'found one, could not place it syntenically'. Default on.")
+    parser.add_argument("--classify_fallback_strong_min_identity_floor", type=float,
+                        default=30.0,
+                        help="§1v: absolute identity floor for the strong-flanking "
+                             "fallback->MEDIUM clause. Its qcov arm has no identity "
+                             "requirement, so without this a hit at any identity reached "
+                             "MEDIUM inside a flanking-rich block (yeast STE2: 32 MEDIUM "
+                             "at 21-27%%). Default 30 keeps the 34.7%% ant-melittin call "
+                             "and rejects the 21-27%% false positives. 0 = legacy.")
     parser.add_argument("--classify_tandem_min_qcov", type=float, default=0.35,
                         help="§A2: min query coverage for MEDIUM tandem_copy; a high-identity "
                              "but short local window (true low qcov) is demoted to LOW.")
@@ -5997,10 +6123,16 @@ def main():
     # is pre-sorted closest-first): closest genomes in small serial waves for
     # maximum seed propagation (the §A3 precondition), distant genomes in larger
     # waves for parallelism. Deterministic (pure function of the sorted order).
-    parser.add_argument("--rank_wave_binning", type=str2bool, default=False,
-                        help="§A4: bin waves by phylo-distance RANK/quantile instead of "
-                             "absolute-distance thresholds, so a saturated distance metric "
-                             "(tight clade) still grades close→far. Default off.")
+    parser.add_argument("--rank_wave_binning", type=str2bool, default=True,
+                        help="§A4 / F4: bin waves by phylo-distance RANK/quantile instead "
+                             "of absolute-distance thresholds. Default ON since 2026-07-26: "
+                             "the legacy binning compares ABSOLUTE cut-offs (0.05/0.15) "
+                             "against a divide-by-max NORMALISED distance, which is "
+                             "incoherent by construction — the farthest genome is always "
+                             "1.0, so the closest reaches the serial tier only if it is "
+                             ">=20x nearer. Measured over 44 runs on disk: legacy gave the "
+                             "closest genome a serial wave in 7, rank binning in 44. Pass "
+                             "false to restore the legacy behaviour.")
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
@@ -6137,6 +6269,8 @@ def main():
     # `flanking_support < high_min_collinear` waiver always fires (→ order never gates).
     CLASSIFY_THRESHOLDS["high_min_collinear"] = (
         args.classify_high_min_collinear if args.classify_high_min_collinear > 0 else 10 ** 9)
+    CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = (
+        args.classify_fallback_strong_min_identity_floor)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold

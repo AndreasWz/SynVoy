@@ -10,6 +10,7 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
+from sequence_utils import longest_collinear_run  # noqa: E402
 
 # No BioPython needed - we parse FASTA manually for genome length
 
@@ -100,6 +101,12 @@ def parse_args():
     # collinear genome stays strict; gated on identity+evalue and same-chromosome
     # synteny so paralogs / fold-analogues (biglycan, the structdisc lipase) are
     # still rejected. See target_rearrangement_score / qualifies_distant_macrosynteny_rescue.
+    parser.add_argument("--legacy_strand_score", action="store_true",
+                        help="F2: revert strand_consistency to the pre-2026-07-26 "
+                             "measure (fraction of hits on the cluster's own majority "
+                             "strand), which never compares against the home genome and "
+                             "so scores a fully inverted neighbourhood as perfectly "
+                             "conserved. Only for reproducing old numbers.")
     parser.add_argument("--disable_distant_synteny_rescue", action="store_true",
                         help="Disable the distant-macrosynteny GOI rescue (kill switch).")
     parser.add_argument("--distant_synteny_min_identity", type=float, default=40.0,
@@ -199,6 +206,33 @@ def resolve_species(species_map_path, genome_name):
                 return None
             return sanitized
     return None
+
+def load_home_strands(bed_file):
+    """Map each home flanking gene -> its strand, from column 6 of the synteny BED.
+
+    Needed by `score_flexible_synteny` to measure strand CONSERVATION (target vs home)
+    rather than the target's internal strand agreement — see the note there. Returns an
+    empty dict when the BED has no strand column, which makes the scorer fall back to
+    the legacy behaviour rather than silently scoring everything as conserved.
+    """
+    strands = {}
+    if not os.path.exists(bed_file):
+        return strands
+    try:
+        with open(bed_file) as fh:
+            for line in fh:
+                parts = line.strip().split('\t')
+                if len(parts) < 6 or parts[5] not in ('+', '-'):
+                    continue
+                name = parts[3]
+                clean = name.split('|')[0]
+                strands[clean] = parts[5]
+                if name != clean:
+                    strands[name] = parts[5]
+    except OSError as exc:
+        print(f"Error loading home strands: {exc}", file=sys.stderr)
+    return strands
+
 
 def load_synteny_map(bed_file):
     """
@@ -758,10 +792,23 @@ def cluster_hits_proximity(hits, gene_map, max_dist):
     clusters.append(current_cluster)
     return clusters
 
-def score_flexible_synteny(cluster, gene_map):
+def score_flexible_synteny(cluster, gene_map, home_strands=None):
     """
     Score a cluster based on synteny preservation.
     Returns: (unique_genes_count, consistency_score, strand_score)
+
+    `home_strands` maps a home gene -> its strand in the home genome. When supplied,
+    the third value measures true strand CONSERVATION: for each hit, whether its target
+    strand agrees with its home gene's, scored as the majority of agree/disagree so a
+    UNIFORMLY INVERTED neighbourhood still scores 1.0 (an inversion preserves relative
+    orientation; only scrambling breaks it). This mirrors how collinearity is scored in
+    both directions.
+
+    Without it the function falls back to the legacy measure — the fraction of hits on
+    the cluster's own majority strand — which never looks at the home genome at all and
+    therefore scores an entirely inverted neighbourhood identically to a conserved one.
+    That was a real defect: the value is weighted 0.3 of the quality score and is
+    documented as "strand conservation", which it was not measuring.
     """
     # 1. Unique Genes Coverage
     # Map hits to ranks
@@ -791,31 +838,20 @@ def score_flexible_synteny(cluster, gene_map):
     if not hit_ranks:
         return unique_genes, 0.0, 0.0
         
-    # 2. Consistency (Order preservation)
-    # Check if ranks are increasing (or decreasing if inverted)
-    # LIS (Longest Increasing Subsequence) could be used
-    # But simple pair consistency is faster/robust
-    
-    # Sort by target position (already filtered/clustered this way)
-    # hit_ranks is naturally sorted by t_pos
-    
+    # 2. Consistency (order preservation), measured as the longest monotonic run of
+    # home ranks over the hits in TARGET order, divided by the number of ranked hits.
+    #
+    # F5: this used to count adjacent monotonic PAIRS while the search core
+    # (iterative_search_runner) used a proper LIS — two different definitions of one
+    # concept, so a block could be judged collinear when it was seeded and
+    # non-collinear when it was ranked. Adjacent-pair counting is also fragile: a
+    # single transposed gene inside an otherwise perfect run breaks two pairs, whereas
+    # the LIS absorbs it as one skip. Both now call the same helper.
     if len(hit_ranks) < 2:
-        return unique_genes, 1.0, 1.0 # Single gene is consistent
-        
-    # Determine dominant direction
-    increasing = 0
-    decreasing = 0
-    for i in range(len(hit_ranks)-1):
-        r1 = hit_ranks[i]['rank']
-        r2 = hit_ranks[i+1]['rank']
-        if r2 > r1: increasing += 1
-        elif r2 < r1: decreasing += 1
-        
-    total_pairs = len(hit_ranks) - 1
-    if total_pairs > 0:
-        consistency = max(increasing, decreasing) / total_pairs
-    else:
-        consistency = 1.0
+        return unique_genes, 1.0, 1.0  # Single gene is consistent
+
+    run_len, _direction = longest_collinear_run([h['rank'] for h in hit_ranks])
+    consistency = run_len / len(hit_ranks)
         
     # 3. Strand Consistency
     # If Increasing (Home + -> Target +), Strands should match?
@@ -828,11 +864,30 @@ def score_flexible_synteny(cluster, gene_map):
     # If Target Block is -, query strands should be Inverted?
     # Simplify: Fraction of hits on the Majority Strand of the cluster.
     
-    plus_cnt = sum(1 for h in cluster if h['strand'] == '+')
-    minus_cnt = len(cluster) - plus_cnt
-    majority = max(plus_cnt, minus_cnt)
-    strand_cons = majority / len(cluster)
-    
+    if home_strands:
+        agree = disagree = 0
+        for h in cluster:
+            q = h.get('query', '')
+            hs = home_strands.get(q) or home_strands.get(q.split('|')[0])
+            if not hs or h.get('strand') not in ('+', '-'):
+                continue
+            if h['strand'] == hs:
+                agree += 1
+            else:
+                disagree += 1
+        scored = agree + disagree
+        if scored:
+            strand_cons = max(agree, disagree) / scored
+        else:
+            # No hit could be matched to a home strand — do not invent a score.
+            plus_cnt = sum(1 for h in cluster if h['strand'] == '+')
+            strand_cons = max(plus_cnt, len(cluster) - plus_cnt) / len(cluster)
+    else:
+        plus_cnt = sum(1 for h in cluster if h['strand'] == '+')
+        minus_cnt = len(cluster) - plus_cnt
+        majority = max(plus_cnt, minus_cnt)
+        strand_cons = majority / len(cluster)
+
     return unique_genes, consistency, strand_cons
 
 def estimate_pvalue(observed_score, cluster_hits, all_hits, genome_len, cluster_distance, score_func, gene_map, total_genes_expected,
@@ -893,6 +948,17 @@ def main():
     species_label = resolve_species(args.species_map, lookup_key)
 
     gene_map = load_synteny_map(args.synteny_bed)
+    # F2: home strands make `strand_consistency` measure conservation instead of the
+    # target's internal strand agreement. Empty (no strand column) -> legacy fallback.
+    home_strands = {} if getattr(args, 'legacy_strand_score', False) \
+        else load_home_strands(args.synteny_bed)
+    if home_strands:
+        print(f"INFO: strand conservation scored against {len(home_strands)} home "
+              f"gene strands (home-relative).", file=sys.stderr)
+    else:
+        print("WARN: no home strand column in the synteny BED — strand_consistency "
+              "falls back to the legacy target-majority measure, which does not "
+              "measure conservation.", file=sys.stderr)
     # gene_map contains alias keys (raw + cleaned IDs) that may point to the
     # same rank; coverage must use unique ranks, not raw key count.
     # Exclude GOI-derived entries from the denominator — those are the targets
@@ -997,7 +1063,8 @@ def main():
 
     scored_clusters = []
     for cl in clusters:
-        unique_genes, consistency, strand_cons = score_flexible_synteny(cl, gene_map)
+        unique_genes, consistency, strand_cons = score_flexible_synteny(
+            cl, gene_map, home_strands)
 
         cluster_chrom = cl[0]['chrom']
         cluster_start = min(h['start'] for h in cl)
@@ -1029,6 +1096,20 @@ def main():
                 cluster_start = min(cluster_start, anchor["start"])
                 cluster_end = max(cluster_end, anchor["end"])
 
+        # §1q: computed HERE, where the cluster coordinates are final (the block-anchor
+        # step above may have widened them) and BEFORE the distant-macrosynteny rescue
+        # gate below reads `strong_synteny`. It used to be assigned further down, after
+        # that read: the first GOI-overlapping cluster raised UnboundLocalError and every
+        # later one silently saw the PREVIOUS cluster's value. Both depend only on
+        # cluster_chrom/start/end, so hoisting is behaviour-preserving.
+        high_flanking_count = count_high_flanking(
+            cluster_chrom, cluster_start, cluster_end, high_flanking_intervals
+        )
+        strong_synteny = (
+            args.strong_synteny_min_flanking > 0
+            and high_flanking_count >= args.strong_synteny_min_flanking
+        )
+
         # Composite Score (coverage uses the block's flanking support when richer).
         effective_unique = max(unique_genes, goi_block_flanking)
         if total_genes_expected > 0:
@@ -1044,7 +1125,16 @@ def main():
             args.weight_strand * strand_cons
         )
 
-        final_score = quality_score * coverage_score
+        # `synteny_score` is the pure neighbourhood statistic: coverage, gene-order
+        # consistency and strand coherence, and nothing else. It is what the
+        # permutation test below is allowed to see.
+        synteny_score = quality_score * coverage_score
+
+        # `final_score` is the RANKING score. It may carry a GOI-overlap bonus and a
+        # rescue floor, both of which are prior knowledge injected by us rather than
+        # evidence measured from the neighbourhood — so they must never be tested
+        # against a null that cannot produce them (see below).
+        final_score = synteny_score
         if goi_overlap:
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
@@ -1071,23 +1161,26 @@ def main():
                     goi_identity = max(goi_identity, best_goi_id)
                     final_score = max(final_score, args.distant_synteny_rescue_score)
 
+        # Test `synteny_score`, NOT `final_score`. The null re-scores shuffled labels
+        # through `quality * coverage` and can never produce the +0.15 GOI-overlap
+        # bonus or the distant-rescue floor, so feeding it `final_score` compared an
+        # inflated observation against an un-inflated null and drove p to its floor.
+        # Measured before this fix: the identical cluster scored p=0.194 without the
+        # bonus and p=0.005 (the 1/201 floor) with it, and 55/130 region rows across
+        # the demo runs sat exactly at the floor — every one of them goi_overlap=True,
+        # and none of the 21 goi_overlap=False rows. That is the bug's signature, not
+        # biology. p now answers "is this neighbourhood's gene composition non-random",
+        # which is the only question the permutation test can actually pose.
         p_val = estimate_pvalue(
-            final_score, cl, hits, genome_len, args.cluster_distance,
-            score_flexible_synteny, gene_map, total_genes_expected,
+            synteny_score, cl, hits, genome_len, args.cluster_distance,
+            lambda c, gm: score_flexible_synteny(c, gm, home_strands),
+            gene_map, total_genes_expected,
             weight_base=args.weight_base,
             weight_consistency=args.weight_consistency,
             weight_strand=args.weight_strand,
             n=200, seed=42
         )
         
-        high_flanking_count = count_high_flanking(
-            cluster_chrom, cluster_start, cluster_end, high_flanking_intervals
-        )
-        strong_synteny = (
-            args.strong_synteny_min_flanking > 0
-            and high_flanking_count >= args.strong_synteny_min_flanking
-        )
-
         scored_clusters.append({
             'cluster': cl,
             'unique': effective_unique,
@@ -1096,6 +1189,7 @@ def main():
             'coverage_score': coverage_score,
             'quality_score': quality_score,
             'score': final_score,
+            'synteny_score': synteny_score,
             'p_value': p_val,
             'start': cluster_start,
             'end': cluster_end,
@@ -1289,6 +1383,10 @@ def main():
                     "end": best["end"],
                     "strand": region_strand,
                     "score": best["score"],
+                    # The statistic the permutation test actually saw: `score` minus
+                    # the GOI-overlap bonus / rescue floor. Emitted so `p_value` can
+                    # be checked against the number it was computed from.
+                    "synteny_score": best.get("synteny_score", best["score"]),
                     "quality_score": best["quality_score"],
                     "coverage_score": best["coverage_score"],
                     "unique_genes": best["unique"],
@@ -1299,6 +1397,12 @@ def main():
                     "goi_overlap": bool(best.get("goi_overlap")),
                     "is_goi_anchor": bool(best.get("is_goi_anchor")),
                     "high_flanking_count": best.get("high_flanking_count", 0),
+                    # §1u: this is the PRIMARY sort key (regions are ordered by
+                    # -goi_block_flanking, then -score, then p_value). Without it in
+                    # the output, the region order a user sees cannot be reconstructed
+                    # from any file — a lower-scoring region legitimately outranking a
+                    # higher-scoring one looked like a bug with no way to check.
+                    "goi_block_flanking": best.get("goi_block_flanking", 0),
                     "region_class": region_class,
                     "goi_missing": goi_missing_strong,
                     "confidence": confidence,
@@ -1332,6 +1436,7 @@ def main():
             "end",
             "strand",
             "score",
+            "synteny_score",
             "quality_score",
             "coverage_score",
             "unique_genes",
@@ -1342,6 +1447,7 @@ def main():
             "goi_overlap",
             "is_goi_anchor",
             "high_flanking_count",
+            "goi_block_flanking",
             "region_class",
             "goi_missing",
             "confidence",

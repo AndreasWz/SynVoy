@@ -881,3 +881,39 @@ if __name__ == '__main__':
                 print(f"  ... and more")
                 break
             print(f"  {clean_id}: {len(seq)} bp")
+
+
+def longest_collinear_run(ranks):
+    """Longest monotonic (non-decreasing OR non-increasing) subsequence of home ranks.
+
+    Single source of truth for "how collinear is this set of anchors". `None` entries
+    (GOI proxies, unmapped genes) are ignored. Returns (length, direction) with '+' for
+    increasing and '-' for decreasing; ties favour '+'.
+
+    Both halves of the pipeline must agree on this. Before it lived here, the search
+    core scored collinearity with a proper LIS while the region scorer used a fraction
+    of adjacent monotonic PAIRS — two different definitions of one concept, so a block
+    could be judged collinear when seeding and non-collinear when ranking. Adjacent-pair
+    counting is also fragile: one transposed gene in the middle of an otherwise perfect
+    run breaks two pairs, while an LIS absorbs it as a single skip.
+    """
+    vals = [r for r in ranks if r is not None]
+    n = len(vals)
+    if n <= 1:
+        return n, '+'
+
+    def _lis_non_decreasing(seq):
+        m = len(seq)
+        dp = [1] * m
+        best = 1
+        for i in range(m):
+            for j in range(i):
+                if seq[j] <= seq[i] and dp[j] + 1 > dp[i]:
+                    dp[i] = dp[j] + 1
+            if dp[i] > best:
+                best = dp[i]
+        return best
+
+    inc = _lis_non_decreasing(vals)
+    dec = _lis_non_decreasing(list(reversed(vals)))
+    return (inc, '+') if inc >= dec else (dec, '-')

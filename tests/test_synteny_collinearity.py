@@ -99,6 +99,36 @@ def test_can_bridge_rejects_direction_break():
     assert not isr._can_bridge(block, cand, home_rank, max_rank_gap=5, min_anchors=3)
 
 
+def test_can_bridge_accepts_uniformly_inverted_block():
+    """A wholly inverted neighbourhood bridges — only a direction REVERSAL is refused.
+
+    The docstring used to claim "inversions are deliberately not bridged", which is
+    wrong: _can_bridge takes the direction from the BLOCK's own anchors, so a block
+    running g5,g4,g3 continues correctly into g2. Pinning it so the wrong reading
+    cannot come back (docs corrected 2026-07-21).
+    """
+    home_rank = {"g1": 1, "g2": 2, "g3": 3, "g4": 4, "g5": 5}
+    block = _block([("g5", 0), ("g4", 100), ("g3", 200)], home_rank)
+    cand = {"query": "g2", "chrom": "chr1", "start": 9999, "end": 10999}
+    assert isr._can_bridge(block, cand, home_rank, max_rank_gap=5, min_anchors=3)
+
+
+def test_bridge_spans_gap_for_inverted_neighbourhood():
+    """End-to-end counterpart: inverted anchors either side of a 2.8 Mb gap = ONE block."""
+    home_rank = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5}
+    hits = [{"query": q, "chrom": "chr1", "start": s, "end": s + 5000,
+             "strand": "+", "bits": 100}
+            for q, s in [("F", 100_000), ("E", 150_000), ("D", 200_000),
+                         ("C", 3_000_000), ("B", 3_050_000), ("A", 3_100_000)]]
+    blocks = isr.identify_synteny_blocks(
+        hits, max_intron=20_000, cluster_distance=150_000, home_rank=home_rank,
+        bridge_max_gap=6_000_000, bridge_max_rank_gap=5, bridge_min_anchors=3)
+    assert len(blocks) == 1
+    assert blocks[0]["bridged"] is True
+    assert blocks[0]["collinear_chain_len"] == 6
+    assert blocks[0]["collinear_direction"] == "-"
+
+
 # --------------------------------------------------------------------------- #
 # build_home_rank
 # --------------------------------------------------------------------------- #

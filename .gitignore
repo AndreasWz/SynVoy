@@ -56,6 +56,10 @@ scratch/
 docs/LOCAL_PLAN.md
 docs/BENCHMARK_PLAN.md
 docs/TODO.md
+docs/HOW_IT_WORKS.md
+docs/analysis/
+# Presentation assets (slide figures, talk material) — not part of the pipeline.
+figures/
 benchmark_results/
 # scripts/benchmark/ is now tracked — wrappers are part of the paper-supporting code.
 # Genome data + truth files stay ignored (large/curated, kept out of git).
@@ -64,3 +68,8 @@ tmp/
 .claude/
 CLAUDE.md
 meeting_notes.txt
+
+# Talk material and one-off backups — same category as figures/, not pipeline code.
+*.pptx
+*_slide.png
+lrz_backup_*/
