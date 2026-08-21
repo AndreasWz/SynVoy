@@ -5,6 +5,26 @@ family into its three syntenic loci?* Source run: `results/tp53_15042026/` (quer
 human TP53, easy mode, 6 vertebrate target genomes). Analysis is static over the
 captured per-locus homology TSVs — no rerun. Date: 2026-05-27.
 
+> **Status update (2026-07-26): the two fixes this document asks for have landed;
+> the re-score it recommends has not been done.**
+>
+> - **§1j reciprocal-best check — implemented.** `bin/reciprocal_best_paralog_check.py`
+>   SW-aligns each recovered target against every home paralog;
+>   `generate_report.py` flags a call whose best-matching paralog differs from the
+>   per-cell modal one as `paralog_confusion` in the `self_consistency` block.
+>   Single-paralog queries are an automatic no-op. Toggle: `--disable_paralog_check`.
+> - **Locus ownership (§1m) — implemented, and goes further than §1j.** The home-paralog
+>   panel is built from the whole home proteome (`bin/build_home_paralog_panel.py`), so a
+>   call whose best home match is a *family paralog* rather than the GOI is relabelled
+>   `paralog_not_goi` and **excluded from the headline HIGH/MEDIUM counts** — it is
+>   demoted, not merely flagged. Toggle: `--disable_locus_ownership`.
+> - **§2a eggNOG OG-gating — not implemented.** No eggNOG code exists in the repo.
+> - **The recommended re-run was never scored.** The TP53 target genomes were removed
+>   from disk, so reproducing §2's MEDIUM-bleed numbers needs a refetch first. Until
+>   then, treat every number below as describing the **pre-§1j/§1m** behaviour: the
+>   MEDIUM family bleed it measures is precisely what those two fixes target, so the
+>   figures here are an upper bound on the problem, not the current state.
+
 ## 1. Home-locus separation — clean ✅
 
 `split_loci.py` split the TP53 query into **three home loci that land on the correct

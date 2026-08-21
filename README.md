@@ -79,6 +79,7 @@ SynVoy reads the species from the accession and downloads its reference genome p
 | `--home_genome` | The genome the gene comes from (FASTA). |
 | `--home_gff` | That genome's **gene annotation** (a GFF3 file listing where its genes are). *Optional but recommended:* with it, SynVoy reads the real neighbouring genes; without it, it predicts them, which is less accurate. |
 | `--target_genomes` | The genomes to search. Simplest: a **folder** of genome FASTAs — `genomes/` uses every `.fna`/`.fa`/`.fasta` inside it (other files like GFF/TSV are ignored). You can also pass a quoted glob (`"genomes/*.fna"`) or a comma-separated list. SynVoy stops with a clear error if it finds no genomes. |
+| `--target_gffs` | *Optional.* Annotations for the **target** genomes — a second folder, glob, or comma-list. Because `--target_genomes` is FASTA-only, target GFFs go here, not alongside the genomes. With them, results tell you *which annotated gene* each hit landed on instead of only a sequence identity. Matched by filename stem or assembly accession. |
 
 ### On a powerful machine
 

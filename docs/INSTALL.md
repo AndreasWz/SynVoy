@@ -63,8 +63,17 @@ augustus --version
 iqtree2 --version || iqtree --version
 datasets version
 esearch -version
-python -c "import Bio; import plotly; import ete3; import taxopy; import parasail; import psutil; print('Python deps OK')"
+python -c "import Bio, plotly, ete3, taxopy, psutil, numpy; print('Python deps OK')"
+
+# parasail deserves a functional test, not just an import: it can import fine and
+# still fail to load its C extension, and it is the dep most often shadowed by a
+# stray virtualenv. Smith-Waterman is load-bearing for divergent genes, and the
+# pipeline now aborts rather than silently searching without it.
+python -c "import parasail; parasail.sw_trace_striped_16('AAAA','AAAA',10,1,parasail.blosum62); print('parasail OK')"
 ```
+
+`./install.sh` runs exactly these checks (plus the parasail alignment probe) and
+reports anything missing, so running it is the shorter path.
 
 If any tool is missing, re-create the environment:
 
@@ -93,6 +102,12 @@ For Singularity (common on HPC):
 nextflow run main.nf -profile singularity --mode easy --query_id Q16553 --outdir results
 ```
 
+> **This is the one path where `./run_synvoy.sh` does not apply.** The launcher
+> activates `synvoy_env` and aborts if conda/mamba or the env is absent, so on a
+> genuinely conda-free machine you must call `nextflow run main.nf` yourself. If you
+> *do* have the conda env and are only choosing a container for the tools, prefer
+> `./run_synvoy.sh -profile docker …` — the pre-flight checks still apply.
+
 ---
 
 ## HPC / standalone Nextflow (no conda)
@@ -116,4 +131,4 @@ With `-profile standard`, the conda env is mandatory.
 
 ## Troubleshooting
 
-See [USAGE.md](USAGE.md#troubleshooting) for common installation and runtime issues.
+See [USAGE.md § 8](USAGE.md#8-troubleshooting) for common installation and runtime issues.

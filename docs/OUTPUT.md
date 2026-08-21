@@ -117,10 +117,17 @@ For a quick health check:
 python3 -c "
 import json; d=json.load(open('synvoy_report.json'))
 s=d['summary']
-print(f'Genomes searched: 19, GOI absent in: {len(s[\"goi_absent_genomes\"])}')
+print(s.get('headline', ''))
+print(f'GOI absent in: {len(s[\"goi_absent_genomes\"])} genome(s)')
 print(f'Confidence: {d[\"annotations\"][\"goi_confidence_counts\"]}')
+print(f'Self-consistency flags: {s.get(\"self_consistency_flag_count\", 0)}')
 "
 ```
+
+> Read `headline` / `headline_metric` rather than `total_raw_search_hits`. The latter
+> counts raw `.m8` search hits and is often `0` on a perfectly good run — it is a
+> plumbing diagnostic, not a result. Check `self_consistency.flags` too: it surfaces
+> strong-synteny-but-no-GOI cells, cross-locus duplicates, and paralog confusion.
 
 ---
 
@@ -128,15 +135,19 @@ print(f'Confidence: {d[\"annotations\"][\"goi_confidence_counts\"]}')
 
 | File | When to use |
 |---|---|
-| `<locus>_anchor_grid.html` | **The headline figure.** Species × gene grid — rows are species (NCBI-tax order, tree at left), columns are home-genome genes, the GOI in red. Arrows shaded by % identity, styled by confidence (solid HIGH / dashed MEDIUM / striped LOW / open circle = not found). The fastest "which species have the ortholog, and where does it sit in the neighbourhood?" view. Emitted by default (`--no_anchor_grid` to skip). |
+| `<locus>_anchor_grid.html` | **The headline figure.** Species × gene grid — rows are species (NCBI-tax order, tree at left), columns are home-genome genes, the GOI in red. Arrows shaded by % identity, styled by confidence (solid HIGH / dashed MEDIUM / striped LOW / open circle = not found). The fastest "which species have the ortholog, and where does it sit in the neighbourhood?" view. Always emitted — `bin/plot_synteny.py` has a `--no_anchor_grid` switch, but the Nextflow module does not forward it, so there is no pipeline flag to turn it off. |
 | `<locus>_synteny_plot.html` | Interactive track-style plot (legacy). Best for an exploratory single-locus view with ribbons between flanking orthologs. Resolved-vs-ambiguous GOIs distinguished by hatched fill. |
 | `<locus>_synteny_plot_view.svg` | **Static SVG mirror of the HTML** (auto-generated). Same layout, same colours, drops cleanly into READMEs / Word / Inkscape. CSS is CDATA-embedded so the file is fully standalone. |
 | `<locus>_synteny_plot.svg` | Narrow publication-format SVG. Render with `--pub_svg`. Different layout (vertical, condensed) optimised for two-column journal figures. |
 | `<locus>_tree.html` | Standalone phylogenetic tree of the GOI sequences. Midpoint-rooted, with subclade colouring matching the matrix plot. |
-| **(matrix plot)** | Run `bin/plot_synteny_matrix.py` separately on the same `plot_inputs_*` directory — gives a phylogeny-anchored matrix view of all species at once, with HIGH/MEDIUM/LOW confidence visually distinct. The fastest "is the gene present in this clade?" view. |
+| `<locus>_synteny_matrix.svg` | Phylogeny-anchored presence/absence matrix — all species at once, HIGH/MEDIUM/LOW visually distinct. The fastest "is the gene present in this clade?" view. **Opt-in:** re-run with `--enable_matrix_plot true`, since the anchor grid covers the same ground more compactly. You can also run `bin/plot_synteny_matrix.py` by hand on an existing `plot_inputs_*` directory. |
+| `<locus>_gene_positions.html` / `.svg` | **Gene-position map.** Each genome is a backbone line carrying one dot per gene at its *true* normalised position, coloured by home ortholog. The anchor grid answers "is the ortholog present?"; this answers "where does it sit, and is the neighbourhood rearranged?" — the spacing, gaps and inversions the aligned columns hide. |
+| `<locus>_anchor_positions.html` / `.svg` | The two views combined: the aligned column grid, with each row also carrying a faint real-position dot-line and slanted leaders down to its columns. Shares the palette and tree panel with the anchor grid. |
+| `<locus>_anchor_grid.svg` | Static SVG mirror of the anchor grid, for figures. |
 
-For paper figures, prefer the SVG export (`--pub_svg` flag) and the matrix
-plot — both render cleanly at print size.
+For paper figures, prefer the SVG export (`--pub_svg true`, width via
+`--pub_width_mm`, palette via `--pub_palette`) and the matrix plot — both render
+cleanly at print size.
 
 ---
 
@@ -154,7 +165,19 @@ behaved unexpectedly:
 | `annotate_goi/` | GOI exon structure (`goi_exons.faa`, `goi_annotation.bed`, `goi_info.json`) |
 | `phylo_sort/` | Phylogenetic ordering of target genomes (closest first) |
 | `initial_db/` | The starting MMseqs2 query DB (flanking genes + GOI) |
+| `resolve_home_locus/` | Name-lookup home locus resolution (only when `--enable_name_locus` / `--home_goi_gene` is used) — the matched gene, its span, and the query↔gene consistency score |
 | `qc/` | Per-genome quality-control flags |
+
+`intermediate/` is **always** written — every stage publishes into it unconditionally.
+(`--keep_intermediate` is declared in `nextflow.config` but currently read by no
+process, so it does not gate this.)
+
+Two files here are worth knowing about even on a healthy run:
+
+| File | Why |
+|---|---|
+| `locate_gene/hit_profile.json` | The hit distribution SynVoy read off `LOCATE_GENE`. |
+| `locate_gene/auto_preset.json` + `effective_params.json` | Which biology preset was auto-selected from that profile, and the merged parameter set the downstream steps actually ran with. Check here first when a run behaves as if a parameter you passed was ignored — with auto-apply on (the default), the preset's value wins for preset-covered params. |
 
 ---
 

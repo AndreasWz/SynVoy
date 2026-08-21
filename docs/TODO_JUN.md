@@ -6,6 +6,17 @@ P01501; `local_runs/melittin_reg` = 5 bees) against NCBI / on-disk ground truth,
 independent subagent verification of every claim. Companion to `docs/TODO.md` (this file is
 the actionable next-step list; §-numbers below map back to `docs/TODO.md` where relevant).
 
+> **Historical working document — dated 2026-06-09, not maintained.** Per-item ✅ markers
+> below record what shipped. As of 2026-07-26 the outstanding items are:
+> **A4** (rank-based wave binning) — *implemented but opt-in*, `--rank_wave_binning true`,
+> default off pending validation; **A5** (eggNOG OG-gating) — *not implemented*, no eggNOG
+> code exists in the repo. Everything else marked ✅ is in the codebase.
+>
+> **Note for readers on GitHub:** `docs/TODO.md`, referenced throughout, is a local
+> working file excluded by `.gitignore` and is not published. The §-numbers are internal
+> cross-references; the user-facing behaviour they describe is documented in
+> [USAGE.md](USAGE.md) and [PARAMETERS.md](PARAMETERS.md).
+
 ---
 
 ## HUMAN INPUT
