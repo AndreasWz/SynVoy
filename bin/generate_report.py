@@ -53,6 +53,13 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
 def _is_true(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
@@ -477,6 +484,85 @@ def _dir_diagnostics(dir_path, patterns, sample_size=5):
         "patterns": list(patterns),
         "sample_entries": entries[:sample_size],
         "sample_matches": [os.path.basename(m) for m in matches[:sample_size]],
+    }
+
+
+NONSYNTENIC_SUFFIX = ".nonsyntenic.tsv"
+
+
+def collect_nonsyntenic_candidates(paths):
+    """§1x: load the GOI hits that cleared the quality bar and were then refused by a
+    synteny gate.
+
+    These are the run's *false negatives that it knows about*. Refusing a hit whose
+    neighbourhood cannot be confirmed is the correct call — at 250 My a translocated
+    ortholog is genuinely indistinguishable from a paralog by synteny alone — but the
+    old behaviour reported such a genome as "no ortholog" while holding a 54-72 %
+    identity hit sitting inside the real gene. `goi_absent` and
+    `goi_found_but_not_syntenic` are scientifically opposite claims and must not share
+    a field.
+
+    Returns (records, per_genome_map). Malformed or unreadable files are skipped rather
+    than failing the report — this is diagnostic output, never a reason to lose a run.
+    """
+    records, per_genome = [], {}
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if not row.get("chrom"):
+                        continue
+                    genome = canonical_genome_id(
+                        row.get("genome") or os.path.basename(path).split(NONSYNTENIC_SUFFIX)[0])
+                    rec = {
+                        "genome": genome,
+                        "query": row.get("query", ""),
+                        "chrom": row.get("chrom", ""),
+                        "start": _safe_int(row.get("start")),
+                        "end": _safe_int(row.get("end")),
+                        "identity": _safe_float(row.get("identity")),
+                        "evalue": row.get("evalue", ""),
+                        "alnlen": _safe_int(row.get("alnlen")),
+                        "rejected_by": row.get("rejected_by", ""),
+                        "nearest_anchor_gene": row.get("nearest_anchor_gene", ""),
+                        "nearest_anchor_bp": _safe_int(row.get("nearest_anchor_bp")),
+                        "nearest_anchor_same_chrom":
+                            str(row.get("nearest_anchor_same_chrom", "")).lower() == "true",
+                    }
+                    records.append(rec)
+                    per_genome.setdefault(genome, []).append(rec)
+        except (OSError, csv.Error):
+            continue
+    records.sort(key=lambda r: (-r["identity"], r["genome"], r["chrom"], r["start"]))
+    return records, per_genome
+
+
+def summarize_nonsyntenic_candidates(records, per_genome):
+    """Report block for §1x. `best_per_genome` is what a reader should look at: the
+    strongest hit we found and declined to call, per genome."""
+    by_gate = {}
+    for r in records:
+        by_gate[r["rejected_by"]] = by_gate.get(r["rejected_by"], 0) + 1
+    best = {}
+    for genome, recs in per_genome.items():
+        top = max(recs, key=lambda r: r["identity"])
+        best[genome] = {
+            "chrom": top["chrom"], "start": top["start"], "end": top["end"],
+            "identity": top["identity"], "rejected_by": top["rejected_by"],
+            "nearest_anchor_bp": top["nearest_anchor_bp"],
+            "nearest_anchor_same_chrom": top["nearest_anchor_same_chrom"],
+        }
+    return {
+        "total": len(records),
+        "genomes": sorted(per_genome),
+        "by_gate": by_gate,
+        "best_per_genome": best,
+        "note": ("GOI hits that passed the identity/e-value/alignment-length bar but "
+                 "were refused by a synteny gate. Not orthology calls: at long "
+                 "divergences a translocated ortholog and a paralog are "
+                 "indistinguishable by gene order. Listed so a genome with a strong "
+                 "unplaceable hit is not read as a genome with no hit."),
+        "candidates": records,
     }
 
 
@@ -1131,11 +1217,19 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "gff": (".gff", ".gff3"),
     })
     scores_scan = scan_dir_by_suffix(scores_dir, {"scores": (".scores.tsv",)})
-    hits_scan = scan_dir_by_suffix(hits_dir, {"hits": (".m8",)})
+    # §1x candidates ride along in hits/ (staged wholesale by generate_report.nf),
+    # so they need no channel of their own.
+    hits_scan = scan_dir_by_suffix(
+        hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,)})
     fasta_files = regions_scan["fasta"]
     gff_files = regions_scan["gff"]
     score_files = scores_scan["scores"]
     hit_files = hits_scan["hits"]
+    nonsyntenic_files = hits_scan["nonsyntenic"]
+    nonsyntenic_records, nonsyntenic_by_genome = collect_nonsyntenic_candidates(
+        nonsyntenic_files)
+    nonsyntenic_block = summarize_nonsyntenic_candidates(
+        nonsyntenic_records, nonsyntenic_by_genome)
 
     staging_diagnostics = build_staging_diagnostics(
         results_dir,
@@ -1269,6 +1363,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "annotations": annotation_summary,
         "regions": region_summary,
         "goi_dedup": goi_dedup,
+        # §1x — the run's known false negatives: strong GOI hits it refused on synteny
+        # grounds and used to discard in silence.
+        "rejected_candidates": nonsyntenic_block,
         "self_consistency": self_consistency,
         "staging_diagnostics": staging_diagnostics,
         "summary": {
@@ -1304,7 +1401,21 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "ambiguous_goi_annotations": annotation_summary["goi_class_counts"].get("ambiguous_goi_family_member", 0),
             "fallback_goi_annotations": annotation_summary["fallback_goi_annotations"],
             "low_confidence_regions": region_summary["confidence_counts"].get("LOW", 0),
-            "goi_absent_genomes": annotation_summary["genomes_without_goi"],
+            # §1x: "we found nothing" and "we found something and could not place it"
+            # are opposite claims. goi_absent_genomes is now the former ONLY; a genome
+            # holding a strong-but-unplaceable hit moves to goi_found_but_not_syntenic.
+            # Derived from the genomes that produced no GOI call, which is NOT the same
+            # set as genomes_without_goi: a genome whose search emitted no GFF at all
+            # never reaches that list, yet is exactly the case where a refused hit is
+            # the only thing we know about it.
+            "goi_absent_genomes": sorted(
+                g for g in annotation_summary["genomes_without_goi"]
+                if g not in nonsyntenic_by_genome),
+            "goi_found_but_not_syntenic": sorted(
+                set(nonsyntenic_by_genome) - {
+                    row["genome"] for row in annotation_summary["per_genome"]
+                    if row.get("goi_annotations", 0) > 0}),
+            "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
             "staging_empty": staging_diagnostics["empty"],

@@ -196,6 +196,214 @@ def paramBool(value) {
     return text in ['true', '1', 'yes', 'y', 'on']
 }
 
+// --- Numeric parameter validation (docs/TODO.md §1s) -------------------------
+// Nextflow types a value from `nextflow.config` by its literal (9.5 -> Double)
+// but types EVERY `--param value` from the command line as a **String**. Groovy
+// refuses to order a String against a Number, so a range check that is silent
+// for the config value aborts the whole run for the identical value passed as a
+// flag:
+//
+//     $ nextflow run main.nf --mmseqs_sensitivity 9.5
+//     ERROR ~ Cannot compare java.lang.String with value '9.5'
+//             and java.lang.Integer with value '1'
+//
+// It fails in the validation block, i.e. before any work starts, and the message
+// names neither the parameter nor the fact that the value is fine — so the whole
+// numeric surface of the CLI looked broken. `num()` below coerces first, which
+// makes config and CLI behave identically and turns unparseable input into a
+// normal validation error instead of a stack trace.
+//
+// Living in its own method also keeps ~130 lines out of the `workflow {}` body,
+// which is at the JVM 64 kB method-size limit (see CLAUDE.md §17).
+def validateNumericParams(validationErrors, validationWarnings) {
+    // Coerce to a Number. `safe` is an in-range stand-in used when the value is
+    // unparseable, so one bad flag yields one clear error instead of cascading
+    // range complaints about a value we could not read.
+    def num = { String name, value, Number safe ->
+        if (value instanceof Number) {
+            return value
+        }
+        if (value == null) {
+            return safe
+        }
+        def text = value.toString().trim()
+        if (!text) {
+            return safe
+        }
+        try {
+            return new BigDecimal(text)
+        } catch (NumberFormatException e) {
+            validationErrors << "Invalid --${name} '${text}'. Expected a number."
+            return safe
+        }
+    }
+
+    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
+        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
+    }
+
+    def nFlanking = num.call('n_flanking_genes', params.n_flanking_genes, 1)
+    if (nFlanking < 1) {
+        validationErrors << "Invalid --n_flanking_genes (${params.n_flanking_genes}). Must be >= 1."
+    }
+    def minSynteny = num.call('min_synteny_score', params.min_synteny_score, 0)
+    if (minSynteny < 0 || minSynteny > 1) {
+        validationErrors << "Invalid --min_synteny_score (${params.min_synteny_score}). Must be between 0 and 1."
+    }
+    def minHitIdentity = num.call('min_hit_identity', params.min_hit_identity, 0)
+    if (minHitIdentity < 0 || minHitIdentity > 100) {
+        validationErrors << "Invalid --min_hit_identity (${params.min_hit_identity}). Must be between 0 and 100."
+    }
+    def minHitLength = num.call('min_hit_length', params.min_hit_length, 1)
+    if (minHitLength < 1) {
+        validationErrors << "Invalid --min_hit_length (${params.min_hit_length}). Must be >= 1."
+    }
+    def searchEvalue = num.call('search_evalue', params.search_evalue, 1)
+    if (searchEvalue <= 0) {
+        validationErrors << "Invalid --search_evalue (${params.search_evalue}). Must be > 0."
+    }
+    def maxIntron = num.call('max_intron', params.max_intron, 0)
+    if (maxIntron < 0) {
+        validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
+    }
+    def clusterDistance = num.call('cluster_distance', params.cluster_distance, 0)
+    if (clusterDistance < 0 && clusterDistance != -1) {
+        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
+    }
+    def mmseqsSensitivity = num.call('mmseqs_sensitivity', params.mmseqs_sensitivity, 7)
+    if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
+        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
+    }
+    def swTimeout = num.call('sw_timeout_seconds', params.sw_timeout_seconds, 1)
+    if (swTimeout < 1) {
+        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
+    }
+    if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
+        validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
+    }
+    def swMinIdentity = num.call('sw_min_identity', params.sw_min_identity, 0)
+    if (swMinIdentity < 0 || swMinIdentity > 100) {
+        validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
+    }
+    def regionPadding = num.call('region_padding', params.region_padding, 0)
+    def paddingMin = num.call('padding_min', params.padding_min, 0)
+    def paddingMax = num.call('padding_max', params.padding_max, 0)
+    if (regionPadding < 0 || paddingMin < 0 || paddingMax < 0) {
+        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
+    }
+    if (paddingMax < paddingMin) {
+        validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
+    }
+    def maxBlocks = num.call('max_blocks_per_genome', params.max_blocks_per_genome, 0)
+    if (maxBlocks < 0) {
+        validationErrors << "Invalid --max_blocks_per_genome (${params.max_blocks_per_genome}). Must be >= 0."
+    }
+    def minBlockGenes = num.call('min_block_genes', params.min_block_genes, 1)
+    if (minBlockGenes < 1) {
+        validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
+    }
+    def maxFlankSim = num.call('max_flanking_goi_similarity', params.max_flanking_goi_similarity, 0)
+    if (maxFlankSim < 0 || maxFlankSim > 100) {
+        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
+    }
+    def minFlankSize = num.call('min_flanking_size', params.min_flanking_size, 0)
+    if (minFlankSize < 0) {
+        validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
+    }
+    def badQualityTimeout = num.call('bad_quality_timeout', params.bad_quality_timeout, 0)
+    if (badQualityTimeout < 0) {
+        validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
+    }
+
+    // Classification thresholds
+    def classifyHigh = num.call('classify_high_min_identity', params.classify_high_min_identity, 0)
+    if (classifyHigh < 0 || classifyHigh > 100) {
+        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
+    }
+    def classifyMedium = num.call('classify_medium_min_identity', params.classify_medium_min_identity, 0)
+    if (classifyMedium < 0 || classifyMedium > 100) {
+        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
+    }
+    def classifyTandem = num.call('classify_tandem_min_identity', params.classify_tandem_min_identity, 0)
+    if (classifyTandem < 0 || classifyTandem > 100) {
+        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
+    }
+    def fragmentMaxQcov = num.call('classify_fragment_max_qcov', params.classify_fragment_max_qcov, 0)
+    if (fragmentMaxQcov < 0 || fragmentMaxQcov > 1) {
+        validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
+    }
+    def completeMinQcov = num.call('classify_complete_min_qcov', params.classify_complete_min_qcov, 1)
+    if (completeMinQcov < 0 || completeMinQcov > 1) {
+        validationErrors << "Invalid --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Must be between 0 and 1."
+    }
+    if (fragmentMaxQcov >= completeMinQcov) {
+        validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
+    }
+
+    // Gene predictor validation
+    if (!(params.gene_predictor in ['auto', 'augustus', 'prodigal'])) {
+        validationErrors << "Invalid --gene_predictor (${params.gene_predictor}). Must be 'auto', 'augustus', or 'prodigal'."
+    }
+
+    // PLM embedding search thresholds
+    if (paramBool(params.enable_plm_search)) {
+        if (!(params.plm_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
+        }
+        def plmSimilarity = num.call('plm_similarity_threshold', params.plm_similarity_threshold, 0)
+        if (plmSimilarity < 0 || plmSimilarity > 1) {
+            validationErrors << "Invalid --plm_similarity_threshold (${params.plm_similarity_threshold}). Must be between 0 and 1."
+        }
+        def plmMedium = num.call('plm_medium_threshold', params.plm_medium_threshold, 0)
+        if (plmMedium < 0 || plmMedium > 1) {
+            validationErrors << "Invalid --plm_medium_threshold (${params.plm_medium_threshold}). Must be between 0 and 1."
+        }
+        def plmHigh = num.call('plm_high_threshold', params.plm_high_threshold, 1)
+        if (plmHigh < 0 || plmHigh > 1) {
+            validationErrors << "Invalid --plm_high_threshold (${params.plm_high_threshold}). Must be between 0 and 1."
+        }
+        if (plmMedium >= plmHigh) {
+            validationWarnings << "PLM thresholds: --plm_medium_threshold (${params.plm_medium_threshold}) >= --plm_high_threshold (${params.plm_high_threshold})."
+        }
+    }
+
+    // Structural search (ESMFold + Foldseek) thresholds
+    if (paramBool(params.enable_structural_search)) {
+        if (!(params.structural_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
+        }
+        def structTm = num.call('structural_tm_threshold', params.structural_tm_threshold, 0)
+        if (structTm < 0 || structTm > 1) {
+            validationErrors << "Invalid --structural_tm_threshold (${params.structural_tm_threshold}). Must be between 0 and 1."
+        }
+        def structMedium = num.call('structural_medium_threshold', params.structural_medium_threshold, 0)
+        if (structMedium < 0 || structMedium > 1) {
+            validationErrors << "Invalid --structural_medium_threshold (${params.structural_medium_threshold}). Must be between 0 and 1."
+        }
+        def structHigh = num.call('structural_high_threshold', params.structural_high_threshold, 1)
+        if (structHigh < 0 || structHigh > 1) {
+            validationErrors << "Invalid --structural_high_threshold (${params.structural_high_threshold}). Must be between 0 and 1."
+        }
+        if (structMedium >= structHigh) {
+            validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
+        }
+        def structMaxLength = num.call('structural_max_length', params.structural_max_length, 10)
+        if (structMaxLength < 10) {
+            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
+        }
+    }
+
+    // Synteny scoring weights should sum to ~1. These need coercion too: with a
+    // String from the CLI, `+` is string CONCATENATION ("0.4" + 0.3 -> "0.40.3")
+    // and the subtraction below then throws instead of comparing.
+    def weightSum = num.call('synteny_weight_base', params.synteny_weight_base, 0) +
+                    num.call('synteny_weight_consistency', params.synteny_weight_consistency, 0) +
+                    num.call('synteny_weight_strand', params.synteny_weight_strand, 0)
+    if (Math.abs(weightSum - 1.0) > 0.01) {
+        validationWarnings << "Synteny score weights sum to ${weightSum} (expected ~1.0). Scoring may behave unexpectedly."
+    }
+}
+
 def flattenNestedList(value) {
     if (!(value instanceof List)) {
         return [value]
@@ -486,135 +694,9 @@ workflow {
     validateTargetGffs(validationErrors, validationWarnings)
 
     // --- Universal parameter range validation ---
-    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
-        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
-    }
-    if (params.n_flanking_genes < 1) {
-        validationErrors << "Invalid --n_flanking_genes (${params.n_flanking_genes}). Must be >= 1."
-    }
-    if (params.min_synteny_score < 0 || params.min_synteny_score > 1) {
-        validationErrors << "Invalid --min_synteny_score (${params.min_synteny_score}). Must be between 0 and 1."
-    }
-    if (params.min_hit_identity < 0 || params.min_hit_identity > 100) {
-        validationErrors << "Invalid --min_hit_identity (${params.min_hit_identity}). Must be between 0 and 100."
-    }
-    if (params.min_hit_length < 1) {
-        validationErrors << "Invalid --min_hit_length (${params.min_hit_length}). Must be >= 1."
-    }
-    if (params.search_evalue <= 0) {
-        validationErrors << "Invalid --search_evalue (${params.search_evalue}). Must be > 0."
-    }
-    if (params.max_intron < 0) {
-        validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
-    }
-    if (params.cluster_distance < 0 && params.cluster_distance != -1) {
-        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
-    }
-    if (params.mmseqs_sensitivity < 1 || params.mmseqs_sensitivity > 12) {
-        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
-    }
-    if (params.sw_timeout_seconds < 1) {
-        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
-    }
-    if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
-        validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
-    }
-    if (params.sw_min_identity < 0 || params.sw_min_identity > 100) {
-        validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
-    }
-    if (params.region_padding < 0 || params.padding_min < 0 || params.padding_max < 0) {
-        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
-    }
-    if (params.padding_max < params.padding_min) {
-        validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
-    }
-    if (params.max_blocks_per_genome < 0) {
-        validationErrors << "Invalid --max_blocks_per_genome (${params.max_blocks_per_genome}). Must be >= 0."
-    }
-    if (params.min_block_genes < 1) {
-        validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
-    }
-    if (params.max_flanking_goi_similarity < 0 || params.max_flanking_goi_similarity > 100) {
-        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
-    }
-    if (params.min_flanking_size < 0) {
-        validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
-    }
-    if (params.bad_quality_timeout < 0) {
-        validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
-    }
-
-    // Classification thresholds
-    if (params.classify_high_min_identity < 0 || params.classify_high_min_identity > 100) {
-        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_medium_min_identity < 0 || params.classify_medium_min_identity > 100) {
-        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_tandem_min_identity < 0 || params.classify_tandem_min_identity > 100) {
-        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_fragment_max_qcov < 0 || params.classify_fragment_max_qcov > 1) {
-        validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
-    }
-    if (params.classify_complete_min_qcov < 0 || params.classify_complete_min_qcov > 1) {
-        validationErrors << "Invalid --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Must be between 0 and 1."
-    }
-    if (params.classify_fragment_max_qcov >= params.classify_complete_min_qcov) {
-        validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
-    }
-
-    // Gene predictor validation
-    if (!(params.gene_predictor in ['auto', 'augustus', 'prodigal'])) {
-        validationErrors << "Invalid --gene_predictor (${params.gene_predictor}). Must be 'auto', 'augustus', or 'prodigal'."
-    }
-
-    // PLM embedding search thresholds
-    if (paramBool(params.enable_plm_search)) {
-        if (!(params.plm_device in ['cpu', 'cuda'])) {
-            validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
-        }
-        if (params.plm_similarity_threshold < 0 || params.plm_similarity_threshold > 1) {
-            validationErrors << "Invalid --plm_similarity_threshold (${params.plm_similarity_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_medium_threshold < 0 || params.plm_medium_threshold > 1) {
-            validationErrors << "Invalid --plm_medium_threshold (${params.plm_medium_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_high_threshold < 0 || params.plm_high_threshold > 1) {
-            validationErrors << "Invalid --plm_high_threshold (${params.plm_high_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_medium_threshold >= params.plm_high_threshold) {
-            validationWarnings << "PLM thresholds: --plm_medium_threshold (${params.plm_medium_threshold}) >= --plm_high_threshold (${params.plm_high_threshold})."
-        }
-    }
-
-    // Structural search (ESMFold + Foldseek) thresholds
-    if (paramBool(params.enable_structural_search)) {
-        if (!(params.structural_device in ['cpu', 'cuda'])) {
-            validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
-        }
-        if (params.structural_tm_threshold < 0 || params.structural_tm_threshold > 1) {
-            validationErrors << "Invalid --structural_tm_threshold (${params.structural_tm_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_medium_threshold < 0 || params.structural_medium_threshold > 1) {
-            validationErrors << "Invalid --structural_medium_threshold (${params.structural_medium_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_high_threshold < 0 || params.structural_high_threshold > 1) {
-            validationErrors << "Invalid --structural_high_threshold (${params.structural_high_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_medium_threshold >= params.structural_high_threshold) {
-            validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
-        }
-        if (params.structural_max_length < 10) {
-            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
-        }
-    }
-
-    // Synteny scoring weights should sum to ~1
-    def weightSum = (params.synteny_weight_base ?: 0) + (params.synteny_weight_consistency ?: 0) + (params.synteny_weight_strand ?: 0)
-    if (Math.abs(weightSum - 1.0) > 0.01) {
-        validationWarnings << "Synteny score weights sum to ${weightSum} (expected ~1.0). Scoring may behave unexpectedly."
-    }
+    // Extracted to script scope so CLI Strings are coerced before comparison
+    // (docs/TODO.md §1s) and so this does not consume workflow{} method bytes.
+    validateNumericParams(validationErrors, validationWarnings)
 
     // --- Print all warnings ---
     validationWarnings.each { msg ->

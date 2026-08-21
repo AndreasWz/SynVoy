@@ -178,5 +178,52 @@ class TestStrongSyntenyIntegration(unittest.TestCase):
         self.assertNotIn("goi_missing_but_strong_synteny", classes)
 
 
+class TestStrongSyntenyUnboundRegression(unittest.TestCase):
+    """§1q: `strong_synteny` was READ by the distant-macrosynteny gate before it was
+    assigned, in the same per-cluster loop.
+
+    Reproducing it needs the FIRST scored cluster to overlap a GOI — otherwise an
+    earlier iteration has already bound the name and the bug degrades from a crash
+    into a silent stale read. This fixture therefore has exactly ONE cluster, and it
+    overlaps a GOI. Against the pre-fix ordering this raises
+    ``UnboundLocalError: cannot access local variable 'strong_synteny'``; it is how a
+    real run died (yeast STE2 demo, 2026-07-21).
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        chrom = "cA"
+        # one flanking anchor + a GOI model overlapping it => goi_overlap on cluster #1
+        m8 = "\t".join([ "fg0", chrom, "70.0", "400", "1", "0", "1", "400",
+                          "100000", "101200", "1e-30", "200"])
+        gff = [_flank_mrna(chrom, 100000, 101200, "fg0", "HIGH"),
+               _goi_mrna(chrom, 100400, 101000, 24.0, "MEDIUM", "probable_goi")]
+        self.hits = self._write("hits.m8", m8 + "\n")
+        self.gff = self._write("target.gff", "##gff-version 3\n" + "\n".join(gff) + "\n")
+        self.bed = self._write("synteny.bed", "chrHome\t0\t900\tfg0\t.\t+\n")
+
+    def _write(self, name, content):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write(content)
+        return path
+
+    def test_single_goi_overlapping_cluster_does_not_crash(self):
+        out_bed = os.path.join(self.dir, "regions.bed")
+        out_scores = os.path.join(self.dir, "regions.scores.tsv")
+        proc = subprocess.run(
+            [sys.executable, CLUSTER_SCRIPT,
+             "--hits", self.hits, "--target_gff", self.gff, "--synteny_bed", self.bed,
+             "--output", out_bed, "--scores_output", out_scores,
+             "--cluster_distance", "50000"],
+            capture_output=True, text=True)
+        self.assertNotIn("UnboundLocalError", proc.stderr)
+        self.assertEqual(proc.returncode, 0, msg=f"stderr={proc.stderr[-2000:]}")
+        with open(out_scores) as fh:
+            rows = list(csv.DictReader(fh, delimiter="\t"))
+        self.assertTrue(any(r["goi_overlap"] == "True" for r in rows),
+                        msg="fixture must produce a GOI-overlapping cluster")
+
+
 if __name__ == "__main__":
     unittest.main()
