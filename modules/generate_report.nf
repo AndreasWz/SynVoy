@@ -89,7 +89,10 @@ process GENERATE_REPORT {
         --qc_json "${qc_json}" \\
         --qc_policy "${qc_policy}" \\
         --paralog_confusion_min_gap ${paralog_confusion_min_gap} \\
-        --locus_ownership_tiebreak_gap ${params.locus_ownership_tiebreak_gap} \\
+        --locus_ownership_tiebreak_gap ${params.locus_ownership_tiebreak_gap} \
+        --identity_decoupled_min_identity ${params.identity_decoupled_min_identity} \
+        --identity_decoupled_max_qcov ${params.identity_decoupled_max_qcov} \
+        ${params.disable_coverage_demotion ? '--disable_coverage_demotion' : ''} \\
         --output synvoy_report.json
     """
 }

@@ -94,6 +94,7 @@ process ITERATIVE_SEARCH {
         --seed_flanking_min_count ${params.seed_flanking_min_count} \\
         --seed_flanking_min_qcov ${params.seed_flanking_min_qcov} \\
         --rank_wave_binning ${params.rank_wave_binning} \\
+        --disable_wavefront ${params.disable_wavefront} \\
         --disable_distance_autotune ${params.disable_distance_autotune} \\
         --distance_autotune_close_pct ${params.distance_autotune_close_pct} \\
         --distance_autotune_far_pct ${params.distance_autotune_far_pct} \\
