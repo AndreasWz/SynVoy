@@ -2917,6 +2917,70 @@ def is_valid_fallback(
     return not (qcov < 0.25 and aln_total < 35 and best_bits < 60.0)
 
 
+def define_waves(genome_entries, args):
+    """Partition genomes into execution waves (the expanding-database schedule).
+
+    Three modes, in precedence order: ``--disable_wavefront`` (F4 control: one
+    parallel wave, no iteration at all), rank/quantile binning (§A4, the default),
+    and the legacy absolute-distance binning. Extracted from ``main()`` so the
+    schedule is unit-testable.
+    """
+    if getattr(args, "disable_wavefront", False):
+        # F4 control: one parallel wave => the query DB is never augmented between
+        # genomes, so every target is searched with the initial DB only.
+        waves = [list(genome_entries)]
+        logger.info(
+            "F4 wavefront DISABLED: all %d genome(s) in ONE parallel wave — "
+            "no expanding-database iteration (control arm).", len(genome_entries)
+        )
+    elif args.rank_wave_binning:
+        # §A4 (TODO_JUN): bin by phylo-distance RANK so a saturated metric
+        # (tight clade, all dist≈0.99) still grades close→far.
+        waves = assign_waves_by_rank(genome_entries)
+        logger.info(
+            "§A4 rank/quantile wave binning: ENABLED — "
+            f"{len(waves)} graded waves (closest serial → farthest parallel), "
+            "robust to saturated phylo-distance."
+        )
+    else:
+        waves = []
+
+        # IMPROVED WAVEFRONT STRATEGY (legacy absolute-distance binning):
+        # - Closest genomes (dist < 0.05): Process strictly serially for maximum sensitivity
+        # - Medium distance (0.05 - 0.15): Small waves (2-3 genomes)
+        # - Distant genomes (> 0.15): Larger waves (can parallelize more)
+
+        i = 0
+        while i < len(genome_entries):
+            curr = genome_entries[i]
+
+            if curr['dist'] < 0.05:
+                # Very close: Serial processing (wave of 1)
+                waves.append([curr])
+                i += 1
+            elif curr['dist'] < 0.15:
+                # Medium distance: Small waves of 2-3 genomes with similar distance
+                wave = [curr]
+                i += 1
+                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.01:
+                    wave.append(genome_entries[i])
+                    i += 1
+                    if len(wave) >= 3:  # Max 3 per wave for medium distance
+                        break
+                waves.append(wave)
+            else:
+                # Distant: Can parallelize more (waves of up to 5)
+                wave = [curr]
+                i += 1
+                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.02:
+                    wave.append(genome_entries[i])
+                    i += 1
+                    if len(wave) >= 5:  # Max 5 per wave for distant genomes
+                        break
+                waves.append(wave)
+    return waves
+
+
 def assign_waves_by_rank(genome_entries):
     """§A4 (TODO_JUN): rank/quantile wave binning.
 
@@ -6133,6 +6197,16 @@ def main():
                              ">=20x nearer. Measured over 44 runs on disk: legacy gave the "
                              "closest genome a serial wave in 7, rank binning in 44. Pass "
                              "false to restore the legacy behaviour.")
+    # F4 control arm: the wavefront is the mechanism the method is named for, but no
+    # run has ever demonstrated that it changes the result. Comparing rank-vs-legacy
+    # binning cannot answer that (both still iterate); the control is NO iteration at
+    # all — every genome searched with the initial DB only. This flag provides it.
+    parser.add_argument("--disable_wavefront", type=str2bool, default=False,
+                        help="F4 control arm: place ALL genomes in ONE parallel wave, so "
+                             "no genome is ever searched with a nearer relative's recovered "
+                             "ortholog (the expanding database never expands). This is the "
+                             "measurement baseline for 'does the wavefront earn its place'; "
+                             "it is not a performance option. Overrides --rank_wave_binning.")
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
@@ -6682,52 +6756,8 @@ def main():
                     g['dist'] = g['dist'] / max_dist
             logger.info(f"Normalized phylogenetic distances by max {max_dist:.3f}")
     
-    # Define Waves
-    if args.rank_wave_binning:
-        # §A4 (TODO_JUN): bin by phylo-distance RANK so a saturated metric
-        # (tight clade, all dist≈0.99) still grades close→far.
-        waves = assign_waves_by_rank(genome_entries)
-        logger.info(
-            "§A4 rank/quantile wave binning: ENABLED — "
-            f"{len(waves)} graded waves (closest serial → farthest parallel), "
-            "robust to saturated phylo-distance."
-        )
-    else:
-        waves = []
-
-        # IMPROVED WAVEFRONT STRATEGY (legacy absolute-distance binning):
-        # - Closest genomes (dist < 0.05): Process strictly serially for maximum sensitivity
-        # - Medium distance (0.05 - 0.15): Small waves (2-3 genomes)
-        # - Distant genomes (> 0.15): Larger waves (can parallelize more)
-
-        i = 0
-        while i < len(genome_entries):
-            curr = genome_entries[i]
-
-            if curr['dist'] < 0.05:
-                # Very close: Serial processing (wave of 1)
-                waves.append([curr])
-                i += 1
-            elif curr['dist'] < 0.15:
-                # Medium distance: Small waves of 2-3 genomes with similar distance
-                wave = [curr]
-                i += 1
-                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.01:
-                    wave.append(genome_entries[i])
-                    i += 1
-                    if len(wave) >= 3:  # Max 3 per wave for medium distance
-                        break
-                waves.append(wave)
-            else:
-                # Distant: Can parallelize more (waves of up to 5)
-                wave = [curr]
-                i += 1
-                while i < len(genome_entries) and abs(genome_entries[i]['dist'] - curr['dist']) < 0.02:
-                    wave.append(genome_entries[i])
-                    i += 1
-                    if len(wave) >= 5:  # Max 5 per wave for distant genomes
-                        break
-                waves.append(wave)
+    # Define Waves (see define_waves)
+    waves = define_waves(genome_entries, args)
 
     logger.info(f"Defined {len(waves)} waves of execution.")
 

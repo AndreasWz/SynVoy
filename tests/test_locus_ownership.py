@@ -309,6 +309,29 @@ class TestBuildLocusOwnership(unittest.TestCase):
         self.assertEqual(rec["owning_locus"], "locus_1")
         self.assertFalse(rec["ownership_tiebroken"])
 
+    def test_rescue_tagged_genome_still_matches(self):
+        """A rescue-pass ownership row must reach the record it belongs to.
+
+        RESCUE_GOI_HULL's ownership task is tagged "<genome>.hull_rescue" so its
+        output filename cannot collide with the seeded task's, and that tag is
+        written verbatim into the TSV's `genome` column. The dedup records are
+        already canonicalized, so build_locus_ownership has to canonicalize the
+        row's genome too — otherwise the key never matches and every rescue-derived
+        call silently skips the RBH check, which is the guard against exactly the
+        mislabelled calls the rescue path is most likely to produce.
+        """
+        for tag in ("cow", "cow.hull_rescue", "cow.rescue", "cow.fna"):
+            with self.subTest(genome_column=tag):
+                rec = _dedup_record("cow", "NC_t5", 100, 500, provenance=["locus_1"])
+                rows = [_ownership_row(tag, "NC_t5", 100, 500,
+                                       best_label="locus_9|home_gene-BGN", best_bit=950.0,
+                                       second_label="locus_1|gene-DCN", second_bit=507.0,
+                                       locus="locus_1")]
+                flags, summary = build_locus_ownership({"records": [rec]}, rows,
+                                                       self._panel_meta(), {})
+                self.assertEqual(summary["evaluated"], 1)
+                self.assertEqual(rec["goi_class"], "paralog_not_goi")
+
     def test_no_ownership_rows_is_noop(self):
         rec = _dedup_record("cow", "NC_t5", 100, 500, provenance=["locus_4"])
         goi_dedup = {"records": [rec]}

@@ -694,6 +694,9 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
                 "n_source_loci": len(sources),
                 "n_merged_hits": len(members),
                 "cross_locus_duplicate": is_cross_dup,
+                # Carried so the coverage demotion can distinguish "coverage is low"
+                # from "coverage was never recorded" (see apply_coverage_demotion).
+                "query_cov": rep.get("query_cov", ""),
             })
 
     records.sort(key=lambda r: (-_confidence_rank(r["confidence"]), -_safe_float(r["identity"]), r["genome"], r["chrom"]))
@@ -907,9 +910,16 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
                     "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0}
 
     # Index ownership rows by genome+chrom for coordinate matching.
+    # canonical_genome_id() on the row's genome is load-bearing: the rescue-pass
+    # ownership tasks are tagged "<genome>.hull_rescue" so their output filename cannot
+    # collide with the seeded task's, and that tag is written verbatim into the TSV's
+    # `genome` column. The dedup records on the other side of this lookup are ALREADY
+    # canonicalized, so without stripping it here the key never matches and every
+    # rescue-derived call silently skips the RBH paralog check — i.e. the guard misses
+    # exactly the calls most likely to need it (most HIGH calls now come from rescue).
     rows_by_gc = defaultdict(list)
     for r in ownership_rows:
-        rows_by_gc[(r["genome"], r["chrom"])].append(r)
+        rows_by_gc[(canonical_genome_id(r["genome"]), r["chrom"])].append(r)
 
     flags = []
     n_reattributed = n_paralog = n_fumble = n_tiebreak = n_eval = 0
@@ -1137,11 +1147,16 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "mrna_id": a.get("mrna_id"),
                 "identity": ident,
                 "query_coverage": qc,  # None = coverage not recorded for this call
+                "coverage_recorded": qc is not None,
                 "confidence": a.get("confidence"),
                 "advice": (
-                    "High %identity but missing/low query coverage — likely a short "
-                    "high-identity local window, not a full-length match. Treat the "
-                    "identity as unreliable and inspect the alignment span/coverage."
+                    "High %identity over a small fraction of the query — a short "
+                    "high-identity local window, not a full-length match. This call is "
+                    "DEMOTED out of the headline counts."
+                    if qc is not None else
+                    "High %identity but query coverage was never recorded for this call, "
+                    "so it cannot be verified as full-length. Advisory only — not demoted; "
+                    "inspect the alignment span manually."
                 ),
             })
 
@@ -1202,8 +1217,52 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     }
 
 
+def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35):
+    """Demote a high-identity / low-coverage GOI call out of the headline counts.
+
+    A short high-identity local window is not an ortholog call: 100 % over 10 aa of a
+    70 aa query says almost nothing. ``build_self_consistency`` has flagged this as
+    ``identity_coverage_decoupled`` since QW3, but only advisorily — the headline counted
+    the call anyway. This makes the existing, already-calibrated detector actually demote.
+
+    **Only demotes when coverage is KNOWN and low.** A call whose coverage was never
+    recorded stays where it is and remains advisory: absence of evidence is not evidence
+    of low coverage, and demoting on it would take out good full-length rescue models
+    (before ``rescue_goi_hull.py`` learned to emit ``QueryCoverage``, that was every
+    single one of them — including the true Apis cerana melittin).
+
+    Mutates ``goi_dedup["records"]`` in place, mirroring how §1m relabels
+    ``paralog_not_goi``. Returns a summary dict.
+    """
+    demoted, unknown = 0, 0
+    for rec in goi_dedup.get("records", []):
+        if rec.get("confidence") not in ("HIGH", "MEDIUM"):
+            continue
+        if _safe_float(rec.get("identity"), 0.0) < min_identity:
+            continue
+        raw = str(rec.get("query_cov") or "").strip()
+        qc = _safe_float(raw, None) if raw else None
+        if qc is None:
+            unknown += 1
+            continue
+        if qc >= max_qcov:
+            continue
+        rec.setdefault("original_goi_class", rec.get("goi_class"))
+        rec["goi_class"] = "identity_coverage_decoupled"
+        rec["coverage_demoted"] = True
+        rec["query_coverage"] = qc
+        demoted += 1
+    return {
+        "demoted": demoted,
+        "coverage_not_recorded": unknown,
+        "min_identity": min_identity,
+        "max_qcov": max_qcov,
+    }
+
+
 def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
-                 locus_ownership_tiebreak_gap=10.0):
+                 locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
+                 identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -1320,16 +1379,29 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # a GOI ortholog, so drop it from the headline HIGH/MEDIUM counts. It stays in
     # goi_dedup["records"] with its flag for transparency; the pre-ownership counts are kept
     # as *_pre_ownership. This is what makes the RBH check actually demote the false positive.
+    # A high-identity call over a tiny slice of the query is not an ortholog call either.
+    # Same treatment as paralog_not_goi: relabel, keep the record, drop it from the
+    # headline. Only fires on KNOWN-low coverage (see apply_coverage_demotion).
+    coverage_demotion_summary = (
+        apply_coverage_demotion(goi_dedup,
+                                min_identity=identity_decoupled_min_identity,
+                                max_qcov=identity_decoupled_max_qcov)
+        if coverage_demotion else
+        {"demoted": 0, "coverage_not_recorded": 0, "disabled": True}
+    )
+
+    _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
     _own_recs = goi_dedup.get("records", [])
     dedup_high = sum(1 for r in _own_recs
-                     if r.get("confidence") == "HIGH" and r.get("goi_class") != "paralog_not_goi")
+                     if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
     dedup_medium = sum(1 for r in _own_recs
-                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") != "paralog_not_goi")
+                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
     # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
     # The flanking-only-block surfacing is the §1e piece that lives in cluster_grs.py.
+    goi_dedup["coverage_demotion"] = coverage_demotion_summary
     self_consistency = build_self_consistency(
         goi_annotations, goi_dedup, flanking_per_locus,
         paralog_flags=paralog_flags,
@@ -1338,6 +1410,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         paralog_min_gap=paralog_confusion_min_gap,
         ownership_flags=ownership_flags,
         ownership_summary=ownership_summary,
+        identity_decoupled_min_identity=identity_decoupled_min_identity,
+        identity_decoupled_max_qcov=identity_decoupled_max_qcov,
     )
 
     # §1.1 honesty: detect a gene-family / multi-paralog query and advise treating GOI
@@ -1373,6 +1447,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # Post-dedup (docs/TODO.md §1h): distinct HIGH/MEDIUM ortholog genes, not the
             # per-home-locus seed count, so the same gene found from N loci reads as one.
             "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low, genomes_with_goi),
+            # How many calls the coverage rule removed from the headline above.
+            "coverage_demoted_calls": coverage_demotion_summary.get("demoted", 0),
+            "coverage_not_recorded_calls": coverage_demotion_summary.get("coverage_not_recorded", 0),
             "headline_metric": dedup_high,  # distinct high-confidence GOI orthologs (post-dedup)
             "high_confidence_goi": dedup_high,
             "medium_confidence_goi": dedup_medium,
@@ -1467,6 +1544,19 @@ def main():
              "flanking-synteny tiebreak (docs/TODO.md §1m)",
     )
     parser.add_argument(
+        "--disable_coverage_demotion", action="store_true",
+        help="Keep high-identity/low-coverage GOI calls in the headline counts "
+             "(advisory-only, the pre-2026-08-22 behaviour).",
+    )
+    parser.add_argument(
+        "--identity_decoupled_min_identity", type=float, default=50.0,
+        help="Identity at or above which a low-coverage GOI call is demoted.",
+    )
+    parser.add_argument(
+        "--identity_decoupled_max_qcov", type=float, default=0.35,
+        help="Query coverage below which a high-identity GOI call is demoted.",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -1479,6 +1569,9 @@ def main():
         qc_policy=args.qc_policy,
         paralog_confusion_min_gap=args.paralog_confusion_min_gap,
         locus_ownership_tiebreak_gap=args.locus_ownership_tiebreak_gap,
+        coverage_demotion=not args.disable_coverage_demotion,
+        identity_decoupled_min_identity=args.identity_decoupled_min_identity,
+        identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
     )
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)

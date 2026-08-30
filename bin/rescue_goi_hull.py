@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
-from sequence_utils import parse_gff, parse_fasta  # noqa: E402
+from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
     _read_query,
     _run_miniprot_relaxed,
@@ -139,16 +139,22 @@ def _confidence_for(identity: float, high: float, medium: float) -> str:
 
 
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,
-                         confidence) -> List[str]:
+                         confidence, query_coverage=None) -> List[str]:
     """Map miniprot window-relative coords to genome coords; SynVoy GFF block tagged
     EvidenceType=synteny_hull_rescue, confidence by identity."""
     mp_start, mp_end, strand = int(mrna[3]), int(mrna[4]), mrna[6]
     identity = _identity_pct(mrna[8])
     gstart = window_start + mp_start - 1
     gend = window_start + mp_end - 1
+    # QueryCoverage is emitted so the report can tell "coverage is low" apart from
+    # "coverage was never recorded". Without it every rescue model looked like the
+    # latter, and a coverage-based demotion could not fire without also demoting
+    # good full-length rescues.
+    cov_attr = "" if query_coverage is None else f";QueryCoverage={query_coverage:.3f}"
     common = (f"Name={query_id};SynVoyRole=goi;Confidence={confidence};"
               f"EvidenceType=synteny_hull_rescue;GOIClass=synteny_hull_rescue;"
-              f"ModelStatus=rescue;Identity={identity:.1f};TargetGene={query_id}")
+              f"ModelStatus=rescue;Identity={identity:.1f};TargetGene={query_id}"
+              f"{cov_attr}")
     rows = [
         "\t".join([chrom, "SynVoy_hull", "gene", str(gstart), str(gend), ".", strand, ".",
                    f"ID={parent_id};{common}"]),
@@ -166,6 +172,39 @@ def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_i
     return rows
 
 
+def _translate_model(window_seq: str, cds_rows) -> str:
+    """Protein for a miniprot model, from CDS rows in WINDOW coordinates.
+
+    Needed because the rescue passes emit only a GFF, but the §1m ownership check
+    RBH-aligns a protein FASTA. Without this a rescue model can never be checked
+    against the home-paralog panel — the guard that exists to catch a mislabelled
+    GOI never sees the models most likely to carry one.
+
+    CDS rows are concatenated in transcript order (reversed on the minus strand,
+    where miniprot still reports ascending coordinates), the first row's phase is
+    trimmed, and any trailing stop is dropped.
+    """
+    if not cds_rows:
+        return ""
+    strand = cds_rows[0][6]
+    rows = sorted(cds_rows, key=lambda c: int(c[3]), reverse=(strand == "-"))
+    pieces = []
+    for c in rows:
+        s, e = int(c[3]), int(c[4])
+        seg = window_seq[max(0, s - 1):e]
+        if strand == "-":
+            seg = reverse_complement(seg)
+        pieces.append(seg)
+    dna = "".join(pieces)
+    try:
+        phase = int(rows[0][7])
+    except (ValueError, TypeError, IndexError):
+        phase = 0
+    dna = dna[phase:]
+    dna = dna[:len(dna) - (len(dna) % 3)]
+    return translate(dna).rstrip("*").replace("*", "X")
+
+
 def _cds_coverage(cds_rows, query_len: int) -> float:
     """Fraction of the query covered by the model's CDS (aa)."""
     if query_len <= 0:
@@ -181,6 +220,10 @@ def main() -> int:
     ap.add_argument("--query", required=True, help="GOI query protein FASTA")
     ap.add_argument("--genome_name", required=True, help="Logical genome name for ID stems")
     ap.add_argument("--output", required=True, help="Output GFF")
+    ap.add_argument("--output_faa",
+                    help="Optional protein FASTA of the rescued model(s), so the "
+                         "§1m locus-ownership check can RBH them against the home "
+                         "paralog panel. Written even when empty.")
     ap.add_argument("--samtools_bin", default="samtools")
     ap.add_argument("--min_flanking", type=int, default=4,
                     help="Min HIGH flanking genes in the dominant cluster to attempt a hull rescue")
@@ -207,10 +250,13 @@ def main() -> int:
     qlen = len(query_seq)
     out_lines = ["##gff-version 3",
                  f"# synteny_hull_rescue for {args.genome_name} vs {query_id}"]
+    faa_records = []  # (header, protein) for --output_faa
 
     if not query_seq:
         with open(args.output, "w") as fh:
             fh.write("\n".join(out_lines) + "\n")
+        if args.output_faa:
+            open(args.output_faa, "w").close()
         print(f"[hull] empty query {args.query}", file=sys.stderr)
         return 0
 
@@ -257,15 +303,25 @@ def main() -> int:
             conf = _confidence_for(ident, args.classify_high_min_identity,
                                    args.classify_medium_min_identity)
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
+            best_cov = _cds_coverage(cds_rows, qlen)
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
-                                                  query_id, parent_id, conf))
+                                                  query_id, parent_id, conf,
+                                                  query_coverage=best_cov))
+            prot = _translate_model(window, cds_rows)
+            if prot:
+                faa_records.append((f"{parent_id}.mRNA", prot))
             n_emitted += 1
             print(f"[hull] {args.genome_name} {chrom}:{hull_s}-{hull_e} "
                   f"({n_in_hull} HIGH flanking, no HIGH GOI) -> rescued model "
-                  f"id={ident:.1f}% conf={conf}", file=sys.stderr)
+                  f"id={ident:.1f}% cov={best_cov:.2f} conf={conf}", file=sys.stderr)
 
     with open(args.output, "w") as fh:
         fh.write("\n".join(out_lines) + "\n")
+    if args.output_faa:
+        # Always written (possibly empty) so the Nextflow output glob never misses.
+        with open(args.output_faa, "w") as fh:
+            for header, prot in faa_records:
+                fh.write(f">{header}\n{prot}\n")
     print(f"[hull] {args.genome_name}: {n_emitted} model(s) rescued.", file=sys.stderr)
     return 0
 

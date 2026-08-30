@@ -23,18 +23,10 @@ include { RESOLVE_GENE_INPUT } from './modules/resolve_query.nf'
 include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
-include { GENERATE_REPORT } from './modules/generate_report.nf'
+include { ADJUDICATE_AND_REPORT } from './subworkflows/adjudicate_and_report.nf'
 // 4 aliases so each per-locus file type (gff / faa / homology.tsv / scores.tsv) gets
 // its own STAGE_REGION_FOR_REPORT instance — each prefixes basenames with the locus_id
 // before they reach GENERATE_REPORT's flat-cp staging (docs/TODO.md §1h + follow-up).
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_GFF       } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_FAA       } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_HOMOLOGY  } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_SCORES    } from './modules/stage_for_report.nf'
-include { RESCUE_STRONG_SYNTENY } from './modules/rescue_strong_synteny.nf'
-include { RESCUE_GOI_HULL } from './modules/rescue_goi_hull.nf'  // §1m fumble fix
-include { RECIPROCAL_BEST_PARALOG } from './modules/reciprocal_best_paralog.nf'
-include { BUILD_HOME_PARALOG_PANEL; ASSIGN_LOCUS_OWNERSHIP } from './modules/assign_locus_ownership.nf'
 include { RESOLVE_EFFECTIVE_PARAMS } from './modules/resolve_effective_params.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
@@ -1405,170 +1397,25 @@ workflow {
         uiPhase(5, 'Report Generation')
         uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
         
-        // Use sentinel files so that collect() always yields a valid path list
-        // that Nextflow can stage into the process work directory.
-        def no_regions_sentinel = file("${projectDir}/assets/sentinels/NO_REGIONS")
-        def no_gffs_sentinel    = file("${projectDir}/assets/sentinels/NO_GFFS")
-        def no_homology_sentinel = file("${projectDir}/assets/sentinels/NO_HOMOLOGY")
-        def no_hits_sentinel    = file("${projectDir}/assets/sentinels/NO_HITS")
-        def no_augmented_sentinel = file("${projectDir}/assets/sentinels/NO_AUGMENTED")
-        def no_scores_sentinel = file("${projectDir}/assets/sentinels/NO_SCORES")
-        
-        // Tag every per-locus region file (.gff / .faa / .homology.tsv / .scores.tsv)
-        // with its home-locus id before GENERATE_REPORT's flat-cp staging, so same-named
-        // files from different loci no longer overwrite each other. The GFF case landed
-        // first (docs/TODO.md §1h); this also covers .faa / .homology.tsv / .scores.tsv
-        // (the §1h follow-up that previously under-reported `total_new_genes` and the
-        // per-locus region score counts in multi-locus runs).
-        // Python side: generate_report.py's canonical_genome_id() strips the locus prefix
-        // before grouping by genome, so no parser change is needed.
-
-        // §1e follow-up: rescue pass against blocks cluster_grs classified as
-        // goi_missing_but_strong_synteny. Inputs: scores.tsv per (locus, genome),
-        // the genomes dir to resolve the target FASTA, and the GOI query FASTA.
-        // Output GFFs are mixed with iterative_search's per-locus GFFs into the
-        // staging channel so the report parser sees them via the same path.
-        rescue_query_ch = ( params.query
-            ? channel.value(file(params.query))
-            : EXTRACT_FLANKING.out.faa.map { rec -> rec[1] }.first() )
-
-        RESCUE_STRONG_SYNTENY(
+        // Adjudication, staging and reporting live in a sub-workflow: the two rescue
+        // passes, the reciprocal-best paralog check, locus ownership, per-locus staging
+        // and GENERATE_REPORT. Moved out of this body so it stays clear of the JVM
+        // 64 kB method-size limit — new steps of that kind belong in the sub-workflow.
+        ADJUDICATE_AND_REPORT(
+            ITERATIVE_SEARCH.out.gff,
+            ITERATIVE_SEARCH.out.region_genes,
+            ITERATIVE_SEARCH.out.homology,
+            ITERATIVE_SEARCH.out.hits,
             CLUSTER_REGIONS.out.scores,
             genomes_dir_ch.first(),
-            rescue_query_ch
-        )
-
-        // §1j Phase B: reciprocal-best paralog check. Per (locus, genome), align
-        // each recovered GOI target protein against every paralog in the home
-        // query FASTA. generate_report.py uses the result to flag MEDIUM-confidence
-        // calls whose best home paralog differs from the modal best at the same
-        // locus — the TP63 ↔ TP73 bleed observed in docs/TP53_PARALOG_ASSESSMENT.md.
-        // No-op when params.query has a single sequence (nothing reciprocal).
-        paralog_faa_ch = ITERATIVE_SEARCH.out.region_genes.transpose()
-            .map { locus_id, faa ->
-                def stem = faa.name.replaceFirst(/\.faa$/, '')
-                tuple("${locus_id}::${stem}", locus_id, stem, faa)
-            }
-        paralog_gff_ch = ITERATIVE_SEARCH.out.gff.transpose()
-            .map { locus_id, gff ->
-                def stem = gff.name.replaceFirst(/\.gff3?$/, '')
-                tuple("${locus_id}::${stem}", gff)
-            }
-        paralog_inputs_ch = paralog_faa_ch
-            .map { key, locus_id, stem, faa -> tuple(key, locus_id, stem, faa) }
-            .join(paralog_gff_ch)
-            .map { key, locus_id, stem, faa, gff ->
-                def genome_name = stem.replaceFirst(/\.(fna|fa|fasta)$/, '')
-                tuple(locus_id, genome_name, faa, gff)
-            }
-
-        RECIPROCAL_BEST_PARALOG(
-            paralog_inputs_ch,
-            rescue_query_ch   // same home query as the rescue pass — multi-FASTA = paralog panel
-        )
-
-        // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
-        // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
-        // STAGE_REGION_GFF like the strong-synteny rescue.
-        RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir_ch.first(), rescue_query_ch)
-
-        // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
-        // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target
-        // against it so the report can re-attribute orthologs filed under the wrong
-        // home locus (decorin recovered by the chr9 OMD locus belongs to the chr12
-        // DCN locus) and relabel paralogs carried under the GOI name (asporin at
-        // 49.5% labelled GOI_DCN). No-op when --disable_locus_ownership.
-        BUILD_HOME_PARALOG_PANEL(
+            normalized_gene_ready_ch.first(),
             effective_home_gff_ch,
             PREPARE_HOME_PROTEOME.out.faa,
-            SPLIT_LOCI.out.beds.flatten().collect(),
-            normalized_gene_ready_ch.first()
+            SPLIT_LOCI.out.beds,
+            qc_summary_ch
         )
 
-        ASSIGN_LOCUS_OWNERSHIP(
-            paralog_inputs_ch,
-            BUILD_HOME_PARALOG_PANEL.out.faa.first()  // value channel: broadcast panel to every genome (see module)
-        )
-
-        STAGE_REGION_GFF(
-            ITERATIVE_SEARCH.out.gff.transpose()
-                .mix(RESCUE_STRONG_SYNTENY.out.gff)
-                .mix(RESCUE_GOI_HULL.out.gff)
-        )
-        STAGE_REGION_GFF.out
-            .ifEmpty(no_gffs_sentinel)
-            .collect()
-            .set { collected_region_gffs }
-
-        STAGE_REGION_FAA(
-            ITERATIVE_SEARCH.out.region_genes.transpose()
-        )
-        STAGE_REGION_FAA.out
-            .ifEmpty(no_regions_sentinel)
-            .collect()
-            .set { collected_regions }
-
-        STAGE_REGION_HOMOLOGY(
-            ITERATIVE_SEARCH.out.homology.transpose()
-        )
-        STAGE_REGION_HOMOLOGY.out
-            .ifEmpty(no_homology_sentinel)
-            .collect()
-            .set { collected_homology }
-
-        ITERATIVE_SEARCH.out.hits
-            .map { rec -> rec[1] }
-            .ifEmpty(no_hits_sentinel)
-            .collect()
-            .set { collected_hits }
-
-        // CLUSTER_REGIONS.out.scores tuple is (locus_id, genome_name, score_file).
-        // Drop genome_name and feed (locus_id, score_file) into STAGE_REGION_SCORES.
-        STAGE_REGION_SCORES(
-            CLUSTER_REGIONS.out.scores.map { rec -> tuple(rec[0], rec[2]) }
-        )
-        STAGE_REGION_SCORES.out
-            .ifEmpty(no_scores_sentinel)
-            .collect()
-            .set { collected_scores }
-
-        // §1j Phase B paralog-check TSVs (one per (locus, genome) when params.query
-        // has >=2 paralogs; the script no-ops to a header-only TSV when it has 1).
-        def no_paralog_sentinel = file("${projectDir}/assets/sentinels/NO_PARALOG_CHECK")
-        RECIPROCAL_BEST_PARALOG.out.tsv
-            .map { rec -> rec[1] }
-            .ifEmpty(no_paralog_sentinel)
-            .collect()
-            .set { collected_paralog_check }
-
-        // §1m locus-ownership TSVs (one per (locus, genome)) + the panel meta sidecar.
-        def no_ownership_sentinel = file("${projectDir}/assets/sentinels/NO_LOCUS_OWNERSHIP")
-        ASSIGN_LOCUS_OWNERSHIP.out.tsv
-            .map { rec -> rec[1] }
-            .ifEmpty(no_ownership_sentinel)
-            .collect()
-            .set { collected_locus_ownership }
-        collected_panel_meta = BUILD_HOME_PARALOG_PANEL.out.meta.ifEmpty(no_ownership_sentinel)
-
-        // No standalone augmented proteins - pass sentinel file
-        collected_augmented = channel.value(no_augmented_sentinel)
-
-        GENERATE_REPORT(
-            collected_regions,
-            collected_region_gffs,
-            collected_homology,
-            collected_hits,
-            collected_augmented,
-            qc_summary_ch,
-            collected_scores,
-            collected_paralog_check,
-            params.paralog_confusion_min_gap,
-            params.qc_fail_policy,
-            collected_locus_ownership,
-            collected_panel_meta
-        )
-        
-        GENERATE_REPORT.out.report.view { report ->
+        ADJUDICATE_AND_REPORT.out.report.view { report ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'GENERATE_REPORT'.padRight(24)}${c.reset} analysis report generated"
         }
     }

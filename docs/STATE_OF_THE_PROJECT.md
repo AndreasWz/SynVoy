@@ -22,19 +22,54 @@ wrap up**.
 > (`Reg1_G7_CMEDIUM_S0.47`) are not comparable to new ones, and the melittin GT fixture
 > needs regenerating — do it once, now that both landed in the same pass.
 
+> **Fix log — 2026-08-21/22 (first cluster validation of the above).** The 2026-07-26 pass
+> was committed (`49df417`, `8e44d55`) and then run on LRZ for the first time. Three runs,
+> melittin `P01501`, easy mode, 4 auto-picked targets:
+>
+> - **F1 ✅, F6 ✅, §1u ✅ confirmed on real output.** 2 of 8 GOI-overlapping region rows sit
+>   at the permutation floor (pre-fix: all of them); MEDIUM identities bottom out at 30.4 %
+>   against the 30.0 floor; `synteny_score` is emitted.
+> - **F4 ⚠️ measured, inconclusive** — both binnings gave identical waves on this target set.
+>   The experiment that answers the question is *waves vs no waves* on a uniform-depth set.
+>   See **F4**.
+> - **§1x ⚪ null result** — 0 rejected candidates; every GOI hit was inside the flanking
+>   envelope.
+> - **F8 🔴 NEW, found and fixed.** Easy mode was searching for the **flanking proteins**
+>   instead of the GOI in all three rescue/reciprocal passes. Every "high-confidence
+>   ortholog" in the first run was a 10 aa flanking fragment at "100 %". Fixed
+>   (`main.nf:1431`); the re-run recovers the true *Apis cerana* melittin at 97.1 % as the
+>   single HIGH call. **This invalidated the headline of every easy-mode run ever produced.**
+>   See **F8**.
+>
+> Part A gained **A.8** (the rescue layer), which had never been documented algorithmically
+> despite being the source of the recovered ortholog in both validated cases.
+
 ---
 
 ## 0. One-paragraph status
 
 SynVoy is a working synteny-guided search engine wrapped in a scoring, labelling and
 reporting layer that is not trustworthy. The discovery layer is validated across four
-clades and is robust to large parameter changes. The adjudication layer — region
-ranking, confidence labels, the p-value, the report headline — contains at least four
-defects serious enough that its numbers should not be published as-is. Separately, the
-signature *mechanism* of the method (the closest-first expanding wavefront) is
-**inoperative in 37 of 44 runs on disk, including the flagship melittin benchmark** —
-which means the published melittin result was produced *without* the mechanism the paper
-would attribute it to. That is the single most important thing in this document.
+clades and is robust to large parameter changes. The adjudication layer — region ranking,
+confidence labels, the p-value, the report headline — contained at least four defects
+serious enough that its numbers should not be published as-is; as of 2026-07-26 those four
+are fixed, and the 2026-08-21 cluster run confirmed three of them on real output.
+
+**The single most important thing in this document is now F8**, found on 2026-08-21: in
+**easy mode** — the documented path, the one the BA students run — the rescue and
+reciprocal passes were searching for the **flanking genes** rather than the gene of
+interest, and reporting what they found as high-confidence orthologs. On the melittin run
+all three "high-confidence orthologs" were 10 aa fragments of one flanking gene at
+"100 % identity", two of them in genomes (*Bombus*) that do not have the gene. It is fixed,
+and the corrected run returns the true *Apis cerana* ortholog at 97.1 % as the single HIGH
+call — but **every easy-mode headline produced before 2026-08-22 is invalid**, and any
+figure or count derived from one must be regenerated.
+
+Second in importance, and still open: the signature *mechanism* of the method (the
+closest-first expanding wavefront) was **inoperative in 37 of 44 runs on disk, including
+the flagship melittin benchmark** — so the published melittin result was produced *without*
+the mechanism the paper would attribute it to. The binning is fixed; the measurement
+proving the wavefront earns its place has still not been made (see **F4**).
 
 ---
 
@@ -52,6 +87,15 @@ the docs, and each formula carries its source location.
 The claim is that **gene order is conserved longer than gene sequence**, so for a gene too
 divergent for direct homology search, the neighbourhood is a stronger locator than the
 sequence. Everything below is machinery in service of that one idea.
+
+One caveat belongs in the summary rather than a later section: the line above says "keep the
+collinear neighbourhoods", but the neighbourhood that finally yields the ortholog is often
+**not** a collinear block. When the gene's immediate neighbours are rearranged it falls into
+a *gap between* blocks, and it is the hull rescue (A.8) — the span of the whole neighbourhood,
+gaps included — that recovers it. On both validated cases where the answer was known in
+advance, cow decorin and *Apis cerana* melittin, the recovered ortholog came from the hull,
+not from a seeded block. The honest one-line statement of the method is therefore
+"**the flanking neighbourhood, not the collinear block, is the search unit**".
 
 ## A.2 Synteny block construction — `bin/iterative_search_runner.py`
 
@@ -141,8 +185,9 @@ that cannot generate them must not be asked to compete with them (flaw **F1**, f
 Both numbers are emitted in `regions/*.scores.tsv` so the test is auditable.
 
 **Ranking** (`:1119`): `sort by (−S_block, −score, +p)`. Block synteny support outranks
-score. `S_block` is not emitted in the scores TSV, so the ordering a user sees cannot be
-reconstructed from any output file (TODO §1u).
+score. Since §1u (2026-07-26) both `synteny_score` and `goi_block_flanking` (= `S_block`)
+are emitted in `regions/*.scores.tsv`, so the ordering a user sees is now reconstructible
+from the output files.
 
 ## A.4 Confidence classification — `_classify_goi_evidence` (`:935`)
 
@@ -152,7 +197,7 @@ Defaults from `CLASSIFY_THRESHOLDS` (`:199`):
 | evidence_type | → HIGH | → MEDIUM |
 |---|---|---|
 | `exon_annotation` | `exons ≥ 2` ∧ `id ≥ 50` ∧ `S_block ≥ 2` ∧ collinear_ok | `id ≥ 35` ∧ (`S_block ≥ 1` ∨ `qcov ≥ 0.65`) |
-| `fallback_hit_span` | — | (`S_block ≥ 2` ∧ `qcov ≥ 0.75` ∧ `id ≥ 60`) **∨** (`S_block ≥ 5` ∧ (`qcov ≥ 0.25` ∨ `id ≥ 35`)) |
+| `fallback_hit_span` | — | (`S_block ≥ 2` ∧ `qcov ≥ 0.75` ∧ `id ≥ 60`) **∨** (`S_block ≥ 5` ∧ `id ≥ 30` ∧ (`qcov ≥ 0.25` ∨ `id ≥ 35`)) |
 | `tandem_copy` | — | `id ≥ 40` ∧ `qcov ≥ 0.35` |
 | `rescued_exon`, `raw_hit` | — | only via PLM/structural rescue |
 
@@ -165,9 +210,23 @@ collinear_ok  ⇔  L_block is None  ∨  S_block < 3  ∨  L_block ≥ 3
 A HIGH-quality model in a *scrambled* neighbourhood (enough flanking, wrong order) is
 demoted to MEDIUM — this is the biglycan-as-decorin guard.
 
-⚠️ The second `fallback_hit_span` clause has **no identity floor**: with `S_block ≥ 5` and
-`qcov ≥ 0.25`, a hit at *any* identity is MEDIUM. This is the mechanism behind the yeast
-STE2 overcalling (32 MEDIUM calls at 21–27 % identity). See **F6**.
+*(The second `fallback_hit_span` clause carried **no identity floor** until 2026-07-26:
+with `S_block ≥ 5` and `qcov ≥ 0.25`, a hit at any identity reached MEDIUM — the mechanism
+behind the yeast STE2 overcalling, 32 MEDIUM calls at 21–27 % identity. The `id ≥ 30` term
+is the **F6** fix, calibrated so the 34.7 % ant-melittin rescue survives.)*
+
+⚠️ **HIGH still has no query-coverage term in the classifier itself.** The
+`exon_annotation` → HIGH branch tests exon count, identity and flanking support only, so a
+short high-identity window can still be *labelled* HIGH where the `tandem_copy` branch would
+reject it. Since 2026-08-22 this is caught one layer later instead: `apply_coverage_demotion`
+(`generate_report.py`) relabels such a call `identity_coverage_decoupled` and drops it from
+the headline counts, exactly as §1m does for `paralog_not_goi`.
+
+The demotion fires **only when coverage is known and low** (`identity ≥ 50` ∧
+`qcov < 0.35`, both tunable). A call whose coverage was never recorded stays put and remains
+advisory — absence of evidence is not evidence of low coverage, and before
+`rescue_goi_hull.py` learned to emit `QueryCoverage` that described *every* rescue model,
+including the true *Apis cerana* melittin. Disable with `--disable_coverage_demotion`.
 
 ## A.5 Distance auto-tuning — `_apply_distance_adaptive_thresholds` (`:282`)
 
@@ -223,6 +282,14 @@ d ≥ 0.15            → wave of ≤ 5, members within 0.02
 which is incoherent by construction — see flaw **F4**. `--rank_wave_binning false`
 restores it for reproducing older runs.
 
+**Measured 2026-08-21 (LRZ A/B, jobs 5757307/5757308):** the two binnings are *not*
+universally different. On a target set spanning three distinct taxonomic ranks — *Apis
+cerana* (genus), two *Bombus* (family), *Agapostemon* (order) → normalised distances
+`0.200 / 0.700 / 1.000` — both produce identical waves `[1, 2, 1]` and identical results.
+Legacy binning fails specifically on a **uniform-depth** target set, where divide-by-max
+collapses everything to 1.0. Rank binning is the safer default because it cannot collapse;
+it is not a change of behaviour on well-spread sets.
+
 ## A.7 Post-hoc paralog adjudication
 
 `bin/build_home_paralog_panel.py` aligns the query against the whole home proteome and
@@ -231,6 +298,67 @@ keeps homologs above `paralog_panel_min_identity` (28 %) with a coverage guard.
 against every panel member; a call whose best home match is a family paralog rather than
 the GOI is relabelled `paralog_not_goi` and excluded from the headline counts. This is
 what demotes the cow/mouse "decorin" that is really biglycan (BGN 950 vs DCN 507).
+
+*(Until 2026-08-22 there was a hole here: `ASSIGN_LOCUS_OWNERSHIP` consumes the
+ITERATIVE_SEARCH region files, while rescue models (A.8) are mixed in later at
+`STAGE_REGION_GFF` — so the one guard designed to catch a mislabelled GOI never saw the
+models most likely to carry one. `rescue_goi_hull.py` now also emits the rescued model's
+protein (`--output_faa`, translated from the CDS with strand/phase handling), and the
+sub-workflow feeds it in as its own `(locus, genome.hull_rescue)` ownership task.
+`canonical_genome_id()` already strips that suffix, so the rows fold back onto the real
+genome.)*
+
+## A.8 The rescue layer — the part that is not block-based
+
+A.2–A.4 describe the main path: seed blocks from flanking hits, search inside them, classify.
+Two passes run *outside* that path, and on the melittin run they were the only source of a
+HIGH call — so they are part of the method, not a footnote.
+
+**Strong-synteny rescue** (`bin/rescue_strong_synteny.py`, §1e Phase B). Fires on a block
+`cluster_grs` classed `goi_missing_but_strong_synteny`: ≥ `strong_synteny_min_flanking` (5)
+HIGH flanking genes and no GOI model at all. Runs a relaxed `miniprot` (`--outc 0.05`) over
+the block window and emits a **LOW**-confidence model, `EvidenceType=relaxed_miniprot_rescue`.
+Deliberately conservative: it asserts "something GOI-like is here", not orthology.
+
+**GOI synteny-hull rescue** (`bin/rescue_goi_hull.py`, §1m/§17). Addresses the failure the
+block model *cannot* see: a GOI sitting in a **gap between** flanking-seeded blocks, because
+its immediate neighbours were rearranged. Cow decorin at chr5:21.0 Mb fell in the dead zone
+between blocks at 17.8–19.5 and 22.5–24 Mb and was simply never searched.
+
+Rather than a block, it takes the **hull** of the neighbourhood (`compute_hull`): find the
+dominant flanking cluster (single-linkage at `goi_hull_cluster_max_gap`), take its centre,
+and keep every flanking gene whose midpoint lies within `goi_hull_max_window/2` of it —
+
+```
+centre = midpoint(dominant cluster)
+hull   = span{ f ∈ flanking : |midpoint(f) − centre| ≤ goi_hull_max_window / 2 }
+window = hull ± goi_hull_window_pad          (skipped if wider than max_window)
+```
+
+so the window spans the gap while still excluding a far rearranged outlier (cow chr5's
+105 Mb singleton, ~80 Mb away). It fires only when the hull holds ≥ `goi_hull_min_flanking`
+(4) HIGH flanking genes **and no HIGH GOI model already overlaps it** — so it is a no-op
+wherever the main path already succeeded. Relaxed miniprot again, then the best model by
+identity that clears both gates:
+
+```
+accept  ⇔  identity ≥ goi_hull_min_identity (40)  ∧  cov ≥ goi_hull_min_coverage (0.5)
+cov     =  Σ CDS length / 3 / |query|
+conf    =  HIGH   if identity ≥ classify_high_min_identity   (50)
+           MEDIUM if identity ≥ classify_medium_min_identity (35)
+           LOW    otherwise
+```
+
+Note what confidence is **not** a function of here: flanking support, collinearity, or exon
+structure. Inside the hull, identity alone decides the label — the coverage term is a gate,
+not a grade. That is defensible (the hull already established the neighbourhood) but it means
+the rescue path skips every order-based guard A.4 applies, including the collinearity gate
+that exists to stop a paralog being called the GOI.
+
+**Empirical weight.** On the melittin LRZ run (job 5757853, post-F8) the single HIGH call —
+*Apis cerana* melittin, `NC_083855.1:12,201,521`, 135 aa, 97.1 % — came from the hull rescue,
+not the main block path. The mechanism that recovers the flagship result is therefore the
+hull, and this is worth stating plainly in any write-up.
 
 ---
 
@@ -388,12 +516,31 @@ Measured over all 44 runs on disk:
 The melittin ground-truth run goes from a single undifferentiated wave of 5 to `[1, 2, 2]`
 — a real closest-first gradient. Regressions: `tests/test_adjudication_fixes.py`.
 
-**⬜ Still owed: the measurement.** Fixing the binning restores the *opportunity* for the
-expanding database to matter; it does not prove that it does. Re-run the melittin
-benchmark with and without an expanding DB and compare. If it makes no difference the
-paper is simpler and still correct — neighbourhood restriction is the mechanism. If it
-does, that is a second result. **Until that run exists, do not attribute the melittin
-result to the wavefront.**
+**⚠️ Measurement attempted 2026-08-21 — inconclusive, and instructive about why.**
+A/B on LRZ (`lrz-cpu`, jobs 5757307 / 5757308): melittin `P01501`, easy mode, identical
+inputs (arm B resumed arm A's work dir, so the fetch was the *same cached task*), one
+variable — `--rank_wave_binning true` vs `false`.
+
+**Both arms produced identical waves** `[1, 2, 1]` at normalised distances
+`0.200 / 0.700 / 1.000`, and byte-identical results (3 HIGH / 13 MEDIUM / 145 LOW).
+
+The reason is the target set, not the code. Easy mode auto-picked four genomes sitting at
+three *distinct* taxonomic ranks — *Apis cerana* (genus), *Bombus turneri* + *Bombus
+ignitus* (family), *Agapostemon virescens* (order) — so the distances are genuinely spread
+and **legacy binning separates them correctly too**. The degenerate single-wave collapse
+needs a *uniform-depth* target set, which is what the pinned GT genome set happens to be.
+
+So: this run shows the fix does not regress, and nothing more. It does **not** validate the
+wavefront. Note the expanding DB did do work within the run — wave 1 added 0 new genes,
+wave 2 added 6, wave 3 added 1 — but whether those seeds changed any final call is still
+untested, because both arms had the same wave structure.
+
+**⬜ Still owed — but the mechanism now exists.** The comparison that answers the question
+is *waves vs no waves*, not rank-vs-legacy binning. `--disable_wavefront` (added 2026-08-22)
+puts every genome in one parallel wave, so the query DB is never augmented between genomes;
+run it against a normal run on the **uniform-depth GT genome set**, where the gradient
+actually differs. It is a measurement flag, not a performance option.
+**Until that run exists, do not attribute the melittin result to the wavefront.**
 
 ## F5 Two incompatible definitions of collinearity — ✅ FIXED 2026-07-26
 
@@ -470,6 +617,63 @@ misses.
 Corroborating evidence for the knock-on: **109 of 130 region rows have
 `goi_overlap=True`** — junk GOI calls are scattered so widely that the GOI-overlap
 prioritisation in `cluster_grs` carries almost no information.
+
+## F8 ⭐⭐⭐ Easy mode searched for the *flanking* genes and reported them as the GOI — ✅ FIXED 2026-08-21
+
+Found by the LRZ run above, not by any test. [`main.nf:1431`](../main.nf#L1431) read:
+
+```groovy
+rescue_query_ch = ( params.query
+    ? channel.value(file(params.query))
+    : EXTRACT_FLANKING.out.faa.map { rec -> rec[1] }.first() )
+```
+
+In **easy mode `params.query` is null** — the user passes `--query_id` — so the fallback
+fires and the channel carries `flanking_proteins_locus_<n>.faa`. Three processes then run
+against the flanking proteins instead of the gene of interest: `RESCUE_GOI_HULL` (§17),
+`RESCUE_STRONG_SYNTENY` (§1e Phase B), and `RECIPROCAL_BEST_PARALOG` (§1j).
+
+**What it produced.** All three HIGH calls in job 5757307 were 32 bp (~10 aa) fragments of
+`gene-LOC107964339_exon_1` — a *flanking* gene — at "100 % identity", class
+`synteny_hull_rescue`, one per genome. The report's headline, *"3 high-confidence GOI
+ortholog annotation(s)"*, was entirely this artefact. Melittin at 100 % in two *Bombus*
+genomes is the tell; that is not biology. The plausible real ortholog (*Apis cerana*
+`NC_083855.1:12,201,524`, ~134 aa, 100 %) was ranked only **MEDIUM**.
+
+The rescue log states it plainly: `13 HIGH flanking, no HIGH GOI -> rescued model
+id=100.0% conf=HIGH`.
+
+**Why nothing caught it.** `ASSIGN_LOCUS_OWNERSHIP` (§1m), which exists to demote exactly
+this class of mislabel, consumes `paralog_inputs_ch` — the ITERATIVE_SEARCH region files.
+Rescue GFFs are mixed in later, at `STAGE_REGION_GFF`, so **rescue models bypass ownership
+entirely**. `self_consistency` *did* flag 6 HIGH rows `identity_coverage_decoupled`
+(query coverage 0.21–0.29) — the detector works; the headline ignores it. This is the
+two-layer thesis in miniature: the search layer found the neighbourhood correctly, and the
+adjudication layer named the wrong gene in it.
+
+**Why it survived to now.** Every §1m/§17 validation was done in **pro mode** (decorin/DCN),
+where `params.query` is set and the branch is correct. Easy mode is the path README and
+QUICKSTART document, and the one the BA students run.
+
+**✅ Fixed** — `rescue_query_ch = normalized_gene_ready_ch.first()`. `NORMALIZE_QUERY.out.fasta`
+is the real GOI protein in both modes. This also repairs pro mode, where the old branch
+passed the *raw* `--query` file — DNA if the user supplied DNA, which miniprot cannot use.
+The edit is 3 lines → 1, so the `workflow {}` body shrinks (safe for the JVM method-size
+limit). 550 tests pass; re-run verification in progress.
+
+**Both follow-ups closed 2026-08-22:**
+
+1. **A 10 aa 100 % match can no longer reach the headline**, whichever query produced it.
+   `apply_coverage_demotion` relabels a known-low-coverage, high-identity call
+   `identity_coverage_decoupled` and excludes it from the HIGH/MEDIUM counts — turning the
+   existing QW3 detector from an annotation into a demotion. Only fires on *known* low
+   coverage, so `rescue_goi_hull.py` now emits `QueryCoverage` (it computed it as a gate all
+   along and threw it away). See A.4.
+2. **Rescue models now reach the ownership check.** The rescue emits the model's protein and
+   the sub-workflow feeds it into `ASSIGN_LOCUS_OWNERSHIP` as its own task. See A.7.
+
+Both landed behind the `main.nf` sub-workflow extraction described below — the wiring in (2)
+was impossible before it.
 
 ## F7 Documentation-layer defects (fixed in the 2026-07-26 docs pass)
 
@@ -599,9 +803,9 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 
 ### Immediately (hours) — stop the bleeding
 
-1. ⬜ **Commit §1q + §1s.** Both verified working, sitting uncommitted. `--mmseqs_sensitivity 9.5` on the command line currently crashes any released checkout.
+1. ✅ **Committed 2026-08-21** (`49df417`). The adjudication fixes are on `origin/dev`.
 2. ✅ **Anchor-grid identity labels — fixed 2026-07-26.** The GOI column was routed through `draw_goi_array_grid`, which bypasses `draw_arrow` — the only code that draws identity labels. So every flanking column carried a number and the one column a reader cares about most carried none, while the legend still said "number = % identity". Labels restored on each enrolled copy (both the grid and the track-plot variant). The obsolete `×2` badge test was replaced: the copy count is now conveyed structurally by drawing one arrow per copy, so the test asserts both copies appear with their own identity instead.
-3. ⬜ **Commit the documentation pass.**
+3. ✅ **Committed 2026-08-21** (`8e44d55`).
 
 ### Before any figure or number is published (days) — the adjudication layer
 
@@ -611,9 +815,13 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 7. ✅ **§1x — fixed 2026-07-26.** `select_dispersed_goi_seeds` now records every hit that clears the quality bar and is then refused by a synteny gate, with the gate that refused it and the distance to the nearest flanking anchor, and logs one INFO line per rejection. Written to `hits/<genome>.nonsyntenic.tsv` — which `generate_report.nf` already stages wholesale, so this needed **no new channel and no `main.nf` edit** (that method body is at the JVM 64 kB limit). The report gains a `rejected_candidates` block, and `goi_absent_genomes` is split from the new `goi_found_but_not_syntenic` — opposite claims that used to share a field. Opt out with `--report_nonsyntenic_candidates false`. ⚠️ **Plot, partially:** the anchor-grid legend said **"no ortholog"** for an empty cell — a claim the figure is not entitled to make, and precisely the misreading §1x exists to prevent. Now reads **"not placed here"**, with a caption line stating that an empty cell means no ortholog was *placed* in this neighbourhood, not that the gene is absent, and pointing at `synvoy_report.json → rejected_candidates`. The track plot's per-row "✗ GOI not found" is now "✗ GOI not placed". ⬜ Drawing the specific rejected candidate as an off-block marker still needs the TSV to reach `PLOT_SYNTENY`, which needs a new channel in `main.nf` — blocked on the sub-workflow refactor (CLAUDE.md §17: that method body is at the JVM 64 kB limit, where a 4-line comment has already re-triggered `UTF8 string too large`).
 8. ✅ **F2 — fixed 2026-07-26**, and it was worse than reported: the legacy measure scored a *scrambled* neighbourhood 1.000 and a *conserved* one 0.500. Now scored against the home strand, inversion-tolerant. ⬜ **F3 left as a description matter** — see the section above for why rescaling is not worth doing on its own.
 
+8b. ✅ **F8 — easy mode was searching for the flanking genes and reporting them as the GOI. Fixed 2026-08-21** (`main.nf:1431`). This invalidated the headline of *every easy-mode run*: the three "high-confidence orthologs" on the melittin LRZ run were 10 aa fragments of a flanking gene at 100 %. ✅ Both follow-ups closed 2026-08-22: the QW3 `identity_coverage_decoupled` detector now **demotes** instead of merely annotating (only on *known*-low coverage, so `rescue_goi_hull.py` now emits `QueryCoverage`), and rescue models are routed into `ASSIGN_LOCUS_OWNERSHIP` via a new `--output_faa`. See F8.
+
+8c. ✅ **`main.nf` sub-workflow extraction — the JVM method-size blocker is gone (2026-08-22).** The adjudication + staging + report block (two rescue passes, reciprocal-best paralog, locus ownership, per-locus staging, `GENERATE_REPORT`) moved to `subworkflows/adjudicate_and_report.nf`. The `workflow {}` body went 56 693 → 49 975 bytes, and — the actual point — the extracted block now has its own method budget, so new adjudication steps no longer risk `UTF8 string too large`. **New steps of that kind belong in the sub-workflow, not in `main.nf`.**
+
 ### Before the paper's mechanism section (days)
 
-9. ⚠️ **F4 — binning fixed 2026-07-26 (rank binning now default; 44/44 runs grade close→far, was 7/44). The measurement is still owed:** re-run the melittin benchmark with and without an expanding DB and compare. If it makes no difference, the paper is *simpler and still correct*: neighbourhood restriction is the mechanism. If it does, you have a second result. Either outcome is publishable; attributing the existing result to the wavefront is not.
+9. ⚠️ **F4 — binning fixed 2026-07-26; measurement attempted 2026-08-21 and inconclusive.** The LRZ A/B (jobs 5757307/5757308, identical inputs, one variable) returned *identical* wave structure and byte-identical results, because easy mode auto-picked targets at three distinct taxonomic ranks — a set legacy binning already grades correctly. **The right experiment is waves vs no waves on the uniform-depth GT genome set**, not rank-vs-legacy binning. Until it exists, attributing the melittin result to the wavefront is still not permitted. See F4.
 10. **§1y — re-score the melittin benchmark by coordinate overlap** and freeze it in CI. Publish the coordinate number next to the species-presence number.
 
 ### Benchmark completion (days, mostly waiting)

@@ -10,6 +10,7 @@ import os
 import select
 import subprocess
 import sys
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -323,6 +324,26 @@ def ask_keep_bad_quality(entry, reasons, timeout_seconds):
     return False
 
 
+def normalize_species_name(species_name):
+    """Strip a strain/isolate qualifier that NCBI `datasets` will not accept.
+
+    UniProt reports organisms with the qualifier attached — D6VTK4 (yeast STE2) comes
+    back as ``Saccharomyces cerevisiae (strain ATCC 204508 / S288c)`` — and
+    ``datasets summary genome taxon`` rejects that with "The taxonomy name ... is not
+    exact", so easy mode cannot fetch the home genome at all. Returns the bare binomial
+    (``Saccharomyces cerevisiae``), or the input unchanged when there is nothing to strip.
+
+    Only used as a FALLBACK after the verbatim name has been tried, so a species whose
+    real NCBI name contains parentheses is unaffected.
+    """
+    if not species_name:
+        return species_name
+    out = re.sub(r"\s*\((?:strain|isolate|serotype|serovar|var\.|subsp\.|biotype|genotype)\b[^)]*\)",
+                 "", species_name, flags=re.IGNORECASE)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out or species_name
+
+
 def get_reference_genome(species_name):
     """Get the reference/representative genome accession for a species.
     Returns (accession, has_annotation, actual_species) tuple.
@@ -364,7 +385,15 @@ def get_reference_genome(species_name):
         print(f"  No reference genome found via datasets: {e.stderr.strip()}", file=sys.stderr)
     except Exception as e:
         print(f"  Error: {e}", file=sys.stderr)
-    
+
+    # Retry once without a strain/isolate qualifier. UniProt hands us names like
+    # "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)", which datasets rejects
+    # as "not exact" — that is a naming mismatch, not a missing genome.
+    bare = normalize_species_name(species_name)
+    if bare and bare != species_name:
+        print(f"  Retrying without the strain qualifier: '{bare}'")
+        return get_reference_genome(bare)
+
     return None, False, species_name
 
 
