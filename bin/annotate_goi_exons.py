@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import urllib.error
 
@@ -1032,14 +1033,23 @@ MINIPROT_AVAILABLE = _check_miniprot()
 def _parse_miniprot_gff(gff_text):
     """
     Parse miniprot GFF3 output to extract gene models.
-    
+
     Returns list of gene models, each with:
       - rank, identity, score
       - list of CDS features with (start, end, strand, phase, target_info)
+      - 'protein': the translated model from miniprot --trans (the ##STA line that
+        precedes the model's mRNA record), or '' when --trans was not used
     """
     models = {}  # ID -> model dict
-    
+    pending_sta = ''
+
     for line in gff_text.strip().split('\n'):
+        if line.startswith('##STA'):
+            # miniprot --trans writes ##PAF, then ##STA<TAB>protein, then that
+            # alignment's mRNA/CDS records.
+            parts = line.split('\t')
+            pending_sta = parts[1].strip() if len(parts) > 1 else ''
+            continue
         if line.startswith('#') or not line.strip():
             continue
         parts = line.split('\t')
@@ -1066,8 +1076,10 @@ def _parse_miniprot_gff(gff_text):
                 'identity': identity,
                 'score': score_val,
                 'strand': strand,
-                'cds_list': []
+                'cds_list': [],
+                'protein': pending_sta,
             }
+            pending_sta = ''
         elif ftype == 'CDS':
             parent = attr_dict.get('Parent', '')
             if parent in models:
@@ -1104,6 +1116,143 @@ def _parse_miniprot_gff(gff_text):
     return result
 
 
+# =============================================================================
+# TERMINAL REFINEMENT OF MINIPROT MODELS
+# =============================================================================
+# miniprot reports only the part of the query it aligns, so a model normally starts a few
+# codons inside the gene (without the initiator Met) and ends before the stop codon. On the
+# 2026-09 family benchmark this was the most common disagreement with curated annotations:
+# every apyrase model was short by exactly 3 codons at the N terminus and 2 codons plus the
+# stop at the C terminus, while all ten internal splice junctions were byte-identical to the
+# curated gene. Walking in frame outwards from the terminal CDS recovers those ends.
+
+STOP_CODONS = ('TAA', 'TAG', 'TGA')
+TERMINUS_MAX_START_CODONS = 30
+TERMINUS_MAX_STOP_CODONS = 20
+_TERMINUS_UNKNOWN_QUERY_BOUND = 10
+
+
+def _terminus_bound(unaligned_query_residues, hard_cap):
+    """How many codons the walk may cross.
+
+    The unaligned query residues at that terminus are the natural bound: they are what the
+    model is missing. With none unaligned (the query itself may be truncated) a small fixed
+    budget is allowed instead, so the walk can complete a start/stop codon but cannot invent
+    a long terminus.
+    """
+    if unaligned_query_residues > 0:
+        return max(1, min(hard_cap, unaligned_query_residues + 3))
+    return min(hard_cap, _TERMINUS_UNKNOWN_QUERY_BOUND)
+
+
+def refine_model_termini(cds_ordered, chrom_seq, strand,
+                         max_start_codons=TERMINUS_MAX_START_CODONS,
+                         max_stop_codons=TERMINUS_MAX_STOP_CODONS):
+    """Extend a miniprot model's terminal CDS to the gene's own start and stop codon.
+
+    ``cds_ordered`` is the model's CDS list in CODING order (the caller reverses it on the
+    minus strand), with ``gstart`` 0-based inclusive and ``gend`` exclusive in ``chrom_seq``
+    coordinates. It is modified in place.
+
+    The walk is deliberately timid, because extending a terminus is inventing sequence the
+    aligner did not support:
+      * it refuses to start when the model's terminal codon is already ATG / a stop codon;
+      * it refuses to cross a splice site (``AG`` immediately 5' of the first coding base, or
+        ``GT`` immediately 3' of the last one) — there the model is missing a neighbouring
+        EXON, and walking into the intron would fabricate residues;
+      * the upstream walk stops at the first in-frame stop codon rather than crossing it;
+      * it only extends when it finds an ATG (upstream) or a stop codon (downstream) inside
+        the bound, so a terminus it cannot resolve is left exactly as miniprot reported it;
+      * a first CDS with a non-zero phase, or a last CDS whose coding length is not a whole
+        number of codons, is left alone (the model does not begin or end on a codon border).
+
+    The splice-site guard costs some legitimate extensions, since ``GT``/``AG`` also occur
+    inside coding sequence: of four real Apis genes checked on 2026-09-15 (query trimmed at
+    both ends), three were recovered to the curated boundary exactly and in the fourth a
+    chance ``GT`` in a valine codon blocked a 5-codon walk to the real stop. Refusing to
+    invent residues is the safer error.
+
+    Returns ``(prefix_aa, suffix_aa)``: the residues the extension adds to miniprot's own
+    translation. The stop codon itself is not translated, so ``suffix_aa`` holds only the
+    coding residues in front of it.
+    """
+    if not cds_ordered or not chrom_seq:
+        return '', ''
+
+    first, last = cds_ordered[0], cds_ordered[-1]
+    prefix = suffix = ''
+    n = len(chrom_seq)
+
+    # --- start codon: walk upstream, in frame, from the first coding base
+    if int(first.get('phase', 0) or 0) == 0:
+        if strand == '+':
+            edge = int(first['gstart'])
+            at_splice = edge >= 2 and chrom_seq[edge - 2:edge].upper() == 'AG'
+            already = chrom_seq[edge:edge + 3].upper() == 'ATG'
+            steps = min(max_start_codons, edge // 3)
+            if not at_splice and not already:
+                for k in range(1, steps + 1):
+                    s = edge - 3 * k
+                    codon = chrom_seq[s:s + 3].upper()
+                    if codon in STOP_CODONS:
+                        break
+                    if codon == 'ATG':
+                        first['gstart'] = s
+                        prefix = translate(chrom_seq[s:edge]).replace('*', '')
+                        break
+        else:
+            edge = int(first['gend'])
+            at_splice = (edge + 2 <= n and
+                         reverse_complement(chrom_seq[edge:edge + 2]).upper() == 'AG')
+            already = (edge >= 3 and
+                       reverse_complement(chrom_seq[edge - 3:edge]).upper() == 'ATG')
+            steps = min(max_start_codons, (n - edge) // 3)
+            if not at_splice and not already:
+                for k in range(1, steps + 1):
+                    e = edge + 3 * k
+                    codon = reverse_complement(chrom_seq[e - 3:e]).upper()
+                    if codon in STOP_CODONS:
+                        break
+                    if codon == 'ATG':
+                        first['gend'] = e
+                        prefix = translate(
+                            reverse_complement(chrom_seq[edge:e])).replace('*', '')
+                        break
+
+    # --- stop codon: walk downstream, in frame, from the last coding base
+    coding_len = (int(last['gend']) - int(last['gstart'])) - int(last.get('phase', 0) or 0)
+    if coding_len > 0 and coding_len % 3 == 0:
+        if strand == '+':
+            edge = int(last['gend'])
+            at_splice = edge + 2 <= n and chrom_seq[edge:edge + 2].upper() == 'GT'
+            already = (edge >= 3 and chrom_seq[edge - 3:edge].upper() in STOP_CODONS)
+            steps = min(max_stop_codons, (n - edge) // 3)
+            if not at_splice and not already:
+                for k in range(1, steps + 1):
+                    e = edge + 3 * k
+                    if chrom_seq[e - 3:e].upper() in STOP_CODONS:
+                        last['gend'] = e
+                        suffix = translate(chrom_seq[edge:e]).replace('*', '')
+                        break
+        else:
+            edge = int(last['gstart'])
+            at_splice = (edge >= 2 and
+                         reverse_complement(chrom_seq[edge - 2:edge]).upper() == 'GT')
+            already = (edge + 3 <= n and
+                       reverse_complement(chrom_seq[edge:edge + 3]).upper() in STOP_CODONS)
+            steps = min(max_stop_codons, edge // 3)
+            if not at_splice and not already:
+                for k in range(1, steps + 1):
+                    s = edge - 3 * k
+                    if reverse_complement(chrom_seq[s:s + 3]).upper() in STOP_CODONS:
+                        last['gstart'] = s
+                        suffix = translate(
+                            reverse_complement(chrom_seq[s:edge])).replace('*', '')
+                        break
+
+    return prefix, suffix
+
+
 def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                              strand=None, max_intron=200000,
                              sensitive=False, region_offset=0):
@@ -1135,10 +1284,13 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
               file=sys.stderr)
         return [], query_seq
     
-    pid = os.getpid()
-    query_file = f"/tmp/synvoy_mp_query_{pid}.faa"
-    target_file = f"/tmp/synvoy_mp_target_{pid}.fna"
-    
+    # mkstemp, not a pid-derived name: pids repeat across containers/PID namespaces
+    # that share /tmp, and a collision would silently swap one task's model for another's.
+    _qfd, query_file = tempfile.mkstemp(prefix="synvoy_mp_query_", suffix=".faa")
+    _tfd, target_file = tempfile.mkstemp(prefix="synvoy_mp_target_", suffix=".fna")
+    os.close(_qfd)
+    os.close(_tfd)
+
     try:
         # Write temp files
         write_fasta([("query", query_seq)], query_file)
@@ -1206,32 +1358,51 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
         
         # Extract CDS DNA and build exon list
         exons = []
-        dna_fragments = []
         model_strand = best['strand']
-        
+
         cds_ordered = best['cds_list']
         if model_strand == '-':
             cds_ordered = list(reversed(cds_ordered))
-        
+
+        # miniprot reports only the aligned span: recover the model's own start and stop
+        # codon where the sequence supports them (see refine_model_termini). The codon count
+        # BEFORE the walk is what miniprot's own translation covers.
+        cds_codons_before = sum(int(c['gend']) - int(c['gstart'])
+                                for c in cds_ordered) // 3
+        term_prefix, term_suffix = refine_model_termini(
+            cds_ordered, chrom_seq, model_strand,
+            max_start_codons=_terminus_bound(
+                max(0, int(cds_ordered[0].get('qstart', 0) or 0) - 1),
+                TERMINUS_MAX_START_CODONS),
+            max_stop_codons=_terminus_bound(
+                max(0, len(query_seq) - int(cds_ordered[-1].get('qend', 0) or 0)),
+                TERMINUS_MAX_STOP_CODONS),
+        )
+        if term_prefix or term_suffix:
+            print(f"[miniprot] Terminal refinement: +{len(term_prefix)} aa at the N "
+                  f"terminus, +{len(term_suffix)} aa + stop at the C terminus",
+                  file=sys.stderr)
+
         for i, cds in enumerate(cds_ordered, 1):
             gs = cds['gstart']
             ge = cds['gend']
-            
+
             # Extract DNA
             exon_dna = chrom_seq[gs:ge]
             if model_strand == '-':
                 exon_dna = reverse_complement(exon_dna)
-            
-            # Handle phase: only the first CDS in coding order needs phase
-            # adjustment (subsequent phases are redundant given exon lengths).
-            # After per-CDS reverse-complement above, left side is always the
-            # coding-direction 5' end, so trimming from the left is correct.
+
+            # Every CDS is read in ITS OWN frame: GFF3 phase = bases to skip at the
+            # coding-direction 5' end to reach the first complete codon (after the
+            # reverse-complement above, that end is on the left). Trimming only the
+            # first CDS read every exon behind a phase-1/2 intron in the wrong frame:
+            # a 64 %-identity Harpegnathos hyaluronidase model came out at 47.6 %, and
+            # every multi-exon GOI model of the 2026-09-11 family benchmark was affected.
+            # The residue of a codon split by an intron is dropped here; the model
+            # protein below comes from miniprot's own translation, which keeps it.
             phase = cds['phase']
-            if phase > 0 and i == 1:
-                exon_dna = exon_dna[phase:]
-            
-            dna_fragments.append(exon_dna)
-            
+            coding_dna = exon_dna[phase:] if phase > 0 else exon_dna
+
             # Check splice sites
             splice_donor = None
             splice_acceptor = None
@@ -1246,8 +1417,8 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                 else:
                     splice_acceptor = reverse_complement(chrom_seq[ge:ge+2]).upper()
             
-            exon_prot = translate(exon_dna)
-            
+            exon_prot = translate(coding_dna)
+
             exons.append({
                 'id': f'exon_{i}',
                 # Remove all stop codons; internal stops can appear in noisy models
@@ -1259,6 +1430,7 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                 'gstart': gs + region_offset,
                 'gend': ge + region_offset,
                 'strand': model_strand,
+                'phase': phase,
                 'chrom': chrom_name,
                 'pident': best['identity'] * 100,  # miniprot reports 0-1
                 'has_start_codon': (i == 1 and exon_prot.startswith('M')),
@@ -1268,20 +1440,27 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                 'splice_acceptor': splice_acceptor,
                 'method': 'miniprot'
             })
-        
-        # Assemble full protein from DNA
-        full_cds = ''.join(dna_fragments)
-        # Trim to codon boundary
-        full_cds = full_cds[:len(full_cds) - len(full_cds) % 3]
-        # Keep a stop-free protein for downstream querying.
-        full_protein = translate(full_cds).replace('*', '')
-        
+
+        # Model protein: miniprot's own translation (--trans, the ##STA record). It is
+        # the only construction that stays in frame across a frameshift miniprot has
+        # modelled (Frameshift=1) and keeps intron-split codons; concatenating the CDS
+        # DNA runs out of frame from the first frameshift to the end of the model.
+        # Fallback, without --trans output: the per-exon in-frame translations.
+        full_protein = (best.get('protein') or '').replace('*', '')
+        if full_protein:
+            # miniprot's translation covers the aligned span only; the terminal refinement
+            # above widened the terminal CDS, so those residues are added here. The per-exon
+            # fallback below translates the widened CDS and already contains them.
+            # An alignment that ends mid-codon leaves miniprot's translation one residue
+            # longer than its own CDS, and that residue is the first one the C-terminal walk
+            # re-translates — drop the overlap instead of duplicating it.
+            overlap = max(0, len(full_protein) - cds_codons_before)
+            full_protein = term_prefix + full_protein + term_suffix[overlap:]
+        else:
+            full_protein = ''.join(e['seq'] for e in exons)
         if not full_protein:
             full_protein = query_seq
-        
-        # Parse --trans output for verification (appears as PAF comments)
-        # The GFF-based extraction above is authoritative
-        
+
         print(f"[miniprot] Best model: {len(exons)} exon(s), "
               f"{len(full_protein)} aa, identity={best['identity']:.2f}, "
               f"score={best['score']:.0f}", file=sys.stderr)
