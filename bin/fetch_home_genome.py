@@ -711,8 +711,8 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
             extract_zip_archive(zip_file, extract_dir)
 
             # Find files
-            fna_files = list(extract_dir.rglob("*.fna"))
-            gff_files = list(extract_dir.rglob("*.gff"))
+            fna_files = sorted(extract_dir.rglob("*.fna"))
+            gff_files = sorted(extract_dir.rglob("*.gff"))
 
             genome_path = None
             gff_path = None

@@ -234,7 +234,7 @@ def main() -> int:
     ap.add_argument("--max_window", type=int, default=20000000,
                     help="Skip hull windows larger than this (bp) — guards against runaway spans")
     ap.add_argument("--min_identity", type=float, default=40.0,
-                    help="Min miniprot %identity to emit a rescued model")
+                    help="Min miniprot %%identity to emit a rescued model")
     ap.add_argument("--min_coverage", type=float, default=0.5,
                     help="Min query coverage (CDS aa / query len) to emit a model")
     ap.add_argument("--classify_high_min_identity", type=float, default=70.0)

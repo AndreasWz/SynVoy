@@ -763,6 +763,16 @@ def get_genome_length(genome_file):
         print(f"WARNING: Could not determine genome length from {genome_file}: {e}", file=sys.stderr)
     return max(1, total_len)
 
+def hit_sort_key(h):
+    """Total order over hits. Sorting by (chrom, start) alone left hits that share a
+    start in INPUT order, and the search tools write their tables in a thread-dependent
+    order: the same hits gave consistency 0.875-0.917 (and so five different region
+    scores and names) across five line orders of one file. Every field takes part, so
+    the order depends on the set of hits only."""
+    return (h['chrom'], h['start'], h['end'], h['query'], h.get('strand', ''),
+            -h.get('identity', 0.0), h.get('evalue', 0.0))
+
+
 def cluster_hits_proximity(hits, gene_map, max_dist):
     """
     Cluster hits based on genomic proximity in Target.
@@ -770,8 +780,8 @@ def cluster_hits_proximity(hits, gene_map, max_dist):
     """
     if not hits: return []
     
-    # Sort by Chrom, Start
-    hits.sort(key=lambda x: (x['chrom'], x['start']))
+    # Sort by chrom, start -- and every other field, see hit_sort_key.
+    hits.sort(key=hit_sort_key)
     
     clusters = []
     current_cluster = [hits[0]]
@@ -1007,6 +1017,11 @@ def main():
                     continue
     else:
         print(f"INFO: Hits file {args.hits} not found. Continuing with GOI-anchor fallback if possible.", file=sys.stderr)
+
+    # One canonical order before anything reads the list: clustering, the order
+    # consistency of each cluster, and the label pool the permutation p-value samples
+    # from all depend on it.
+    hits.sort(key=hit_sort_key)
 
     goi_intervals_gff = load_goi_intervals_from_gff(args.target_gff, padding_bp=args.goi_padding)
     goi_intervals_hits = load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding)

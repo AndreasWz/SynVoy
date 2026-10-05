@@ -353,7 +353,7 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
             # CIGAR Parsing for coordinates
             try: 
                 cigar_decoded = result.cigar.decode.decode()
-            except:
+            except Exception:
                 break
                 
             # Parse CIGAR to find start and alignment length

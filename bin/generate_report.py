@@ -450,6 +450,10 @@ def scan_dir_by_suffix(dir_path, suffix_buckets):
                         break
     except OSError:
         pass
+    # scandir order is file-system dependent (ext4 hash order vs. e.g. GPFS); the
+    # report must not depend on which machine staged the files.
+    for bucket in result:
+        result[bucket].sort()
     return result
 
 
@@ -800,7 +804,7 @@ def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
     if not paralog_check_dir or not os.path.isdir(paralog_check_dir):
         return rows
     with os.scandir(paralog_check_dir) as it:
-        for entry in it:
+        for entry in sorted(it, key=lambda e: e.name):
             if not entry.is_file() or not entry.name.endswith(suffix):
                 continue
             try:
@@ -967,7 +971,7 @@ def load_phylo_placement_rows(phylo_dir):
     if not phylo_dir or not os.path.isdir(phylo_dir):
         return rows
     with os.scandir(phylo_dir) as it:
-        for entry in it:
+        for entry in sorted(it, key=lambda e: e.name):
             if not entry.is_file() or not entry.name.endswith(".tsv"):
                 continue
             try:

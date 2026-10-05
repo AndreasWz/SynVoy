@@ -216,7 +216,7 @@ def datasets_download(accession: str, output_path: Path,
             extract_dir.mkdir(exist_ok=True)
             with zipfile.ZipFile(zip_file, "r") as zf:
                 zf.extractall(extract_dir)
-            fna_files = list(extract_dir.rglob("*.fna"))
+            fna_files = sorted(extract_dir.rglob("*.fna"))
             gff_files = [f for pat in ("*.gff", "*.gff3") for f in extract_dir.rglob(pat)]
             fna_ok = False
             gff_ok = False
