@@ -470,7 +470,7 @@ is a *description* problem and is now handled by describing it correctly. Revisi
 you decide to renumber the scale anyway — in which case do it in the same pass as
 regenerating the benchmark fixtures.
 
-## F4 ⭐⭐⭐ The wavefront is inoperative in 37 of 44 runs — ⚠️ CODE FIXED, measurement still owed
+## F4 ⭐⭐⭐ The wavefront is inoperative in 37 of 44 runs — ✅ FIXED, and ✅ MEASURED 2026-08-31: it changes nothing
 
 Recomputed the binning from every `sorted_genomes.txt` in `results/` and `local_runs/`
 (44 runs):
@@ -535,12 +535,58 @@ wavefront. Note the expanding DB did do work within the run — wave 1 added 0 n
 wave 2 added 6, wave 3 added 1 — but whether those seeds changed any final call is still
 untested, because both arms had the same wave structure.
 
-**⬜ Still owed — but the mechanism now exists.** The comparison that answers the question
-is *waves vs no waves*, not rank-vs-legacy binning. `--disable_wavefront` (added 2026-08-22)
-puts every genome in one parallel wave, so the query DB is never augmented between genomes;
-run it against a normal run on the **uniform-depth GT genome set**, where the gradient
-actually differs. It is a measurement flag, not a performance option.
-**Until that run exists, do not attribute the melittin result to the wavefront.**
+**✅ MEASURED 2026-08-31 (job 5768082) — clean negative result. The wavefront changes nothing.**
+
+Three arms on the pinned pro-mode melittin GT set, one variable, separate work dirs so no
+cached task could mask a difference. The third arm is the one the 2026-08-21 attempt lacked:
+an identical **replicate** of arm A, giving a noise floor, because a difference between two
+arms is uninterpretable while the run's determinism is unknown.
+
+| arm | setting | waves | DB growth between waves |
+|---|---|---|---|
+| A | wavefront ON | **3 graded** `[1, 2, 2]` | 1 → 4 → 6 genes |
+| A′ | ON, replicate | 3 graded `[1, 2, 2]` | 1 → 4 → 6 genes |
+| B | `--disable_wavefront true` | **1 wave of 5** | none — initial DB only |
+
+The control genuinely controlled this time — that was the specific failure of the 2026-08-21
+run, where both arms produced identical waves and therefore tested nothing. Here arm B searched
+every genome against the initial database only, while arm A searched genomes 2–5 against a
+database augmented by nearer relatives' recovered orthologs.
+
+**All three arms produced byte-identical results**: 0 HIGH / 7 MEDIUM / 13 LOW, coordinate
+distance 0 for every pairing. `diff(A,B) = diff(A,A′) = 0`.
+
+So: **the expanding wavefront made no difference to any call on this target set**, and the run
+is deterministic here (worth knowing in itself — the suspected non-determinism did not appear).
+
+**What this does and does not license.** It licenses removing the wavefront from the *melittin
+result's* explanation: that result is produced by neighbourhood restriction, and the mechanism
+section must say so. It does **not** license "the wavefront is useless", and the negative must
+not be over-read — **the experiment did not stress the mechanism.**
+
+The wavefront can only pay off through a **stepping-stone**: a target whose gene is too divergent
+to hit from the original query, but reachable from an ortholog recovered in a *nearer* species and
+added to the database. That needs a genuine divergence ladder. This set has no such ladder — the
+normalised distances were
+
+```
+wave 1: dist 0.667   wave 2: dist 0.667   wave 3: dist 1.000
+```
+
+i.e. **two distinct values across five genomes**, all bees comfortably within reach of the *Apis*
+query (every target was recovered in wave 1's database anyway). There was no target that needed a
+stepping stone, so no stepping stone could be observed. A flat gradient cannot test a gradient
+mechanism.
+
+**⬜ The experiment that would actually test it** — a divergence ladder, targets at increasing
+distance where the farthest is beyond direct reach of the query but within reach of an
+intermediate's recovered ortholog. The oskar ladder set (mosquito → Nasonia → Gryllus) is the
+natural candidate: chosen for exactly that spread, and already validated on the cluster. Run
+`--disable_wavefront` A/B there before concluding anything general about the mechanism.
+
+Honest summary for the paper: *the wavefront was measured on the melittin benchmark and changed
+nothing there, so the melittin result is attributable to neighbourhood restriction alone. Whether
+it helps across a real divergence gradient is untested.*
 
 ## F5 Two incompatible definitions of collinearity — ✅ FIXED 2026-07-26
 
@@ -675,6 +721,33 @@ limit). 550 tests pass; re-run verification in progress.
 Both landed behind the `main.nf` sub-workflow extraction described below — the wiring in (2)
 was impossible before it.
 
+**Follow-up (2) verified against the real v2_decorin run — 2026-08-30, and it is a no-op there.**
+The wiring alone was not enough: `build_locus_ownership` indexed ownership rows by the raw
+`genome` column, and the rescue task writes that column as `<genome>.hull_rescue` (the tag
+exists so its output filename cannot collide with the seeded task's). The dedup records on
+the other side of the lookup are already canonicalized, so the key never matched and every
+rescue-derived call still skipped the RBH check. Fixed by canonicalizing the row's genome
+(`generate_report.py`, committed in `b3fcfe6`); regression
+`tests/test_locus_ownership.py::test_rescue_tagged_genome_still_matches`.
+
+Replaying **both** code versions over the staged ownership TSVs of job 5760122 (25 files,
+792 rows, 6 of them rescue-tagged) gives **byte-identical verdicts** — 15 records evaluated,
+11 `paralog_misassignment`, same classes, same owners. The reason is worth recording, because
+it is the difference between "the guard was broken" and "the guard was redundant here":
+
+> All 6 rescue rows are **shadowed** by a seeded row at the same coordinates carrying the
+> same verdict. For the cow decorin at `NC_037332.1:21,015,210` the rescue row scores
+> `locus_1|gene-DCN` at bit 1713 and the seeded row scores the same gene at bit 886 — the
+> rescue row is the better alignment, but it is not the *deciding* one. §18's collinearity
+> bridging already recovers that gene inside the seeded block, so the seeded ownership task
+> models the same span independently.
+
+**Consequence: the 2026-08-24 decorin headline stands** — the 4 HIGH decorins were RBH-checked
+after all, via their seeded twins, and the 2 biglycans were correctly demoted. The fix is
+defensive rather than corrective: it matters for a call the rescue path finds *alone*, which
+on this dataset does not occur (0 of 6 orphans). It should not be described as having changed
+any published number. Verify on new data with `scripts/lrz/verify_ownership_fix.py`.
+
 ## F7 Documentation-layer defects (fixed in the 2026-07-26 docs pass)
 
 `--keep_intermediate` is declared and read by nothing; `--no_anchor_grid` is a
@@ -683,6 +756,149 @@ though `main.nf:714` still advertises it; 59 parameters were documented nowhere.
 corrected in the docs — but `main.nf:714` and the two dead parameters are still live in
 the code.
 
+## F9 ⭐⭐⭐ Over-calling is a MISSING-EVIDENCE problem, not a threshold problem — ⚠️ measured 2026-08-31
+
+The benchmark re-run (D.1b) called PRESENT in **16 of 19 species and ABSENT in none**, with the
+same 5 false positives as May. Every fix since then has adjusted *thresholds*. This section
+records why that could never have worked, using the per-call evidence dumped from the run.
+
+**The evidence does not separate the two populations.** HIGH/MEDIUM calls, grouped by whether
+the species actually has the gene:
+
+| | identity | query cov | flanking support |
+|---|---|---|---|
+| gene **PRESENT** | 84.3 · 73.5 · 63.5 · 59.8 · 54.5 · **30.2** | 1.00–0.27 | 6–10 |
+| gene **LOST/ABSENT** | **93.8** · 57.7 · 37.0 · 31.9 · 30.4 · 30.2 | 0.56–0.26 | 7–8 |
+
+The **highest-identity call in the entire benchmark (93.8 %, *Bombus terrestris*) is a false
+positive**, and the lowest true call (*Formica*, 30.2 %) ties the lowest false one. Nearest
+neighbours across the boundary — *Colletes* 54.5 %/0.427/4 exons (real) versus *Bombus impatiens*
+57.7 %/0.443/4 exons (lost) — are indistinguishable on every feature the classifier has.
+
+**Why flanking support carries no signal here, structurally.** It is 6–10 on *both* sides,
+because a gene lost from a conserved locus leaves the neighbourhood intact — that is precisely
+what gene loss looks like. Synteny tells you *where to look*; using it as evidence that *what you
+found is the gene* is a category error, and it is the mechanism behind the over-calling.
+
+**The RBH check cannot rescue it either, and the reason is fixable.** Best-home-match is
+`gene-Melt` for 14/22 PRESENT rows and 15/23 LOST/ABSENT rows — no discrimination. The cause is
+in the last column of every ownership TSV: **`n_paralogs_compared = 2`**. The home panel holds
+only `gene-Melt` and `gene-LOC726866`. *Bombus terrestris* RBHs to melittin at bit 89 / 53.3 % —
+**stronger than real *Colletes* (78)** — because **bombolitin, the melittin-family gene that
+replaced melittin in *Bombus*, is not in the panel for it to match instead.** §1m's
+`find_family_paralogs` recovered BGN/ASPN for decorin but only one extra member here.
+
+### The AMBIGUOUS tier (shipped 2026-08-31, default ON)
+
+A fourth verdict for a candidate promoted **only** by flanking support:
+`AMBIGUOUS` / `syntenic_candidate_unconfirmed`. It stays in the JSON and is drawn in the plots
+(palest, most broken outline in the legend) but is **excluded from the ortholog counts** and
+named separately in the headline. Kill switch `--disable_ambiguous_tier`.
+
+**Measured cost, replaying all 53 real benchmark calls through both classifiers:**
+
+| | TP | FP | FN | TN | precision | recall | F1 |
+|---|---|---|---|---|---|---|---|
+| MEDIUM (pre-2026-08-31) | 6 | 4 | 2 | 3 | 0.600 | 0.750 | 0.667 |
+| AMBIGUOUS tier | 2 | 1 | 6 | 6 | 0.667 | **0.250** | 0.364 |
+
+11 of 13 HIGH/MEDIUM calls become AMBIGUOUS. It removes 3 false positives (*Bombus impatiens*,
+*Melipona*, *Solenopsis*) and costs 4 true positives (*Cardiocondyla*, *Colletes*, *Euglossa*,
+*Formica*). **That is a near 1:1 trade, and it is the expected result**: the tier adds no
+information, it only stops the tool asserting what it cannot support. Precision barely moves
+because the errors were never separable.
+
+So the tier is an **honesty fix, not an accuracy fix**, and it should be argued as one. Part of
+the F1 drop is an artefact of a metric that rewards guessing PRESENT — there are more PRESENT
+species than LOST ones in the truth set.
+
+### The "populate the paralog panel" fix — PROPOSED, TESTED, REFUTED (2026-08-31)
+
+The obvious next move was to fill the 2-member panel with the melittin gene family so the RBH
+check could reject the *Bombus* call. **It was tested against the real *Apis mellifera* proteome
+(9 935 proteins) and it does not work.** Recorded because the negative is more useful than the
+proposal:
+
+| home gene | len | SW score | score / self |
+|---|---|---|---|
+| `gene-Melt` (melittin) | 70 | 290 | **0.797** |
+| `gene-LOC726866` | 282 | 26 | 0.071 |
+| `gene-Apamin` | 46 | 21 | 0.058 |
+| `gene-Mcdp` | 50 | 16 | 0.044 |
+
+Apamin and MCD peptide *are* annotated in the proteome and *are* bee-venom relatives, but against
+a self-score of 364 they score 21 and 16. They share only the venom-gland signal peptide; the
+mature peptides are unrelated (apamin is a disulfide neurotoxin, melittin an amphipathic lytic
+peptide). **They are a functional family, not a sequence family** — melittin is effectively
+single-copy in *Apis*, so there is nothing to put in the panel.
+
+**The real reason RBH cannot fix this is architectural.** The *Bombus terrestris* call matches
+`gene-Melt` at bit 89 / 53.3 % — **stronger than real *Colletes* (78 / 37.1 %)**. SynVoy is
+finding a genuine melittin-like sequence in the *Bombus* syntenic locus; the literature says
+melittin is absent from *Bombus* venom and **bombolitin** replaced it, and bombolitin is not
+annotated in the *Bombus* proteome at all. So the recovered sequence is a **target-lineage-specific
+paralog**, and a home-proteome RBH can only reject a call that matches a *home* paralog better.
+There is no *Apis* gene for bombolitin to match. **No amount of home-panel curation reaches this
+class of error.**
+
+**This strengthens the case for AMBIGUOUS rather than weakening it.** "Melittin ortholog vs
+bombolitin paralog" is not decidable from the home genome and the target sequence alone, so
+AMBIGUOUS is the *correct* verdict here, not a stopgap for a missing threshold.
+
+### Architecture profiling — PROTOTYPED, test INCONCLUSIVE (2026-08-31)
+
+Third hypothesis: the melittin precursor is signal peptide -> acidic propeptide -> amphipathic
+cationic mature, and the 2026-07-19 six-frame audit used exactly that to sort 11 real family
+members from ~13 overcalls by hand. Prototyped as a **query-derived** profile (6-bin Kyte-Doolittle
+hydropathy + 6-bin net charge, compared by normalised L1) rather than a hardcoded melittin rule,
+so it would generalise to any query. The query's own signature comes out clearly:
+
+```
+hydropathy  +0.41 +0.99 -1.68 -1.05 +1.31 +0.06      (hydrophobic signal, then ...)
+charge      +0.00 -0.08 -0.42 -0.42 +0.08 +0.25      (... acidic propeptide, cationic mature)
+```
+
+Scored against the best melittin-like protein in each species' proteome it did **not** separate:
+`min(PRESENT) = 0.828 < max(LOST) = 0.898`.
+
+**But that test is inconclusive, not a refutation, and the reason matters.** The test bed is
+broken: *Apis cerana*'s best proteome match scores SW 49, while its recovered ortholog scores
+**342**. The truth table already says why — *"NCBI annotation gap (RefSeq does not currently
+annotate melittin)"*. For most of these species the proteome does not contain melittin at all, so
+"best melittin-like protein" is noise, and a discriminator cannot be evaluated against noise.
+
+**⬜ To actually test it**, score the profile against SynVoy's *recovered models* (the 12
+HIGH/MEDIUM calls of D.1b), not against proteome proxies. That needs the models translated from
+the staged genomes — a small batch job, not login-node work. Two design notes for whoever does it:
+the coarse 6-bin profile is probably too permissive (many proteins are hydrophobic-N /
+acidic-middle / basic-C), and melittin's defining property is the **amphipathicity** of the mature
+helix, which a linear profile cannot see — a helical-wheel moment is the feature with real
+discriminating power.
+
+**⬜ Other routes**, in increasing order of cost:
+1. **Phylogenetic placement.** A true ortholog groups with the query in a species-tree-consistent
+   way; a lineage-specific paralog does not. SynVoy already builds trees (`compute_tree.py`) but
+   the tree never feeds back into the call (§1p — verdicts never reach the tree or plot). This is
+   the route that could reach the *Bombus* class of error, because it does not depend on the home
+   genome containing a paralog to match against.
+2. **Target-side annotation / synteny of the paralog itself** — expensive, and out of scope.
+
+### Summary: three hypotheses, none cheap
+
+| # | hypothesis | outcome |
+|---|---|---|
+| 1 | tune identity / coverage / flanking thresholds | **refuted** — distributions overlap completely; the highest-identity call in the benchmark is a false positive |
+| 2 | populate the home paralog panel | **refuted** — melittin has no sequence family in *Apis*; the confounder is a *target*-lineage paralog a home RBH can never see |
+| 3 | architecture profiling | **inconclusive** — plausible, but untestable against proteomes that do not annotate the gene |
+
+The over-calling is **not reachable by reweighting evidence the pipeline already has.** That is
+the finding, and it is what justifies the AMBIGUOUS tier as the shipped response rather than a
+placeholder: where the evidence cannot decide, the honest output is a named candidate with
+orthology explicitly unasserted.
+
+Until one exists, the defensible output for this class is exactly what the tier now emits: a
+named candidate in a conserved neighbourhood, with orthology explicitly not asserted.
+
 ---
 
 # Part C — Known open items (from `docs/TODO.md`, re-verified)
@@ -690,7 +906,7 @@ the code.
 | § | Item | Severity | State |
 |---|---|---|---|
 | **§1x** | **Silent discard** — a confident hit on the correct gene is rejected by the synteny gate and never mentioned. `demo_Def`: *Anopheles* defensin found at 54–72 % inside the real RefSeq gene, reported as "no ortholog". | ⭐⭐ | ✅ **Fixed 2026-07-26** — report block, per-rejection logging, and the plot no longer claims absence. Off-block marker ⬜ (needs a `main.nf` channel) |
-| **§1y** | **Coordinate regression** — the ant melittin was hit in 8 runs; the newest run is 2 543 bp off and nobody noticed, because scoring is species-presence not coordinate overlap | ⭐⭐ | Open; best-ever hit was 132 bp of an 855 bp gene |
+| **§1y** | **Coordinate regression** — the ant melittin was hit in 8 runs; the newest run is 2 543 bp off and nobody noticed, because scoring is species-presence not coordinate overlap | ⭐⭐ | ✅ **Scorer + 28-model truth set + CI freeze built 2026-08-30**, and on its first real use (D.1b) it caught a live overclaim: the benchmark's only recall gain is a model **63,936 bp** off the gene. ⬜ Cardiocondyla accession mapping (13 models unscoreable) |
 | §1v | Classifier ignores the synteny evidence the run computed | ⭐⭐ | ✅ **Fixed 2026-07-26** — identity floor; per-call support measured and closed won't-do (see F6) |
 | §1u | `goi_block_flanking` drives ranking but is not emitted | ⭐ | ✅ **Fixed 2026-07-26** — emitted in the scores TSV alongside `synteny_score` |
 | §1z | `QueryCoverage` read as target recovery; target coverage never reported | 🐛 | Open |
@@ -698,7 +914,7 @@ the code.
 | §1p.1 | Target exon composition not passed to plot → synthetic uniform exons drawn | ⭐ | Drawing side in progress (uncommitted); data side untouched |
 | §1t | Every distance parameter is metazoan-scale (found by pointing it at an 11 Mb yeast) | ⭐ | Open |
 | §1w | Duplicate regions with byte-identical spans | 🐛 | Open |
-| §1q, §1s | `strong_synteny` read before assignment; numeric CLI params crash the run | ✅ fixed | **Fixed but uncommitted** — see Part F |
+| §1q, §1s | `strong_synteny` read before assignment; numeric CLI params crash the run | ✅ fixed | Committed 2026-08-21 (`49df417`) |
 | — | **Ivan's annotation agent deletes coding sequence** on validation failure, silently, marked only `class=modified` | ⚠️ external | Blocking the next annotation round |
 
 Counted: **38 unchecked action items** across Part 0 + Part 1 of `docs/TODO.md`.
@@ -719,6 +935,58 @@ Counted: **38 unchecked action items** across Part 0 + Part 1 of `docs/TODO.md`.
 The shape of the result is exactly the story: **SynVoy trades precision for recall.** The
 5 FP are the overcalling problem (F6) and the 0.875 recall is the contribution. Per tier,
 SynVoy is the only tool with any tier-2/tier-3 recall at all (baselines: 0.000).
+
+### D.1b Re-run on current code — 2026-08-31 (job 5768083, 19 targets)
+
+| scoring | TP | FP | FN | TN | precision | recall | F1 |
+|---|---|---|---|---|---|---|---|
+| **2026-05-03 (D.1)** | 7 | 5 | 1 | 2 | 0.583 | 0.875 | 0.700 |
+| **2026-08-31, current code** | **8** | 5 | **0** | 2 | 0.615 | **1.000** | **0.762** |
+
+On species presence the tool improved: recall 0.875 → **1.000**, F1 0.700 → 0.762. The entire
+gain is one species — *Tetramorium bicarinatum* moving from FN to TP.
+
+**That single improvement is an artefact, and the coordinate scorer catches it.** Tetramorium is
+called PRESENT at HIGH confidence over `OV788322.1:15,483,596–15,743,000` — a **259 kb** region
+that does contain the true melittin at 15,634,953. But the actual GOI *model* is placed
+**63,936 bp** away from the gene. In `mel_det_rep2` the same gene was modelled at offset **0**,
+132 bp overlapping. So between those runs the **gene model got worse while the benchmark score
+got better** — the §1y thesis demonstrated end-to-end on the flagship benchmark in a single run.
+
+> **Erratum 2026-09-10: rescore before citing anything in this section.** Until 2026-09-10
+> `score_coordinates.py` read only `mRNA` GOI features and silently skipped tandem copies,
+> which SynVoy writes as `gene` features. On a local rerun of this benchmark, that hid **42 of
+> 95** GOI calls (6 of them MEDIUM). The fix moves locus_recall **0.04 → 0.28** on the same
+> output, and it turned LRZ det_rep R2's "*Tetramorium* melittin absent" into a hit at the
+> correct locus. The "model placed 63,936 bp away" claim below was scored the old way, so a
+> tandem copy on the true gene would have been invisible to it. Its run outputs are on LRZ;
+> rescore them with the fixed scorer.
+
+Coordinate scoring of the same run:
+
+```
+locus recall      4/12  searched truth models overlapped by a call
+substantial       1/9   curated models recovered over >=50% of their span
+false positives   1     call on a locus where the gene is LOST
+unscoreable      13     curated on a different assembly (Cardiocondyla)
+```
+
+Two further findings from the same run:
+
+- **SynVoy called PRESENT in 16 of 19 species and ABSENT in none.** All four species whose truth
+  is `LOST` (*Bombus terrestris*, *B. impatiens*, *Melipona*, *Tetragonula*) got a MEDIUM call,
+  as did *Solenopsis* (truth `ABSENT`). The 5 FP are unchanged from May — **none of the
+  2026-07/08 adjudication work moved precision at all.** The identity floor and coverage demotion
+  fixed the *labels*; they did not stop the tool asserting presence nearly everywhere.
+- **13 of 28 truth models could not be scored**, because the curated Cardiocondyla coordinates
+  are on `GCA_019399895.2` (`CM079762.1`) while the run used `GCF_019399895.1` (`NC_091864.1`).
+  These are the same linkage groups in different accession namespaces; an accession mapping would
+  make them scoreable. Worth doing — Cardiocondyla has the highest GR2 copy count in the paper,
+  its call sits ~70 kb from the curated array, and it is currently counted as a presence TP that
+  has never been checked by coordinate.
+
+⚠️ `median_overlap_frac = 1.0` in that output is a median over **n = 1** curated hit and should
+not be read as a typical recovery. The statistic needs a minimum-n guard.
 
 Three caveats that must be stated if this is published:
 
@@ -821,13 +1089,24 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 
 ### Before the paper's mechanism section (days)
 
-9. ⚠️ **F4 — binning fixed 2026-07-26; measurement attempted 2026-08-21 and inconclusive.** The LRZ A/B (jobs 5757307/5757308, identical inputs, one variable) returned *identical* wave structure and byte-identical results, because easy mode auto-picked targets at three distinct taxonomic ranks — a set legacy binning already grades correctly. **The right experiment is waves vs no waves on the uniform-depth GT genome set**, not rank-vs-legacy binning. Until it exists, attributing the melittin result to the wavefront is still not permitted. See F4.
-10. **§1y — re-score the melittin benchmark by coordinate overlap** and freeze it in CI. Publish the coordinate number next to the species-presence number.
+9. ⚠️ **F4 — the measurement is prepared and ready to submit (2026-08-30).** `scripts/lrz/f4_wavefront.sbatch` + `f4_wavefront_payload.sh` run **three** pro-mode arms on the pinned melittin GT set: wavefront ON, an identical ON **replicate**, and `--disable_wavefront true`. The replicate is not padding — SynVoy has known run-to-run non-determinism, so `diff(A,B)` is uninterpretable without the noise floor `diff(A,A')`; the rule is that a wavefront effect exists only if `diff(A,B) > diff(A,A')`. `scripts/lrz/f4_compare.py` scores the arms by **coordinate**, not by count (§1y is precisely the lesson that counting species presence hides a wrong call), and prints the verdict. Binning fixed 2026-07-26; measurement attempted 2026-08-21 and inconclusive.** The LRZ A/B (jobs 5757307/5757308, identical inputs, one variable) returned *identical* wave structure and byte-identical results, because easy mode auto-picked targets at three distinct taxonomic ranks — a set legacy binning already grades correctly. **The right experiment is waves vs no waves on the uniform-depth GT genome set**, not rank-vs-legacy binning. Until it exists, attributing the melittin result to the wavefront is still not permitted. See F4.
+10. ✅ **§1y — coordinate scoring built and frozen in CI (2026-08-30).** `tests/benchmark_truth/melittin_loci.tsv` is a new **28-model coordinate truth set** — one row per curated model, not per species — generated from the curated UGENE/manual GFFs in the Ant_Venoms tree, with every scaffold's assembly membership verified against the downloaded FASTAs. `scripts/benchmark/score_coordinates.py` scores a run by overlap and reports the **fraction** of each truth model recovered, because the fraction is what separates "recovered the gene" from "landed on its first exon". Wired into `run_all_sequential.sh` so a benchmark run now emits **both** numbers. Frozen by `tests/test_coordinate_benchmark.py` (18 cases), and CI now runs on `dev` as well as `main`.
+
+    **What it shows on the two real runs** (re-verified 2026-08-30 against `local_runs/`):
+
+    | run | `A0A6M3Z554_1` | overlap | frac of gene | region recall |
+    |---|---|---|---|---|
+    | `mel_det_rep2` | **hit**, start exact to the base | 132 bp | **15.4 %** | 2/12 |
+    | `melittin_val_sw_20260630` | **missed**, nearest model 2 543 bp away | 0 | 0 % | **3/12** |
+
+    Note the last column: the run that **lost** the gene scores *higher* on region recall. That is the §1y trap in one line — presence-style scoring can rise while the actual result goes to zero, which is exactly how the loss went unnoticed.
+
+    Two things the truth set forced into the open: a curated model must not be scored against a run that used a **different assembly** (Cardiocondyla is curated on `GCA_019399895.2` while the truth table names `GCF_019399895.1` — 13 models, now reported `assembly_mismatch` and excluded rather than counted as fabricated misses), and a 110 kb *syntenic region* is not a gene model, so region rows are excluded from the fraction statistics.
 
 ### Benchmark completion (days, mostly waiting)
 
 11. **TOGA on CoolMUC**, or a written exclusion + MCScanX/GENESPACE as the synteny comparator.
-12. **Re-run the whole benchmark on current code** — the numbers in D.1 predate three months of fixes.
+12. ✅ **Re-run done 2026-08-31** (job 5768083, 19 targets) — see **D.1b**. Presence F1 0.700 → 0.762 (recall 1.000), but the single gain is an artefact the coordinate scorer catches, and **precision did not move at all**. `scripts/lrz/benchmark_rerun.sbatch`. Must run on the **cluster**, not the laptop: the laptop holds 14 of the 19 target genomes, and the five Koludarov assemblies missing there include *Colletes*, *Euglossa*, *Xylocopa* (PRESENT) **and both deliberate false-positive tests**, *Melipona* and *Tetragonula* (LOST). Scoring without them changes the confusion matrix materially. All five are already staged on LRZ in `gt_melittin/targets`; the other 14 need uploading (5.6 GB).
 13. Write `docs/BENCHMARK_RESULTS.md`.
 
 ### Last
@@ -840,11 +1119,23 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 
 ## What to say about SynVoy right now
 
-> A synteny-guided locator that recovers divergent orthologs sequence search misses —
-> validated on melittin (11/12 vs 2/12 for BLAST/MMseqs2 baselines), yeast STE2 (3/3),
-> Drosophila Defensin (3/3), and me31B across ~250 My — with a confidence-labelling layer
-> that currently over-calls and is being rebuilt to consume the synteny evidence the
-> search already computes.
+> A synteny-guided locator that finds the *neighbourhood* of a divergent gene when sequence
+> search cannot — validated on melittin, yeast STE2 (3/3), Drosophila Defensin (3/3), and
+> me31B across ~250 My. It recovers the right locus far more often than BLAST/MMseqs2
+> baselines (species-presence recall 1.000 vs 0.250). Its weakness is the complement of its
+> strength: it asserts presence almost everywhere (16 of 19 benchmark species, ABSENT in
+> none, precision 0.615), and locating a neighbourhood is not the same as modelling the gene
+> in it — by coordinate overlap only 1 of 9 curated models is recovered over half its span.
 
-That is true, it is defensible under review, and it does not depend on any of the numbers
-this document just invalidated.
+That is defensible under review. **Three things must NOT be said** (2026-08-31):
+
+1. **Do not attribute the melittin result to the expanding wavefront.** Measured with a proper
+   control and a replicate: three waves vs one wave, byte-identical output. Neighbourhood
+   restriction is what produces that result (F4). Equally, do not claim the wavefront is
+   useless — that set had only two distinct distances and no target needing a stepping stone,
+   so the mechanism was never stressed. Both overstatements are wrong.
+2. **Do not quote a species-presence recall without the coordinate number beside it.** On the
+   current benchmark the only recall gain over May is a gene model **63,936 bp** from the gene
+   it is credited with finding (D.1b).
+3. **Do not say the over-calling is fixed.** The 2026-07/08 adjudication pass fixed *labels*;
+   benchmark precision is unchanged since May (5 FP, same species).
