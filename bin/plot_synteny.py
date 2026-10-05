@@ -2475,6 +2475,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 gene, track, home_products, goi_like, resolved_goi
             )
             label_attr = _svg_esc(display_label)
+            # Built outside the f-string: a backslash inside an f-string expression
+            # is a SyntaxError before Python 3.12, and environment.yml allows 3.10+.
+            overflow_attr = ' opacity="0.45"' if gene.get("_lane_overflow") else ''
 
             svg_parts.append(
                 f'<g class="gene-group" data-homology="{hom_id_attr}" '
@@ -2482,8 +2485,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 f'data-x0="{x0_attr}" data-x1="{x1_attr}" data-yb="{yb_attr}" '
                 f'data-fill="{colour}" data-identity="{gene.get("identity", 0.0)}" '
                 f'data-label="{label_attr}" '
-                f'data-tooltip=\'{tooltip_json}\'{goi_attr}'
-                f'{" opacity=\"0.45\"" if gene.get("_lane_overflow") else ""}>'
+                f'data-tooltip=\'{tooltip_json}\'{goi_attr}{overflow_attr}>'
             )
 
             # Render gene body
