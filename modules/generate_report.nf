@@ -17,13 +17,23 @@ process GENERATE_REPORT {
     val qc_policy
     path locus_ownership_files, stageAs: 'locus_ownership/?/*'  // §1m
     path panel_meta            // §1m panel sidecar — single file or sentinel
+    path phylo_placement_files, stageAs: 'phylo_placement/?/*'  // F9
 
     output:
     path "synvoy_report.json", emit: report
 
     script:
     """
-    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership
+    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership staged_results/phylo_placement
+
+    # Stage F9 phylo-placement verdicts from numbered subdirs.
+    for f in \$(find -L phylo_placement -type f 2>/dev/null); do
+        fname=\$(basename "\$f")
+        case "\$fname" in
+            NO_PHYLO_PLACEMENT|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
+        esac
+        cp "\$f" staged_results/phylo_placement/ 2>/dev/null || true
+    done
 
     # Stage paralog-check TSVs from numbered subdirs (§1j Phase B).
     for f in \$(find -L paralog_check -type f 2>/dev/null); do
@@ -92,7 +102,9 @@ process GENERATE_REPORT {
         --locus_ownership_tiebreak_gap ${params.locus_ownership_tiebreak_gap} \
         --identity_decoupled_min_identity ${params.identity_decoupled_min_identity} \
         --identity_decoupled_max_qcov ${params.identity_decoupled_max_qcov} \
-        ${params.disable_coverage_demotion ? '--disable_coverage_demotion' : ''} \\
+        ${params.disable_coverage_demotion ? '--disable_coverage_demotion' : ''} \
+        --phylo_placement_dir staged_results/phylo_placement \
+        ${params.phylo_placement_promote ? '--phylo_placement_promote' : ''} \\
         --output synvoy_report.json
     """
 }
