@@ -1412,7 +1412,9 @@ workflow {
             effective_home_gff_ch,
             PREPARE_HOME_PROTEOME.out.faa,
             SPLIT_LOCI.out.beds,
-            qc_summary_ch
+            qc_summary_ch,
+            ITERATIVE_SEARCH.out.goi_for_tree,
+            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first()
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

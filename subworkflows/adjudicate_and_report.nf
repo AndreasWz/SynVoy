@@ -20,6 +20,7 @@ include { RESCUE_STRONG_SYNTENY } from '../modules/rescue_strong_synteny.nf'
 include { RESCUE_GOI_HULL } from '../modules/rescue_goi_hull.nf'
 include { RECIPROCAL_BEST_PARALOG } from '../modules/reciprocal_best_paralog.nf'
 include { BUILD_HOME_PARALOG_PANEL; ASSIGN_LOCUS_OWNERSHIP } from '../modules/assign_locus_ownership.nf'
+include { PHYLO_PLACEMENT_CHECK } from '../modules/phylo_placement.nf'
 
 workflow ADJUDICATE_AND_REPORT {
 
@@ -35,6 +36,8 @@ workflow ADJUDICATE_AND_REPORT {
     home_proteome       // value channel: home proteome FASTA
     locus_beds          // collected per-locus BEDs
     qc_summary          // genome QC summary JSON
+    goi_for_tree        // ITERATIVE_SEARCH.out.goi_for_tree (locus_id, faa) — F9 input
+    sorted_genomes      // value channel: PHYLO_SORT sorted_genomes.txt (species distances)
 
     main:
 
@@ -204,6 +207,17 @@ workflow ADJUDICATE_AND_REPORT {
     // No standalone augmented proteins - pass sentinel file
     collected_augmented = channel.value(no_augmented_sentinel)
 
+    // F9 phylogenetic placement. Runs on the GOI proteins ITERATIVE_SEARCH already
+    // collects for the tree, so it needs no new search work — only the species
+    // distances PHYLO_SORT computed. Advisory unless --phylo_placement_promote.
+    PHYLO_PLACEMENT_CHECK(goi_for_tree, query_faa, sorted_genomes)
+
+    no_phylo_sentinel = file("${projectDir}/assets/sentinels/NO_PHYLO_PLACEMENT")
+    collected_phylo = PHYLO_PLACEMENT_CHECK.out.tsv
+        .map { _locus, tsv -> tsv }
+        .collect()
+        .ifEmpty([no_phylo_sentinel])
+
     GENERATE_REPORT(
         collected_regions,
         collected_region_gffs,
@@ -216,7 +230,8 @@ workflow ADJUDICATE_AND_REPORT {
         params.paralog_confusion_min_gap,
         params.qc_fail_policy,
         collected_locus_ownership,
-        collected_panel_meta
+        collected_panel_meta,
+        collected_phylo
     )
 
     emit:
