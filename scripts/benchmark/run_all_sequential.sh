@@ -60,19 +60,41 @@ run_step synvoy "bash scripts/benchmark/run_synvoy.sh" || true
 #    the point of including it.
 run_step mcscanx "bash scripts/benchmark/run_mcscanx.sh" || true
 
-# 6. Score everything
+# 6a. Score by SPECIES PRESENCE (the historical number, all tools)
 echo
-echo "=== scoring at $(date -Iseconds) ==="
+echo "=== scoring [species presence] at $(date -Iseconds) ==="
 python scripts/benchmark/score_benchmark.py \
     --truth tests/benchmark_truth/melittin_orthologs.tsv \
     --calls-glob 'benchmark_results/*/calls.tsv' \
     --outdir benchmark_results/ 2>&1 | tee "${LOG_DIR}/score.log"
 
+# 6b. Score by COORDINATE OVERLAP (docs/TODO.md §1y) — SynVoy only, because it is
+#     the only tool here that emits full gene models. Presence scoring recorded the
+#     ant melittin "recovery" as a clean TP when it was 132 bp of an 855 bp gene,
+#     and did not notice when a later run lost it entirely. Both numbers get
+#     published; neither is reported alone.
+echo
+echo "=== scoring [coordinate overlap, SynVoy] at $(date -Iseconds) ==="
+SYNVOY_RUN="${RESULTS_DIR:-results/melittin_benchmark}"
+if [[ -d "${SYNVOY_RUN}" ]]; then
+    python scripts/benchmark/score_coordinates.py \
+        --truth tests/benchmark_truth/melittin_loci.tsv \
+        --run "${SYNVOY_RUN}" \
+        --out benchmark_results/coordinate_per_model.tsv \
+        --out-calls benchmark_results/coordinate_per_call.tsv \
+        2>&1 | tee "${LOG_DIR}/score_coordinates.log"
+else
+    echo "  SKIPPED: no SynVoy run dir at ${SYNVOY_RUN}" | tee "${LOG_DIR}/score_coordinates.log"
+fi
+
 echo
 echo "=== all steps complete at $(date -Iseconds) ==="
 echo
-echo "Confusion per tool:"
+echo "Confusion per tool [species presence]:"
 column -t -s $'\t' benchmark_results/confusion_per_tool.tsv 2>/dev/null
+echo
+echo "Coordinate recall [SynVoy] — read this next to the table above:"
+grep -A6 "READ THIS NUMBER" "${LOG_DIR}/score_coordinates.log" 2>/dev/null
 echo
 echo "TOGA runs are separate (need the heavier toga_setup.sh install + 22GB+ RAM):"
 echo "  bash scripts/benchmark/run_toga_tier3.sh    # TOGA1 (generates chains)"
