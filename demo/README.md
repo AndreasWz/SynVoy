@@ -67,9 +67,9 @@ this rather than running degraded.
 
 1. `results/demo_ste2/*_anchor_grid.svg` — the payoff figure: rows = species,
    columns = genes, the GOI column filled across all four.
-2. `results/demo_ste2/synvoy_report.json` — read `headline` and
-   `high_confidence_goi`, not `total_raw_search_hits` (which is a diagnostic and
-   is routinely 0 on a good run).
+2. `results/demo_ste2/synvoy_report.json` — read `summary.headline` and the three
+   records under `goi_dedup.records`, not `total_raw_search_hits` (which is a
+   diagnostic and is routinely 0 on a good run).
 3. The console `[INFO] §1m collinearity: bridged …` lines, if any fire — that is
    the gap-bridging slide happening live.
 
@@ -79,7 +79,8 @@ Workstation: 12 cores, 15 GB RAM (~4 GB free), disk at 97 %.
 
 | Run | Config | Wall time |
 |---|---|---|
-| cold, no cache | `low_mem` as shipped | **3m49s** (50 tasks) |
+| cold, no cache | `low_mem` as shipped | **3m49s** (50 tasks, 2026-07) |
+| cold, no cache | `low_mem`, 2026-10-05 code | 3m56s (55 tasks incl. the parameter advisor) |
 | `-resume` | `low_mem` | 3m37s (10 tasks cached) |
 
 Comfortably inside a 10-minute slot, with room to spare. If you need to fill a
@@ -88,30 +89,44 @@ longer slot, add a 4th target genome (~+1 min) rather than slowing anything down
 `low_mem` is deliberate: 4 GB per search task and serialised forks, so the demo
 cannot OOM in front of an audience. On 11 Mb genomes the ceiling never binds.
 
-## Why the overrides live in `demo.config`, not on the command line
+## Why the overrides live in `demo.config`
 
-`low_mem` ships two settings that are wrong for a *demo*: it drops
-`mmseqs_sensitivity` to 7.0 and sets `skip_tree = true`. `demo/demo.config`
-restores 9.5 and the gene tree.
+`low_mem` ships one setting that is wrong for a *demo*: it sets `skip_tree = true`.
+`demo/demo.config` restores the gene tree. It deliberately does **not** raise
+`mmseqs_sensitivity` back from 7.0 to 9.5: measured on this demo, 9.5 costs +8 min
+for identical STE2 calls.
 
-They are in a **config file** because passing them as `--flags` crashes the run:
+The override is in a config file to keep the command short. Passing it as a flag
+(`--skip_tree false`) works too. (Until 2026-08-21 numeric flags such as
+`--mmseqs_sensitivity 9.5` aborted the run with `Cannot compare java.lang.String …`;
+if you still see that, your checkout is old — `git pull`.)
+
+## What the result looks like (checked 2026-10-05)
 
 ```
-$ ./run_synvoy.sh ... --mmseqs_sensitivity 9.5
-ERROR ~ Cannot compare java.lang.String with value '9.5' and java.lang.Integer with value '1'
+1 high-confidence + 2 medium-confidence GOI ortholog annotation(s) (+16 low-confidence) across 3 genome(s).
 ```
 
-Nextflow hands every `--param value` in as a String and `main.nf`'s validation
-compares numeric params with `<`/`>`. This affects `--max_intron`,
-`--cluster_distance`, `--sw_timeout_seconds` and ~20 others — see `docs/TODO.md`
-§1s. Config-file values keep their numeric type and validate cleanly.
+| Species | Call | Identity | Target's own gene name |
+|---|---|---|---|
+| *N. castellii* | HIGH | 66.0 % | — (found by the hull rescue) |
+| *K. lactis* | MEDIUM | 47.8 % | STE2 |
+| *L. thermotolerans* | MEDIUM | 41.9 % | STE2 |
 
-## Known rough edges to avoid on stage
+Three orthologs, one per species, each matching the home STE2 gene best in the paralog
+check. (Before 2026-07-26 the same run reported "1 high + 32 medium": weak hits at
+21–28 % identity were promoted by their neighbourhood alone. An identity floor ended
+that, and the figures now hide fragment hits by default.)
 
-- **The GOI column in the anchor grid is noisy.** Each target row carries several
-  red arrows, because `fallback_hit_span` / `rescued_exon` calls at 21–28 %
-  identity are drawn next to the real ortholog. The report's headline reads
-  "1 high + 32 medium" when the defensible answer is "3 orthologs at 66/48/42 %".
-  There is no plot-side confidence filter today. Talk to the *columns* (anchors
-  recovered across all four species) and to the three identities, not to the
-  medium count.
+## Things to know before presenting
+
+- **The report carries the final confidence, the figure the search-time one.** The
+  *N. castellii* call is HIGH in `synvoy_report.json` because the hull rescue built a
+  full-length model; the anchor grid draws the search's own models. Read the headline
+  from the report. The rescued gene model itself is in
+  `results/demo_ste2/rescue/locus_1/`.
+- **The 16 low-confidence items are hit fragments**, not candidates worth discussing.
+  They are in the `*_with_fragments` figures if someone asks.
+- **`--auto_params true` is advisory.** On yeast its heuristic suggests fungal-scale
+  values (`--max_intron 500 --cluster_distance 40000 …`) and prints them as flags to
+  re-run with; it cannot change the running pipeline's parameters.

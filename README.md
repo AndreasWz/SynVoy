@@ -14,9 +14,9 @@ SynVoy finds the ortholog of a gene in other species **when the gene is too dive
 It is built for **divergent, single-copy genes** (e.g. toxins, micro-exon genes). For large multi-gene families it returns ranked *candidates*, not asserted orthologs — see [Scope](#scope).
 
 <p align="center">
-  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor-grid — melittin-family candidates across 19 Hymenoptera" width="860"/>
+  <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor grid — honeybee melittin searched in 19 Hymenoptera genomes" width="860"/>
 </p>
-<p align="center"><sub>Example: searching honeybee <b>melittin</b> across 19 Hymenoptera. Each row is a species; each column is a gene. The red column is the searched gene; flanking columns are its neighbours. Arrows are shaded by % identity; arrow style is confidence (solid = HIGH, dashed = MEDIUM, striped = LOW, open circle = not found). Only solid (HIGH) cells are confident orthologs; the rest are candidates to curate.</sub></p>
+<p align="center"><sub>Example: honeybee <b>melittin</b> searched in 19 Hymenoptera genomes. Each row is a species (the 9 with a placed call; the 10 without one are hidden), each column a gene: the searched gene in red, its neighbours either side. Numbers are % identity. The outline is the confidence — solid = HIGH, dashed = MEDIUM, pale dotted = AMBIGUOUS (in the right neighbourhood, but not shown to be the gene), striped = LOW. An empty cell means no ortholog was <i>placed</i> there, not that the gene is absent. The report for this run counts 2 HIGH and 2 MEDIUM calls and names 6 AMBIGUOUS candidates separately.</sub></p>
 
 ---
 
@@ -30,7 +30,7 @@ cd SynVoy
 ./install.sh
 ```
 
-`./install.sh` creates the `synvoy_env` environment from `environment.yml` and checks that every tool is present. To update SynVoy later, run `git pull` from the `SynVoy` folder. Docker, Singularity, and HPC setups: [docs/INSTALL.md](docs/INSTALL.md).
+`./install.sh` creates the `synvoy_env` environment from `environment.yml` and checks that every tool is present. To update SynVoy later, run `git pull` from the `SynVoy` folder — do this before reporting a problem, and note the version `./run_synvoy.sh` prints, because results from different versions are not comparable in detail. Docker, Singularity, and HPC setups: [docs/INSTALL.md](docs/INSTALL.md).
 
 ---
 
@@ -97,9 +97,9 @@ Everything is written under `--outdir`. The files you will usually open:
 
 | File | What it is |
 |---|---|
-| `plot_inputs_*/*.homology.tsv` | The ortholog calls, one row per target gene, with a `confidence` column. **`HIGH` = confident orthologs; `MEDIUM`/`LOW` = candidates to check.** |
+| `synvoy_report.json` | **The result.** `summary.headline` is the one-line answer; `goi_dedup.records` lists one record per gene found, with coordinates and a `confidence`: **`HIGH` / `MEDIUM` = orthologs, `AMBIGUOUS` = a candidate in the right neighbourhood that is not shown to be the gene, `LOW` (counted only) = leads.** |
 | `*_anchor_grid.html` | The interactive version of the figure above (hover for details). |
-| `synvoy_report.json` | A machine-readable summary of the whole run. |
+| `plot_inputs_*/*.gff`, `*.homology.tsv` | Per genome: the gene models with exon coordinates, and a table of every model with its evidence. |
 
 A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).
 
@@ -107,7 +107,15 @@ A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ## Scope
 
-SynVoy is for **divergent, low-copy genes** located by conserved gene order. It is validated on cases like melittin and LY6. It is **not** a general ortholog finder for large paralog families or repeat-domain superfamilies: for those, treat `MEDIUM`/`LOW` calls as leads that need manual curation, not findings. For genome-wide ortholog inference, use OrthoFinder or TOGA instead.
+SynVoy is for **divergent, low-copy genes** located by conserved gene order. It is validated on cases like melittin and LY6, and on a benchmark of ten curated venom-gene families across 33 ant genomes: in the four near-single-copy families it recovered 30/31, 28/28, 32/32 and 31/32 of the genes that are reachable from the honeybee seed ([details](docs/NEXT_SESSION_FAMILY_BENCHMARK.md)).
+
+Know its limits:
+
+- It is **not** a general ortholog finder for large paralog families or tandem arrays. There, treat `MEDIUM`/`LOW` calls as leads that need manual curation, not findings. For genome-wide ortholog inference, use OrthoFinder or TOGA instead.
+- It finds a gene **where the home genome's neighbourhood is conserved**. A gene that moved, or a locus the home genome does not have, is out of reach by design.
+- A conserved neighbourhood does not prove the gene is still there. Where only the neighbourhood supports a call, SynVoy says `AMBIGUOUS` and does not count it.
+
+The current state of the method, including what does not work yet, is written up in [docs/STATE_OF_THE_PROJECT.md](docs/STATE_OF_THE_PROJECT.md).
 
 ---
 
@@ -117,6 +125,7 @@ SynVoy is for **divergent, low-copy genes** located by conserved gene order. It 
 - [docs/OUTPUT.md](docs/OUTPUT.md) — what each output file contains.
 - [docs/USAGE.md](docs/USAGE.md) — every option, all profiles, and HPC/SLURM.
 - [docs/PARAMETERS.md](docs/PARAMETERS.md) — parameter tuning, with the biological reasoning.
+- [docs/STATE_OF_THE_PROJECT.md](docs/STATE_OF_THE_PROJECT.md) — what the method is, what is validated, known weaknesses.
 
 ---
 

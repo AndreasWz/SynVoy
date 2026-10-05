@@ -108,6 +108,18 @@ Supply your own query FASTA, reference genome, and target genome files. Works of
 
 > **Tip:** `--target_genomes` accepts a **folder** of genomes (`genomes/` — every `.fna`/`.fa`/`.fasta` inside is used; GFF/TSV/other files are ignored), a glob (`"genomes/*.fna"` — match your extension: `*.fa`, `*.fasta`), a comma-separated list (`"a.fna,b.fna"`), or Nextflow list syntax. SynVoy errors clearly if no genomes are found.
 
+> **File names matter.** The genome file name (minus extension) becomes the genome's
+> name inside sequence IDs, GFF attributes and output file names. SynVoy stops at launch
+> if a query, home or target file name contains whitespace or any of
+> `| ; = , ' " ( ) [ ] { } < > * ? ! # % & $`, or if two targets differ only by
+> extension (`Apis.fa` + `Apis.fna`). Use letters, digits, `.`, `_` and `-` —
+> e.g. `Apis_mellifera.fna`.
+
+> **The query is one protein.** `--query` may be protein or DNA (DNA is translated to its
+> longest ORF). Case, whitespace, digits, alignment gaps and a trailing `*` are cleaned
+> away; anything else that is not an amino-acid code is an error. If the file holds
+> several sequences, **only the first is used** (the task log says so).
+
 > **Tip:** Because `--target_genomes` is FASTA-only, target annotations are passed **separately** via `--target_gffs` — keep genomes and GFFs in two folders:
 >
 > ```bash
@@ -130,7 +142,7 @@ Supply your own query FASTA, reference genome, and target genome files. Works of
 > what you are on with `./run_synvoy.sh --check-only` (it prints the version banner and
 > warns when you are behind the remote), then `git pull`.
 >
-> **What it buys you:** matched target models gain `TargetGene` / `TargetProduct` / `TargetID` attributes in the output GFF and the `target_gene` / `target_product` report columns — i.e. you can see *which annotated gene* a call landed on. This is read-out evidence, not a scoring input: annotations do not move synteny blocks, region scores, or confidence. The only mechanism that acts on them is the family-consistency gate (`--strict_goi_family`, default `false`), which can **demote** a weak call whose target gene name disagrees with `--goi_family_tokens`. If you enable it, set `--goi_family_tokens` for your gene explicitly — the automatic derivation does not work (see PARAMETERS.md).
+> **What it buys you:** matched target models gain `TargetGene` / `TargetProduct` / `TargetID` attributes in the output GFF and the `target_gene` / `target_product` report columns — i.e. you can see *which annotated gene* a call landed on. This is read-out evidence, not a scoring input: annotations do not move synteny blocks, region scores, or confidence. The only mechanism that acts on them is the family-consistency gate (`--strict_goi_family`, default `false`), which can **demote** a weak call whose target gene name disagrees with `--goi_family_tokens`. If you enable it, set `--goi_family_tokens` for your gene explicitly — the automatic derivation does not work (see PARAMETERS.md), and without tokens the gate switches itself off. `preset_paralog_discrimination` turns the gate on but, since 2026-10-05, no longer supplies tokens of its own (it used to carry the TP53 family names into every large-family query it was auto-applied to).
 
 ---
 
@@ -195,7 +207,7 @@ Trade-off: tighter tiers are slower (more MMseqs splits, less parallelism) and s
 | `preset_tandem_family` | Tandem-duplicated families with many close paralogs (e.g. luciferases, opsins, cytochrome P450 clusters). |
 | `preset_paralog_discrimination` | When the goal is to tell paralogs apart, not just find any family member (e.g. distinguishing TP53 from TP63/TP73). |
 
-> **Auto-apply (since 2026-05-29, default ON):** if you don't pick a preset, SynVoy picks one for you after `LOCATE_GENE` from the hit distribution and applies it at runtime to `EXTRACT_FLANKING` / `ITERATIVE_SEARCH` / `CLUSTER_REGIONS` via a value channel — no restart needed. The chosen preset is logged as `[INFO] §1f preset applied: …` and dumped to `intermediate/locate_gene/effective_params.json`. Pin one with `--preset_override preset_X`, opt out with `--auto_apply_preset false`. The one caveat: `NORMALIZE_QUERY.min_query_length` is resolved before LOCATE_GENE runs, so short queries (< 30 aa) still need `--min_query_length 20` or `-profile preset_short_peptide` set at launch. See [docs/PARAMETERS.md §19](PARAMETERS.md#19-auto-apply-preset-self-consistency--rescue) for the full toggle list.
+> **Auto-apply (since 2026-05-29, default ON):** if you don't pick a preset, SynVoy picks one for you after `LOCATE_GENE` from the hit distribution and applies it at runtime to `EXTRACT_FLANKING` / `ITERATIVE_SEARCH` / `CLUSTER_REGIONS` via a value channel — no restart needed. The chosen preset is logged as `[INFO] §1f preset applied: …` and dumped to `intermediate/locate_gene/effective_params.json`. Pin one with `--preset_override preset_X`, opt out with `--auto_apply_preset false`. **A value you set yourself wins over the preset**: any preset-covered parameter that differs from the shipped default — set on the command line, in a params file, a `-c` config or a `-profile` — is kept, and `effective_params.json` lists it under `user_set_kept` (before 2026-10-05 the preset silently overwrote it). The one case this cannot see is passing the shipped default explicitly; use `--auto_apply_preset false` to pin that. The other caveat: `NORMALIZE_QUERY.min_query_length` is resolved before LOCATE_GENE runs, so short queries (< 30 aa) still need `--min_query_length 20` or `-profile preset_short_peptide` set at launch. See [docs/PARAMETERS.md §19](PARAMETERS.md#19-auto-apply-preset-self-consistency--rescue) for the full toggle list.
 
 ---
 
@@ -217,7 +229,7 @@ The pipeline proceeds through five phases:
 
 7. **Phylo Sort:** Target genomes are ordered by evolutionary distance to the reference.
 8. **Genome Quality Assessment:** Target assemblies are evaluated for contiguity (N50, scaffold count).
-9. **Iterative Search:** For each target genome (nearest-first), flanking genes are mapped with MMseqs2. Hits are clustered into candidate syntenic blocks. Within each block, localized tblastn, miniprot, and Smith-Waterman searches attempt to find the GOI. Discovered genes are added to the search database, improving sensitivity for more distant species.
+9. **Iterative Search:** For each target genome (nearest-first), flanking genes are mapped with MMseqs2. Hits are clustered into candidate syntenic blocks; two clusters separated by a rearrangement gap are bridged into one block when the flanking genes continue the home gene order. Within each block, localized MMseqs2, tblastn and Smith-Waterman searches (BLOSUM62 11/1 with real E-values) locate the GOI, and miniprot builds the gene model. The model's protein is miniprot's own translation, and its two ends are extended to the start and stop codon where the reading frame allows. Each call gets a confidence: `HIGH`, `MEDIUM`, `AMBIGUOUS` (in a conserved neighbourhood, but nothing shows the sequence is the ortholog) or `LOW`. Discovered genes are added to the search database for the next, more distant wave.
 
 ### Phase 3 — Region Clustering
 
@@ -228,9 +240,11 @@ The pipeline proceeds through five phases:
 11. **Compute Tree:** All discovered GOI and GOI-similar sequences across all genomes are aligned (MAFFT) and a phylogenetic tree is inferred (IQ-TREE with automatic model selection and ultrafast bootstrap). Multiple hits per genome are preserved, so the tree can resolve paralogs from orthologs.
 12. **Plot Synteny:** An interactive HTML plot shows the syntenic context of each hit, colored by homology, with the phylogenetic tree alongside.
 
-### Phase 5 — Reporting
+### Phase 5 — Adjudication & Reporting
 
-13. **Generate Report:** A JSON summary file is produced with run parameters, genome QC results, and per-target outcomes.
+13. **Rescue passes:** where a neighbourhood is clearly the right one but holds no GOI model, a relaxed miniprot pass searches the block (strong-synteny rescue) or the whole flanking neighbourhood including the gaps between blocks (hull rescue).
+14. **Adjudication:** calls are de-duplicated across home loci, checked against the home genome's paralogs (a call that matches a paralog better than the GOI becomes `paralog_not_goi`), demoted when a high identity rests on a short slice of the query, and tested for phylogenetic placement (advisory).
+15. **Generate Report:** `synvoy_report.json` carries the adjudicated calls (`goi_dedup.records`), the headline counts, the self-consistency flags and the candidates that were rejected by a synteny gate.
 
 ---
 
@@ -330,7 +344,7 @@ Controls the increasingly permissive search passes used for highly divergent tar
 
 ### Gene Model Classification
 
-Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (complete/partial/fragment) assigned to gene models in GFF output.
+Controls the confidence labels (HIGH / MEDIUM / AMBIGUOUS / LOW) and model status labels (complete/partial/fragment) assigned to gene models in GFF output.
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -338,9 +352,14 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--classify_medium_min_identity` | `35.0` | Min identity (%) for MEDIUM-confidence exon_annotation models (lowered from 45 for divergent orthologs) |
 | `--classify_high_min_collinear` | `3` | Once a block has ≥3 flanking genes, HIGH additionally requires a collinear run of home-ordered flanking at least this long — a scrambled paralog neighbourhood is capped at MEDIUM even at high identity. `0` restores the legacy count-only behaviour. |
 | `--strict_goi_family` | `false` | Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated `TargetGene`/`TargetProduct` does not contain a family token. Useful for multi-paralog queries (e.g. TP53 family). |
-| `--goi_family_tokens` | _(auto)_ | Comma-separated family name tokens for `--strict_goi_family`. If empty, auto-derived from query FASTA header (`GN=`, UniProt entry name). |
+| `--goi_family_tokens` | _(empty)_ | Comma-separated family name tokens for `--strict_goi_family`. **Set it explicitly**: the automatic derivation from the query header does not work in practice, and with no tokens the gate disables itself (a warning in the `ITERATIVE_SEARCH` log). |
 | `--classify_tandem_min_identity` | `40.0` | Min identity (%) for MEDIUM-confidence tandem copies. Below this, tandem copies are labeled LOW. |
-| `--classify_tandem_min_qcov` | `0.35` | Min query coverage for a MEDIUM tandem copy. A high-identity but short local window (its true low coverage now recorded) is demoted to LOW — stops a 7–20 aa micro-window from masquerading as a full tandem copy. |
+| `--classify_tandem_min_qcov` | `0.35` | Min query coverage for a MEDIUM tandem copy. A high-identity but short local window (its true low coverage now recorded) is demoted to LOW — stops a 7–20 aa micro-window from masquerading as a full tandem copy. Since 2026-09 a tandem copy also needs context for MEDIUM: either strong flanking support in its block or query coverage ≥ 0.65; otherwise it is LOW (`goi_tandem_copy_weak_context`). |
+| `--classify_fallback_strong_min_identity_floor` | `30.0` | Identity floor for the "many flanking genes" route to MEDIUM for hit-chain calls. Without it any hit in a flanking-rich block reached MEDIUM at any identity. `0` = legacy. |
+| `--disable_ambiguous_tier` | `false` | `true` restores the pre-2026-08-31 behaviour, where a candidate promoted only by flanking support was `MEDIUM`. By default it is `AMBIGUOUS` (`syntenic_candidate_unconfirmed`): named in the report and drawn in the plots, but not counted as an ortholog. |
+| `--identity_decoupled_min_identity` | `50.0` | With the next row: a call at or above this identity … |
+| `--identity_decoupled_max_qcov` | `0.35` | … whose *recorded* query coverage is below this is relabelled `identity_coverage_decoupled` and dropped from the headline counts (a 10 aa window at 100 % is not an ortholog). |
+| `--disable_coverage_demotion` | `false` | `true` keeps that rule advisory only (a flag in `self_consistency`, no demotion). |
 | `--classify_fragment_max_qcov` | `0.4` | Query coverage below this marks a gene model as `fragment` in the ModelStatus field |
 | `--classify_complete_min_qcov` | `0.7` | Query coverage above this (with multi-exon evidence) marks a model as `complete` |
 
@@ -362,6 +381,10 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--adaptive_score_floor_abs` | `0.03` | Adaptive mode: absolute score floor. Permissive default preserves weak-synteny discovery for toxins/venoms/micro-exon peptides |
 | `--adaptive_max_regions` | `6` | Adaptive mode: hard cap on emitted regions |
 | `--adaptive_unique_gene_floor` | `3` | Adaptive mode: clusters with >= this many unique flanking hits are kept even below the score floor |
+| `--disable_distant_synteny_rescue` | `false` | Skip the distant-macrosynteny rescue in region ranking, which promotes a strong GOI hit that is isolated from its local flanking genes but sits on a chromosome that still carries an anchor in a rearranged genome. |
+| `--legacy_strand_score` | `false` | Reproduce pre-2026-07-26 region scores (strand term computed without the home strand). For comparing against old runs only. |
+
+The region score is **coverage-dominated**: `synteny_score = Q × C` with `Q = 0.4·C + 0.3·K + 0.3·S`, where `C` is the fraction of flanking genes found, `K` the gene-order consistency and `S` the strand agreement with the home genome. Order and strand modulate the score by at most `0.3·C`; a uniformly inverted neighbourhood scores as conserved. The p-value is a permutation test on `synteny_score` only (the GOI bonus is not part of it).
 
 ### Visualization
 
@@ -377,6 +400,19 @@ Controls the confidence labels (HIGH/MEDIUM/LOW) and model status labels (comple
 | `--pub_width_mm` | `183` | Publication SVG width in mm (183 = Nature double column). |
 | `--pub_palette` | `okabe_ito` | Colour palette for the publication SVG. Default is the colourblind-safe Okabe–Ito set. |
 | `--enable_matrix_plot` | `false` | Also render the phylogeny-anchored presence/absence matrix (`*_synteny_matrix.svg`). Off because the anchor grid covers the same ground more compactly. |
+| `--plot_extra_args` | _(empty)_ | Extra options passed verbatim to `bin/plot_synteny.py`, for the figure controls below. Quote the whole value: `--plot_extra_args '--grid_goi_style genomic --no_fragment_variant'`. |
+
+Figure controls available through `--plot_extra_args`, or after the run with `scripts/replot.sh <outdir>/plot_inputs_synteny_block_locus_1 <new_folder> [options]`, which re-draws the figures of a finished run without re-running the search:
+
+| Option | Default | Effect |
+|---|---|---|
+| `--grid_goi_style` | `cds` | How the GOI column of the anchor grid draws a model: `cds` (exons to scale on one shared scale, fixed-width introns), `cds_aligned`, `genomic` (true intron lengths) or `notched` (the old evenly notched arrow). |
+| `--grid_goi_max_models` | `3` | A grid cell with more GOI models than this shows the best one plus `×N`. |
+| `--no_fragment_variant` | off | Do not write the `*_with_fragments` figures. By default `ModelStatus=fragment` GOI models are hidden in the main figures and drawn in these siblings. |
+| `--no_orient_to_home` | off | Do not flip scaffolds that read in the opposite direction to the home genome. |
+| `--no_anchor_grid` | off | Skip the anchor grid. |
+| `--max_goi_per_genome` | `10` | How many GOI models steer the choice of neighbourhood to draw (all models inside the chosen view are drawn regardless). |
+| `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Tandem-array figure controls. |
 
 ### Resource Tuning
 
@@ -399,7 +435,12 @@ These control per-process resource allocation. Override them for your hardware.
 | `--gpu_cluster_options` | `--gres=gpu:1` | Extra `sbatch` options for those steps. A GPU job without a `--gres` request sits permanently pending. |
 | `--allow_missing_smith_waterman` | `false` | Proceed with Smith-Waterman disabled when parasail is unavailable, instead of failing loud. Degrades divergent-GOI recall — see [§8 parasail](#parasail-import-error-on-startup). |
 | `--force_disable_advanced_search` | `false` | Prevent `--auto_params` from switching on the optional PLM / structural search layers, whatever the estimated evolutionary distance. |
-| `--rank_wave_binning` | `false` | Bin search waves by phylo-distance **rank** rather than absolute distance, so a tight clade whose distances all saturate near 1.0 still grades close→far. |
+| `--rank_wave_binning` | `true` | Bin search waves by phylo-distance **rank** rather than absolute distance, so a tight clade whose distances all saturate near 1.0 still grades close→far. `false` restores the pre-2026-07-26 binning. |
+| `--disable_wavefront` | `false` | Measurement control, not a performance option: search every genome against the initial database only (one parallel wave), to test whether the expanding wavefront changes a result. |
+| `--synteny_bridge_two_sided` | `false` | **(opt-in, unmeasured)** Weigh the flanking genes on both sides of a gap when deciding to bridge it, instead of only the left side. Bigger blocks raise flanking support, so this can promote more calls. |
+| `--synteny_bridge_max_per_block` | `2` | Max gaps one block may chain when bridging (`0` = unlimited). |
+| `--report_nonsyntenic_candidates` | `true` | Record GOI hits that clear the quality bar but are refused by a synteny gate; they are listed in `synvoy_report.json` under `rejected_candidates`. |
+| `--quiet` | `true` | Compact console output. `false` prints the full per-task Nextflow log. |
 | `--goi_fallback_intron_margin` | `5.0` | GOI fallback hit-chaining uses the home GOI's *own* largest intron × this margin as the max gap, so two far-apart spurious hits aren't stitched into one gene. |
 | `--goi_fallback_intron_floor` | `10000` | Floor (bp) for that derived gap, covering compact / single-exon genes. Falls back to `--max_intron` when the home GOI structure is unavailable. |
 
@@ -459,9 +500,25 @@ paralog — the decorin-vs-biglycan class of error.
 | `--locus_ownership_pad` | `2000` | bp padding when intersecting genes with a locus span. |
 | `--locus_ownership_max_genes_per_locus` | `5` | Cap panel entries per locus (keeps tandem clusters from dominating). |
 | `--locus_ownership_tiebreak_gap` | `10.0` | SW-score margin below which the RBH result counts as ambiguous and the synteny tiebreak decides. |
-| `--locus_ownership_synteny_window` | `200000` | bp window for that flanking co-location tiebreak. |
+| `--locus_ownership_synteny_window` | `200000` | **Currently inert** — declared, but no script reads it. |
 | `--disable_paralog_check` | `false` | Turn off the reciprocal-best paralog check. Automatically a no-op for single-sequence queries. |
 | `--paralog_confusion_min_gap` | `5` | Min bitscore gap before a call whose best-matching paralog differs from the per-cell modal paralog is flagged `paralog_confusion` in `self_consistency`. |
+
+### Phylogenetic Placement (advisory)
+
+Asks whether a call's sequence divergence from the query fits its species' distance. A
+lineage-specific paralog sits further away than its species should. The verdict
+(`phylo_concordant` / `phylo_discordant` / `insufficient_data`) is written on each record
+in the report; it does **not** change a confidence unless you ask it to. On the 10-family
+benchmark it carried no usable signal (every discordant record was a real ortholog), so
+treat it as a hint.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `--disable_phylo_placement` | `false` | Skip the check. |
+| `--phylo_placement_min_calls` | `4` | Species with calls needed before the fit is attempted. |
+| `--phylo_placement_z_threshold` | `2.0` | Residual z-score at or above which a call is `phylo_discordant`. |
+| `--phylo_placement_promote` | `false` | Promote an `AMBIGUOUS` call that is `phylo_concordant` to `MEDIUM`. Not recommended yet. |
 
 ### Distance Auto-Tuning
 
@@ -506,15 +563,22 @@ SynVoy can automatically estimate optimal search parameters based on the biologi
 
 **Disabled by default** (requires an API key to be useful). Enable with `--auto_params true`.
 
+> **The estimate is advisory on current Nextflow.** Nextflow 25 and later no longer let a
+> pipeline change its parameters after launch, so the estimated values cannot be applied
+> inside the run that computed them. SynVoy prints a warning with the exact flags to
+> re-run with, and saves the estimate to
+> `intermediate/estimate_params/estimated_params.json`. (Before 2026-10-05 it logged every
+> value as applied while every step kept its launch-time value.)
+
 | Parameter | Default | Description |
 |---|---|---|
 | `--auto_params` | `false` | Enable automatic parameter estimation. When on, SynVoy analyzes your query gene, home species genome architecture, and target species distances to set optimal values for ~25 search parameters. |
 | `--llm_provider` | `google` | LLM provider: `google` (Google Gemini) or `openai` (OpenAI or any OpenAI-compatible API). |
-| `--llm_api_key` | _(empty)_ | API key for the chosen provider. Also read from `LLM_API_KEY`, `GOOGLE_API_KEY` (for google), or `OPENAI_API_KEY` (for openai) env vars. |
+| `--llm_api_key` | _(empty)_ | API key for the chosen provider. Also read from `LLM_API_KEY`, `GOOGLE_API_KEY` (for google), or `OPENAI_API_KEY` (for openai) in the environment you launch from; those three are passed into Docker / Singularity / Apptainer containers automatically. |
 | `--llm_api_base_url` | _(empty)_ | Custom API base URL for OpenAI-compatible providers (Together, Groq, LM Studio, etc.). Ignored for google. |
 | `--llm_model` | _(empty)_ | Model override. Defaults: `gemini-2.5-flash-lite` (google), `gpt-4o-mini` (openai). |
-| `--multi_profile` | `false` | For small searches, run with multiple parameter profiles (sensitive/balanced/stringent) and automatically select the best result. |
-| `--multi_profile_max_jobs` | `30` | Max total jobs (`loci × targets × 3`) allowed for multi-profile. If exceeded, only the LLM-estimated profile runs. |
+| `--multi_profile` | `false` | **Not implemented — setting it changes nothing.** The parameter exists, but no pipeline step runs the multi-profile comparison. |
+| `--multi_profile_max_jobs` | `30` | Inert, as above. |
 
 **Setup:**
 
@@ -668,7 +732,7 @@ nextflow clean -f
 
 **Fix:**
 - Install [Mamba](https://github.com/mamba-org/mamba) and create the environment with `mamba env create -f environment.yml`
-- Or increase the timeout: the config already sets `conda.createTimeout = '1 h'`
+- Or increase the timeout: the config already sets `conda.createTimeout = '3 h'`
 - Re-create the environment if Python 3.13 was selected by an older environment file; SynVoy pins Python `<3.13` because `ete3` still imports the removed `cgi` module.
 
 ### Easy Mode fails to download genomes
@@ -753,7 +817,7 @@ Nextflow channel wiring did not stage the expected files into
 2. If `match_counts` shows zero across the board **and** the sample
    entries are empty or only contain sentinels like `NO_REGIONS`, the
    upstream search truly found nothing. Inspect
-   `logs/iterative_search/*.log` for the per-genome hit counts.
+   `logs/ITERATIVE_SEARCH__*/stdout.log` for the per-genome hit counts.
 3. If the dirs contain files but none match the expected patterns
    (`*.gff`, `*.scores.tsv`), the module's channel wiring is wrong —
    check `modules/generate_report.nf` stageAs directives.
@@ -808,9 +872,9 @@ or fails with an HTTP 401 / 403 error.
 **Fix (pick one):**
 - **Recommended for students / reproducibility:** disable LLM auto-params entirely:
   ```
-  --auto_params false --multi_profile false
+  --auto_params false
   ```
-  The heuristic fallback is solid and covers most common cases.
+  (This is the default.)
 - **Google Gemini** (free tier available at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
   ```
   export GOOGLE_API_KEY=your_api_key
@@ -882,6 +946,47 @@ available. This is the one case where you call Nextflow directly:
 `./run_synvoy.sh` aborts when `synvoy_env` is absent, which is exactly
 the situation you are working around here.
 
+### A parameter I set seems to be ignored
+
+Check these in order:
+
+1. **Was it replaced by a preset?** Open `intermediate/locate_gene/effective_params.json`.
+   `source` says, per parameter, whether the value came from the default, a preset or
+   you (`user_set`). Since 2026-10-05 a value you set wins; on an older checkout the
+   auto-selected preset overwrote it — `git pull`.
+2. **Is the parameter inert?** `--keep_intermediate`, `--max_retries`, `--multi_profile`,
+   `--multi_profile_max_jobs` and `--locus_ownership_synteny_window` are declared but not
+   read by any step.
+3. **Is it a script-level option?** Figure controls such as `--grid_goi_style` belong to
+   `bin/plot_synteny.py`; pass them through `--plot_extra_args '…'`.
+4. **Did you pass `false` to switch something off?** That works since 2026-10-05. On an
+   older checkout `--require_paralog_panel false`, `--disable_goi_hull_rescue false` and
+   a few others were read as *true*, because Nextflow hands every command-line value over
+   as text.
+
+### `SyntaxError: f-string expression part cannot include a backslash` in PLOT_SYNTENY
+
+Your environment has Python 3.10 or 3.11 and your checkout dates from before 2026-10-05,
+when one line of `bin/plot_synteny.py` only parsed on Python 3.12. `git pull`.
+
+### `UnboundLocalError: cannot access local variable 'strong_synteny'` in CLUSTER_REGIONS
+
+Fixed on 2026-08-21. Your checkout is older — `git pull` (and check which branch you are
+on: the fix reached `main` later than `dev`).
+
+### The run ends with "Tasks FAILED (ignored): N"
+
+The rescue, paralog-check and ownership steps are allowed to fail without stopping the
+run, because one failed rescue should not cost you a whole result. When any did fail the
+summary says so. The main search results are complete; for the genomes concerned the
+rescue or the paralog check is missing. Look in `logs/` for the step named
+`RESCUE_GOI_HULL`, `RESCUE_STRONG_SYNTENY`, `RECIPROCAL_BEST_PARALOG` or
+`ASSIGN_LOCUS_OWNERSHIP`.
+
+### "File name(s) with whitespace or special characters"
+
+See the file-name note under [Pro Mode](#pro-mode): rename the files, then relaunch.
+
 ### Tracking down a specific process failure
 
 Nextflow keeps every task's working directory under `work/<hash>/`.
@@ -903,8 +1008,8 @@ task failed without tripping the whole pipeline.
    Java, Nextflow, the config, and parasail without launching a run, and prints
    the version you are on. (There is no `--help` flag: use §4 above, or
    [PARAMETERS.md](PARAMETERS.md) for the annotated reference.)
-2. See [QUICKSTART.md](QUICKSTART.md) for a <15 min end-to-end worked
-   example on small bee genomes.
+2. See [QUICKSTART.md](QUICKSTART.md) for an end-to-end worked example on
+   bee genomes (~20–30 min, mostly downloads).
 3. Open an issue at https://github.com/AndreasWz/SynVoy/issues with
    your `nextflow run` command, the contents of
    `synvoy_report.json`'s `staging_diagnostics` block, and the
