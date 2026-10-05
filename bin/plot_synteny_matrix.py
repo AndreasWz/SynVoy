@@ -205,22 +205,9 @@ def parse_homology_tsv(path):
     return rows
 
 
-# Tree helpers moved to bin/synvoy_tree.py — see imports at top of file.
-
-def species_from_leaf(leaf):
-    """`GOI_Melt|Apis_florea_fna_b0_l1_exon_ann` → `Apis_florea`."""
-    if "|" not in leaf:
-        return None
-    tail = leaf.split("|", 1)[1]
-    # Drop common sentinel suffixes piece by piece.
-    suffixes = ("_exon_ann", "_fallback", "_flank_ann", "_full")
-    for suf in suffixes:
-        if tail.endswith(suf):
-            tail = tail[: -len(suf)]
-    # Drop trailing  "_b<N>_l<M>" or "_b<N>_fl<M>" segments.
-    tail = re.sub(r"_(b|fl|l)\d+(_(b|fl|l)\d+)*$", "", tail)
-    tail = re.sub(r"_(fa|fna|fasta)$", "", tail)
-    return tail
+# Tree helpers (incl. species_from_leaf) live in bin/synvoy_tree.py — see the imports
+# at the top of this file. A stale local copy of species_from_leaf used to sit here
+# and shadowed the shared one, so `_extraN` tandem-copy leaves read as extra species.
 
 
 # ─────────────────────────────── slot building ──────────────────────────────

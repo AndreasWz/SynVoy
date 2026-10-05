@@ -3031,6 +3031,7 @@ def batch_rbh_check(
             )
             valid_ids.update(_fallback_rbh_local(records, db_path, cand_map))
 
+        seen_candidates = set()
         if mmseqs_ok and os.path.exists(rbh_out):
             with open(rbh_out) as f:
                 for line in f:
@@ -3038,6 +3039,7 @@ def batch_rbh_check(
                     if len(parts) < 9: continue
                     
                     cand_id = parts[0]
+                    seen_candidates.add(cand_id)
                     target_id = parts[1]
                     pident = float(parts[2])
                     qcov = float(parts[3]) if len(parts) > 3 else 100
@@ -3074,7 +3076,16 @@ def batch_rbh_check(
                     elif ids_match and not identity_ok:
                         logger.debug(f"RBH: {cand_id} matches {target_id} but very low identity "
                               f"({pident:.1f}%). Possible pseudogene.")
-                              
+
+        # Peptides below the k-mer prefilter's reach get NO row rather than an error
+        # (current MMseqs2 exits 0 with an empty table), so the fallback above never
+        # ran for them and every short candidate was silently rejected.
+        if mmseqs_ok:
+            short_missed = [(cid, cseq) for cid, cseq in records
+                            if cid not in seen_candidates and len(cseq) < 30]
+            if short_missed:
+                valid_ids.update(_fallback_rbh_local(short_missed, db_path, cand_map))
+
     except Exception as e:
         logger.error(f"RBH check failed: {e}")
         return set()
@@ -3459,7 +3470,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     continue
 
                 parent_loci = split_hits_into_loci(parent_hits, max_gap=locus_gap)
-                print(f"[DEBUG PARENT] parent_id={parent_id} is_goi={is_goi_parent} num_loci={len(parent_loci)} exon_parents={exon_parents}", flush=True)
+                logger.debug(f"[PARENT] parent_id={parent_id} is_goi={is_goi_parent} num_loci={len(parent_loci)} exon_parents={exon_parents}")
                 if not parent_loci:
                     continue
 
@@ -3477,16 +3488,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 for locus_idx, gene_hits in enumerate(parent_loci, start=1):
                     work_hits = gene_hits
                     if parent_id in exon_parents:
-                        print(f"[DEBUG EXON] {parent_id} starting with {len(work_hits)} hits", flush=True)
+                        logger.debug(f"[EXON] {parent_id} starting with {len(work_hits)} hits")
                         work_hits = filter_exon_hits(
                             work_hits,
                             len(parent_query_seq),
                             args.min_exon_query_cov,
                             args.min_exon_alnlen
                         )
-                        print(f"[DEBUG EXON] {parent_id} after filter: {len(work_hits)} hits", flush=True)
+                        logger.debug(f"[EXON] {parent_id} after filter: {len(work_hits)} hits")
                         if not work_hits:
-                            print(f"[DEBUG EXON] {parent_id} dropped entirely by filter_exon_hits!", flush=True)
+                            logger.debug(f"[EXON] {parent_id} dropped entirely by filter_exon_hits!")
                             continue
 
                     exons = []
@@ -3549,7 +3560,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     qcov = _query_union_coverage(ordered_hits, query_len)
                                     aln_total = sum(max(0, int(h.get('alnlen', 0))) for h in ordered_hits)
                                     best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
-                                    print(f"[DEBUG FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}", flush=True)
+                                    logger.debug(f"[FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}")
 
                                     # A1 "the fumble": short queries gate on aligned length +
                                     # bitscore, not coverage (see is_valid_fallback).
@@ -3594,7 +3605,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                             )
                                             valid_fallback = False
 
-                                    print(f"[DEBUG FALLBACK] valid_fallback={valid_fallback}", flush=True)
+                                    logger.debug(f"[FALLBACK] valid_fallback={valid_fallback}")
 
                                     if valid_fallback:
                                         coding_frags = []

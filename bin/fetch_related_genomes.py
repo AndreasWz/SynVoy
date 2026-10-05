@@ -100,10 +100,17 @@ def extract_zip_archive(zip_path: Path, extract_dir: Path):
         zf.extractall(extract_dir)
 
 
-def run_piped_command(cmds):
+# An NCBI E-utilities query (esearch | efetch | xtract) answers in seconds. Without a
+# limit a stalled connection held the task until the 3 h process time limit, then did
+# it again on each retry. Generous on purpose: taxonomy walks can return large docsums.
+NCBI_QUERY_TIMEOUT = 600
+
+
+def run_piped_command(cmds, timeout=NCBI_QUERY_TIMEOUT):
     """
     Run a chain of commands connected by pipes.
     cmds: List of command lists. E.g. [['esearch', ...], ['efetch', ...]]
+    Returns the output, or None on failure or when the chain exceeds *timeout* seconds.
     """
     procs = []
     try:
@@ -120,7 +127,7 @@ def run_piped_command(cmds):
             prev_stdout = p_next.stdout
 
         last_proc = procs[-1]
-        output, error = last_proc.communicate()
+        output, error = last_proc.communicate(timeout=timeout)
 
         if last_proc.returncode != 0:
             print(f"Error in piped command chain: {cmds[-1]}", file=sys.stderr)
@@ -129,6 +136,10 @@ def run_piped_command(cmds):
 
         return output.decode().strip()
 
+    except subprocess.TimeoutExpired:
+        print(f"NCBI query timed out after {timeout}s: {' | '.join(c[0] for c in cmds)}",
+              file=sys.stderr)
+        return None
     except Exception as e:
         print(f"Exception running pipe chain: {e}", file=sys.stderr)
         return None
@@ -851,7 +862,7 @@ def download_genome(accession, output_dir, max_retries=3):
             run_streaming(cmd, label=accession)
             extract_zip_archive(zip_file, extract_dir)
 
-            fna_files = list(extract_dir.rglob("*.fna"))
+            fna_files = sorted(extract_dir.rglob("*.fna"))
             fna_path = None
 
             if fna_files:
