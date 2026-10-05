@@ -25,6 +25,9 @@ process PLOT_SYNTENY {
     path "*_anchor_positions.html", emit: anchor_positions, optional: true
     path "*_anchor_positions.svg", emit: anchor_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
+    // Ribbon plot + anchor grid that also draw ModelStatus=fragment GOI models
+    // (hidden in the default figures); written only when a run has fragments.
+    path "*_with_fragments.*", emit: with_fragments, optional: true
     path "plot_inputs_*", emit: inputs, optional: true
 
     script:
