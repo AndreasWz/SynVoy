@@ -30,6 +30,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
+    _refine_rescue_termini,
     _read_query,
     _run_miniprot_relaxed,
     _parse_miniprot_gff,
@@ -300,6 +301,9 @@ def main() -> int:
             if best is None:
                 continue
             ident, mrna, cds_rows = best
+            # Same terminal refinement as the main path: a rescue model otherwise stops
+            # where the alignment stopped, a few codons inside the gene (CLAUDE.md §21).
+            _refine_rescue_termini(window, mrna, cds_rows)
             conf = _confidence_for(ident, args.classify_high_min_identity,
                                    args.classify_medium_min_identity)
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"

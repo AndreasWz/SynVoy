@@ -463,7 +463,7 @@ def _check_family_consistency(target_gene: str, target_product: str) -> Tuple[bo
     product_norm = _normalize_family_token(target_product)
     if not gene_norm and not product_norm:
         return False, "no_target_annotation"
-    for tok in tokens:
+    for tok in sorted(tokens):   # set: sorted so the reported match is stable
         if not tok:
             continue
         if gene_norm and tok in gene_norm:
@@ -643,6 +643,31 @@ def extract_base_gene_id(query_id: str) -> str:
     # The exon suffix is always "|exon_N"
     
     return base_id
+
+
+def collapse_goi_queries_by_parent(goi_queries: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    One representative GOI query per parent ID: the longest sequence.
+
+    Ties are broken explicitly and never by input order. On equal length the user's
+    own query (id == parent) beats a wavefront expansion model, which shares its
+    parent (`GOI_Melt|Apis_florea_fna_b0_l1_exon_ann` -> `GOI_Melt`); after that the
+    smallest id wins. Before this rule the input order came from a set of strings, so
+    the hash seed decided, independently for every search block, whether the home
+    melittin or the equal-length A. florea model was used.
+    """
+    def _rank(q):
+        qid = q.get('id', '')
+        return (len(q.get('seq', '')), qid == extract_base_gene_id(qid))
+
+    by_parent: Dict[str, Dict[str, Any]] = {}
+    for q in sorted(goi_queries, key=lambda q: q.get('id', '')):
+        parent = extract_base_gene_id(q.get('id', ''))
+        if not parent:
+            continue
+        if parent not in by_parent or _rank(q) > _rank(by_parent[parent]):
+            by_parent[parent] = q
+    return by_parent
 
 
 def is_goi_query_id(query_id: str) -> bool:
@@ -958,6 +983,7 @@ def _classify_goi_evidence(
     embedding_similarity: Optional[float] = None,
     structural_similarity: Optional[float] = None,
     collinear_support: Optional[int] = None,
+    ambiguous_tier_enabled: bool = True,
 ) -> Tuple[str, str, str]:
     """
     Assign a conservative confidence/class label to GOI-derived candidates.
@@ -971,6 +997,10 @@ def _classify_goi_evidence(
     confidence when 3D structure matches despite extreme sequence divergence.
     Neither signal ever reduces confidence — sequence methods already confirmed
     a match.
+
+    ambiguous_tier_enabled adds a fourth verdict, AMBIGUOUS, for candidates promoted
+    only by flanking support (see the fallback_hit_span branch). Pass False to restore
+    the pre-2026-08-31 behaviour where those were labelled MEDIUM/probable_goi.
     """
     identity = float(identity or 0.0)
     exon_count = max(1, int(exon_count or 1))
@@ -978,6 +1008,11 @@ def _classify_goi_evidence(
     context = _synteny_context_label(flanking_support)
 
     ct = CLASSIFY_THRESHOLDS
+    if ambiguous_tier_enabled is None:
+        # Routed through CLASSIFY_THRESHOLDS rather than a call argument: that dict is
+        # already the mechanism carrying classifier settings into every
+        # ProcessPoolExecutor worker, so all five call sites pick it up unchanged.
+        ambiguous_tier_enabled = bool(ct.get("ambiguous_tier_enabled", True))
 
     # §1 synteny-ORDER gate: the flanking are collinear enough to trust the neighbourhood as
     # this GOI's true (orthologous) locus, not a scrambled paralog neighbourhood. Waived when
@@ -995,11 +1030,22 @@ def _classify_goi_evidence(
         # hit on a 70-aa query — Vollenhovia/Polistes "79%"/"71%" overcalls) now
         # carries its true low qcov (QW2) and is demoted to LOW. Missing/zero
         # coverage is treated as failing the floor.
-        if identity >= ct["tandem_min_identity"] and qcov >= ct.get("tandem_min_qcov", 0.0):
-            return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
         if identity < ct["tandem_min_identity"]:
             return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_identity"
-        return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_coverage"
+        if qcov < ct.get("tandem_min_qcov", 0.0):
+            return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_coverage"
+        # Context, like every other evidence type: MEDIUM needs the sequence to carry
+        # the call (exon_annotation's qcov arm) or a strongly supported block (the
+        # strong-flanking fallback bar). Tandem detection runs on raw window hits, and
+        # a short query's best chance alignment in a window (~25-35 aa at 40-50 %) clears
+        # 40 % / 0.35 by itself. Family benchmark 2026-09-11: 77 such MEDIUM calls in
+        # the SECP and SPIN runs, all off-truth, all 16-33 bits, qcov <= 0.59, block
+        # flanking 1-4 in 71 of them; the real tandem copies (KAZA, melittin bees) sit
+        # at flanking 7-13 or qcov >= 0.6.
+        if (flanking_support >= ct["fallback_strong_min_flanking"]
+                or qcov >= ct["medium_min_qcov"]):
+            return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
+        return "LOW", "tandem_goi_copy", "goi_tandem_copy_weak_context"
 
     if evidence_type == "exon_annotation":
         if (exon_count >= ct["high_min_exons"]
@@ -1011,8 +1057,14 @@ def _classify_goi_evidence(
             # home order → likely a paralog neighbourhood, not the true ortholog locus. Demote
             # to MEDIUM (still a probable GOI) rather than assert HIGH on identity+count alone.
             return "MEDIUM", "probable_goi", "high_identity_but_flanking_not_collinear"
+        # The flanking arm does not lift a model this pipeline itself calls a FRAGMENT
+        # (ModelStatus, qcov < fragment_max_qcov): family benchmark 2026-09-11, single-exon
+        # 6-9 %-coverage models in 2-flanking blocks were the MEDIUM calls left off-truth,
+        # while every on-truth call had qcov >= 0.5. Unknown coverage is not low coverage:
+        # the floor only applies when it was measured.
+        fragment = query_cov is not None and qcov < ct["fragment_max_qcov"]
         if identity >= ct["medium_min_identity"] and (
-                flanking_support >= ct["medium_min_flanking"]
+                (flanking_support >= ct["medium_min_flanking"] and not fragment)
                 or qcov >= ct["medium_min_qcov"]):
             confidence = "MEDIUM"
             reason = "modeled_goi_with_partial_support"
@@ -1033,7 +1085,10 @@ def _classify_goi_evidence(
         # LOW from sequence — but PLM may rescue
         confidence = "LOW"
         goi_class = "ambiguous_goi_family_member"
-        reason = "modeled_goi_but_family_context_is_weak"
+        reason = ("fragment_model_with_flanking_only"
+                  if fragment and identity >= ct["medium_min_identity"]
+                  and flanking_support >= ct["medium_min_flanking"]
+                  else "modeled_goi_but_family_context_is_weak")
         if (embedding_similarity is not None
                 and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
                 and flanking_support >= 1):
@@ -1063,6 +1118,30 @@ def _classify_goi_evidence(
                 and identity >= ct.get("fallback_strong_min_identity_floor", 0.0)
                 and (qcov >= ct["fallback_strong_min_qcov"]
                      or identity >= ct["fallback_strong_min_identity"])):
+            # AMBIGUOUS, not MEDIUM, unless the sequence itself carries the call.
+            #
+            # This branch promotes on FLANKING SUPPORT, and flanking support cannot
+            # distinguish "the gene is here" from "the gene was LOST from a locus whose
+            # neighbourhood is still conserved" -- the second is exactly what gene loss
+            # looks like. Measured on the 2026-08-31 benchmark (19 species, per-call
+            # evidence dumped from the run):
+            #
+            #   gene PRESENT   identity 84.3 73.5 63.5 59.8 54.5 30.2   flanking 6-10
+            #   gene LOST      identity 93.8 57.7 37.0 31.9 30.4 30.2   flanking 7-8
+            #
+            # The distributions overlap completely, the single highest-identity call in
+            # the benchmark (93.8%, Bombus terrestris) is a FALSE POSITIVE, and flanking
+            # support is 6-10 on BOTH sides. No threshold on this evidence separates them,
+            # so asserting "probable_goi" here is asserting more than the data supports.
+            #
+            # AMBIGUOUS says the defensible thing instead: a candidate sits in the right
+            # neighbourhood, and the sequence evidence does not establish that it is the
+            # gene. It stays in the output and in the plots; it is excluded from the
+            # ortholog counts. Independent confirmation (RBH against the home paralog
+            # panel, PLM/structural rescue below, or curation) is what promotes it.
+            if ambiguous_tier_enabled:
+                return ("AMBIGUOUS", "syntenic_candidate_unconfirmed",
+                        "fallback_span_with_strong_flanking_support")
             return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
         # PLM rescue for fallback hits
         if (embedding_similarity is not None
@@ -1105,6 +1184,24 @@ def _classify_goi_evidence(
 ML_DISCOVERY_METHODS = frozenset({"plm_embedding", "foldseek_structural"})
 
 
+def _pooled_identity(hits: List[Dict[str, Any]]) -> float:
+    """Percent identity of a model assembled from several local alignments.
+
+    Identity is identical columns over aligned columns, so the per-hit values are
+    weighted by alignment length: a 12-aa hit at 80 % and a 100-aa hit at 30 % are one
+    35 % model, not a 55 % one (the unweighted mean this replaced let a short
+    high-identity chance window lift a model over the identity bars). Falls back to
+    the plain mean when any hit lacks an alignment length.
+    """
+    if not hits:
+        return 0.0
+    lens = [int(h.get("alnlen", 0) or 0) for h in hits]
+    pids = [float(h.get("pident", 0) or 0.0) for h in hits]
+    if all(n > 0 for n in lens):
+        return sum(p * n for p, n in zip(pids, lens)) / sum(lens)
+    return sum(pids) / len(pids)
+
+
 def _resolve_fallback_signals(
     ordered_hits: List[Dict[str, Any]],
 ) -> Tuple[float, Optional[float], Optional[float], bool]:
@@ -1114,7 +1211,8 @@ def _resolve_fallback_signals(
     Returns ``(seq_identity, embedding_similarity, structural_similarity,
     ml_only)``:
 
-      * ``seq_identity`` — mean pident of the NON-ML (real alignment) hits, or
+      * ``seq_identity`` — pooled (alignment-length-weighted, see _pooled_identity)
+        pident of the NON-ML (real alignment) hits, or
         0.0 if the locus is supported only by ML-discovery seeds. This is the
         value that should be written as the model Identity and passed to the
         identity-based classifier — never the synthetic cosine/TM proxy.
@@ -1125,16 +1223,13 @@ def _resolve_fallback_signals(
         which case the caller should also suppress the (synthetic) query
         coverage so MEDIUM can only be reached via the ML rescue branch.
 
-    No-op by construction when PLM/structural search is off: with no ML hits,
-    ``seq_identity`` equals the prior ``mean(pident)`` and ``ml_only`` is False.
+    With no ML hits (PLM/structural search off), ``seq_identity`` is the pooled
+    identity of all hits and ``ml_only`` is False.
     """
     seq_hits = [h for h in ordered_hits if h.get("method") not in ML_DISCOVERY_METHODS]
     ml_hits = [h for h in ordered_hits if h.get("method") in ML_DISCOVERY_METHODS]
 
-    if seq_hits:
-        seq_identity = sum(float(h.get("pident", 0) or 0.0) for h in seq_hits) / len(seq_hits)
-    else:
-        seq_identity = 0.0
+    seq_identity = _pooled_identity(seq_hits) if seq_hits else 0.0
 
     embedding_similarity: Optional[float] = None
     structural_similarity: Optional[float] = None
@@ -1182,6 +1277,7 @@ def _goi_feature_attrs(
     embedding_similarity: Optional[float] = None,
     structural_similarity: Optional[float] = None,
     collinear_support: Optional[int] = None,
+    exons: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     confidence, goi_class, reason = _classify_goi_evidence(
         evidence_type=evidence_type,
@@ -1200,6 +1296,13 @@ def _goi_feature_attrs(
     attrs["Confidence"] = confidence
     attrs["GOIClass"] = goi_class
     attrs["ModelStatus"] = _model_status(query_cov, exon_count, evidence_type)
+    # Whether the model carries the gene's own termini. The per-exon flags existed but only
+    # ever reached CDS lines, so a model starting three codons inside the gene, with no
+    # initiator Met, was indistinguishable from a complete one (family benchmark 2026-09-15:
+    # 62.6 % of curated exons exact, the rest almost all terminal).
+    if exons:
+        attrs["StartCodon"] = "yes" if exons[0].get("has_start_codon") else "no"
+        attrs["StopCodon"] = "yes" if exons[-1].get("has_stop_codon") else "no"
     attrs["SyntenyContext"] = _synteny_context_label(flanking_support)
     attrs["BlockFlankingSupport"] = str(max(0, int(flanking_support or 0)))
     if collinear_support is not None:
@@ -1478,6 +1581,37 @@ def _split_models_into_loci(
     return loci
 
 
+# Consecutive exons of one chained model may overlap by at most this much genome
+# (10 codons: local alignments bleed a few residues past a splice site).
+CHAIN_MAX_EXON_OVERLAP_BP = 30
+
+
+def _query_union_coverage(hits: List[Dict[str, Any]], query_len: int) -> float:
+    """Fraction of the query inside the UNION of the hits' aligned intervals.
+
+    The span from the lowest to the highest aligned query position is not coverage:
+    family benchmark 2026-09-11, two 18- and 29-aa hits from opposite ends of the
+    736-aa HYAL query, 33 kb apart, spanned 0.90 of it while aligning 0.06 -- and the
+    fallback classifier's qcov >= 0.75 arm called that MEDIUM.
+    """
+    intervals = sorted(
+        (min(int(h.get("qstart", 0)), int(h.get("qend", 0))),
+         max(int(h.get("qstart", 0)), int(h.get("qend", 0))))
+        for h in hits
+    )
+    covered, cur_s, cur_e = 0, None, None
+    for s, e in intervals:
+        if cur_e is None or s > cur_e + 1:
+            if cur_e is not None:
+                covered += cur_e - cur_s + 1
+            cur_s, cur_e = s, e
+        else:
+            cur_e = max(cur_e, e)
+    if cur_e is not None:
+        covered += cur_e - cur_s + 1
+    return min(1.0, covered / max(1, int(query_len)))
+
+
 def _longest_monotonic_query_chain(
     ordered_hits: List[Dict[str, Any]],
     strand: str,
@@ -1525,6 +1659,15 @@ def _longest_monotonic_query_chain(
                 # the immediate upstream exon of i; bound the intron between them.
                 gap = int(ordered_hits[i].get("gstart", 0)) - int(ordered_hits[j].get("gend", 0))
                 if gap > max_gap:
+                    ok = False
+            if ok:
+                # Two exons of one gene never share genome. Hits overlapping by more
+                # than an alignment end's bleed are two alignments of ONE target
+                # segment to different parts of the query, and chaining them fakes
+                # coverage: family benchmark 2026-09-11, a 40-aa HYAL window aligned
+                # to both ends of the 736-aa query read as qcov 0.92 -> MEDIUM.
+                overlap = int(ordered_hits[j].get("gend", 0)) - int(ordered_hits[i].get("gstart", 0))
+                if overlap > CHAIN_MAX_EXON_OVERLAP_BP:
                     ok = False
             if ok and dp[j] + 1 > dp[i]:
                 dp[i] = dp[j] + 1
@@ -1691,58 +1834,6 @@ def deduplicate_flanking_models(
     return filtered_gene_records, filtered_gff
 
 
-def collapse_flanking_cds_to_gene_span(gff_lines: List[str]) -> List[str]:
-    """
-    Replace flanking multi-CDS models with a single span CDS per transcript.
-
-    This keeps flanking annotations gene-centric for downstream plotting while
-    preserving GOI CDS detail.
-    """
-    if not gff_lines:
-        return gff_lines
-
-    flanking_sources = {"flanking_annotation", "flanking_hits"}
-    mRNAs = []
-    output = []
-
-    for line in gff_lines:
-        parts = line.split("\t")
-        if len(parts) < 9:
-            output.append(line)
-            continue
-        source = parts[1]
-        ftype = parts[2]
-        attrs = _parse_gff_attributes(parts[8])
-        if source in flanking_sources and ftype == "mRNA":
-            model_id = attrs.get("ID")
-            if model_id:
-                try:
-                    mRNAs.append({
-                        "chrom": parts[0],
-                        "source": source,
-                        "start": int(parts[3]),
-                        "end": int(parts[4]),
-                        "strand": parts[6],
-                        "id": model_id,
-                    })
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Skipping malformed GFF mRNA line for {model_id}: {e}")
-            output.append(line)
-        elif source in flanking_sources and ftype == "CDS":
-            # Drop detailed flanking CDS entries; replaced by one span CDS below.
-            continue
-        else:
-            output.append(line)
-
-    for m in mRNAs:
-        output.append(
-            f"{m['chrom']}\t{m['source']}\tCDS\t{m['start']}\t{m['end']}\t.\t{m['strand']}\t0\t"
-            f"ID={m['id']}_CDS1;Parent={m['id']};Type=flanking_gene_span"
-        )
-
-    return output
-
-
 # ---------------------------------------------------------------------------
 # Collinearity-aware seed placement (docs/TODO.md §1m — proper fix for the
 # "fumble", replacing the §17 hull rescue's after-the-fact patch).
@@ -1817,6 +1908,67 @@ def _can_bridge(block, candidate, home_rank, max_rank_gap, min_anchors):
     return frontier - max_rank_gap <= cand_rank < frontier
 
 
+def _right_cluster(all_loci, i, cluster_distance):
+    """The run of loci starting at index `i` that ordinary proximity clustering would
+    join into one block (same chromosome, successive gaps < cluster_distance).
+
+    This is the half of the evidence the one-sided rule never sees.
+    """
+    out = [all_loci[i]]
+    j = i + 1
+    while j < len(all_loci):
+        prev, cur = out[-1], all_loci[j]
+        if (cur['chrom'] == prev['chrom']
+                and cur['start'] - prev['end'] < cluster_distance):
+            out.append(cur)
+            j += 1
+        else:
+            break
+    return out
+
+
+def _can_bridge_two_sided(block, right, home_rank, max_rank_gap, min_anchors):
+    """True if the loci on BOTH sides of the gap together form one collinear run.
+
+    Why this exists (measured 2026-09-09, docs/CAN_BRIDGE_ANALYSIS.md): `_can_bridge`
+    counts anchors on the LEFT only and inspects exactly ONE locus on the right, because
+    it is called from a left-to-right walk that has not read the rest yet. The result is
+    that identical evidence decides differently depending on where the gap happens to
+    fall --
+
+        A B   ...gap... C D E   -> refused   (2 anchors left)
+        A B C ...gap... D E     -> bridged   (3 anchors left)
+
+    -- and that the first locus after the gap acts as a gatekeeper for everything behind
+    it, so `A B C ...gap... D A A` bridges (D passes; the duplicates then join by ordinary
+    proximity) while `A B C ...gap... A A D` does not.
+
+    Here the whole right cluster is weighed with the block: the union must carry
+    `min_anchors` distinct anchors AND be collinear over at least that many, and the rank
+    step across the gap must continue the union's own direction by at most `max_rank_gap`.
+    Inversions still bridge (the direction is derived, not assumed); a scrambled or
+    duplicated continuation still does not.
+    """
+    left_ranks = [r for r in _block_anchor_ranks(block, home_rank) if r is not None]
+    right_ranks = [home_rank.get(extract_base_gene_id(l.get('query', '')))
+                   for l in right]
+    right_ranks = [r for r in right_ranks if r is not None]
+    if not left_ranks or not right_ranks:
+        return False
+    if len(set(left_ranks) | set(right_ranks)) < min_anchors:
+        return False
+
+    run, direction = _longest_collinear_run(left_ranks + right_ranks)
+    if run < min_anchors:
+        return False
+
+    if direction == '+':
+        frontier = max(left_ranks)
+        return frontier < min(right_ranks) <= frontier + max_rank_gap
+    frontier = min(left_ranks)
+    return frontier - max_rank_gap <= max(right_ranks) < frontier
+
+
 def build_home_rank(initial_db_path):
     """Map each flanking gene's base ID -> ordinal rank in home genomic order.
 
@@ -1883,7 +2035,8 @@ def derive_goi_fallback_max_gap(goi_info_path, margin, floor, default_max_gap):
 
 def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
                             home_rank=None, bridge_max_gap=0,
-                            bridge_max_rank_gap=5, bridge_min_anchors=3):
+                            bridge_max_rank_gap=5, bridge_min_anchors=3,
+                            bridge_two_sided=False, bridge_max_per_block=2):
     """
     Identify all synteny blocks from hits.
     
@@ -1912,6 +2065,11 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
         bridge_max_gap: max bp gap to bridge when collinear (0 disables bridging)
         bridge_max_rank_gap: max home-rank jump still treated as a continuation
         bridge_min_anchors: min distinct anchored flanking genes before bridging
+        bridge_two_sided: weigh the whole cluster on the far side of a gap instead of
+            only its first locus (docs/CAN_BRIDGE_ANALYSIS.md). False = legacy rule.
+        bridge_max_per_block: max bridges one block may chain (0 = unlimited). Bounds a
+            runaway block: each bridge can span bridge_max_gap, so without a cap a chain
+            of them could swallow a chromosome.
 
     Returns:
         List of dictionaries (blocks), sorted by score (descending). Each block
@@ -1968,8 +2126,11 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
     bridging_on = use_collinearity and bridge_max_gap > 0
     synteny_blocks = []
     current_block = [all_loci[0]]
+    bridges_in_block = 0
 
-    for locus in all_loci[1:]:
+    i = 1
+    while i < len(all_loci):
+        locus = all_loci[i]
         last_locus = current_block[-1]
         same_chrom = locus['chrom'] == last_locus['chrom']
         gap = locus['start'] - last_locus['end'] if same_chrom else None
@@ -1977,16 +2138,38 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
         if same_chrom and gap < cluster_distance:
             # Normal clustering: genes close together = same neighbourhood.
             current_block.append(locus)
-        elif (bridging_on and same_chrom and gap < bridge_max_gap and
-              _can_bridge(current_block, locus, home_rank,
-                          bridge_max_rank_gap, bridge_min_anchors)):
+            i += 1
+            continue
+
+        bridge_allowed = (bridging_on and same_chrom and gap < bridge_max_gap
+                          and (bridge_max_per_block <= 0
+                               or bridges_in_block < bridge_max_per_block))
+
+        if bridge_allowed and bridge_two_sided:
+            # #1b two-sided gap-bridging: weigh the whole cluster on the far side of the
+            # gap, not just its first locus, so the decision does not depend on where the
+            # rearrangement happened to fall. See _can_bridge_two_sided.
+            right = _right_cluster(all_loci, i, cluster_distance)
+            if _can_bridge_two_sided(current_block, right, home_rank,
+                                     bridge_max_rank_gap, bridge_min_anchors):
+                current_block.extend(right)
+                bridges_in_block += 1
+                i += len(right)
+                continue
+        elif bridge_allowed and _can_bridge(current_block, locus, home_rank,
+                                            bridge_max_rank_gap, bridge_min_anchors):
             # #1 gap-bridging: the flanking continue the home-order run across a
             # large gap (a local rearrangement that the GOI may sit inside), so
             # keep one block spanning the gap instead of dropping the interior.
             current_block.append(locus)
-        else:
-            synteny_blocks.append(current_block)
-            current_block = [locus]
+            bridges_in_block += 1
+            i += 1
+            continue
+
+        synteny_blocks.append(current_block)
+        current_block = [locus]
+        bridges_in_block = 0
+        i += 1
     synteny_blocks.append(current_block)
 
     # --- Step 4: Format, Score (collinearity) and Sort Blocks ---
@@ -1995,11 +2178,24 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
         chrom = block[0]['chrom']
         start = min(l['start'] for l in block)
         end = max(l['end'] for l in block)
-        genes_list = list(set(extract_base_gene_id(l['query']) for l in block))
+        genes_list = sorted(set(extract_base_gene_id(l['query']) for l in block))
 
         if use_collinearity:
-            ranks = [home_rank.get(extract_base_gene_id(l.get('query', '')))
-                     for l in block]
+            # One representative locus per flanking GENE, in target order — the same
+            # basis process_region_block uses for the classifier's collinear_support.
+            # Before this, every locus contributed a rank, and _longest_collinear_run's
+            # LIS is NON-decreasing, so repeated ranks counted as a run: a block that is
+            # ONE gene hit four times reported collinear_chain_len=4 (observed on real
+            # data, oskar NC_045757.1 / gene-Dmel_CG31100) and outranked a block of three
+            # genuinely ordered genes in the sort below and in the per-genome cap.
+            first_pos = {}
+            for l in block:
+                gid = extract_base_gene_id(l.get('query', ''))
+                pos = int(l.get('start', 0) or 0)
+                if gid not in first_pos or pos < first_pos[gid][0]:
+                    first_pos[gid] = (pos, home_rank.get(gid))
+            ranks = [rank for _gid, (_pos, rank)
+                     in sorted(first_pos.items(), key=lambda kv: kv[1][0])]
             chain_len, direction = _longest_collinear_run(ranks)
             # A block "bridged" if any adjacent loci span >= cluster_distance.
             bridged = any(
@@ -2453,7 +2649,12 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                         sw_hits_file,
                         args.sw_min_identity,
                         10,    # min 10 aa (was 2 – way too permissive)
-                        1.0,   # evalue <= 1.0 (was 20000 – effectively no filter)
+                        # E <= 1 over the window's six-frame search space. Only a real
+                        # filter since 2026-09-11: SW used to write E=0.001 for every hit.
+                        # On shuffled queries 2 % of per-frame best hits pass (~0.1 per
+                        # window); the weak melittin-family members SW exists for sit at
+                        # E 0.002-0.25 (smith_waterman_search.KARLIN_ALTSCHUL_BLOSUM62).
+                        1.0,
                         query_lengths=goi_query_lengths
                     )
                     if sw_hits:
@@ -2643,7 +2844,9 @@ def batch_rbh_check(
     threads=1,
     evalue=1e-5,
     min_coverage=0.5,
-    min_identity=25.0
+    min_identity=25.0,
+    split_memory_limit="8G",
+    mmseqs_verbosity=1,
 ):
     """
     Perform Reciprocal Best Hit check for multiple candidates at once.
@@ -2810,8 +3013,10 @@ def batch_rbh_check(
             "-e", str(evalue),
             "--format-output", "query,target,pident,qcov,tcov,evalue,bits,qlen,tlen,alnlen",
             "--max-seqs", "1", # Top hit only
-            "--split-memory-limit", str(args.mmseqs_split_memory_limit),
-            "-v", str(args.mmseqs_verbosity),
+            # Parameters, not the module-global `args` main() creates: this function has
+            # no caller in the pipeline, and the global does not exist when it is imported.
+            "--split-memory-limit", str(split_memory_limit),
+            "-v", str(mmseqs_verbosity),
             "--threads", str(threads)
         ]
 
@@ -3083,7 +3288,13 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     else:
         unique_queries.update(goi_ids)
 
-    for query_id in unique_queries:
+    # sorted(): `unique_queries` is a set of strings, whose iteration order changes with
+    # the per-process PYTHONHASHSEED. That order used to decide which of two equal-length
+    # GOI representatives survived the parent collapse below, so every block searched after
+    # the first wavefront expansion flipped a coin between the home melittin and the
+    # A. florea model (LRZ job 5778368: 17/20 GFFs differed, exactly the genomes searched
+    # after wave 2).
+    for query_id in sorted(unique_queries):
         if query_id in db_sequences:
             found_queries.append(db_sequences[query_id])
             continue
@@ -3106,13 +3317,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         return [], []
 
     # Collapse duplicated GOI entries by parent ID and keep the longest representative.
-    goi_query_by_parent = {}
-    for q in goi_queries:
-        parent = extract_base_gene_id(q.get('id', ''))
-        if not parent:
-            continue
-        if parent not in goi_query_by_parent or len(q.get('seq', '')) > len(goi_query_by_parent[parent].get('seq', '')):
-            goi_query_by_parent[parent] = q
+    goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
     goi_queries = list(goi_query_by_parent.values())
 
     write_fasta([(q['id'], q['seq']) for q in goi_queries], query_mini_fa)
@@ -3259,9 +3464,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     continue
 
                 def _locus_rank(locus_hits):
-                    qmin = min(h.get('qstart', 1) for h in locus_hits)
-                    qmax = max(h.get('qend', 1) for h in locus_hits)
-                    qcov = ((qmax - qmin + 1) / len(parent_query_seq)) if len(parent_query_seq) > 0 else 0.0
+                    # Aligned query residues (union), not the query SPAN: two short
+                    # chance hits from opposite ends of the query spanned ~0.9 and
+                    # outranked the real locus for one of the two kept slots.
+                    qcov = _query_union_coverage(locus_hits, len(parent_query_seq))
                     best_bits = max(h.get('bits', 0) for h in locus_hits)
                     return (qcov, best_bits, len(locus_hits))
 
@@ -3284,6 +3490,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             continue
 
                     exons = []
+                    model_protein = None
                     try:
                         is_tandem = False
                         tandem_copies = []
@@ -3297,7 +3504,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             exons = tandem_copies
                         else:
                             with maybe_quiet_streams(args.quiet_subtools):
-                                exons, _ = annotate_exons_from_hit_list(
+                                exons, model_protein = annotate_exons_from_hit_list(
                                     work_hits,
                                     parent_query_seq,
                                     subseq,
@@ -3338,10 +3545,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 _goi_gap = getattr(args, 'goi_fallback_max_gap', args.max_intron)
                                 ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=_goi_gap)
                                 if ordered_hits:
-                                    qmin = min(min(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
-                                    qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
                                     query_len = max(1, len(parent_query_seq))
-                                    qcov = (qmax - qmin + 1) / query_len
+                                    qcov = _query_union_coverage(ordered_hits, query_len)
                                     aln_total = sum(max(0, int(h.get('alnlen', 0))) for h in ordered_hits)
                                     best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
                                     print(f"[DEBUG FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}", flush=True)
@@ -3498,7 +3703,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 })
                         else:
                             exons.sort(key=lambda e: e.get('qstart', 0))
-                            exon_protein = ''.join(e['seq'] for e in exons)
+                            # miniprot's own translation of the model (in frame across
+                            # every intron phase and modelled frameshift); see
+                            # annotate_using_miniprot. Per-exon concatenation is the fallback.
+                            exon_protein = model_protein or ''.join(e['seq'] for e in exons)
                             strand = exons[0].get('strand', '+')
                             avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
                             model_qcov = None
@@ -3515,12 +3723,13 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 (
                                     f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
+                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons), global_start, global_end, strand)}"
                                 )
                             ]
                             for eidx, exon in enumerate(exons, 1):
                                 exon_gs = w_start + exon['gstart'] + 1
                                 exon_ge = w_start + exon['gend']
+                                exon_phase = int(exon.get('phase', 0) or 0)
                                 attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
                                 if exon.get('splice_acceptor'):
                                     attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
@@ -3531,7 +3740,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 if exon.get('has_stop_codon'):
                                     attrs += ";StopCodon=yes"
                                 cand_gff.append(
-                                    f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\t{attrs}"
+                                    f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\t{attrs}"
                                 )
 
                             raw_candidates.append({
@@ -3605,9 +3814,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                     # Structure inference failed: keep only a very strict GOI fallback set.
                     elif is_goi_parent:
-                        locus_qmin = min(h.get('qstart', 1) for h in work_hits)
-                        locus_qmax = max(h.get('qend', 1) for h in work_hits)
-                        locus_qcov = ((locus_qmax - locus_qmin + 1) / len(parent_query_seq)) if len(parent_query_seq) > 0 else 0.0
+                        locus_qcov = _query_union_coverage(work_hits, len(parent_query_seq))
                         best_bits = max(h.get('bits', 0) for h in work_hits) if work_hits else 0.0
 
                         # If miniprot is available, only allow fallback on very strong evidence.
@@ -3759,9 +3966,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             )[:2]
 
             for locus_idx, work_hits in enumerate(parent_loci, start=1):
+                model_protein = None
                 try:
                     with maybe_quiet_streams(args.quiet_subtools):
-                        exons, _ = annotate_exons_from_hit_list(
+                        exons, model_protein = annotate_exons_from_hit_list(
                             work_hits,
                             parent_query_seq,
                             subseq,
@@ -3851,7 +4059,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     flank_protein = ''.join(coding_frags)
                     global_start = w_start + min(s for s, _ in cds_intervals) + 1
                     global_end = w_start + max(e for _, e in cds_intervals)
-                    avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
+                    avg_pident = _pooled_identity(ordered_hits)
                     new_id = f"{parent_id}|{clean_gname}_b{block_idx}_fl{locus_idx}_flank_hits"
 
                     cand_gff = [
@@ -3885,7 +4093,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     continue
 
                 exons.sort(key=lambda e: e.get('qstart', 0))
-                flank_protein = ''.join(e.get('seq', '') for e in exons if e.get('seq'))
+                # miniprot's in-frame model translation (see annotate_using_miniprot).
+                flank_protein = model_protein or ''.join(e.get('seq', '') for e in exons if e.get('seq'))
                 if not flank_protein:
                     continue
 
@@ -3910,8 +4119,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 for eidx, exon in enumerate(exons, 1):
                     exon_gs = w_start + exon['gstart'] + 1
                     exon_ge = w_start + exon['gend']
+                    exon_phase = int(exon.get('phase', 0) or 0)
                     cand_gff.append(
-                        f"{chrom}\tflanking_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\tID={new_id}_CDS{eidx};Parent={new_id}"
+                        f"{chrom}\tflanking_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\tID={new_id}_CDS{eidx};Parent={new_id}"
                     )
 
                 flanking_candidates.append({
@@ -4822,6 +5032,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         _bridge_max_gap = getattr(args, 'synteny_bridge_max_gap', 0)
         _bridge_max_rank_gap = getattr(args, 'synteny_bridge_max_rank_gap', 5)
         _bridge_min_anchors = getattr(args, 'synteny_bridge_min_anchors', 3)
+        _bridge_two_sided = bool(getattr(args, 'synteny_bridge_two_sided', False))
+        _bridge_max_per_block = getattr(args, 'synteny_bridge_max_per_block', 2)
 
         # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
         mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
@@ -4911,6 +5123,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             bridge_max_gap=_bridge_max_gap,
             bridge_max_rank_gap=_bridge_max_rank_gap,
             bridge_min_anchors=_bridge_min_anchors,
+            bridge_two_sided=_bridge_two_sided,
+            bridge_max_per_block=_bridge_max_per_block,
         )
         if home_rank:
             _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
@@ -4973,6 +5187,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 bridge_max_gap=_bridge_max_gap,
                 bridge_max_rank_gap=_bridge_max_rank_gap,
                 bridge_min_anchors=_bridge_min_anchors,
+                bridge_two_sided=_bridge_two_sided,
+                bridge_max_per_block=_bridge_max_per_block,
             )
             synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
 
@@ -5080,7 +5296,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             genome_name=genome_name,
             locus_gap_bp=max(5000, int(args.cluster_distance)),
         )
-        all_gff_lines = collapse_flanking_cds_to_gene_span(all_gff_lines)
+        # Flanking models keep one CDS row per exon. They used to be collapsed to a
+        # single gene-span CDS "for plotting", which threw the exon positions away
+        # while the mRNA kept Exons=N -- so the plot drew N evenly spaced exons that
+        # do not exist. (Rearranged flanking models, written below, always kept theirs.)
 
         # --- Cross-chromosome flanking recovery ---
         # Some flanking genes may have translocated to a different chromosome.
@@ -5231,9 +5450,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
                     # Attempt miniprot-style exon annotation
                     exons = []
+                    model_protein = None
                     try:
                         with maybe_quiet_streams(args.quiet_subtools):
-                            exons, _ = annotate_exons_from_hit_list(
+                            exons, model_protein = annotate_exons_from_hit_list(
                                 local_hits,
                                 parent_query_seq,
                                 off_subseq,
@@ -5256,7 +5476,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
                     if exons:
                         exons.sort(key=lambda e: e.get('qstart', 0))
-                        exon_protein = ''.join(e['seq'] for e in exons)
+                        # miniprot's in-frame model translation (see annotate_using_miniprot).
+                        exon_protein = model_protein or ''.join(e['seq'] for e in exons)
                         strand = exons[0].get('strand', '+')
                         avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
                         model_qcov = None
@@ -5271,13 +5492,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         rearr_gff = [
                             f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                             f"{avg_pident:.1f}\t{strand}\t.\t"
-                            f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
+                            f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking', 'Rearranged_from': ','.join(sorted(block_chroms))}, evidence_type='rearranged_flanking', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                         ]
                         for eidx, e in enumerate(exons, 1):
                             exon_gs = off_w_start + e['gstart'] + 1
                             exon_ge = off_w_start + e['gend']
+                            exon_phase = int(e.get('phase', 0) or 0)
                             rearr_gff.append(
-                                f"{off_chrom}\trearranged_flanking\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\t"
+                                f"{off_chrom}\trearranged_flanking\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\t"
                                 f"ID={new_id}_CDS{eidx};Parent={new_id}"
                             )
 
@@ -5336,7 +5558,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 flank_protein = ''.join(coding_frags)
                                 global_start = off_w_start + min(s for s, _ in cds_intervals) + 1
                                 global_end = off_w_start + max(e for _, e in cds_intervals)
-                                avg_pident = sum(h.get('pident', 0) for h in ordered_hits) / len(ordered_hits)
+                                avg_pident = _pooled_identity(ordered_hits)
                                 qmin = min(min(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
                                 qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
                                 model_qcov = ((qmax - qmin + 1) / len(parent_query_seq)) if parent_query_seq else None
@@ -5345,7 +5567,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 rearr_gff = [
                                     f"{off_chrom}\trearranged_flanking\tmRNA\t{global_start}\t{global_end}\t"
                                     f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking_fallback', 'Rearranged_from': ','.join(block_chroms)}, evidence_type='rearranged_flanking_fallback', identity=avg_pident, exon_count=len(cds_intervals), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
+                                    f"{_target_mrna_attrs(off_chrom, global_start, global_end, strand, _flanking_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'rearranged_flanking_fallback', 'Rearranged_from': ','.join(sorted(block_chroms))}, evidence_type='rearranged_flanking_fallback', identity=avg_pident, exon_count=len(cds_intervals), query_cov=model_qcov, context='cross_chromosome_rearranged'))}"
                                 ]
                                 for cidx, (hs, he) in enumerate(cds_intervals, 1):
                                     exon_gs = off_w_start + hs + 1
@@ -5385,7 +5607,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 _pad = args.region_padding
                 _covered.append((_b['chrom'], _b['start'] - _pad, _b['end'] + _pad))
 
-            for _proxy_id in goi_proxy_flanking_parents:
+            # sorted(): each sweep marks its locus covered, so iteration order decides
+            # which proxy's search runs where two loci overlap (and shifts _sw_idx).
+            for _proxy_id in sorted(goi_proxy_flanking_parents):
                 if _proxy_id in found_flanking_parents:
                     continue
                 _proxy_on_block = [
@@ -6104,6 +6328,18 @@ def main():
         "--synteny_bridge_min_anchors", type=int, default=3,
         help="Min distinct anchored flanking genes a block needs before it may bridge a gap."
     )
+    parser.add_argument(
+        "--synteny_bridge_two_sided", type=str2bool, nargs='?', const=True, default=False,
+        help="Weigh the whole cluster on the FAR side of a gap when deciding to bridge, "
+             "not just its first locus. Fixes the asymmetry where identical collinear "
+             "evidence bridges or not depending on where the gap falls "
+             "(docs/CAN_BRIDGE_ANALYSIS.md). Default off pending the A/B measurement."
+    )
+    parser.add_argument(
+        "--synteny_bridge_max_per_block", type=int, default=2,
+        help="Max gaps a single block may bridge (0 = unlimited). Each bridge can span "
+             "synteny_bridge_max_gap, so this bounds a runaway chained block."
+    )
     # §A1 (TODO_JUN) — "the fumble": short-query fallback gate keyed on aligned
     # length + bitscore instead of query coverage (a short mature peptide in a
     # longer precursor is structurally low-coverage even on a perfect hit).
@@ -6201,6 +6437,14 @@ def main():
     # run has ever demonstrated that it changes the result. Comparing rank-vs-legacy
     # binning cannot answer that (both still iterate); the control is NO iteration at
     # all — every genome searched with the initial DB only. This flag provides it.
+    parser.add_argument("--disable_ambiguous_tier", type=str2bool, default=False,
+                        help="Restore the pre-2026-08-31 behaviour where a candidate "
+                             "promoted only by flanking support was labelled "
+                             "MEDIUM/probable_goi. By default such a call is AMBIGUOUS: "
+                             "measured on the melittin benchmark, identity and flanking "
+                             "support are indistinguishable between species that HAVE the "
+                             "gene and species that LOST it, so 'probable ortholog' "
+                             "asserts more than the evidence supports.")
     parser.add_argument("--disable_wavefront", type=str2bool, default=False,
                         help="F4 control arm: place ALL genomes in ONE parallel wave, so "
                              "no genome is ever searched with a nearer relative's recovered "
@@ -6335,6 +6579,7 @@ def main():
     args = parser.parse_args()
 
     # Populate classification thresholds from CLI args
+    CLASSIFY_THRESHOLDS["ambiguous_tier_enabled"] = not args.disable_ambiguous_tier
     CLASSIFY_THRESHOLDS["high_min_identity"] = args.classify_high_min_identity
     CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
     CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity

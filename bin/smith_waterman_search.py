@@ -5,12 +5,16 @@ smith_waterman_search.py - Smith-Waterman local alignment for GOI search
 Uses parasail library for vectorized Smith-Waterman alignment.
 This provides more sensitive local alignment than MMseqs2 for divergent sequences.
 
+Hits are written as BLAST m8 with real Karlin-Altschul bit scores and E-values for the
+window's six-frame search space (BLOSUM62, BLAST gap costs 11/1 by default).
+
 Usage:
     python smith_waterman_search.py --query goi.faa --target region.fna \\
-        --output hits.tsv --matrix BLOSUM62 --gap_open 10 --gap_extend 1
+        --output hits.tsv --matrix BLOSUM62 --gap_open 11 --gap_extend 1
 """
 
 import argparse
+import math
 import sys
 import os
 try:
@@ -25,6 +29,68 @@ try:
 except ImportError:
     HAS_PARASAIL = False
     print("WARNING: parasail not installed. Falling back to ssearch36.", file=sys.stderr)
+
+
+# Gapped Karlin-Altschul parameters (lambda, K) for BLOSUM62, keyed by BLAST gap costs
+# (open, extend), where a gap of length k costs open + k*extend. Values as printed by
+# NCBI blastp 2.17.0 for each setting.
+#
+# Until 2026-09-11 every SW hit was written with a placeholder E-value (0.001) and its
+# RAW score in the bit-score column. SW reports the best local alignment in each of the
+# six reading frames of every window, homolog or not, so each window contributed ~6 hits
+# that cleared every E-value filter downstream and, carrying raw scores (about twice a
+# bit score), won the spatial dedup against real tblastn/MMseqs2 hits of the same gene.
+# Scored properly those hits sit at E 14-93 (median) on shuffled queries.
+KARLIN_ALTSCHUL_BLOSUM62 = {
+    (12, 1): (0.283, 0.059),
+    (11, 1): (0.267, 0.041),   # BLAST default
+    (10, 1): (0.243, 0.024),
+    (9, 1): (0.206, 0.010),
+}
+
+
+def to_parasail_gaps(gap_open, gap_extend):
+    """parasail charges `open` for a gap's first residue and `extend` for each further one
+    (gap of length k = open + (k-1)*extend); BLAST charges open + k*extend. BLAST 11/1 is
+    therefore parasail (12, 1)."""
+    return gap_open + gap_extend, gap_extend
+
+
+def karlin_altschul(score, query_len, search_space_len, gap_open, gap_extend,
+                    matrix_name='BLOSUM62'):
+    """(bit score, E-value) of a raw SW score. The search space is the query length times
+    the total translated length searched, with no edge-effect correction (as in SSEARCH);
+    for six-frame genomic windows this is conservative, because stop codons cut the target
+    into short open frames (measured on shuffled queries: 2 % of per-frame best hits reach
+    E <= 1 at 11/1, where a calibrated E would give ~10 %)."""
+    params = KARLIN_ALTSCHUL_BLOSUM62.get((gap_open, gap_extend)) if matrix_name == 'BLOSUM62' else None
+    if params is None:
+        raise ValueError(
+            f"No Karlin-Altschul parameters for {matrix_name} gap {gap_open}/{gap_extend}; "
+            f"supported (BLAST convention): {sorted(KARLIN_ALTSCHUL_BLOSUM62)}")
+    lam, k = params
+    bits = (lam * score - math.log(k)) / math.log(2)
+    evalue = k * query_len * search_space_len * math.exp(-lam * score)
+    return bits, evalue
+
+
+def _traceback_counts(tb):
+    """(identities, mismatches, gap openings) from a parasail traceback. parasail marks
+    identities '|', positive substitutions ':', others '.' and gap columns ' '."""
+    comp = tb.comp or ''
+    identities = comp.count('|')
+    mismatches = comp.count(':') + comp.count('.')
+    gapopen = 0
+    for s in (tb.ref or '', tb.query or ''):
+        in_gap = False
+        for c in s:
+            if c == '-':
+                if not in_gap:
+                    gapopen += 1
+                    in_gap = True
+            else:
+                in_gap = False
+    return identities, mismatches, gapopen
 
 
 def translate_in_six_frames(dna_seq):
@@ -48,45 +114,44 @@ def translate_in_six_frames(dna_seq):
     return frames
 
 
-def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62', 
-                            gap_open=10, gap_extend=1):
+def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
+                            gap_open=11, gap_extend=1):
     """
     Perform Smith-Waterman alignment using parasail (fast vectorized implementation).
-    
+
+    gap_open/gap_extend follow the BLAST convention (gap of length k costs
+    open + k*extend) and are converted for parasail here.
+
     Returns dict with alignment details.
     """
     if not HAS_PARASAIL:
         raise ImportError("parasail library required for Smith-Waterman search")
-    
+
     # Get substitution matrix
     matrix = parasail.blosum62 if matrix_name == 'BLOSUM62' else parasail.pam100
-    
+    p_open, p_extend = to_parasail_gaps(gap_open, gap_extend)
+
     # Run Smith-Waterman with traceback
     result = parasail.sw_trace_striped_32(
-        query_seq, target_seq, gap_open, gap_extend, matrix
+        query_seq, target_seq, p_open, p_extend, matrix
     )
-    
-    # Calculate percent identity and alignment length from traceback
-    if hasattr(result, 'traceback'):
-        traceback = result.traceback
-        aln_len = len(traceback.comp) if traceback.comp else 0
-        identity = (traceback.comp.count('|') / aln_len) * 100 if aln_len else 0
-        # Count how many reference/query positions are consumed (non-gap)
-        ref_consumed = sum(1 for c in traceback.ref if c != '-') if traceback.ref else aln_len
-        query_consumed = sum(1 for c in traceback.query if c != '-') if traceback.query else aln_len
-    else:
-        # Estimate from score
-        identity = (result.score / (len(query_seq) * 5)) * 100  # Rough estimate
-        aln_len = len(query_seq)
-        ref_consumed = aln_len
-        query_consumed = aln_len
-    
+
+    traceback = result.traceback
+    aln_len = len(traceback.comp) if traceback.comp else 0
+    identities, mismatches, gapopen = _traceback_counts(traceback)
+    identity = (identities / aln_len) * 100 if aln_len else 0
+    # Count how many reference/query positions are consumed (non-gap)
+    ref_consumed = sum(1 for c in traceback.ref if c != '-') if traceback.ref else aln_len
+    query_consumed = sum(1 for c in traceback.query if c != '-') if traceback.query else aln_len
+
     return {
         'score': result.score,
         'end_query': result.end_query,
         'end_ref': result.end_ref,
         'identity': identity,
         'length': aln_len,
+        'mismatch': mismatches,
+        'gapopen': gapopen,
         'ref_consumed': ref_consumed,
         'query_consumed': query_consumed,
     }
@@ -245,7 +310,12 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
         frames.append({'seq': seq_trans, 'frame': -(i+1), 'strand': '-', 'offset': i})
         
     all_hits = []
-    
+    # BLAST 11/1, as the main() path; real Karlin-Altschul statistics instead of the old
+    # 1e-10 / raw-score placeholders. Search space = all six frames of the region.
+    blast_open, blast_extend = 11, 1
+    p_open, p_extend = to_parasail_gaps(blast_open, blast_extend)
+    search_space_len = sum(len(f['seq']) for f in frames)
+
     # 3. For each query
     for q_head, q_id, q_seq in queries:
         try:
@@ -265,7 +335,7 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
             for f_idx, frame in enumerate(frames):
                 seq_str = "".join(frame['seq'])
                 # sw_trace_striped_profile_32
-                result = parasail.sw_trace_striped_profile_32(profile, seq_str, 11, 1)
+                result = parasail.sw_trace_striped_profile_32(profile, seq_str, p_open, p_extend)
                 
                 if result.score > best_score:
                     best_score = result.score
@@ -384,7 +454,9 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
                 real_pident = 0.0
                 mismatch = 0
                 gapopen = 0
-            hit_line = f"{q_id}\t{t_id}\t{real_pident:.1f}\t{aln_len}\t{mismatch}\t{gapopen}\t{q_start_aa+1}\t{q_end_aa+1}\t{ts}\t{te}\t1e-10\t{result.score}"
+            bits, evalue = karlin_altschul(result.score, len(q_seq), search_space_len,
+                                           blast_open, blast_extend)
+            hit_line = f"{q_id}\t{t_id}\t{real_pident:.1f}\t{aln_len}\t{mismatch}\t{gapopen}\t{q_start_aa+1}\t{q_end_aa+1}\t{ts}\t{te}\t{evalue:.2e}\t{bits:.1f}"
             all_hits.append(hit_line)
             
             # MASKING: Mask this genomic region in ALL frames
@@ -445,9 +517,11 @@ def main():
     parser.add_argument("--target", required=True, help="Target DNA FASTA (genomic region)")
     parser.add_argument("--output", required=True, help="Output TSV (BLAST m8 format)")
     parser.add_argument("--matrix", default="BLOSUM62", choices=["BLOSUM62", "PAM100"],
-                       help="Substitution matrix")
-    parser.add_argument("--gap_open", type=int, default=10, help="Gap opening penalty")
-    parser.add_argument("--gap_extend", type=int, default=1, help="Gap extension penalty")
+                       help="Substitution matrix (E-values need BLOSUM62)")
+    parser.add_argument("--gap_open", type=int, default=11,
+                        help="Gap opening cost, BLAST convention: a gap of length k costs "
+                             "gap_open + k*gap_extend (default 11/1, BLAST's default)")
+    parser.add_argument("--gap_extend", type=int, default=1, help="Gap extension cost (BLAST convention)")
     parser.add_argument("--min_score", type=int, default=50, help="Minimum alignment score")
     parser.add_argument("--min_identity", type=float, default=20.0, help="Minimum percent identity")
     parser.add_argument("--threads", type=int, default=1, help="Number of threads")
@@ -481,14 +555,18 @@ def main():
         targets = list(parse_fasta(args.target))
         
         hits = []
-        
+        # Validate the statistics up front (fails loud on an unsupported matrix/gap pair).
+        karlin_altschul(0, 1, 1, args.gap_open, args.gap_extend, args.matrix)
+        target_frames = [(t_id, t_seq, translate_in_six_frames(t_seq))
+                         for _t_header, t_id, t_seq in targets]
+        # Search space = every translated residue the query was aligned against.
+        search_space_len = sum(len(prot) for _t_id, _t_seq, frames in target_frames
+                               for _f, prot, _o in frames)
+
         for q_header, q_id, q_seq in queries:
             print(f"Searching with query: {q_id}", file=sys.stderr)
-            
-            for t_header, t_id, t_seq in targets:
-                # Translate target in all 6 frames
-                frames = translate_in_six_frames(t_seq)
-                
+
+            for t_id, t_seq, frames in target_frames:
                 for frame_id, prot_seq, offset in frames:
                     # Run Smith-Waterman
                     try:
@@ -517,20 +595,23 @@ def main():
                                 dna_start = L - rc_start     # larger coord (1-based)
                                 dna_end = L - rc_end         # smaller coord (1-based)
                             
+                            bits, evalue = karlin_altschul(
+                                result['score'], len(q_seq), search_space_len,
+                                args.gap_open, args.gap_extend, args.matrix)
                             # BLAST m8 format output
                             hits.append({
                                 'query': q_id,
                                 'target': t_id,
                                 'pident': result['identity'],
                                 'alnlen': result['length'],
-                                'mismatch': 0,  # Not calculated
-                                'gapopen': 0,   # Not calculated
+                                'mismatch': result['mismatch'],
+                                'gapopen': result['gapopen'],
                                 'qstart': start_query + 1,
                                 'qend': result['end_query'] + 1,
                                 'tstart': dna_start,
                                 'tend': dna_end,
-                                'evalue': 0.001,  # Placeholder
-                                'bits': result['score']
+                                'evalue': evalue,
+                                'bits': bits,
                             })
                     except Exception as e:
                         print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",

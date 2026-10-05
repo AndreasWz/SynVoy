@@ -99,13 +99,34 @@ def test_low_identity_in_flanking_rich_block_is_not_medium():
         assert cls == "ambiguous_goi_family_member"
 
 
-def test_ant_melittin_rescue_still_reaches_medium():
-    """The real Tetramorium melittin call this clause exists to rescue:
-    34.7 % identity, qcov 0.686, BlockFlankingSupport 7. Must stay MEDIUM."""
+def test_ant_melittin_rescue_is_surfaced_as_ambiguous():
+    """The real Tetramorium melittin call this clause exists to rescue: 34.7 %
+    identity, qcov 0.686, BlockFlankingSupport 7.
+
+    It must still be SURFACED by this clause -- that is what the F6 floor was
+    calibrated for and it must not fall back to LOW. But since 2026-08-31 it is
+    AMBIGUOUS, not MEDIUM/probable_goi. Two independent reasons:
+
+      * the benchmark showed this evidence class cannot separate species that HAVE
+        the gene from species that LOST it (the highest-identity call in the whole
+        run, 93.8 %, is a Bombus false positive), and
+      * §1y showed this very call covers 132 bp of an 855 bp gene -- landing on the
+        first exon, which is a candidate, not an established ortholog.
+    """
     conf, cls, reason = _classify(34.7, qcov=0.686, flanking=7)
-    assert conf == "MEDIUM", f"ant melittin demoted to {conf}"
-    assert cls == "probable_goi"
+    assert conf == "AMBIGUOUS", f"ant melittin ended up {conf}, expected AMBIGUOUS"
+    assert cls == "syntenic_candidate_unconfirmed"
     assert reason == "fallback_span_with_strong_flanking_support"
+
+
+def test_ambiguous_tier_kill_switch_restores_medium():
+    """--disable_ambiguous_tier reproduces pre-2026-08-31 output exactly."""
+    conf, cls, reason = isr._classify_goi_evidence(
+        evidence_type="fallback_hit_span", identity=34.7, query_cov=0.686,
+        flanking_support=7, ambiguous_tier_enabled=False)
+    assert (conf, cls) == ("MEDIUM", "probable_goi")
+    assert reason == "fallback_span_with_strong_flanking_support"
+
 
 
 def test_floor_sits_between_the_two_populations():
@@ -120,7 +141,10 @@ def test_floor_of_zero_restores_legacy_behaviour():
     isr.CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = 0.0
     try:
         conf, _, _ = _classify(21.0, qcov=0.40, flanking=7)
-        assert conf == "MEDIUM"
+        # Legacy = the clause fires at 21 % again. The verdict it yields is now
+        # AMBIGUOUS (see test_ant_melittin_rescue_is_surfaced_as_ambiguous); what
+        # this test guards is that the FLOOR, not the tier, is what gates entry.
+        assert conf == "AMBIGUOUS"
     finally:
         isr.CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = original
 
@@ -129,7 +153,7 @@ def test_high_identity_low_coverage_arm_is_unaffected():
     """The other arm of the OR (identity >= 35) is above the floor anyway, so a
     high-identity low-coverage hit still passes."""
     conf, _, reason = _classify(60.0, qcov=0.05, flanking=7)
-    assert conf == "MEDIUM"
+    assert conf == "AMBIGUOUS"
     assert reason == "fallback_span_with_strong_flanking_support"
 
 

@@ -85,6 +85,71 @@ def test_single_hit_unchanged():
     assert chain(one, "+", max_gap=20000) == one
 
 
+# --- the HYAL Solenopsis failure: one window aligned to both ends of the query - #
+def test_same_window_two_query_ends_not_chained():
+    # 2026-09-11: CDS 1271270-1271389 and 1271273-1271389 (-), one 40-aa window,
+    # aligned to both ends of a 736-aa query -> "qcov 0.92", called MEDIUM.
+    same = [_hit(1270, 1389, 640, 700, 60.0, 78, "-"),
+            _hit(1273, 1389, 20, 90, 43.0, 79, "-")]
+    for gap in (None, 20000):
+        out = chain(same, "-", max_gap=gap)
+        assert len(out) == 1 and out[0]["bits"] == 60.0
+
+
+def test_alignment_end_bleed_still_chains():
+    # Adjacent exons whose alignments bleed 30 bp into each other are still one gene.
+    bleed = [_hit(1000, 1130, 1, 40, 30.0, 40),
+             _hit(1100, 1250, 41, 90, 40.0, 50)]
+    assert len(chain(bleed, "+", max_gap=20000)) == 2
+    worse = [_hit(1000, 1131, 1, 40, 30.0, 40),
+             _hit(1100, 1250, 41, 90, 40.0, 50)]
+    assert len(chain(worse, "+", max_gap=20000)) == 1
+
+
+# --- fallback coverage is the union of aligned query intervals, not their span - #
+cover = isr._query_union_coverage
+
+
+def test_union_coverage_ignores_the_unaligned_middle():
+    # 2026-09-11 HYAL Harpegnathos: 18 + 29 aa from opposite ends of a 736-aa query.
+    ends = [_hit(400320, 400373, 30, 47, 30.0, 18),
+            _hit(433921, 434007, 668, 696, 40.0, 29)]
+    assert round(cover(ends, 736), 3) == round(47 / 736, 3)
+
+
+def test_union_coverage_merges_overlaps_and_reversed_coords():
+    hits = [_hit(1, 60, 1, 20, 1.0, 20), _hit(100, 160, 15, 40, 1.0, 26),
+            _hit(200, 260, 70, 61, 1.0, 10, "-")]
+    assert cover(hits, 100) == (40 + 10) / 100
+    assert cover([_hit(1, 300, 1, 100, 1.0, 100)], 80) == 1.0
+    assert cover([], 50) == 0.0
+
+
+# --- a multi-hit model's identity is pooled over aligned columns, not averaged -- #
+pooled = isr._pooled_identity
+
+
+def test_pooled_identity_weights_by_alignment_length():
+    # a 12-aa window at 80 % and a 100-aa alignment at 30 % are one ~35 % model
+    hits = [{"pident": 80.0, "alnlen": 12}, {"pident": 30.0, "alnlen": 100}]
+    assert pooled(hits) == (80 * 12 + 30 * 100) / 112
+
+
+def test_pooled_identity_plain_mean_when_lengths_missing():
+    assert pooled([{"pident": 80.0}, {"pident": 60.0, "alnlen": 50}]) == 70.0
+
+
+def test_pooled_identity_empty():
+    assert pooled([]) == 0.0
+
+
+def test_fallback_signals_use_pooled_identity():
+    hits = [{"pident": 90.0, "alnlen": 10}, {"pident": 40.0, "alnlen": 90}]
+    seq_id, _emb, _struct, ml_only = isr._resolve_fallback_signals(hits)
+    assert seq_id == (90 * 10 + 40 * 90) / 100
+    assert ml_only is False
+
+
 # --- data-driven max-gap: derive from the home GOI's own largest intron ----- #
 import json
 import tempfile

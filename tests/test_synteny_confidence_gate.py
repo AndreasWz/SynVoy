@@ -68,3 +68,30 @@ def test_longest_collinear_run_helper():
     assert isr._longest_collinear_run([4, 3, 2, 1])[0] == 4        # reverse-ordered (still collinear)
     assert isr._longest_collinear_run([1, 9, 2, 8, 3])[0] == 3     # scrambled → run of 3 (1,2,3)
     assert isr._longest_collinear_run([5, 1, 4, 2, 3])[0] <= 3     # scrambled
+
+
+# --- family benchmark 2026-09-11: flanking does not lift a FRAGMENT to MEDIUM ---------- #
+def test_fragment_model_with_flanking_only_is_low():
+    # HYAL Probolomyrmex: 1 exon, 46 %, qcov 0.094, 2 flanking -> was MEDIUM, off-truth.
+    conf, cls, reason = classify(identity=46.4, exon_count=1, query_cov=0.094,
+                                 flanking_support=2)
+    assert (conf, cls, reason) == ("LOW", "ambiguous_goi_family_member",
+                                   "fragment_model_with_flanking_only")
+
+
+def test_partial_model_with_flanking_stays_medium():
+    # Above fragment_max_qcov the flanking arm is unchanged.
+    fmq = isr.CLASSIFY_THRESHOLDS["fragment_max_qcov"]
+    conf, cls, _ = classify(identity=46.4, exon_count=1, query_cov=fmq, flanking_support=2)
+    assert (conf, cls) == ("MEDIUM", "probable_goi")
+
+
+def test_unknown_coverage_is_not_a_fragment():
+    conf, _, _ = classify(identity=46.4, exon_count=1, query_cov=None, flanking_support=2)
+    assert conf == "MEDIUM"
+
+
+def test_fragment_high_path_untouched():
+    # HIGH never had a coverage arm; the fragment floor only gates the MEDIUM flanking arm.
+    conf, _, _ = classify(identity=80.0, exon_count=3, query_cov=0.1, flanking_support=6)
+    assert conf == "HIGH"
