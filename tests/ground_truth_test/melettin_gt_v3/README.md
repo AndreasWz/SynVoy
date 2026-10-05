@@ -62,7 +62,6 @@ lengths), regenerate with:
     --target_genomes "local_data/ground_truth/melettin/targets/*.fa" \
     --outdir results/melettin_gt_v4 \
     --n_flanking_genes 5 \
-    --auto_params false --multi_profile false \
     -profile standard
 ```
 
@@ -130,7 +129,31 @@ which:
    family genuinely spans a flanking gap); it is not a strict no-op on
    this benchmark, but it is benign here.
 
-Both are intentional changes, not regressions — but the validator
+4. **Region scores were redefined on 2026-07-26.** The strand term now
+   compares each flanking gene with its home strand (it used to reward
+   scrambled neighbourhoods), and the order term uses the same
+   longest-collinear-run measure as the search. Every `score`,
+   `consistency` and `strand_consistency` value in this fixture, and every
+   region name that embeds a score (`…_S0.47`), predates that and cannot
+   match a current run. The `p_value` column changed meaning too: it now
+   tests the neighbourhood score without the GOI bonus.
+5. **Call-level changes in 2026-09** (tandem copies need context, real
+   Smith-Waterman E-values, in-frame model proteins, extended model ends)
+   changed which weak calls exist and what the models look like. The
+   strong calls on these five bees kept their coordinates.
+6. **Since 2026-10-05 region scores no longer depend on the line order of
+   the hit table**, so they can differ in the third decimal from any
+   earlier run of the same inputs.
+
+**What this fixture is still good for:** scaffold and coordinate checks.
+Its scores and its tree are historical. For "did the call land on the
+gene", the current regression check is the coordinate scorer,
+`scripts/benchmark/score_coordinates.py` against
+`tests/benchmark_truth/melittin_loci.tsv` (see `scripts/benchmark/README.md`).
+The fixture has not been regenerated since 2026-03-28; do that the next
+time the five bee assemblies are at hand.
+
+Items 1–3 are intentional changes, not regressions — but the validator
 will report (1) as informational notes and (2) as a hard FAIL because
 the leaf set genuinely changed. To clear the tree FAIL:
 

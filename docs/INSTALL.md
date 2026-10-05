@@ -13,9 +13,9 @@ Full setup instructions for SynVoy. For the short version, see the [README](../R
 | **Git** | To clone the repository |
 | **Internet** | Easy Mode needs access to NCBI/UniProt for genome downloads |
 
-> **Note on Java and Nextflow:** Both are provided by the `synvoy_env`
-> conda environment (`openjdk >=17` and `nextflow >=25.10`). You do **not**
-> need to install them separately. See the
+> **Note on Java, Nextflow and Python:** All three are provided by the `synvoy_env`
+> conda environment (`openjdk >=17`, `nextflow >=25.10`, `python >=3.10,<3.13`). You
+> do **not** need to install them separately. CI tests Python 3.10 and 3.12. See the
 > [HPC / standalone Nextflow](#hpc--standalone-nextflow-no-conda) section
 > below if your environment forbids conda.
 
@@ -30,7 +30,7 @@ cd SynVoy
 
 ## 2. Set Up the Conda Environment
 
-The environment bundles **Nextflow**, **OpenJDK 17**, all bioinformatics tools (MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE, samtools), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
+The environment bundles **Nextflow**, **OpenJDK** (17 or newer), all bioinformatics tools (MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE, samtools), genome-fetching CLIs (NCBI datasets, Entrez Direct), and all Python dependencies.
 
 **One step (recommended):**
 

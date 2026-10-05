@@ -1,8 +1,16 @@
 # SynVoy — State of the Project
 
-**Compiled 2026-07-26 by direct code and output inspection.** Every number below was
-re-derived from the repository or from run outputs on disk; nothing is quoted from an
-earlier summary without re-checking. Where a claim could not be verified it says so.
+**Compiled 2026-07-26 by direct code and output inspection; fix logs added through
+2026-10-05.** Every number below was re-derived from the repository or from run outputs
+on disk; nothing is quoted from an earlier summary without re-checking. Where a claim
+could not be verified it says so.
+
+**Read the fix logs first.** Parts A–F are the 2026-07/08 audit and are kept as written;
+where a later log entry supersedes a statement, the entry says so. The newest state is:
+[`ALGORITHM_AUDIT_2026-09.md`](ALGORITHM_AUDIT_2026-09.md) (search core),
+[`NEXT_SESSION_FAMILY_BENCHMARK.md`](NEXT_SESSION_FAMILY_BENCHMARK.md) (the 10-family
+benchmark), [`VIZ_REVIEW_2026-09.md`](VIZ_REVIEW_2026-09.md) (figures), and **Part G**
+below (the 2026-10-05 robustness pass).
 
 Companion to `docs/TODO.md` (the live task list). This file answers three questions:
 **what is the contribution**, **what is actually broken**, and **what has to happen to
@@ -44,6 +52,46 @@ wrap up**.
 > Part A gained **A.8** (the rescue layer), which had never been documented algorithmically
 > despite being the source of the recovered ortholog in both validated cases.
 
+> **Fix log — 2026-09-09 → 2026-09-17 (committed 2026-10-05 as `00e4853`…`1e70fa6`).**
+> Three weeks of work that Parts A–F do not describe. In brief; details in the three
+> documents named above.
+>
+> - **Runs are reproducible.** Two identical cluster runs had differed in 17 of 20 genome
+>   GFFs. Cause: two equal-length GOI queries tied when one representative per parent was
+>   chosen, and set order broke the tie. Fixed, `PYTHONHASHSEED` pinned, verified on the
+>   cluster under different hash seeds (20/20 identical).
+> - **A 10-family benchmark** on curated ant venom families (honeybee seed, 33 targets,
+>   reachable set fixed and hashed in advance). Near-single-copy families: 30/31, 28/28,
+>   32/32, 31/32 of reachable genes. Held-out families: no recall lost with the fixed
+>   code. 4 of 10 curated seeds sit at the wrong genomic address (a curation finding).
+> - **Four precision defects** (§19): tandem copies promoted without synteny context,
+>   overlapping "exons" chained, coverage measured as span, fragments lifted by one
+>   flanking gene. Every final call with query coverage < 0.5 had been off-truth.
+> - **Two defects that reached every output** (§20): multi-exon model proteins were
+>   translated out of frame behind phase-1/2 introns (coordinates right, proteins wrong —
+>   so seeds, trees and the paralog check ran on corrupted sequences), and Smith-Waterman
+>   hits carried a fake E-value (six chance hits per window). Both fixed.
+> - **Model ends** (§21): gene ends exactly on the curated coordinate 28/182 → 97/182.
+> - **Figures** (§22): flanking genes had been drawn with invented exon positions; fixed
+>   at the source. ≤ 3 lanes, fragments hidden by default, GOI column from real CDS.
+> - **AMBIGUOUS tier and F9** (2026-08-31/09-09): see F9 below. Measured on the benchmark:
+>   the tier holds 0 of 137 records on a curated gene; the phylo check carries no signal.
+>
+> **What this changes in Parts A–F:** A.4's `tandem_copy` row now also needs context
+> (block flanking ≥ 5 or query coverage ≥ 0.65); A.3's Smith-Waterman input now has real
+> statistics; §1p.1 (invented flanking exons) is fixed; §1y's scorer and tests are in the
+> repository and CI runs on `dev` (Part C said "frozen in CI" on 2026-08-30, but those
+> files were not committed until 2026-10-05).
+
+> **Fix log — 2026-10-05 (robustness pass, Part G).** A systematic check of the wiring
+> between `nextflow.config`, the `.nf` files and the scripts, plus end-to-end runs. Found
+> and fixed: the plot step did not parse on Python 3.10/3.11; `--auto_params` silently
+> applied nothing on current Nextflow; an auto-selected preset overwrote values the user
+> set and carried TP53 family names into unrelated queries; `--x false` was read as true
+> in nine places; region scores depended on the line order of the hit table; rescue-pass
+> gene models were never written to the output folder; 78 % of a cluster console log was
+> one repeated warning. Suite: **867 passed, 0 failed**. See Part G.
+
 ---
 
 ## 0. One-paragraph status
@@ -54,6 +102,13 @@ clades and is robust to large parameter changes. The adjudication layer — regi
 confidence labels, the p-value, the report headline — contained at least four defects
 serious enough that its numbers should not be published as-is; as of 2026-07-26 those four
 are fixed, and the 2026-08-21 cluster run confirmed three of them on real output.
+
+*(Status as of 2026-10-05: the paragraphs below are the 2026-08 picture. Since then the
+search core was audited and the two output-wide defects in it fixed, the result became
+reproducible, and there is a ten-family benchmark behind the recall claim. What has not
+changed: on melittin SynVoy still places a call in most species including those that lost
+the gene — those calls are now labelled AMBIGUOUS and not counted, which is honest but is
+not the same as solving it — and the wavefront still has no measured effect.)*
 
 **The single most important thing in this document is now F8**, found on 2026-08-21: in
 **easy mode** — the documented path, the one the BA students run — the rescue and
@@ -198,7 +253,7 @@ Defaults from `CLASSIFY_THRESHOLDS` (`:199`):
 |---|---|---|
 | `exon_annotation` | `exons ≥ 2` ∧ `id ≥ 50` ∧ `S_block ≥ 2` ∧ collinear_ok | `id ≥ 35` ∧ (`S_block ≥ 1` ∨ `qcov ≥ 0.65`) |
 | `fallback_hit_span` | — | (`S_block ≥ 2` ∧ `qcov ≥ 0.75` ∧ `id ≥ 60`) **∨** (`S_block ≥ 5` ∧ `id ≥ 30` ∧ (`qcov ≥ 0.25` ∨ `id ≥ 35`)) |
-| `tandem_copy` | — | `id ≥ 40` ∧ `qcov ≥ 0.35` |
+| `tandem_copy` | — | `id ≥ 40` ∧ `qcov ≥ 0.35` ∧ (`S_block ≥ 5` ∨ `qcov ≥ 0.65`) *(context term added 2026-09-11)* |
 | `rescued_exon`, `raw_hit` | — | only via PLM/structural rescue |
 
 where the **order gate** is
@@ -756,6 +811,13 @@ though `main.nf:714` still advertises it; 59 parameters were documented nowhere.
 corrected in the docs — but `main.nf:714` and the two dead parameters are still live in
 the code.
 
+*Update 2026-10-05:* the validation message no longer advertises `--help`; every plot
+switch is reachable through `--plot_extra_args`; and the docs now mark **five** declared
+parameters as inert (`keep_intermediate`, `max_retries`, `multi_profile`,
+`multi_profile_max_jobs`, `locus_ownership_synteny_window`). A static test
+(`tests/test_nextflow_param_wiring.py`) now fails when a module passes a flag its script
+lacks or reads a parameter no config declares.
+
 ## F9 ⭐⭐⭐ Over-calling is a MISSING-EVIDENCE problem, not a threshold problem — ⚠️ measured 2026-08-31
 
 The benchmark re-run (D.1b) called PRESENT in **16 of 19 species and ABSENT in none**, with the
@@ -793,7 +855,8 @@ replaced melittin in *Bombus*, is not in the panel for it to match instead.** §
 A fourth verdict for a candidate promoted **only** by flanking support:
 `AMBIGUOUS` / `syntenic_candidate_unconfirmed`. It stays in the JSON and is drawn in the plots
 (palest, most broken outline in the legend) but is **excluded from the ortholog counts** and
-named separately in the headline. Kill switch `--disable_ambiguous_tier`.
+named separately in the headline. Kill switch `--disable_ambiguous_tier` *(until 2026-10-05
+this existed in the script only; the pipeline did not pass it, so it had no effect on a run)*.
 
 **Measured cost, replaying all 53 real benchmark calls through both classifiers:**
 
@@ -910,8 +973,8 @@ named candidate in a conserved neighbourhood, with orthology explicitly not asse
 | §1v | Classifier ignores the synteny evidence the run computed | ⭐⭐ | ✅ **Fixed 2026-07-26** — identity floor; per-call support measured and closed won't-do (see F6) |
 | §1u | `goi_block_flanking` drives ranking but is not emitted | ⭐ | ✅ **Fixed 2026-07-26** — emitted in the scores TSV alongside `synteny_score` |
 | §1z | `QueryCoverage` read as target recovery; target coverage never reported | 🐛 | Open |
-| §1p | Post-processing verdicts never reach the plot or the tree | ⭐ | Open |
-| §1p.1 | Target exon composition not passed to plot → synthetic uniform exons drawn | ⭐ | Drawing side in progress (uncommitted); data side untouched |
+| §1p | Post-processing verdicts never reach the plot or the tree | ⭐ | Open. Partly eased 2026-10-05: rescue-pass gene models are now written to `rescue/locus_<N>/` (before, a hull-rescued ortholog existed in the output only as a span in the report). The plots and `homology.tsv` still do not show rescue models or paralog verdicts. |
+| §1p.1 | Target exon composition not passed to plot → synthetic uniform exons drawn | ⭐ | ✅ **Fixed 2026-09-17** at the source: the search had been collapsing every in-block flanking model to one CDS row. Verified on the cluster (`fix7`): 100 % of multi-exon flanking models now carry real CDS rows (was 1–3 %). Old run outputs still hold collapsed rows. |
 | §1t | Every distance parameter is metazoan-scale (found by pointing it at an 11 Mb yeast) | ⭐ | Open |
 | §1w | Duplicate regions with byte-identical spans | 🐛 | Open |
 | §1q, §1s | `strong_synteny` read before assignment; numeric CLI params crash the run | ✅ fixed | Committed 2026-08-21 (`49df417`) |
@@ -1107,13 +1170,91 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 
 11. **TOGA on CoolMUC**, or a written exclusion + MCScanX/GENESPACE as the synteny comparator.
 12. ✅ **Re-run done 2026-08-31** (job 5768083, 19 targets) — see **D.1b**. Presence F1 0.700 → 0.762 (recall 1.000), but the single gain is an artefact the coordinate scorer catches, and **precision did not move at all**. `scripts/lrz/benchmark_rerun.sbatch`. Must run on the **cluster**, not the laptop: the laptop holds 14 of the 19 target genomes, and the five Koludarov assemblies missing there include *Colletes*, *Euglossa*, *Xylocopa* (PRESENT) **and both deliberate false-positive tests**, *Melipona* and *Tetragonula* (LOST). Scoring without them changes the confusion matrix materially. All five are already staged on LRZ in `gt_melittin/targets`; the other 14 need uploading (5.6 GB).
-13. Write `docs/BENCHMARK_RESULTS.md`.
+13. Write `docs/BENCHMARK_RESULTS.md`. *(2026-10: the family benchmark is written up in
+    `NEXT_SESSION_FAMILY_BENCHMARK.md` §0; a consolidated results page is still owed.)*
 
 ### Last
 
 14. **Calibration pass** — one line of derivation for every parameter in `nextflow.config`, or delete it. Start with the distance family (§1t) and the classify thresholds.
 15. **Website** from the existing markdown.
 16. Talk to Ivan about the annotation agent (blocking, but not on the critical path for the tool).
+
+---
+
+# Part G — Robustness pass, 2026-10-05
+
+A systematic check rather than a bug hunt: every flag a module passes against the
+arguments its script defines, every parameter read against the ones declared, every
+documented default against the config, static analysis for the read-before-assignment
+class, edge-case inputs, and three end-to-end runs (the *Drosophila* Adh demo on the
+committed and on the fixed code, and the yeast STE2 demo through the launcher). The
+trigger was a crash report from a student that turned out to be a bug fixed on `dev` in
+August and never merged to `main`.
+
+## G.1 Defects found and fixed
+
+| # | Defect | Effect before the fix | Evidence |
+|---|---|---|---|
+| G1 | `bin/plot_synteny.py` used a backslash inside an f-string expression | `SyntaxError` on Python 3.10 and 3.11, both allowed by `environment.yml`: PLOT_SYNTENY could not start. CI on `dev` was red. | CI run on `1e70fa6`; reproduced with a local 3.10. Now 782 tests pass on 3.10, 3.11 and 3.12. |
+| G2 | `--auto_params true` applied nothing | Nextflow ≥ 25 ignores `params.put` without an error. The run logged every estimate as applied and every step kept its launch value. | Minimal Nextflow test (`put ok: n 5 -> 5`); yeast run: 5 estimated, 0 applied, search ran with `--max_intron 20000`. Now a warning with the flags to re-run with. |
+| G3 | A preset overwrote values the user set | The resolver was promised "defaults < preset < user value" but was never told which values were the user's. | Code + new tests. Now any value that differs from the shipped default is kept (`user_set`, `user_set_kept` in `effective_params.json`). |
+| G4 | `preset_paralog_discrimination` carried the TP53 family names | The preset is auto-applied to any large family, so an alcohol-dehydrogenase query ran with strict tokens `TP53, TP63, TP73, …`. | Adh run on committed code: 13 of 16 GOI models tagged `strict_family_downgrade`. No confidence changed on that dataset (the 13 were LOW anyway); on annotated targets a weak true call could have been demoted. |
+| G5 | Nine boolean parameters tested by Groovy truthiness | Nextflow 26 hands every command-line value over as text, and `"false"` is true. `--require_paralog_panel false` (the documented opt-out) did nothing; `--disable_goi_hull_rescue false` switched the rescue **off**; `--enable_plm_search false` would request a GPU. | Minimal Nextflow test of parameter types; static test now forbids the pattern. |
+| G6 | Region scores depended on the line order of the hit table | Hits were sorted by (chrom, start); ties kept input order, and the search writes its table in a thread-dependent order. | Old-vs-new Adh runs: identical hits as a set, different order, consistency 0.896 vs 0.917. Five orders of one file gave five scores; now one. Gene calls were never affected. |
+| G7 | Rescue-pass gene models were never published | A hull-rescued ortholog (27 of the 51 confident calls of the SP benchmark run) existed in the output only as a span in the report. | Output trees of all runs on disk. Now `rescue/locus_<N>/`. |
+| G8 | Three switches existed in scripts only | `--disable_ambiguous_tier` (documented as the kill switch), `--disable_distant_synteny_rescue`, `--legacy_strand_score` had no effect on a pipeline run. | Wiring audit. Now parameters; all plot options reachable through `--plot_extra_args`. |
+| G9 | The query was passed through verbatim | Lowercase, alignment gaps, digits and spaces of numbered lines, and a trailing `*` reached the search inside the "normalised" query. | 15 awkward inputs. `normalize_query.py` now cleans or rejects; it had no tests. |
+| G10 | 78 % of a cluster console log was one warning | `env { LLM_API_KEY = … ?: '' }` exported an empty variable, and Nextflow warned for every task (12,929 of 16,528 lines). | Console logs of the `fix7` runs. |
+| G11 | The end-of-run summary could contradict itself | "GOI found in 4 genome(s)" (genomes with *any* model) next to "absent in 1". A default easy-mode run also warned `max_genomes=0 … <3 target genomes` although 0 means automatic. | Adh run. The summary now prints the report headline. |
+
+Smaller: a stale local copy of `species_from_leaf` shadowed the shared one in the matrix
+plot; `rescue_goi_hull.py --help` crashed on an unescaped `%`; six `[DEBUG …]` prints
+made up 31 % of a search log; NCBI query pipelines had no timeout; genome ordering and
+report file lists depended on directory-listing order; the validation message advertised
+a `--help` that does not exist; the manifest said version 1.0.0; the long-failing
+`test_rbh_batch` (a short-peptide fallback that only triggered on an error current
+MMseqs2 no longer raises).
+
+New guards: file names with whitespace or special characters, and targets that differ
+only by extension, stop the run at launch; ignored task failures are counted in the end
+summary.
+
+## G.2 What the end-to-end runs showed
+
+| Run | Result |
+|---|---|
+| Adh, 4 *Drosophila*/*Anopheles* targets, committed code | 3 HIGH (98.8 / 97.3 / 90.2 %), 13 LOW; exit 0, 62 tasks |
+| Same, fixed code | identical calls and identical gene models byte for byte (family-gate attributes aside); one region score differs through G6 |
+| Yeast STE2 through `./run_synvoy.sh`, fixed code, `--auto_params true` | 1 HIGH (66.0 %) + 2 MEDIUM (47.8 / 41.9 %), all three matching the home STE2 gene; 55 tasks, 3 m 56 s. In July the same demo read "1 high + 32 medium". |
+
+Home-locus selection was tested for order dependence too (original, reversed and shuffled
+hit tables, a single-locus and a three-locus query): identical output.
+
+## G.3 Found, not changed
+
+- **`RECIPROCAL_BEST_PARALOG` (§1j Phase B) cannot fire.** It compares calls against
+  several home query sequences, but since the F8 fix the query that reaches it is always
+  the one normalised protein. It still spawns a task per locus and genome. Locus
+  ownership does the job it was meant to do. Remove it or feed it the paralog panel.
+- **A multi-sequence `--query` uses only its first record** (warned in the task log
+  only). The paper's GR1 query file holds ten sequences.
+- **The LLM estimate never reaches the six preset-covered parameters**, and (G2) none of
+  the others either. Making it effective means routing it through the `settings`
+  channel, as presets are.
+- **The plots and `homology.tsv` do not show rescue models or adjudication verdicts**
+  (§1p). In the yeast demo the report's HIGH call is a hull-rescue model the figure does
+  not draw as such.
+- **Five declared parameters are inert**: `keep_intermediate`, `max_retries`,
+  `multi_profile`, `multi_profile_max_jobs`, `locus_ownership_synteny_window`. The docs
+  now say so.
+- **Four packages in `environment.yml` are not imported by any pipeline code**
+  (`plotly`, `taxopy`, `psutil`; `biopython` only by one test).
+- **Each new work directory rebuilds the conda environment** (3.4 GB, about two minutes),
+  because no `conda.cacheDir` is set.
+- **`main` is behind `dev`** by everything since 2026-07-21, including two crash fixes and
+  the easy-mode rescue bug. Anyone who cloned `main` is running that.
+- The melittin ground-truth fixture has not been regenerated since 2026-03-28;
+  `scripts/reproduce_annotation.py` is dead.
 
 ---
 
@@ -1126,6 +1267,13 @@ it is fixed, and the mechanism claim must be corrected before the paper is writt
 > strength: it asserts presence almost everywhere (16 of 19 benchmark species, ABSENT in
 > none, precision 0.615), and locating a neighbourhood is not the same as modelling the gene
 > in it — by coordinate overlap only 1 of 9 curated models is recovered over half its span.
+
+Add, since 2026-09: *on ten curated venom-gene families across 33 ant genomes it recovered
+30/31, 28/28, 32/32 and 31/32 of the reachable genes in the four near-single-copy families,
+with the reachable set fixed in advance; tandem arrays and loci absent from the home genome
+are out of reach by construction.* And replace the coordinate sentence above with the
+September measurement: internal splice sites of recovered models match the curated ones,
+the errors are at the gene ends, where 97 of 182 now land exactly on the curated coordinate.
 
 That is defensible under review. **Three things must NOT be said** (2026-08-31):
 

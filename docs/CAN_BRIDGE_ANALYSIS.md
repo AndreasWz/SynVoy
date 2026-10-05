@@ -6,6 +6,8 @@ Everything below was produced by **executing** `identify_synteny_blocks` /
 Nothing is quoted from a summary.
 
 Date: 2026-09-09. Code state: working tree at `dev` + uncommitted F9/AMBIGUOUS work.
+(That work was committed on 2026-10-05, `ab31c7a` and `96f1d53`. Two-sided bridging is in the
+code as an opt-in, `--synteny_bridge_two_sided`, default off.)
 
 ---
 

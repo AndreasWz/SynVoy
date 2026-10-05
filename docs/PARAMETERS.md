@@ -21,6 +21,8 @@ Is your query one of a small (2–10) paralog family you want to discriminate?
     → -profile <execution>,preset_paralog_discrimination
        --goi_family_tokens 'PARALOG1,PARALOG2,...'
        (TP53/TP63/TP73, HOX, SOX, paired ZNFs)
+       The preset carries NO tokens of its own: without --goi_family_tokens its
+       family gate stays off and only the tighter thresholds apply.
 
 Is your query a well-conserved, single-copy housekeeping gene?
     → -profile <execution>,preset_single_copy
@@ -53,7 +55,8 @@ You don't actually have to pick a preset by hand. After `LOCATE_GENE` finishes, 
 
 Knobs:
 
-- `--auto_apply_preset false` keeps the recommendation advisory-only (the legacy behaviour). Use this if you want a CLI value you set for a preset-affected param (e.g. `--classify_high_min_identity 60`) to survive into downstream steps. With auto-apply on, the preset's value wins.
+- **A value you set yourself wins over the preset** (since 2026-10-05). Any preset-covered parameter whose launch-time value differs from the default shipped in `nextflow.config` — whether you set it on the command line, in a params file, a `-c` config or through a `-profile` — is kept, and `intermediate/locate_gene/effective_params.json` records it (`source: user_set`, and `user_set_kept` when the preset wanted a different value). Before that date the preset silently overwrote it. The one case that cannot be detected is explicitly passing the *shipped default* (e.g. `--classify_high_min_identity 50`): to pin a default against a preset, use the next option.
+- `--auto_apply_preset false` keeps the recommendation advisory-only: no preset value is applied at all.
 - `--preset_override preset_X` pins a specific preset, bypassing the hit-profile decision. Combine with `--auto_apply_preset true` (the default) to apply it at runtime, or use `-profile preset_X` to apply it at launch.
 
 **One caveat:** `NORMALIZE_QUERY` runs *before* `LOCATE_GENE`, so its `min_query_length` cannot be auto-injected — for queries shorter than the default (`30` aa), pass `--min_query_length 20` explicitly or use `-profile preset_short_peptide` at launch so the value is set before normalization runs. Every other preset-affected param (Smith–Waterman, hit, classify, family, adaptive-region, `max_flanking_goi_similarity`, `expand_goi_similar`) is covered by the runtime injection.
@@ -540,9 +543,9 @@ Minimum alignment identity for MEDIUM confidence exon_annotation models. Lowered
 Enables the family-consistency gate. When `true`, every GOI call with evidence_type in {`fallback_hit_span`, `rescued_exon`, `raw_hit`} that does **not** have a `TargetGene`/`TargetProduct` containing one of the expected family tokens is downgraded to LOW confidence / `ambiguous_goi_family_member`. Prevents fallback-heavy output from masquerading as probable GOI when the annotated locus is clearly a different gene (e.g. DNAH2 labelled as "probable TP53"). All GOI features also gain `GoiFamilyConsistent=true/false` and `GoiFamilyReason=...` attributes regardless of strict mode, which makes post-hoc filtering possible. Exon-annotation models (miniprot-supported multi-exon predictions) are never downgraded — their gene model is independent evidence.
 
 ### `goi_family_tokens`
-**Type:** Comma-separated string | **Default:** `''` (auto)
+**Type:** Comma-separated string | **Default:** `''` (empty)
 
-Family name tokens used by `--strict_goi_family`. When empty, SynVoy parses the query FASTA header: UniProt `GN=XYZ` → token `XYZ`; UniProt entry-name `sp|ACC|NAME_SPECIES` → token `NAME` (e.g. `P04637` → `{TP53, P53}`). For multi-paralog queries where the run should accept all paralog labels (e.g. running TP53 but accepting TP63/TP73 annotations), override explicitly: `--goi_family_tokens TP53,TP63,TP73,TRP53,TRP63,TRP73`. Matching is case-insensitive substring after normalization (strip non-alphanumeric). `P53` correctly matches `Trp53` (mouse ortholog) because `P53` is a substring of `TRP53` once normalized.
+Family name tokens used by `--strict_goi_family`. **Set them explicitly.** The code tries to derive tokens from a UniProt-style header (`GN=XYZ`, `sp|ACC|NAME_SPECIES`), but it reads the first record of the search database, whose headers SynVoy has already rewritten, so nothing is derived in practice — and with no tokens the gate switches itself off with a warning in the `ITERATIVE_SEARCH` log. No preset supplies tokens either: `preset_paralog_discrimination` used to ship the TP53 family names and, being auto-applied to any large gene family, made the gate demote hit-chain calls of unrelated queries for not being called TP53 (fixed 2026-10-05). For multi-paralog queries where the run should accept all paralog labels (e.g. running TP53 but accepting TP63/TP73 annotations), override explicitly: `--goi_family_tokens TP53,TP63,TP73,TRP53,TRP63,TRP73`. Matching is case-insensitive substring after normalization (strip non-alphanumeric). `P53` correctly matches `Trp53` (mouse ortholog) because `P53` is a substring of `TRP53` once normalized.
 
 ### `classify_tandem_min_identity`
 **Type:** Float (%) | **Default:** `40.0`
@@ -564,6 +567,26 @@ The maximum query coverage fraction below which a gene model is labeled as a `fr
 
 The minimum query coverage fraction for a gene model to be labeled as `complete` in the ModelStatus field. Models must cover at least 70% of the query protein and have multi-exon evidence (or be identified as tandem copies) to earn the `complete` status. Models between the fragment threshold (40%) and the complete threshold (70%) are labeled `partial` — they have significant alignment to the query but likely miss one or more exons or terminal regions. The `complete` status indicates a gene model that is likely to represent a full-length or near-full-length ortholog suitable for functional annotation and phylogenetic analysis without qualification. These thresholds are intentionally conservative: 70% coverage allows for some divergence at the N- or C-terminus (signal peptides, disordered tails) while ensuring the core protein is well-represented in the gene model.
 
+### `classify_fallback_strong_min_identity_floor`
+**Type:** Float (%) | **Default:** `30.0`
+
+Identity floor for the "strong flanking support" route by which a hit-chain call (`fallback_hit_span`) reaches MEDIUM. A block with five or more flanking genes used to promote any hit inside it, at any identity, as long as it covered a quarter of the query — the mechanism behind 21–27 % "MEDIUM" calls on the yeast STE2 run. The floor was calibrated against two real populations: the genuine ant melittin rescue sits at 34.7 %, the yeast false positives at 21–27 %. `0` restores the old behaviour.
+
+### `disable_ambiguous_tier`
+**Type:** Boolean | **Default:** `false`
+
+SynVoy has four confidence levels. `AMBIGUOUS` (`goi_class = syntenic_candidate_unconfirmed`) is for a candidate that sits in a conserved neighbourhood but whose own sequence evidence does not show it is the gene: it was promoted by flanking support alone. Such calls are kept in the report and drawn in the plots (palest, most broken outline) but are **not** counted as orthologs, and the headline names them separately. The reason is the melittin benchmark: a gene lost from a conserved locus leaves the neighbourhood intact, so flanking support is equally high where the gene is present and where it is gone. Set `true` to label these calls MEDIUM as before 2026-08-31.
+
+### `identity_decoupled_min_identity` / `identity_decoupled_max_qcov`
+**Type:** Float | **Defaults:** `50.0` (%) / `0.35`
+
+A call at or above the identity bound whose *recorded* query coverage is below the coverage bound is a short local window, not an ortholog (ten residues at 100 %). The report relabels it `identity_coverage_decoupled` and leaves it out of the HIGH/MEDIUM headline counts. A call with no recorded coverage is never demoted by this rule.
+
+### `disable_coverage_demotion`
+**Type:** Boolean | **Default:** `false`
+
+`true` keeps the rule above advisory: the flag still appears in `self_consistency`, the call keeps its confidence.
+
 ---
 
 ## 12. Synteny Scoring Weights
@@ -581,12 +604,24 @@ The weight assigned to gene-order consistency in the composite synteny score. Ge
 ### `synteny_weight_strand`
 **Type:** Float | **Default:** `0.3`
 
-The weight assigned to strand conservation in the composite synteny score. Strand conservation checks whether flanking genes in the target region maintain the same transcriptional direction (sense/antisense) as in the home genome. Inversions that flip a segment of the genome reverse the strand of all genes within that segment. With a weight of 0.3, strand conservation accounts for 30% of the composite score. Perfect strand conservation (all flanking genes on the same relative strand) strongly supports synteny because large-scale inversions are relatively rare between closely related species. This component is particularly diagnostic for detecting inversions: a block with all expected genes in the correct order but reversed strand likely represents a simple inversion event, which still preserves synteny in a meaningful biological sense. The scoring accounts for whole-block inversions differently from gene-by-gene strand discordance.
+The weight of strand agreement in the quality term. For each flanking gene found in the target region SynVoy compares its strand with the strand of its home gene and takes the larger of "agree" and "disagree" over all of them, so a **uniformly inverted** neighbourhood scores 1.0 — an inversion keeps relative orientation and is conserved synteny — while a neighbourhood with mixed agreement scores lower. (Before 2026-07-26 this term never looked at the home genome and rewarded scrambled neighbourhoods; `--legacy_strand_score` reproduces those numbers.)
+
+Note what the three weights do and do not mean. The score is `synteny_score = Q × C` with `Q = w_base·C + w_consistency·K + w_strand·S`, where `C` is the fraction of flanking genes found. Coverage therefore enters twice and dominates: order (`K`) and strand (`S`) can move the score by at most `0.3·C` each. Describe the score as coverage-dominated with order and strand as modifiers, not as a 40/30/30 split.
 
 ### `synteny_goi_overlap_bonus`
 **Type:** Float | **Default:** `0.15`
 
-A bonus score added to candidate syntenic blocks that physically overlap an annotated GOI position. When a target genome has GFF annotations and the candidate block overlaps a gene annotated with the same name or ortholog group as the query GOI, this bonus is applied. The bonus rewards regions where independent evidence (gene annotation) corroborates the synteny-based prediction, increasing the score of true-positive blocks relative to false positives. The default of 0.15 (15% bonus) is moderate — enough to differentiate between otherwise equal candidates but not so large that it overrides strong synteny evidence. This is most useful in well-annotated genomes (model organisms) where GFF annotations are reliable. In draft genomes without GFF, this bonus never applies and scoring relies entirely on the three base components.
+A bonus added to the **ranking** score of a candidate region that overlaps a GOI call made by the search itself (it has nothing to do with the target genome's own annotation). It keeps the region that actually holds a GOI model ahead of an equally syntenic region that does not. The bonus is prior knowledge SynVoy injects, not evidence from the neighbourhood, so it is deliberately excluded from the permutation p-value, which tests `synteny_score` alone; both numbers are written to `regions/*.scores.tsv`.
+
+### `disable_distant_synteny_rescue`
+**Type:** Boolean | **Default:** `false`
+
+In region ranking, a strong GOI hit (high identity, very low E-value) that is isolated from its local flanking genes but lies on a chromosome that still carries an anchor, in a genome that is visibly rearranged, is promoted to a floor score instead of being dropped — it is treated as a dispersed ortholog. A region with strong flanking support never takes this route. Set `true` to skip the rescue.
+
+### `legacy_strand_score`
+**Type:** Boolean | **Default:** `false`
+
+Compute the strand term as before 2026-07-26 (`max(#plus, #minus) / k` over the target hits, ignoring the home strand). Only for reproducing or comparing against region scores from older runs.
 
 ### `max_regions`
 **Type:** Integer | **Default:** `0` (adaptive)
@@ -696,6 +731,27 @@ The length of the scale bar in the synteny plot, in base pairs. The scale bar pr
 
 When enabled, genomic tracks (species rows) where no GOI candidate was found are hidden from the synteny plot. This keeps the visualization focused on species where the GOI was detected, avoiding visual clutter from empty tracks that provide no useful information. With the default of `true`, only species with at least one GOI hit appear in the plot. Setting this to `false` shows all target species including those where the GOI was not found — this can be informative for understanding the phylogenetic distribution of gene loss events (where did the GOI disappear?). For publications where you want to explicitly show which species lack the gene, set this to `false`. For routine analysis where you care primarily about the species where orthologs were found, the default `true` produces cleaner, more interpretable plots.
 
+### `plot_extra_args`
+**Type:** String | **Default:** `''`
+
+Extra options appended verbatim to the `bin/plot_synteny.py` call. Use it for the figure controls that have no parameter of their own, quoting the whole value:
+
+```
+--plot_extra_args '--grid_goi_style genomic --no_fragment_variant'
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `--grid_goi_style` | `cds` | How the anchor grid's GOI column draws a gene model. `cds`: exons to scale on one shared scale with fixed-width intron marks (∧); `cds_aligned`; `genomic`: true intron lengths; `notched`: the old evenly notched arrow. Only miniprot models get intron marks — calls built from search hits are drawn as a thin bar. |
+| `--grid_goi_max_models` | `3` | A cell with more GOI models than this shows the best one plus `×N`; the tooltip gives the confidence breakdown, and the synteny plot draws them all. |
+| `--no_fragment_variant` | off | Skip the `*_with_fragments` figures. By default GOI models with `ModelStatus=fragment` are hidden in the main ribbon plot and grid (they are single-exon hits that otherwise stack into extra lanes) and drawn in these sibling files. |
+| `--no_orient_to_home` | off | By default a scaffold whose flanking genes run opposite to the home genome is mirrored so the ribbons run straight. This switches the mirroring off. |
+| `--no_anchor_grid` | off | Do not write the anchor grid. |
+| `--max_goi_per_genome` | `10` | How many GOI models steer the choice of which neighbourhood to draw. Every GOI model inside the chosen view is drawn regardless. |
+| `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Controls for tandem-array figures; see `bin/plot_synteny.py --help`. |
+
+Do not repeat an option the pipeline already sets (`--plot_width`, `--gap_threshold`, …); use the parameter instead. You can also re-render any figure by hand from a finished run's `plot_inputs_*` folder.
+
 ---
 
 ## 16. Resource Tuning
@@ -737,6 +793,8 @@ The memory allocated to the LOCATE_GENE process. This should accommodate the MMs
 ### `auto_params`
 **Type:** Boolean | **Default:** `false`
 
+> **Advisory on Nextflow ≥ 25.** Current Nextflow does not allow a pipeline to change its parameters after launch, so the estimated values cannot be applied within the run that computed them. SynVoy prints a warning with the exact flags to re-run with and writes the estimate to `intermediate/estimate_params/estimated_params.json`. Until 2026-10-05 the log claimed every value was applied while every step kept its launch-time value. To use an estimate: run once with `--auto_params true`, copy the suggested flags, re-run with them.
+
 Master switch for automatic parameter estimation. When enabled, SynVoy analyzes the biological context of your search — the query protein characteristics (size, exon count, signal peptide, gene family), the home species genome architecture (kingdom, genome size, gene count, intron lengths), and the target species evolutionary distances — to automatically set optimal values for approximately 25 search parameters. When an API key is available (`llm_api_key` or the relevant env var), estimation uses a cloud LLM. Without a key it falls back to built-in deterministic heuristics that encode the same biological rules. Disable this with `--auto_params false` if you want full manual control over all parameters. When disabled, all parameters use their nextflow.config defaults.
 
 ### `llm_provider`
@@ -762,10 +820,14 @@ Model name override. When empty, uses the provider default: `gemini-2.5-flash-li
 ### `multi_profile`
 **Type:** Boolean | **Default:** `false`
 
+**Not implemented — setting it changes nothing.** The parameter and `bin/multi_profile_runner.py` exist, but no pipeline step invokes them. The text below describes the intended design.
+
 Enables multi-profile mode, where SynVoy runs the same search with multiple parameter profiles (sensitive, balanced, stringent) and automatically selects the best result. When the LLM estimates parameters, it produces a single "balanced" profile. Multi-profile mode generates two additional variants: a "sensitive" profile with relaxed thresholds (lower identity, lower synteny score, higher sensitivity) and a "stringent" profile with tighter thresholds (higher identity, higher synteny score). The best result per target is selected based on GOI detection confidence and synteny score. This triples the computational work but significantly improves the chance of finding the optimal parameters for each target species — close species benefit from stringent parameters while distant species benefit from sensitive parameters. The mode is automatically disabled when the total job count (loci × targets × 3 profiles) would exceed `multi_profile_max_jobs`.
 
 ### `multi_profile_max_jobs`
 **Type:** Integer | **Default:** `30`
+
+**Inert**, like `multi_profile`.
 
 The maximum total number of jobs (loci × targets × 3 profiles) allowed before multi-profile mode is automatically disabled. When the estimated job count exceeds this threshold, only the LLM-estimated balanced profile runs, saving computational resources. The default of 30 accommodates typical small-to-medium analyses (e.g., 1 locus × 10 targets × 3 profiles = 30 jobs). For larger analyses (many target genomes or multiple loci), multi-profile would create excessive parallelism — a 3-locus × 20-target analysis would need 180 profile runs, which is likely not worth the 3x computational cost. Increase this value on HPC clusters where computational resources are abundant. Decrease it on laptops or when optimizing for runtime. When multi-profile is disabled (either manually or by exceeding this cap), only the single best-estimated parameter set runs.
 
@@ -785,6 +847,8 @@ The directory where all pipeline output files are written. This includes synteny
 
 ### `max_retries`
 **Type:** Integer | **Default:** `3`
+
+**Currently inert.** Nothing reads this parameter: retries are fixed in the `process {}` block of `nextflow.config` (2 for most steps, 3 for the genome downloads, and only for kill/timeout exit codes). Change them there or with a `-c` config. The description below is the intended behaviour.
 
 The maximum number of times a failed Nextflow process is retried before the pipeline aborts. Combined with the `errorStrategy` configuration (which retries on signal-based failures: SIGKILL, SIGTERM, SIGSEGV, etc.), this provides resilience against transient failures like OOM kills, network timeouts, and temporary file system errors. When a process fails with an OOM kill (exit code 137), Nextflow retries it — if the process has a dynamic memory directive that scales with retry count, the retry may succeed with more memory. The default of 3 retries provides robust fault tolerance without infinite loops on persistent failures. For HPC environments with occasional node failures, 3 retries is appropriate. For local runs where failures are more likely systematic (wrong parameters) than transient, you might reduce to 1–2 to fail faster. This parameter applies globally to all processes.
 
@@ -839,8 +903,51 @@ Per-block timeout for the rescue miniprot invocation. Bumps to `300` are reasona
 
 §1j Phase B reciprocal-best paralog check: for paralog-family queries (multi-sequence home FASTA like TP53 + TP63 + TP73), each recovered GOI target protein is Smith–Waterman-aligned against every home paralog with `parasail`. The per-call best/runner-up bitscores feed `generate_report`'s `paralog_confusion` flag — when a call's best home paralog differs from the *modal* best at the same (genome, locus) with a sufficient bitscore gap, the report flags it. Single-paralog queries are automatic no-ops (the alignment step is skipped). Set true to skip even on multi-paralog runs (useful for short-peptide runs where the paralog list is irrelevant).
 
+> **`disable_paralog_check` is a no-op today, either way.** The check compares each call against *several* home query sequences, but the query that reaches it is always the single normalised GOI protein (only the first record of `--query` is used). The job it was meant to do — "is this call really my gene, or its paralog?" — is done by locus ownership (`--disable_locus_ownership`), which builds its paralog panel from the home proteome.
+
 ### `paralog_confusion_min_gap`
 **Type:** Float | **Default:** `5.0`
 
 Minimum bitscore-gap (best vs second-best paralog) before a paralog-confusion flag fires. The default of 5 keeps borderline ties off the report. Raise to `15`/`20` for stricter flagging (only clear-cut paralog reassignments), lower to `2` if you want every disagreeing call surfaced.
 
+### `disable_phylo_placement`
+**Type:** Boolean | **Default:** `false`
+
+Phylogenetic placement check (advisory). For every adjudicated GOI call SynVoy compares the call's sequence divergence from the query with its species' taxonomic distance from the home species, fits the trend across species, and labels a call that sits anomalously far for its species `phylo_discordant` (others `phylo_concordant`, or `insufficient_data` when too few species have calls). The idea: a paralog that arose before the speciation is more diverged than an ortholog in the same species. The verdict and its z-score are written on each record in `synvoy_report.json` (`goi_dedup.records[].phylo_verdict`, `phylo_z`) and summarised under `self_consistency.phylo_placement_summary`.
+
+It does not change any confidence by default, and it should be read as a hint: divergence comes from a local alignment, species distance is a taxonomic rank difference rather than time, and the test assumes comparable rates across lineages — which fast-evolving genes violate. On the 10-family benchmark every `phylo_discordant` record was a real ortholog. Set `true` to skip the step.
+
+### `phylo_placement_min_calls`
+**Type:** Integer | **Default:** `4`
+
+Number of species with a call needed before the trend is fitted. Below it every call is `insufficient_data`.
+
+### `phylo_placement_z_threshold`
+**Type:** Float | **Default:** `2.0`
+
+Residual z-score at or above which a call is `phylo_discordant`.
+
+### `phylo_placement_promote`
+**Type:** Boolean | **Default:** `false`
+
+Promote an `AMBIGUOUS` call that is `phylo_concordant` to `MEDIUM`. Leave it off unless a run on your own data has shown the verdict is trustworthy.
+
+### `disable_wavefront`
+**Type:** Boolean | **Default:** `false`
+
+A measurement control, not a performance option. Normally targets are searched closest-first in waves, and each wave's recovered orthologs are added to the query database for the next. `true` puts every genome in one parallel wave so the database never grows. Run a set both ways to see whether the wavefront changes the result. On the melittin benchmark it did not; it has not yet been tested on a set where the farthest target is out of reach of the original query.
+
+### `synteny_bridge_two_sided` / `synteny_bridge_max_per_block`
+**Type:** Boolean / Integer | **Defaults:** `false` / `2`
+
+The default gap-bridging rule counts the anchored flanking genes on the left of a gap only, so the same evidence bridges or not depending on where the gap falls. `synteny_bridge_two_sided true` weighs both sides together. It is **off pending measurement**: larger blocks raise the flanking support that some confidence rules read, so it can promote more calls. `synteny_bridge_max_per_block` caps how many gaps one block may chain (`0` = unlimited).
+
+### `report_nonsyntenic_candidates`
+**Type:** Boolean | **Default:** `true`
+
+Record GOI hits that clear the identity / E-value / length bar but are refused by a synteny gate, with the gate that refused them and the distance to the nearest flanking anchor. They are listed in `synvoy_report.json` under `rejected_candidates`. They are not orthology calls; they exist so that a genome holding a strong unplaceable hit is not read as a genome with no hit.
+
+### `quiet`
+**Type:** Boolean | **Default:** `true`
+
+Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints them.
