@@ -484,6 +484,33 @@ def targetGffChannel() {
 // body) because the main workflow{} method sits at the JVM method-size limit —
 // see docs/TODO.md §1m; long literal strings there have re-triggered
 // "UTF8 string too large" before. Appends to the caller's lists in place.
+// Genome file names become identifiers: the stem is the genome name inside sequence
+// IDs (GOI_x|<genome>_b0_l1), GFF attributes and output file names. Whitespace cuts
+// a FASTA ID at the first word, '|' is SynVoy's own ID separator, ';' '=' ',' are GFF
+// syntax, and shell metacharacters break the task scripts -- each of those used to
+// surface hours into a run. Two targets that differ only by extension (Apis.fa,
+// Apis.fna) share one genome name and would overwrite each other's results.
+// Script scope, like the other validators, to stay out of the workflow{} method.
+def validateInputFileNames(List targetFiles, List errors) {
+    def bad = ~/[\s|;=,'"`$&()<>*?!\[\]{}#%\\]/
+    def offending = []
+    def check = { f -> if (f && (f.toString().tokenize('/').last() =~ bad).find()) offending << f.toString().tokenize('/').last() }
+    targetFiles.each { f -> check.call(f) }
+    [params.home_genome, params.home_gff, params.query].each { f -> check.call(f) }
+    if (offending) {
+        errors << "File name(s) with whitespace or special characters: ${offending.unique().take(8).collect { n -> "'${n}'" }.join(', ')}. SynVoy uses the file name as the genome name inside sequence IDs and GFF attributes. Rename them using only letters, digits, '.', '_' and '-' (e.g. 'Apis_mellifera.fna')."
+    }
+    def stems = [:].withDefault { [] }
+    targetFiles.each { f ->
+        def name = f.toString().tokenize('/').last()
+        stems[name.replaceAll(/\.gz$/, '').replaceAll(/\.(fna|fa|fasta)$/, '')] << name
+    }
+    def dup = stems.findAll { _k, v -> v.size() > 1 }
+    if (dup) {
+        errors << "Target genomes that would share one genome name: ${dup.collect { k, v -> "${k} <- ${v.join(' + ')}" }.take(5).join('; ')}. Each target needs a unique file name before the extension."
+    }
+}
+
 def validateTargetGffs(List errors, List warnings) {
     if (!params.target_gffs) {
         return
@@ -681,6 +708,7 @@ workflow {
             if (matches.isEmpty()) {
                 validationErrors << "No target genomes found for --target_genomes '${params.target_genomes}'. Pass a folder containing genome FASTAs (.fna/.fa/.fasta), a quoted glob (\"path/to/*.fna\"), or a comma-separated list. Relative paths resolve against the Nextflow launch dir; quote globs so the shell doesn't expand them."
             }
+            validateInputFileNames(matches, validationErrors)
         }
     }
     validateTargetGffs(validationErrors, validationWarnings)
@@ -703,7 +731,7 @@ workflow {
             log.info "${c.red}  ${idx + 1}. ${msg}${c.reset}"
         }
         log.info ""
-        log.info "${c.dim}Run with --help or see USAGE.md for parameter documentation.${c.reset}"
+        log.info "${c.dim}See docs/USAGE.md and docs/PARAMETERS.md for parameter documentation.${c.reset}"
         exit 1
     }
 
@@ -764,7 +792,7 @@ workflow {
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
-        if (max_genomes < 3) {
+        if (max_genomes > 0 && max_genomes < 3) {
             log.warn("max_genomes=${max_genomes}: synteny scoring derives signal from consensus across species; with <3 target genomes, fallback GOI calls tend to be classified as 'ambiguous' (no multi-genome conservation evidence). Consider raising max_genomes to >=3.")
         }
         def target_species = params.target_species ?: ''
@@ -901,12 +929,25 @@ workflow {
                     allowed.remove('enable_structural_search')
                 }
 
+                // Nextflow >= 25 no longer lets params change after launch: params.put()
+                // returns quietly and the value stays what it was. This block used to log
+                // every estimate as applied while no process ever saw one. Check instead,
+                // and when an estimate did not take, hand the user the flags to re-run with.
+                def notApplied = [:]
                 overrides.each { key, value ->
                     if (allowed.contains(key)) {
                         def old_val = params.get(key)
                         params.put(key, value)
-                        log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
+                        if (params.get(key)?.toString() == value?.toString()) {
+                            log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
+                        } else {
+                            notApplied[key] = value
+                        }
                     }
+                }
+                if (notApplied) {
+                    msg += " — ADVISORY ONLY, ${notApplied.size()} value(s) NOT applied"
+                    log.warn "ESTIMATE_PARAMS: this Nextflow version does not allow parameters to change after launch, so ${notApplied.size()} estimated value(s) were NOT applied and this run uses the launch-time values. To use the estimate, re-run with: ${notApplied.collect { k, v -> "--${k} ${v}" }.join(' ')}   (also saved to ${params.outdir}/intermediate/estimate_params/estimated_params.json)"
                 }
 
                 // Log any warnings/issues
@@ -1444,6 +1485,10 @@ workflow {
             if (workflow.stats.cachedCount > 0) {
                 log.info "${done_c.dim}Tasks Cached:     ${done_c.reset} ${workflow.stats.cachedCount} (reused from previous run)"
             }
+            // The rescue / paralog / ownership steps run with errorStrategy 'ignore'.
+            if (workflow.stats.ignoredCount > 0) {
+                log.info "${done_c.yellow}Tasks FAILED (ignored): ${workflow.stats.ignoredCount} — a rescue or ownership step failed for some genomes, so their results are incomplete. See ${params.outdir}/logs/ and .nextflow.log${done_c.reset}"
+            }
             log.info "${done_c.dim}Results Directory: ${done_c.reset} ${done_c.cyan}${params.outdir}${done_c.reset}"
             log.info uiRule()
 
@@ -1461,12 +1506,18 @@ workflow {
                     def report = new groovy.json.JsonSlurper().parse(report_file)
                     def summary = report.summary
                     if (summary) {
-                        def goi_count = summary.total_goi_annotations ?: 0
-                        def genomes_hit = summary.genomes_with_annotations ?: 0
+                        // The report's own headline (adjudicated, post-dedup). This used to
+                        // print genomes_with_annotations -- genomes with ANY model, flanking
+                        // included -- as "GOI found in N genome(s)", so a run with the GOI
+                        // in 3 of 4 genomes read "found in 4" next to "absent in 1".
                         def absent = summary.goi_absent_genomes?.size() ?: 0
-                        log.info "${done_c.dim}    → GOI found in ${genomes_hit} genome(s) (${goi_count} annotation(s) total)${done_c.reset}"
+                        def unplaced = summary.goi_found_but_not_syntenic?.size() ?: 0
+                        log.info "${done_c.dim}    → ${summary.headline ?: "${summary.total_goi_annotations ?: 0} GOI annotation(s)"}${done_c.reset}"
                         if (absent > 0) {
-                            log.info "${done_c.yellow}    → GOI absent in ${absent} genome(s)${done_c.reset}"
+                            log.info "${done_c.yellow}    → no GOI call placed in ${absent} genome(s)${done_c.reset}"
+                        }
+                        if (unplaced > 0) {
+                            log.info "${done_c.yellow}    → ${unplaced} genome(s) hold a strong GOI hit that no synteny gate accepted (report: rejected_candidates)${done_c.reset}"
                         }
                     }
                 } catch (Exception ignored) {}

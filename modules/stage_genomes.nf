@@ -87,7 +87,7 @@ process STAGE_GENOMES {
     # first path find_native_annotation_path() probes.
     stage_target_gffs.py \\
         --genomes_dir staged_genomes \\
-        ${params.allow_unmatched_target_gffs ? '--allow_unmatched' : ''} \\
+        ${params.allow_unmatched_target_gffs.toString().toBoolean() ? '--allow_unmatched' : ''} \\
         --gffs $target_gffs
     """
 }

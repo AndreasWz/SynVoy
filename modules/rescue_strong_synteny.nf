@@ -11,6 +11,13 @@
 process RESCUE_STRONG_SYNTENY {
     tag "${locus_id}/${genome_name}"
     errorStrategy 'ignore'  // never block the pipeline on a single failed rescue
+    // Publish the rescued models. Until 2026-10-05 nothing did: a hull-rescued ortholog
+    // appeared in synvoy_report.json as a span only, with its exon coordinates and
+    // protein left behind in the work directory. One folder per home locus (the file
+    // name carries only the genome, so a flat folder would let loci overwrite each
+    // other); header-only files from a rescue that did not fire are not published.
+    publishDir path: { "${params.outdir}/rescue/${locus_id}" }, mode: 'copy',
+               saveAs: { fn -> task.workDir.resolve(fn).toFile().readLines().any { l -> l && !l.startsWith('#') } ? fn : null }
 
     input:
     tuple val(locus_id), val(genome_name), path(scores_tsv)
@@ -21,12 +28,12 @@ process RESCUE_STRONG_SYNTENY {
     tuple val(locus_id), path("${genome_name}.rescue.gff"), emit: gff
 
     when:
-    !params.disable_strong_synteny_rescue
+    !params.disable_strong_synteny_rescue.toString().toBoolean()
 
     script:
     """
     target_genome=\$(find -L ${genomes_dir} -name "${genome_name}*" -type f \\
-        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" \\) \\
+        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" -o -name "*.fasta.gz" \\) \\
         | head -n 1)
     if [[ -z "\$target_genome" ]]; then
         echo "##gff-version 3" > ${genome_name}.rescue.gff

@@ -127,7 +127,7 @@ if command -v java >/dev/null 2>&1; then
 else
     die "Java not found. Java >=17 ships inside '$ENV_NAME' — run ./install.sh."
 fi
-say "launch essentials present (conda, Nextflow, Java >=$JV)"
+say "launch essentials present (conda, Nextflow, Java $JV)"
 
 # 4b. Config must parse (catches a broken nextflow.config before any compute).
 nextflow config -profile auto,low_mem >/dev/null 2>&1 \

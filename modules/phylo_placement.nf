@@ -21,7 +21,7 @@ process PHYLO_PLACEMENT_CHECK {
     tuple val(locus_id), path("${locus_id}.phylo_placement.tsv"), emit: tsv
 
     when:
-    !params.disable_phylo_placement
+    !params.disable_phylo_placement.toString().toBoolean()
 
     script:
     """

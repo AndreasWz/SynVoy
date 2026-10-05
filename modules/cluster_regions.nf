@@ -22,6 +22,9 @@ process CLUSTER_REGIONS {
 
     script:
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
+    // .toString().toBoolean(): CLI params arrive as Strings, and "false" is truthy.
+    def distant_rescue_arg = params.disable_distant_synteny_rescue.toString().toBoolean() ? '--disable_distant_synteny_rescue' : ''
+    def legacy_strand_arg = params.legacy_strand_score.toString().toBoolean() ? '--legacy_strand_score' : ''
     """
     mkdir -p regions
 
@@ -54,6 +57,8 @@ process CLUSTER_REGIONS {
         --adaptive_max_regions ${settings.adaptive_max_regions} \\
         --adaptive_unique_gene_floor ${settings.adaptive_unique_gene_floor} \\
         --strong_synteny_min_flanking ${params.strong_synteny_min_flanking} \\
+        ${distant_rescue_arg} \\
+        ${legacy_strand_arg} \\
         ${species_arg}
     """
 }
