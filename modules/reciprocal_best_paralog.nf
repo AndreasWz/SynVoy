@@ -20,7 +20,7 @@ process RECIPROCAL_BEST_PARALOG {
     tuple val(locus_id), path("${genome_name}.paralog_check.tsv"), emit: tsv
 
     when:
-    !params.disable_paralog_check
+    !params.disable_paralog_check.toString().toBoolean()
 
     script:
     """

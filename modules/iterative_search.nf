@@ -80,6 +80,7 @@ process ITERATIVE_SEARCH {
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
         --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\
         --synteny_bridge_max_per_block ${params.synteny_bridge_max_per_block} \\
+        --disable_ambiguous_tier ${params.disable_ambiguous_tier} \\
         --fallback_short_query_len ${params.fallback_short_query_len} \\
         --fallback_short_min_aln_aa ${params.fallback_short_min_aln_aa} \\
         --fallback_short_min_bits ${params.fallback_short_min_bits} \\
