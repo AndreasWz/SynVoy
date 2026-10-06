@@ -1206,6 +1206,7 @@ August and never merged to `main`.
 | G9 | The query was passed through verbatim | Lowercase, alignment gaps, digits and spaces of numbered lines, and a trailing `*` reached the search inside the "normalised" query. | 15 awkward inputs. `normalize_query.py` now cleans or rejects; it had no tests. |
 | G10 | 78 % of a cluster console log was one warning | `env { LLM_API_KEY = … ?: '' }` exported an empty variable, and Nextflow warned for every task (12,929 of 16,528 lines). | Console logs of the `fix7` runs. |
 | G11 | The end-of-run summary could contradict itself | "GOI found in 4 genome(s)" (genomes with *any* model) next to "absent in 1". A default easy-mode run also warned `max_genomes=0 … <3 target genomes` although 0 means automatic. | Adh run. The summary now prints the report headline. |
+| G12 | Assembly quality columns were misread in two more NCBI queries (found in G.4) | `xtract` drops absent fields unless `-def NA` is given, and an assembly record has no top-level scaffold or contig count. The scaffold and contig N50 were therefore read as scaffold and contig *counts* in `fetch_related_genomes.get_related_species` (every easy-mode target search) and `fetch_home_genome.find_any_genome`. A scaffold-level assembly with an N50 above 500 kb failed the quality gate and was dropped, and within one species the assembly with the smallest contig N50 ranked first. The same defect was fixed in May for one call site only (§1l). | The easy-mode run logged *S. paradoxus* as `scaf=903028, contigs=835812, N50=NA/NA`; confirmed on the live NCBI record. `tests/test_assembly_docsum_columns.py` (9). |
 
 Smaller: a stale local copy of `species_from_leaf` shadowed the shared one in the matrix
 plot; `rescue_goi_hull.py --help` crashed on an unescaped `%`; six `[DEBUG …]` prints
@@ -1255,6 +1256,93 @@ hit tables, a single-locus and a three-locus query): identical output.
   the easy-mode rescue bug. Anyone who cloned `main` is running that.
 - The melittin ground-truth fixture has not been regenerated since 2026-03-28;
   `scripts/reproduce_annotation.py` is dead.
+
+## G.4 Pre-merge check on the students' use
+
+Two more runs on the pushed code (`baccf29`), both through `./run_synvoy.sh` with its
+default profile, on a 12-core, 15 GB laptop.
+
+| Run | Result |
+|---|---|
+| Firefly luciferase, pro mode — *Photinus pyralis* home, query `XP_031329057.1`, targets *D. melanogaster* and *A. gambiae*. This is one of the two cases a student reported as crashing on `main`. | exit 0, 130 tasks, none failed, 39 min. Four home loci; `preset_paralog_discrimination` auto-applied, now without family tokens. No HIGH call, 3 MEDIUM (40–42 % identity, each reached from more than one home locus), 1 AMBIGUOUS, 81 LOW. |
+| Easy mode — yeast STE2 by accession (`--query_id D6VTK4 --max_genomes 3`). The first easy-mode run on this code. | exit 0, 44 tasks, none failed, 2 HIGH. It took 35 min, 30 of them in three NCBI queries that ran into the 600 s limit, and it fetched 2 of the 3 requested targets. |
+
+**The crash itself.** `tests/test_cluster_grs_strong_synteny.py`, run against `main`'s
+`cluster_grs.py`, reproduces the student's traceback line for line (`line 1059 …
+UnboundLocalError … 'strong_synteny'`); on `dev` it passes. The luciferase run did not
+pass through the crashing state: `main`'s script also completes on that run's eight
+clustering tasks. The crash needs the *first* scored cluster to overlap a GOI hit, and
+that depends on what the search wrote, which differs between the two branches.
+
+**What the luciferase calls mean.** Flies are not bioluminescent. The three MEDIUM calls
+are the closest members of the same enzyme family, found from several home loci at once.
+A MEDIUM call on a distant target says "best family member in a neighbourhood with some
+synteny", not "luciferase".
+
+**Easy mode, found and fixed.** G12 above, and one more:
+
+| # | Defect | Effect before the fix | Evidence |
+|---|---|---|---|
+| G13 | An NCBI query could block on its own error output | `run_piped_command` reads only the last stage of `esearch \| efetch \| xtract`; the earlier stages wrote stderr into a pipe nobody drained, so a stage stopped for good once it had written about 64 kB, and whatever it had said was lost. entrez-direct prints the whole request for every call it has to retry. Each stage now writes stderr to a temporary file, and its tail is printed when the query fails or times out. | 23.5 kB of stderr for one 1,235-assembly query on a connection where each request failed once. `tests/test_ncbi_pipe_chain.py` (4): a stage that floods stderr hangs the pushed code and passes now. |
+
+What G12 changes in practice, for the firefly case in easy mode (*Photinus pyralis* home,
+six targets): the old code took the four Lampyridae references with the *smallest* contig
+N50 (0.5, 2.0, 3.1 and 7.7 Mb) and left out *Aquatica leii* (10.8 Mb); for the two
+Coleoptera slots it took assemblies with 0.14 and 0.16 Mb. The fixed code takes
+*A. leii* first and fills the Coleoptera slots with 125 and 102 Mb assemblies.
+
+**Easy mode, found and not fixed: the stall.** G13 is not what cost the 30 minutes. The
+same 3,407-assembly query was run through the pushed and through the fixed helper with a
+300 s limit: both ran into it, with nothing on stderr. The query is simply too large. Each
+taxonomy level asks NCBI for the record of *every* assembly under the taxon, and how long
+that takes varies widely: 2,357 records came back in under 90 s inside the pipeline run,
+and not within 8 minutes an hour later. A level that hits the limit is skipped, the run
+continues with fewer genomes, and the console says only "downloaded 2 target genome(s)".
+
+| Taxon | Assemblies at NCBI (2026-10-05) |
+|---|---:|
+| *Apis* / Apidae / Hymenoptera | 39 / 228 / 1,753 |
+| Lampyridae / Coleoptera | 12 / 1,235 |
+| Hydrozoa / Cnidaria | 72 / 605 |
+| *Saccharomyces* / Saccharomycetaceae | 2,357 / 3,407 |
+| *Homo* / Primates / Mammalia | 3,211 / 3,792 / 6,969 |
+| Insecta | 12,093 |
+
+So a human or yeast gene in easy mode can stall at the first level, and any insect run
+that has to climb to class level will. The fix is to narrow the search on the server
+(reference and representative assemblies first, the rest only if the budget is not
+filled). That changes which genomes are chosen and needs its own test, so it was not done
+here. An `NCBI_API_KEY` raises the rate limit. Pro mode does not use these queries.
+
+Suite after G12 and G13: 880 passed, 0 failed.
+
+## G.5 Figure review of the latest runs (2026-10-06)
+
+All figures of the four latest cluster runs (APYR, DPP4, SP, melittin; 17–18 Sep) and of
+the four local runs of G.2 and G.4 were laid out on one page and looked at. Before any
+change, replaying each cluster run's own plot command with the current plotting code
+gave 78 of 78 byte-identical files: the September figures were what `dev` drew.
+
+| # | Defect | Effect before the fix | Evidence |
+|---|---|---|---|
+| G14 | The grid's `×N` badge counted hits anywhere in the genome | Above a flanking arrow, `×N` was the number of models named after that home gene in the whole track, on any scaffold. A paralog-rich gene looked like a local tandem array. Now it counts the models on the drawn gene's scaffold that lie no farther from it than the neighbourhood is long; the legend says so. The GOI column is unchanged. | Yeast, easy mode: `×9` above a 100 % ortholog, the other eight being 26–48 % hits on other chromosomes; 23 such badges in that grid, none after the fix. SP, three loci: 46 badges → 23. DPP4: 14 → 11. APYR: 3 → 3 (real local copies). |
+| G15 | The home GOI label of the synteny plot ran through the subtitle | The label climbs at 45° into a header of fixed height. A long product name crossed the subtitle and was cut off at the top edge. The header now grows as far as the first track's labels need, a name longer than 34 characters is cut with an ellipsis, and the small "GOI" tag is dropped when the label runs through it. | Firefly luciferase, "4-coumarate--CoA ligase 1-like ×5". Short labels in a busy track (melittin) keep the old header. |
+| G16 | Home row labels | The home row printed its scaffold twice ("NC_037641.1 • NC_037641.1"), and in easy mode its species label carried UniProt's strain qualifier ("Saccharomyces cerevisiae (strain ATCC 204508 / S288c)"). | Every synteny plot; the yeast easy-mode figures. |
+| G17 | Easy mode could offer the home species as a related genome | Found through G16. The related-genome search compared the home species for equality with NCBI's species name. With a strain in the home name (UniProt's parenthetical form, or NCBI's "Saccharomyces cerevisiae S288C") it never matched, and the taxonomy lookup of the long name failed over to the genus. | On the 2,357 real assembly records of the genus, the home assembly `GCF_000146045.2` itself was the fourth candidate. `tests/test_fetch_related_home_species.py` (10). |
+
+Tests for G14–G16: `tests/test_plot_grid_copies_and_labels.py` (14). All figures were
+re-drawn afterwards; the README figure is the re-drawn melittin grid.
+
+**Exon counts against NCBI.** NCBI lists 14 exons for the apyrase home gene; the figure
+shows 11. Nothing coding is missing. The gene has three annotated transcripts with 11
+coding segments each, and NCBI's number also counts three non-coding 5′ UTR exons of
+the two predicted variants. The home gene model is taken from the home annotation, not
+re-predicted:
+all eight runs report `method: gff_annotation` in `goi_info.json`, with the model
+protein equal to the query (APYR: 576 aa, start and stop present). The alignment-based
+model is the fallback for a home genome without a matching annotated gene.
+
+Suite after G14–G17: 904 passed, 0 failed.
 
 ---
 
