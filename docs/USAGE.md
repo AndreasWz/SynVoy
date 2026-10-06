@@ -70,6 +70,10 @@ Provide a UniProt/NCBI protein accession, a local FASTA (`--query`), or an inlin
 | `--bad_max_scaffolds` | `500000` | Assemblies with more scaffolds are flagged as low quality |
 | `--bad_min_n50` | `5000` | Assemblies with N50 below this are flagged as low quality |
 
+> **How the quality check decides.** Chromosome-level and complete assemblies always pass.
+> For the others the N50 decides in practice: NCBI's assembly records carry N50 values but
+> no contig or scaffold counts, so the two count limits apply only when a count is known.
+
 > **Note:** When using `--query_seq`, you must also provide `--home_species`.
 
 ### Pro Mode

@@ -654,6 +654,27 @@ def iter_fasta_headers(path: Union[str, Path]) -> Iterator[str]:
 # CLI / PROCESS HELPERS
 # =============================================================================
 
+_SPECIES_QUALIFIER_RE = re.compile(
+    r"\s*\((?:strain|isolate|serotype|serovar|var\.|subsp\.|biotype|genotype)\b[^)]*\)",
+    re.IGNORECASE)
+
+
+def strip_species_qualifier(species_name):
+    """Species name without a strain/isolate qualifier in parentheses.
+
+    UniProt reports organisms with the qualifier attached: D6VTK4 (yeast STE2) comes
+    back as ``Saccharomyces cerevisiae (strain ATCC 204508 / S288c)``. NCBI knows the
+    species as ``Saccharomyces cerevisiae``, so the long form is rejected by
+    ``datasets``, has no taxonomy entry, never equals the species name of an assembly
+    record, and is noise in a figure label. Returns the input unchanged when there is
+    nothing to strip, so a name whose real form contains other parentheses is kept.
+    """
+    if not species_name:
+        return species_name
+    out = re.sub(r"\s+", " ", _SPECIES_QUALIFIER_RE.sub("", species_name)).strip()
+    return out or species_name
+
+
 def str2bool(value: Any) -> bool:
     """
     Argparse-friendly boolean parser.
