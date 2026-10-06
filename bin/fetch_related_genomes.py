@@ -12,6 +12,7 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -25,6 +26,8 @@ try:
     _HAS_ROBUST_DOWNLOADER = True
 except ImportError:
     _HAS_ROBUST_DOWNLOADER = False
+
+from sequence_utils import strip_species_qualifier
 
 
 def _download_one(accession: str, outdir: str) -> str | None:
@@ -106,32 +109,47 @@ def extract_zip_archive(zip_path: Path, extract_dir: Path):
 NCBI_QUERY_TIMEOUT = 600
 
 
+def _stderr_tail(handle, limit=1500):
+    """Last *limit* characters a pipeline stage wrote to its stderr file."""
+    try:
+        handle.seek(0)
+        return handle.read().decode(errors="replace").strip()[-limit:]
+    except Exception:
+        return ""
+
+
 def run_piped_command(cmds, timeout=NCBI_QUERY_TIMEOUT):
     """
     Run a chain of commands connected by pipes.
     cmds: List of command lists. E.g. [['esearch', ...], ['efetch', ...]]
     Returns the output, or None on failure or when the chain exceeds *timeout* seconds.
+
+    Each stage writes its stderr to a temporary file, not to a pipe. Only the last
+    stage is read here, so a piped stderr of an earlier stage was never drained and
+    the stage blocked for good once it had written ~64 kB. entrez-direct echoes the
+    whole request for every call it retries, so a large query on a poor connection
+    can get there. The tail of each stage's stderr is printed when the chain fails
+    or times out, which is the only place a failing NCBI call can be seen.
     """
     procs = []
+    errs = []
     try:
-        p1 = subprocess.Popen(cmds[0], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        procs.append(p1)
-
-        prev_stdout = p1.stdout
-        for i in range(1, len(cmds)):
-            p_next = subprocess.Popen(
-                cmds[i], stdin=prev_stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            procs.append(p_next)
-            prev_stdout.close()
-            prev_stdout = p_next.stdout
+        prev_stdout = None
+        for i, cmd in enumerate(cmds):
+            err = tempfile.TemporaryFile()
+            errs.append(err)
+            proc = subprocess.Popen(cmd, stdin=prev_stdout, stdout=subprocess.PIPE, stderr=err)
+            procs.append(proc)
+            if prev_stdout is not None:
+                prev_stdout.close()
+            prev_stdout = proc.stdout
 
         last_proc = procs[-1]
-        output, error = last_proc.communicate(timeout=timeout)
+        output, _ = last_proc.communicate(timeout=timeout)
 
         if last_proc.returncode != 0:
             print(f"Error in piped command chain: {cmds[-1]}", file=sys.stderr)
-            print(f"Stderr: {error.decode() if error else ''}", file=sys.stderr)
+            print(f"Stderr: {_stderr_tail(errs[-1])}", file=sys.stderr)
             return None
 
         return output.decode().strip()
@@ -139,6 +157,10 @@ def run_piped_command(cmds, timeout=NCBI_QUERY_TIMEOUT):
     except subprocess.TimeoutExpired:
         print(f"NCBI query timed out after {timeout}s: {' | '.join(c[0] for c in cmds)}",
               file=sys.stderr)
+        for cmd, err in zip(cmds, errs):
+            tail = _stderr_tail(err)
+            if tail:
+                print(f"  last output of {cmd[0]}: {tail}", file=sys.stderr)
         return None
     except Exception as e:
         print(f"Exception running pipe chain: {e}", file=sys.stderr)
@@ -147,10 +169,28 @@ def run_piped_command(cmds, timeout=NCBI_QUERY_TIMEOUT):
         for p in procs:
             if p.poll() is None:
                 p.kill()
+        for err in errs:
+            err.close()
 
 
 def normalize_species(name):
     return (name or "").strip().lower()
+
+
+def is_home_species(candidate, home_species):
+    """True when the species name of an assembly record is the home species.
+
+    The home name is often longer than NCBI's species name: UniProt appends the strain
+    in parentheses ("Saccharomyces cerevisiae (strain ATCC 204508 / S288c)") and an
+    NCBI protein record names the strain taxon ("Saccharomyces cerevisiae S288C").
+    Compared for equality, neither matches "Saccharomyces cerevisiae", and the home
+    species itself was offered as a related genome.
+    """
+    cand = normalize_species(candidate)
+    home = normalize_species(strip_species_qualifier(home_species))
+    if not cand or not home:
+        return False
+    return cand == home or (len(cand.split()) >= 2 and home.startswith(cand + " "))
 
 
 def parse_int(value):
@@ -336,6 +376,54 @@ def enrich_quality_metadata(entry, metadata_cache):
         if entry.get(key) is None and value is not None:
             entry[key] = value
     return entry
+
+
+# One row per assembly from an NCBI assembly docsum, in this column order.
+# ``-def NA`` is load-bearing: a docsum has no top-level <ScaffoldCount>/<ContigCount>
+# (and may lack other fields), and without a placeholder xtract simply drops the
+# empty ones, so <ScaffoldN50>/<ContigN50> slide into the count columns. A 900 kb
+# scaffold N50 was then read as "896107 scaffolds": contiguous scaffold-level
+# assemblies failed the quality gate and, within a species, the assembly with the
+# SMALLEST contig N50 ranked first. Same defect as fetch_home_genome.py (TODO §1l).
+ASSEMBLY_DOCSUM_XTRACT = [
+    "xtract", "-pattern", "DocumentSummary", "-def", "NA", "-element",
+    "AssemblyAccession", "SpeciesName", "RefSeq_category", "AssemblyStatus",
+    "ScaffoldCount", "ContigCount", "ScaffoldN50", "ContigN50",
+    "ScaffoldN80", "ContigN80",
+]
+
+
+def _docsum_text(value):
+    """A docsum text field; the ``-def NA`` placeholder counts as absent."""
+    txt = (value or "").strip()
+    return "" if txt.upper() == "NA" else txt
+
+
+def parse_assembly_row(line, tax_level=""):
+    """Parse one tab-separated row of ASSEMBLY_DOCSUM_XTRACT output.
+
+    Returns the assembly entry dict, or None when the row names no assembly or
+    no species.
+    """
+    parts = line.split("\t")
+    parts += [""] * (10 - len(parts))
+    accession = _docsum_text(parts[0])
+    species = _docsum_text(parts[1])
+    if not accession or not species:
+        return None
+    return {
+        "accession": accession,
+        "species": species,
+        "category": _docsum_text(parts[2]),
+        "assembly_status": _docsum_text(parts[3]),
+        "scaffold_count": parse_int(parts[4]),
+        "contig_count": parse_int(parts[5]),
+        "scaffold_n50": parse_float(parts[6]),
+        "contig_n50": parse_float(parts[7]),
+        "scaffold_n80": parse_float(parts[8]),
+        "contig_n80": parse_float(parts[9]),
+        "tax_level": tax_level,
+    }
 
 
 def refseq_priority(entry):
@@ -615,28 +703,12 @@ def get_related_species(
     cmds = [
         ["esearch", "-db", "assembly", "-query", query],
         ["efetch", "-format", "docsum"],
-        [
-            "xtract",
-            "-pattern",
-            "DocumentSummary",
-            "-element",
-            "AssemblyAccession",
-            "SpeciesName",
-            "RefSeq_category",
-            "AssemblyStatus",
-            "ScaffoldCount",
-            "ContigCount",
-            "ScaffoldN50",
-            "ContigN50",
-            "ScaffoldN80",
-            "ContigN80",
-        ],
+        ASSEMBLY_DOCSUM_XTRACT,
     ]
     results = run_piped_command(cmds)
     if not results:
         return []
 
-    exclude_lower = normalize_species(exclude_species) if exclude_species else None
     candidates_by_species = {}
     max_scan_species = max(100, max_genomes * 8)
     max_scan_lines = max(2000, max_genomes * 200)
@@ -645,28 +717,12 @@ def get_related_species(
     for line in results.strip().split("\n"):
         if not line:
             continue
-        parts = line.split("\t")
-        parts += [""] * (10 - len(parts))
-        accession = parts[0].strip()
-        species = parts[1].strip()
-        if not accession or not species:
+        entry = parse_assembly_row(line, tax_level)
+        if entry is None:
             continue
-        if exclude_lower and normalize_species(species) == exclude_lower:
+        species = entry["species"]
+        if exclude_species and is_home_species(species, exclude_species):
             continue
-
-        entry = {
-            "accession": accession,
-            "species": species,
-            "category": parts[2].strip() if len(parts) > 2 else None,
-            "assembly_status": parts[3].strip() if len(parts) > 3 else None,
-            "scaffold_count": parse_int(parts[4]) if len(parts) > 4 else None,
-            "contig_count": parse_int(parts[5]) if len(parts) > 5 else None,
-            "scaffold_n50": parse_float(parts[6]) if len(parts) > 6 else None,
-            "contig_n50": parse_float(parts[7]) if len(parts) > 7 else None,
-            "scaffold_n80": parse_float(parts[8]) if len(parts) > 8 else None,
-            "contig_n80": parse_float(parts[9]) if len(parts) > 9 else None,
-            "tax_level": tax_level,
-        }
         sp_key = normalize_species(species)
         candidates_by_species.setdefault(sp_key, []).append(entry)
 
@@ -1155,6 +1211,10 @@ def main():
 
     print(f"Looking up taxonomy for '{args.home_species}'...")
     species_taxid = get_taxid_from_name(args.home_species)
+    bare_species = strip_species_qualifier(args.home_species)
+    if not species_taxid and bare_species != args.home_species:
+        print(f"  Retrying without the strain qualifier: '{bare_species}'")
+        species_taxid = get_taxid_from_name(bare_species)
     if not species_taxid:
         species_taxid = get_taxid_from_name(genus)
     if not species_taxid:
@@ -1212,7 +1272,7 @@ def main():
     print(f"  Budget allocation: {budget_str}\n")
 
     collected = []
-    seen_species = {normalize_species(args.home_species)}
+    seen_species = {normalize_species(args.home_species), normalize_species(bare_species)}
     carry_over = 0
 
     for i, (level_name, level_taxid) in enumerate(search_levels):

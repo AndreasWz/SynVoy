@@ -158,6 +158,8 @@ The number of seconds SynVoy waits for a user response when `bad_quality_policy`
 ### `bad_max_contigs`
 **Type:** Integer | **Default:** `500000`
 
+Applies only when the contig count of an assembly is known. NCBI's assembly records carry N50 values but no counts, so for most assemblies the decision rests on the assembly level (chromosome-level and complete assemblies always pass) and on `bad_min_n50`. The same holds for `bad_max_scaffolds`.
+
 The maximum number of contigs an assembly can have before it is flagged as low quality. Assemblies with more contigs than this threshold are subject to the `bad_quality_policy`. Contig count is a proxy for assembly fragmentation — a highly fragmented assembly has hundreds of thousands of small contigs, meaning genes and their flanking regions are often split across multiple pieces. This breaks synteny analysis because the pipeline cannot reliably identify the genomic neighborhood of a gene when that neighborhood spans multiple unlinked contigs. The default of 500,000 is permissive; most reasonable genome assemblies have far fewer contigs. Lowering this threshold (e.g., to 50,000) enforces stricter quality requirements, which improves synteny reliability but may exclude draft-quality genomes for non-model organisms.
 
 ### `bad_max_scaffolds`
