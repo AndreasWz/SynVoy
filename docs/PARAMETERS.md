@@ -402,9 +402,9 @@ A safety cap on the total number of candidate syntenic blocks evaluated per targ
 The minimum number of flanking gene hits required in a candidate syntenic block for it to be kept and evaluated further. Blocks with fewer than this many hits are discarded as noise. With the default of 2, at least two flanking gene anchors must map to the same target region (within `cluster_distance`). Setting this to 1 is extremely permissive — a single flanking gene hit somewhere on a chromosome does not constitute synteny evidence and is almost certainly a standalone ortholog of that flanking gene rather than a conserved syntenic block. Setting this higher than 3 is very strict and may miss real syntenic regions in organisms with high chromosomal rearrangement. The combination of `min_block_genes` and `min_synteny_score` together determines which candidate regions survive for GOI search: `min_block_genes` is the absolute floor, while `min_synteny_score` is the proportional threshold.
 
 ### `max_consecutive_empty_blocks`
-**Type:** Integer | **Default:** `25` | **Range:** 5–100
+**Type:** Integer | **Default:** `25` | **Currently has no effect**
 
-Controls the iterative search early-stopping behavior. When evaluating candidate syntenic blocks in order of decreasing synteny score, if this many consecutive blocks fail to produce a GOI hit (i.e., are "empty"), the pipeline stops evaluating remaining blocks for that target genome. This is a heuristic optimization: if the top 25 candidate blocks (by synteny score) all fail to contain the GOI, it is very unlikely that lower-scored blocks will succeed. The default of 25 is generous — even in complex cases with many false-positive syntenic blocks, the true positive is almost always found within the top 10–15 candidates. Reducing this to 10 speeds up processing but risks missing GOIs in unusual genomic contexts (e.g., highly rearranged genomes where the true orthologous region has a mediocre synteny score). Increasing it beyond 50 is rarely beneficial.
+This parameter was an early stop: abandon a target genome after this many consecutive blocks without a GOI model. The stop is switched off in the code (`iterative_search_runner.py` → `process_single_genome` counts the streak, logs it and continues), so every block that passes `min_block_genes` and `max_blocks_per_genome` is searched, whatever this value is. To limit the work per genome, lower `max_blocks_per_genome`.
 
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
@@ -454,37 +454,37 @@ Makes the iterative per-target GOI search **reproducible run-to-run**. MMseqs2 w
 ### `gff_search_window`
 **Type:** Integer (bp) | **Default:** `100000`
 
-The window size in base pairs around the GOI position within which SynVoy searches the GFF annotation file for flanking genes. When a GFF is provided (via `--home_gff`), the pipeline locates the GOI in the home genome by coordinate overlap, then extracts annotated gene features within this window on each side. The default of 100,000 bp (100 kb) typically captures 5–15 genes per side in eukaryotic genomes, which is more than enough for the default `n_flanking_genes=10`. For gene-dense genomes (bacteria: ~1 gene per kb), a smaller window (20,000 bp) suffices. For gene-sparse large genomes where flanking genes may be very far apart, increasing to 200,000–500,000 bp may be necessary. This parameter only affects flanking gene extraction from the home genome GFF — target genome analysis uses different windowing controlled by `cluster_distance` and `region_padding`.
+Used once, when the home gene model is built (`annotate_goi_exons.py`). If the GOI is not found in the home GFF by name, the proteins of the annotated genes within this distance of the query's hits are compared with the query, and the best match is taken as the home gene. It does not affect the choice of flanking genes (that is `n_flanking_genes` and `max_flanking_distance`) or anything in the target genomes. Raise it only if the query's hits lie far from the gene they belong to.
 
 ### `gap_search_window`
 **Type:** Integer (bp) | **Default:** `50000`
 
-The window size for gap-filling searches within candidate syntenic regions. During GOI search within a candidate block, if the initial tblastn/MMseqs2 search finds partial hits (e.g., only some exons), the gap-filling module searches within this window around existing hits for additional exons or fragments that may have been missed. The default of 50,000 bp covers the typical span of a multi-exon gene in most eukaryotes. For organisms with very large introns (some vertebrate genes span >500 kb), increase this to capture all exons. For bacteria and fungi where genes are compact, 10,000–20,000 bp is sufficient. Gap filling is particularly important for multi-exon genes in distant species where some exons have diverged beyond initial detection thresholds — the gap filler uses relaxed parameters to rescue these missing exons.
+Two uses, both in the target search. (1) **Core window:** a hit is kept for GOI modelling only if it overlaps the block of flanking genes widened by this many bp, so every GOI model starts within this distance of the flanking genes. (2) **Modelling window:** miniprot is given the hits of one candidate widened by this many bp on each side, with a maximum intron equal to that window (at least 20 kb). The home gene model uses the same margin when it falls back to miniprot. Raise it for genes with very long introns; lower it for compact genomes. There is no separate gap-filling search: missing exons are found by miniprot inside this window, or not at all.
 
 ### `gap_min_size`
-**Type:** Integer (bp) | **Default:** `10`
+**Type:** Integer (bp) | **Default:** `10` | **Currently has no effect**
 
-The minimum gap size in base pairs between existing hits for the gap-filling module to attempt a search. Gaps smaller than this are considered too small to contain a missing exon and are skipped. The default of 10 bp is extremely permissive — almost any gap between hits triggers a gap-filling search. This is appropriate because even very small exons (microexons of 3–30 bp) exist in some gene families, and the gap-filling search cost is low since it only examines a small region. For most practical purposes, this parameter does not need adjustment. Setting it higher (e.g., 50–100 bp) would skip tiny gaps but might miss microexons in genes known to contain them (e.g., some ion channels, cadherins).
+**No effect.** The value is accepted and passed to `annotate_goi_exons.py` → `annotate_exons_from_hit_list`, which does not read it. It belonged to a gap-filling search that was replaced by one miniprot alignment per candidate (see `gap_search_window`).
 
 ### `gap_evalue`
-**Type:** Float | **Default:** `10`
+**Type:** Float | **Default:** `10` | **Currently has no effect**
 
-The E-value threshold for gap-filling searches. This is deliberately very permissive — much more so than the main `search_evalue` (default 0.01). The rationale is that gap filling occurs within a region already validated by synteny evidence, so we expect the GOI to be there. The search target is small (only the gap region), which means even weak alignments to short exon fragments are worth capturing. An E-value of 10 in a small search space has a different significance than E-value of 10 in a whole-genome search; the effective false-positive rate is controlled by the restricted search region. This permissive threshold enables rescue of highly divergent exons that would be invisible under standard thresholds. Tightening this value risks losing the marginal exons that gap filling is specifically designed to recover.
+**No effect.** The value is accepted and passed to `annotate_goi_exons.py` → `annotate_exons_from_hit_list`, which does not read it. It belonged to a gap-filling search that was replaced by one miniprot alignment per candidate (see `gap_search_window`).
 
 ### `gap_min_identity`
 **Type:** Float (%) | **Default:** `15.0`
 
-The minimum percent identity for gap-filling search hits. This is slightly more permissive than the main `min_hit_identity` (default 10%) to allow detection of highly divergent exon fragments. At 15% identity, alignments are in the deep twilight zone, but within a synteny-validated region, even such weak matches can represent genuine exon fragments. The gap-filling module combines identity with the gap context (position relative to other confirmed exons, frame consistency, splice site signals) to evaluate whether a weak hit is a genuine exon. Lowering this below 10% is not recommended as alignments below that threshold are indistinguishable from random for protein sequences. Setting it higher (e.g., 25%) would be appropriate for within-family searches where you expect clear sequence conservation even in exon fragments.
+Despite the name, this is only a lower bound of the identity required for a `raw_hit` GOI row, the last-resort output when neither miniprot nor a hit chain gives a model. The bound is `max(gap_min_identity, 90)`, so the default has no effect and only a value above 90 changes anything. A `raw_hit` is always LOW confidence.
 
 ### `gap_min_alnlen`
-**Type:** Integer (aa) | **Default:** `10`
+**Type:** Integer (aa) | **Default:** `10` | **Currently has no effect**
 
-The minimum alignment length in amino acids for gap-filling hits. Combined with `gap_min_identity`, this defines the quality floor for rescued exon fragments. An alignment of 10 amino acids represents approximately 30 nucleotides of coding sequence — this is short enough to capture microexons and highly diverged exon fragments but long enough to have some statistical significance. For multi-domain proteins where individual exons encode distinct domains, even short alignments to a single domain's fragment provide valuable positional information. For most use cases, the default is appropriate. Increase to 20–30 if you want to restrict gap filling to more confident hits, at the cost of potentially missing small exons in divergent species.
+**No effect.** The value is accepted and passed to `annotate_goi_exons.py` → `annotate_exons_from_hit_list`, which does not read it. It belonged to a gap-filling search that was replaced by one miniprot alignment per candidate (see `gap_search_window`).
 
 ### `gap_max_hits`
 **Type:** Integer | **Default:** `5`
 
-The maximum number of gap-filling hits to report per gap. When the gap-filling search finds multiple candidate fragments in a single gap region, only the top N (by score) are retained. This prevents a single large gap in a repetitive region from generating hundreds of weak candidate fragments that would overwhelm downstream processing. The default of 5 is usually sufficient — in a genuine gap between exons, there is typically at most one real missing exon plus a few noise hits. Increasing this is rarely helpful because the additional hits beyond the top 5 are almost always noise. Decreasing to 1 forces the pipeline to commit to the single best hit per gap, which is fine for clean genomes but may miss alternative exon configurations in polyploid or duplicated regions.
+The maximum number of `raw_hit` GOI rows written per candidate locus (the last-resort output described under `gap_min_identity`); the hits with the highest identity are taken. Must be at least 1.
 
 ### `min_exon_query_cov`
 **Type:** Float | **Default:** `0.25` | **Range:** 0–1

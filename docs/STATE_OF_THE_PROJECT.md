@@ -1344,6 +1344,66 @@ model is the fallback for a home genome without a matching annotated gene.
 
 Suite after G14–G17: 904 passed, 0 failed.
 
+## G.6 Algorithm description, parameter docs, block merging (2026-10-06/07)
+
+[ALGORITHM.md](ALGORITHM.md) now describes what the pipeline computes, step by step,
+written from the code. Reading the code for it found two more defects.
+
+| # | Defect | Effect before the fix | Evidence |
+|---|---|---|---|
+| G18 | Eight parameters were documented as doing things the code does not do | `max_consecutive_empty_blocks`, `gap_min_size`, `gap_evalue` and `gap_min_alnlen` have no effect; `gap_min_identity` and `gap_max_hits` only bound last-resort `raw_hit` rows; `gff_search_window` is the home-gene lookup distance; `gap_search_window` is the margin for GOI hits and for miniprot. There is no gap-filling search. | Code reading (`process_single_genome`, `annotate_exons_from_hit_list`). PARAMETERS.md, USAGE.md and the config comments corrected; no behaviour changed. |
+| G19 | A merged block added its parts' gene counts and kept only the first part's gene list | Two copies of one flanking gene less than 300 kb apart read as a 2-gene block and passed `min_block_genes = 2`, so the window was searched although the neighbourhood had a single anchor. The genes of the later parts were invisible to the "seeded by the GOI's own gene" exception and to the 80-block cap. Now the merged block holds the union of the genes. | `tests/test_merge_block_gene_count.py` (6; 4 fail on the old code). Measurements below. |
+
+**G19, measured.** Replaying block building on the saved genome-wide hits of two local
+runs (firefly luciferase against two flies, yeast STE2) reproduces the block counts in
+the run logs: 89 of the 544 blocks that passed the filter held one distinct flanking
+gene. An A/B on the cluster with two code snapshots that differ only by this fix
+(control `pre8`, fix `fix8`; jobs 5831701–08), plus the luciferase case locally:
+
+| Run | Blocks searched, control → fix | HIGH / MEDIUM / AMBIGUOUS records that differ | Gene-model rows that differ |
+|---|---|---|---|
+| APYR, 33 genomes | 224 → 209 | 0 of 32 | 0 of 331 |
+| DPP4, 33 genomes | 352 → 351 | 0 of 32 | 0 of 149 |
+| SP, 33 genomes, 3 home loci | 5,675 → 5,028 | 0 of 122 | 19 LOW gone, 2 LOW new, of 2,129 |
+| Melittin, 19 genomes | 46 → 46 | 0 of 10 | 0 of 8 |
+| Luciferase, 2 genomes, 4 home loci (local) | 525 → 436 | 0 of 6 | 2 LOW gone, 1 MEDIUM new, 1 LOW with another identity, of 89 |
+
+Recall, precision and the set of final calls are identical in both arms for all three
+families. The one new MEDIUM row (luciferase) is the second half of the defect: a block
+that was seeded by a rescued GOI hit lost that gene from its list when it was merged,
+was not protected, and fell outside the 80-block cap. With the fix it is searched; the
+model it yields was already in the report from another home locus, and as a new member
+of the query set it changes the identity of one LOW row in the next genome. Run times of the two
+cluster arms are not comparable: they ran on different nodes, and the melittin run, which
+did identical work in both arms, differed by 35 %.
+
+**The control arm is also the first cluster run of the code since G.1.** Against the
+last validated run (17 Sep): APYR, DPP4, SP and melittin have the same final calls,
+the same recall and precision, and identical gene-model rows in the search output. One
+label differs: 14 APYR records carry the class `confident_goi` where they carried
+`synteny_hull_rescue`. Both models exist in both runs, at the same coordinates and with
+the same identity; the report keeps the first of two tied models, and since the October
+robustness pass (`565bf81`) the result files are read in sorted order, main-path model
+first, and no longer in directory order.
+
+**Found, not changed.** The hull rescue looks for an existing HIGH GOI model inside the
+span of the HIGH flanking models but searches that span plus 100 kb on each side. A gene
+the main path found just outside the span is modelled again: in the APYR control run the
+rescue produced a model in 28 of 33 genomes, all of which the main path already had as
+HIGH. The duplicates are merged in the report, so the counts are right; the work is
+wasted, and before the sorted read the reported class of such a gene was arbitrary.
+Changing the check can change which model is reported where the two differ, so it needs
+its own benchmark run.
+
+The rescue also labels its models with the shipped identity thresholds (HIGH from 50 %),
+not with the thresholds of an auto-applied preset. In the DPP4 run the preset raised the
+main path's HIGH threshold to 55 %; 16 genes at 52.1–54.8 % identity are MEDIUM there,
+and the same 16 are HIGH in the report through the rescue. All 16 are curated orthologs,
+so recall and precision are unaffected; the confidence label of such a gene depends on
+which path reports it.
+
+Suite after G18–G19: 910 passed, 0 failed.
+
 ---
 
 ## What to say about SynVoy right now

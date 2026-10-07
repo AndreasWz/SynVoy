@@ -125,6 +125,7 @@ The current state of the method, including what does not work yet, is written up
 - [docs/OUTPUT.md](docs/OUTPUT.md) — what each output file contains.
 - [docs/USAGE.md](docs/USAGE.md) — every option, all profiles, and HPC/SLURM.
 - [docs/PARAMETERS.md](docs/PARAMETERS.md) — parameter tuning, with the biological reasoning.
+- [docs/ALGORITHM.md](docs/ALGORITHM.md) — what the pipeline computes, step by step, with every rule and default.
 - [docs/STATE_OF_THE_PROJECT.md](docs/STATE_OF_THE_PROJECT.md) — what the method is, what is validated, known weaknesses.
 
 ---
