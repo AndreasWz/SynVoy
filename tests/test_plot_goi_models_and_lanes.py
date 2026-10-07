@@ -20,6 +20,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bin"))
 
 import plot_synteny as ps  # noqa: E402
+import synvoy_grid as sg  # noqa: E402
+
+sg._PS = ps      # the grid module is handed plot_synteny by render(); set here for its helpers
 
 
 def _g(name, start, end, **kw):
@@ -172,43 +175,38 @@ def _model(strand="-"):
 
 
 def test_cds_geometry_is_to_scale_with_fixed_introns():
-    w, exons, introns, pointing = ps._goi_model_geometry(_model(), "cds", 0.1)
+    w, exons, introns = sg.model_geometry(_model(), 0.1, caret=2.4)
     assert [round(x1 - x0, 6) for x0, x1 in exons] == [10.0, 30.0, 10.0]
-    assert all(round(x1 - x0, 6) == ps.GOI_INTRON_PX for x0, x1 in introns)
-    assert pointing == "-"
-    assert w == pytest.approx(50 + 2 * ps.GOI_INTRON_PX)
+    assert all(round(x1 - x0, 6) == 2.4 for x0, x1 in introns)
+    assert w == pytest.approx(50 + 2 * 2.4)
 
 
-def test_cds_aligned_draws_minus_strand_five_prime_first():
-    _, exons, _, pointing = ps._goi_model_geometry(_model("-"), "cds_aligned", 0.1)
-    # 5' exon of a '-' gene is the genomically LAST block (100 bp) ... all
-    # blocks are symmetric here, so check the middle one stays in the middle
-    # and the tip points right.
-    assert [round(x1 - x0, 6) for x0, x1 in exons] == [10.0, 30.0, 10.0]
-    assert pointing == "+"
+def test_panel_model_is_drawn_five_prime_first():
+    # The 5' exon of a '-' gene is its genomically LAST block.
     asym = dict(_model("-"), exon_coords=[(1000, 1099), (2001, 2300)])
-    _, ex2, _, _ = ps._goi_model_geometry(asym, "cds_aligned", 0.1)
-    assert round(ex2[0][1] - ex2[0][0], 6) == 30.0
+    _, exons, _ = sg.model_geometry(asym, 0.1, flip=True)
+    assert round(exons[0][1] - exons[0][0], 6) == 30.0
+    svg, _ = sg.draw_model(asym, 0, 20, 0.1, "#f00", "#800", "", 5.0, aligned=True)
+    assert svg.count("<path") == 1          # one arrow tip, on the last exon drawn
 
 
-def test_genomic_geometry_keeps_intron_lengths():
-    w, exons, introns, _ = ps._goi_model_geometry(_model(), "genomic", 0.1)
-    assert w == pytest.approx(200.1)
-    assert introns[0][1] - introns[0][0] == pytest.approx(90.1)
+def test_a_tiny_exon_keeps_a_visible_width():
+    micro = dict(_model(), exon_coords=[(1000, 1002), (2001, 2300)])
+    _, exons, _ = sg.model_geometry(micro, 0.01)
+    assert exons[0][1] - exons[0][0] == sg.MIN_EXON
 
 
-def test_column_scale_is_shared_and_longest_model_gets_budget():
-    short = dict(_model(), exon_coords=[(1000, 1099)])
-    long_ = _model()
-    bp_px, col_w = ps._goi_column_scale([[short], [long_]], "cds")
-    assert bp_px == pytest.approx(ps.GOI_MODEL_MAX_W / 500)
-    assert col_w <= ps.GOI_COL_MAX_W
+def test_hit_span_cannot_set_the_scale():
+    # A hit-based call has no exon structure; its span is cut to the longest gene model.
+    hit = dict(_model(), evidence_type="tandem_copy", exon_coords=[(1000, 6600)])
+    assert sg.model_geometry(hit, 0.1, cap_bp=500)[0] == pytest.approx(50.0)
+    assert sg.model_geometry(_model(), 0.1, cap_bp=100)[0] == pytest.approx(50 + 2 * 2.4)
 
 
 def test_hit_chains_are_not_drawn_as_gene_models():
     hit = dict(_model(), evidence_type="fallback_hit_span")
-    svg_model, _ = ps._goi_model_svg(_model(), 0, 20, "cds", 0.1, "#f00", "#800", "")
-    svg_hit, _ = ps._goi_model_svg(hit, 0, 20, "cds", 0.1, "#f00", "#800", "")
+    svg_model, _ = sg.draw_model(_model(), 0, 20, 0.1, "#f00", "#800", "", 5.0)
+    svg_hit, _ = sg.draw_model(hit, 0, 20, 0.1, "#f00", "#800", "", 5.0)
     assert "<polyline" in svg_model          # intron carets
     assert "<polyline" not in svg_hit        # plain connector lines
     h_model = float(re.search(r'height="([\d.]+)"', svg_model).group(1))
@@ -372,31 +370,94 @@ def _goi(start, conf="LOW", ident=40.0, chrom="chr1", status="complete"):
               exon_coords=[(start, start + 100), (start + 200, start + 300)])
 
 
-def test_cell_with_few_models_draws_all_of_them():
-    genes = [_goi(1000), _goi(2000), _goi(3000)]
-    models, n, frags, nf = ps._goi_cell_items(genes)
-    assert len(models) == 3 and n == 3 and not frags and nf == 0
-
-
-def test_cell_with_many_models_draws_best_and_counts_all():
-    genes = [_goi(s) for s in range(1000, 46000, 1000)] + [_goi(99000, conf="HIGH", ident=70.0)]
-    genes += [_goi(s, status="fragment") for s in (50000, 51000)]
-    models, n, frags, nf = ps._goi_cell_items(genes)
-    assert n == 46 and [g["confidence"] for g in models] == ["HIGH"]
-    assert nf == 2 and len(frags) == 2
-
-
-def test_grid_prints_count_for_collapsed_cell():
+def _grid_pair(target_goi, home_goi=None):
     home = {"label": "Home", "species": "Apis mellifera", "is_home": True,
             "genome_id": "home", "offset": 0, "breaks": [],
-            "genes": [_g("gene-A", 1000, 2000), _g("GOI_T", 3000, 3500)]}
+            "genes": [_g("gene-A", 1000, 2000)] + (home_goi or [_g("GOI_T", 3000, 3500)])}
     tgt_genes = [_g("a", 1000, 2000, home_gene_id="gene-A", identity=90.0, confidence="HIGH")]
-    tgt_genes += [_goi(s) for s in range(5000, 12000, 1000)]
     tgt = {"label": "T", "species": "Bombus terrestris", "is_home": False,
-           "genome_id": "bter", "offset": 0, "breaks": [], "genes": tgt_genes}
-    html = ps.render_anchor_grid([home, tgt], {"gene-A": "#4e79a7"}, {}, {}, SimpleNamespace())
-    assert ">×7</text>" in html
-    assert "best of 7 GOI models in this neighbourhood (7 LOW)" in html
+           "genome_id": "bter", "offset": 0, "breaks": [], "genes": tgt_genes + target_goi}
+    return [home, tgt]
+
+
+def _grid(tracks, **style):
+    return sg.render(ps, tracks, {"gene-A": "#4e79a7"}, {}, SimpleNamespace(), sg.style_for(**style))
+
+
+def _drawn(result, row=2):
+    return [r["drawn_as"] for r in result["source"] if r["row"] == row and r["column"] == "T"]
+
+
+def test_copy_is_the_best_call_or_at_least_medium():
+    best, medium, low = _goi(1000, "LOW", 60.0), _goi(2000, "MEDIUM"), _goi(3000, "LOW")
+    frag = _goi(4000, "HIGH", status="fragment")
+    assert ps._goi_is_copy(best, best)                  # the best call, whatever its tier
+    assert ps._goi_is_copy(medium, best)
+    assert not ps._goi_is_copy(low, best)
+    assert not ps._goi_is_copy(frag, best)              # a fragment is never a copy
+
+
+def test_one_copy_per_genome_puts_the_model_in_the_goi_column():
+    res = _grid(_grid_pair([_goi(5000, "HIGH", 70.0)]))
+    assert res["info"]["goi_form"] == "column"
+    assert _drawn(res) == ["model"]
+    assert "gene models" not in "".join(res["parts"])      # no panel header
+
+
+def test_two_copies_get_numbered_arrows_and_a_panel():
+    res = _grid(_grid_pair([_goi(5000, "HIGH", 70.0), _goi(7000, "MEDIUM", 55.0)]))
+    assert res["info"]["goi_form"] == "panel"
+    assert res["info"]["most_copies_in_a_target"] == 2
+    rows = [r for r in res["source"] if r["row"] == 2 and r["column"] == "T"]
+    assert [(r["drawn_as"], r["copy_number"]) for r in rows] == [("model", 1), ("model", 2)]
+    assert rows[0]["start"] < rows[1]["start"]             # numbered along the chromosome
+    svg = "".join(res["parts"])
+    assert "T gene models" in svg or ">gene models<" in svg
+
+
+def test_two_goi_genes_in_the_home_genome_also_need_the_panel():
+    home_goi = [_g("GOI_T", 3000, 3500), _g("GOI_T2", 4000, 4500, home_gene_id="GOI_T")]
+    tracks = _grid_pair([_goi(5000, "HIGH", 70.0)], home_goi=home_goi)
+    ps._GOI_NAMES.update({"GOI_T", "GOI_T2"})
+    try:
+        res = _grid(tracks)
+    finally:
+        ps._GOI_NAMES.difference_update({"GOI_T", "GOI_T2"})
+    assert res["info"]["home_copies"] == 2 and res["info"]["goi_form"] == "panel"
+
+
+def test_weak_calls_are_marks_and_never_counted_as_copies():
+    # Seven LOW calls: the best one is the copy, the other six are weak calls.
+    res = _grid(_grid_pair([_goi(s) for s in range(5000, 12000, 1000)]))
+    assert res["info"]["goi_copies"] == 1 and res["info"]["goi_calls"] == 7
+    assert sorted(_drawn(res)) == ["mark"] * 6 + ["model"]
+    assert "×7" not in "".join(res["parts"])
+
+
+def test_many_weak_calls_are_capped_and_the_rest_is_counted():
+    genes = [_goi(s) for s in range(1000, 46000, 1000)] + [_goi(99000, conf="HIGH", ident=70.0)]
+    res = _grid(_grid_pair(genes))
+    drawn = _drawn(res)
+    assert drawn.count("model") == 1 and drawn.count("mark") == sg.GridStyle().max_marks
+    assert drawn.count("counted") == 45 - sg.GridStyle().max_marks
+    assert f">+{45 - sg.GridStyle().max_marks}<" in "".join(res["parts"])
+
+
+def test_a_long_tandem_array_draws_the_first_models_and_says_how_many_more():
+    genes = [_goi(s, "HIGH", 70.0) for s in range(5000, 17000, 1000)]      # 12 copies
+    res = _grid(_grid_pair(genes), max_models=10)
+    assert res["info"]["goi_copies"] == 12 and res["info"]["copies_not_drawn"] == 2
+    drawn = _drawn(res)
+    assert drawn.count("model") == 10 and drawn.count("arrow") == 2    # every copy keeps its arrow
+    assert ">+2 more<" in "".join(res["parts"])
+
+
+def test_full_grid_tooltip_names_weak_calls():
+    html = ps.render_anchor_grid(_grid_pair([_goi(s) for s in range(5000, 12000, 1000)]),
+                                 {"gene-A": "#4e79a7"}, {}, {}, SimpleNamespace())
+    assert html.count("(weak call") == 6       # three at the locus, three elsewhere
+    assert html.count("(weak call, elsewhere in the genome)") == 3
+    assert "×7" not in html
 
 
 def test_capped_goi_models_inside_the_view_are_restored():

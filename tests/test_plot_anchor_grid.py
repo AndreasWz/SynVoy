@@ -9,6 +9,7 @@ the GOI gets its own emphasised column, identity numbers are drawn, strand
 inversions are flagged, and home genes recovered in no target are dropped.
 """
 import os
+import re
 import sys
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
@@ -178,8 +179,11 @@ def test_coverage_shown_only_when_low():
            "breaks": [], "genes": [g_full, g_short]}
     html = ps.render_anchor_grid([home, tgt], {}, {}, {}, _args())
     assert ">92<" in html              # full-length: identity only
-    assert "88 (40)" in html           # short hit: identity + coverage flag
-    assert "92 (95)" not in html       # high coverage never annotated
+    assert ">88<" in html and ">(40)<" in html      # short hit: coverage under the arrow
+    assert "coverage 40%" in html      # and in the tooltip
+    assert html.count('class="cov-low"') == 1       # high coverage carries no second line
+    assert "*<" not in html            # the full grid has room: no flag in place of the value
+    assert "under an arrow: query coverage in %" in html      # the legend explains it
 
 
 def test_positional_variant_valid_with_goi_diamond_and_backbone():
@@ -217,7 +221,7 @@ def test_tree_panel_attaches_unplaced_rows(tmp_path):
     html = ps.render_anchor_grid(_tracks(), {}, {}, {}, args)
     assert 'class="grid-tree"' in html
     # dashed basal connectors for the unplaced rows (home + mouse) + a spine
-    assert html.count('stroke-dasharray="3,2.5"') >= 3
+    assert html.count('class="tree-unplaced"') >= 3
 
 
 def test_anchor_threaded_valid_with_arrows_dots_and_leaders():
@@ -350,8 +354,8 @@ def test_absent_cell_does_not_claim_the_gene_is_missing():
     prevent.
     """
     html = _render()
-    # the standalone legend LABEL, not the phrase anywhere in prose
     assert ">no ortholog</text>" not in html
-    assert ">not placed here</text>" in html
-    assert "rejected_candidates" in html, "legend must point at where refusals are listed"
-    assert "not that the gene is absent" in html
+    legend = " ".join(re.findall(r">([^<]+)</text>", html))
+    assert "Empty cell" in legend and "not placed here" in legend
+    assert "rejected_candidates" in legend, "legend must point at where refusals are listed"
+    assert "not evidence that the gene is absent" in legend

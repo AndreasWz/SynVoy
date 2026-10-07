@@ -59,6 +59,8 @@ from synvoy_tree import (  # noqa: E402
 )
 # Shared BED/GFF parsers (replaces local copies — see sequence_utils.py).
 from sequence_utils import parse_bed, parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
+import synvoy_gene_names as gene_names  # noqa: E402
+import synvoy_legend as figure_legend  # noqa: E402
 
 
 def parse_home_gff_genes(path):
@@ -85,7 +87,7 @@ def parse_home_gff_genes(path):
                 end = int(p[4])
             except ValueError:
                 continue
-            entry = {"symbol": symbol, "product": product,
+            entry = {"symbol": symbol, "product": product, "gene_id": attrs.get("ID", ""),
                      "chrom": p[0], "start": start, "end": end, "strand": p[6]}
             for key in (attrs.get("ID"), attrs.get("Name"), symbol):
                 if key:
@@ -212,11 +214,14 @@ def parse_homology_tsv(path):
 
 # ─────────────────────────────── slot building ──────────────────────────────
 
-def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index):
+def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index, names=None):
     """Order home flanking genes by start; insert a GOI slot from query_bed.
 
+    `names` is the gene-names table ({gene_id: row}, see synvoy_gene_names);
+    a gene it lists is labelled from it.
+
     Returns (slots, goi_slot_id) where each slot is a dict:
-        {id, label, start, end, strand, is_goi, product}
+        {id, label, start, end, strand, is_goi, product, gene_id}
     """
     if not home_bed_rows:
         return [], None
@@ -231,9 +236,9 @@ def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index):
         rn = row["name"]
         if rn.startswith("GOI_") or rn.startswith("gene-GOI"):
             continue
-        label, product = _label_and_product(rn, home_gff_index)
+        label, product = _label_and_product(rn, home_gff_index, names)
         slots.append({
-            "id": row["name"], "label": label, "product": product,
+            "id": row["name"], "label": label, "product": product, "gene_id": rn,
             "start": row["start"], "end": row["end"],
             "strand": row["strand"], "is_goi": False,
         })
@@ -241,7 +246,7 @@ def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index):
     # Synthesize GOI slot: union of query_bed intervals, look up gene symbol
     # in home_gff that overlaps this range. If query_bed is empty, scan
     # home_gff for a gene whose symbol appears in any home_bed name (no-op).
-    goi_slot = _make_goi_slot(query_bed_rows, home_gff_index, chrom)
+    goi_slot = _make_goi_slot(query_bed_rows, home_gff_index, chrom, names)
     if goi_slot is None:
         return slots, None
 
@@ -270,7 +275,7 @@ def build_home_slots(home_bed_rows, query_bed_rows, home_gff_index):
     return slots, goi_slot["id"]
 
 
-def _label_and_product(raw_name, home_gff_index):
+def _label_and_product(raw_name, home_gff_index, names=None):
     label = raw_name
     if label.startswith("gene-"):
         label = label[len("gene-"):]
@@ -280,10 +285,14 @@ def _label_and_product(raw_name, home_gff_index):
         if entry.get("symbol"):
             label = entry["symbol"]
         product = entry.get("product", "") or ""
+    named = (names or {}).get(raw_name)
+    if named:
+        label = gene_names.display_label(named, label)
+        product = named.get("full_name") or product
     return label, product
 
 
-def _make_goi_slot(query_bed_rows, home_gff_index, chrom):
+def _make_goi_slot(query_bed_rows, home_gff_index, chrom, names=None):
     if not query_bed_rows:
         return None
     qrows = [r for r in query_bed_rows if r["chrom"] == chrom]
@@ -313,10 +322,15 @@ def _make_goi_slot(query_bed_rows, home_gff_index, chrom):
             best = entry
             best_score = score
     if best:
-        label = best.get("symbol") or "GOI"
-        product = best.get("product", "") or ""
+        symbol = best.get("symbol") or "GOI"
+        label, product = symbol, best.get("product", "") or ""
+        named = (names or {}).get(best.get("gene_id", ""))
+        if named:
+            label = gene_names.display_label(named, label)
+            product = named.get("full_name") or product
         return {
-            "id": f"GOI_{label}",
+            # The id joins target GOI cells to this slot: it keeps the GFF symbol.
+            "id": f"GOI_{symbol}", "gene_id": best.get("gene_id", ""),
             "label": label, "product": product or "gene of interest",
             "start": best["start"], "end": best["end"],
             "strand": best["strand"], "is_goi": True,
@@ -385,12 +399,19 @@ COL_GOI_HEADER  = "#FFE7DD"
 CONF_OPACITY = {"HIGH": 1.0, "MEDIUM": 0.75, "LOW": 0.50, "": 0.85}
 
 
-def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None):
+def _approx_text_width(text, size, bold=False):
+    """Helvetica width estimate: this figure carries no font metrics."""
+    return len(text or "") * size * (0.58 if bold else 0.53)
+
+
+def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None,
+               names=None, lookup_note=""):
     """Build an SVG string for the matrix.
 
     species_rows: ordered list of
         (display_label, summary_dict, is_home, tree_species_key, clade_color)
     rooted_tree:  midpoint-rooted TreeNode (or None for placeholder ladder).
+    names:        gene-names table; when given, it is listed under the matrix.
     """
     cell_w, cell_h = 46, 30
     name_w = 240
@@ -404,8 +425,23 @@ def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None):
     matrix_w = n_cols * cell_w
     matrix_h = n_rows * cell_h
 
-    total_w = margin + tree_w + name_w + matrix_w + margin
-    total_h = margin + header_h + gap_above + matrix_h + 90  # 90 = two-row legend
+    total_w = max(margin + tree_w + name_w + matrix_w + margin, 760 + 2 * margin)
+    legend_y = margin + header_h + gap_above + matrix_h + 20
+    legend_svg, legend_h = _render_legend(margin, legend_y, total_w - 2 * margin,
+                                          COL_GOI, COL_FLANKING)
+    total_h = legend_y + legend_h + 22
+
+    name_rows = []
+    for slot in slots:
+        named = (names or {}).get(slot.get("gene_id", ""))
+        if named:
+            bare = slot["gene_id"][5:] if slot["gene_id"].startswith("gene-") else slot["gene_id"]
+            name_rows.append(gene_names.table_row(
+                named, bare, COL_GOI if slot["is_goi"] else COL_FLANKING, is_goi=slot["is_goi"]))
+    names_svg, names_h = gene_names.names_table_svg(
+        name_rows, margin, total_h, total_w - 2 * margin, _approx_text_width,
+        lookup_note=lookup_note, goi_stroke=COL_GOI)
+    total_h += names_h
 
     out = []
     out.append(
@@ -534,8 +570,9 @@ def render_svg(slots, species_rows, home_label, goi_slot_id, rooted_tree=None):
                                  margin, matrix_y0, tree_w, cell_h))
 
     # ── Legend ──────────────────────────────────────────────────────────
-    out.append(_render_legend(margin, matrix_y0 + matrix_h + 22, COL_GOI, COL_FLANKING))
+    out.append(legend_svg)
 
+    out.extend(names_svg)
     out.append('</svg>')
     return "\n".join(out)
 
@@ -633,7 +670,7 @@ def _draw_cell(out, x, y, w, h, slot, cell, is_home, n_copies=1):
     if not is_home and ident >= 30:
         qcov = cell.get("query_coverage")
         if qcov is not None and qcov < 0.80:
-            num = f"{ident:.0f} ({qcov*100:.0f})"
+            num = f"{ident:.0f} ({min(79, round(qcov * 100)):.0f})"
         else:
             num = f"{ident:.0f}"
         fsz = max(7.0, min(10.0, (w - 6) / (len(num) * 0.60)))
@@ -810,58 +847,55 @@ def _dashed_leaders(species_rows, x0, x1, matrix_y0, cell_h):
     return "\n".join(parts)
 
 
-def _render_legend(x, y, c_goi, c_flank):
-    """Two-row legend: confidence tiers on top, identity scale + role on bottom."""
-    out = ['<g class="legend" font-size="10">']
+def _render_legend(x, y, avail_w, c_goi, c_flank):
+    """Grouped legend under the matrix: ``(svg, height)``."""
+    fs = 10.5
 
-    # Row 1: confidence tiers shown as flanking-coloured arrows.
-    cx = x
-    out.append(f'<text x="{cx}" y="{y + 10}" font-weight="600">Confidence:</text>')
-    cx += 76
-    # Match cell rendering: HIGH solid, MEDIUM lightened+dotted, LOW hatched+dashed.
-    tiers = [
-        ("HIGH",   c_flank,                    "",                       1.0),
-        ("MEDIUM", _lerp_hex(c_flank, "#FFFFFF", 0.45),
-                                              ' stroke-dasharray="1,1.5"', 0.95),
-        ("LOW",    "url(#lowConfFlank)",       ' stroke-dasharray="3,2"',  0.85),
+    def arrow(fill, dash="", opacity=1.0, w=30.0, h=13.0):
+        def draw(gx, gy):
+            # _arrow_path draws inside a cell and keeps 4 / 5 px clear of its edges.
+            pts = _arrow_path(gx - 4, gy - h / 2 - 5, w + 8, h + 10, "+")
+            return (f'<polygon points="{pts}" fill="{fill}" opacity="{opacity:.2f}" '
+                    f'stroke="{c_flank}" stroke-width="0.9"{dash}/>')
+        return (w, draw)
+
+    def box(fill, w=18.0, h=12.0):
+        return (w, lambda gx, gy: (f'<rect x="{gx:.1f}" y="{gy - h / 2:.1f}" width="{w}" '
+                                   f'height="{h}" fill="{fill}" stroke="#888" stroke-width="0.5"/>'))
+
+    def ramp(w=60.0, h=12.0, steps=12):
+        def draw(gx, gy):
+            out = []
+            for k in range(steps):
+                t = k / (steps - 1.0)
+                col = _lerp_hex(c_flank, "#FFFFFF", min(0.55, (1 - t) * 0.7))
+                out.append(f'<rect x="{gx + k * w / steps:.1f}" y="{gy - h / 2:.1f}" '
+                           f'width="{w / steps + 0.3:.1f}" height="{h}" fill="{col}"/>')
+            return "".join(out)
+        return (w, draw)
+
+    groups = [
+        ("Layout", [
+            ("Columns", "home genes in genomic order"),
+            ("Rows", "genomes, in the order of the tree on the left"),
+            ("Arrow", "ortholog placed in this neighbourhood; points in its coding direction")]),
+        ("Cells", [
+            (box(c_goi), "GOI"),
+            (box(c_flank), "flanking ortholog"),
+            (box(COL_MISSING_BG), "not placed here, which is not evidence that the gene is absent"),
+            (ramp(), "fill: 30 % (pale) to 100 % identity")]),
+        ("Confidence", [
+            # As the cells are drawn: HIGH solid, MEDIUM lightened + dotted, LOW hatched + dashed.
+            (arrow(c_flank), "high"),
+            (arrow(_lerp_hex(c_flank, "#FFFFFF", 0.45), ' stroke-dasharray="1,1.5"', 0.95), "medium"),
+            (arrow("url(#lowConfFlank)", ' stroke-dasharray="3,2"', 0.85), "low")]),
+        ("Numbers", [
+            ("87", "% protein identity"),
+            ("56 (44)", "identity (query coverage, when below 80 %)"),
+            ("×N", "N copies at the locus")]),
     ]
-    for label, fill, dash, opacity in tiers:
-        pts = _arrow_path(cx, y, 36, 16, "+")
-        out.append(
-            f'<polygon points="{pts}" fill="{fill}" opacity="{opacity:.2f}" '
-            f'stroke="{c_flank}" stroke-width="0.9"{dash}/>'
-        )
-        out.append(f'<text x="{cx + 42}" y="{y + 11}">{label}</text>')
-        cx += 92
-
-    # Row 2: GOI vs flanking + absent + identity scale.
-    y2 = y + 28
-    cx = x
-    items = [
-        (c_goi,   "GOI"),
-        (c_flank, "Flanking ortholog"),
-        (COL_MISSING_BG, "Absent"),
-    ]
-    for color, label in items:
-        out.append(
-            f'<rect x="{cx}" y="{y2}" width="18" height="12" fill="{color}" '
-            f'stroke="#888" stroke-width="0.5"/>'
-        )
-        out.append(f'<text x="{cx + 24}" y="{y2 + 10}">{_esc(label)}</text>')
-        cx += 24 + 8 + max(60, len(label) * 7)
-
-    # Identity gradient bar.
-    bar_x = cx + 12
-    bar_y = y2 - 1
-    for k in range(20):
-        t = k / 19.0
-        col = _lerp_hex(c_flank, "#FFFFFF", min(0.55, (1 - t) * 0.7))
-        out.append(f'<rect x="{bar_x + k * 6}" y="{bar_y}" width="6" height="14" fill="{col}"/>')
-    out.append(f'<text x="{bar_x - 4}" y="{y2 + 26}" font-size="9">30%</text>')
-    out.append(f'<text x="{bar_x + 105}" y="{y2 + 26}" font-size="9">100% identity</text>')
-
-    out.append('</g>')
-    return "\n".join(out)
+    parts, height = figure_legend.legend_svg(groups, x, y, avail_w, _approx_text_width, fs=fs)
+    return '<g class="legend figure-legend">' + "".join(parts) + '</g>', height
 
 
 # ─────────────────────────────── HTML wrapper ────────────────────────────────
@@ -1085,7 +1119,13 @@ def main():
                     help="Optional 2-column TSV (scientific<TAB>common) "
                          "overriding NCBI lookups.")
     ap.add_argument("--no_network", action="store_true",
-                    help="Skip the NCBI 'datasets' CLI lookup for common names.")
+                    help="Skip the NCBI lookups: common names of the species, and the "
+                         "current gene symbols of home genes the GFF does not name.")
+    ap.add_argument("--gene_names_tsv", default="",
+                    help="Names table (gene_id, label, full_name, source) that sets the "
+                         "label of the home genes it lists; plot_synteny.py writes one.")
+    ap.add_argument("--no_gene_legend", dest="gene_legend", action="store_false",
+                    help="Do not draw the gene-names table under the matrix.")
     args = ap.parse_args()
 
     # Initialize common-name resolver up front (cheap; just reads cache).
@@ -1100,7 +1140,8 @@ def main():
     if not home_bed:
         sys.exit(f"ERROR: no rows in --home_bed {args.home_bed}")
 
-    slots, goi_slot_id = build_home_slots(home_bed, query_bed, home_gff_index)
+    names, lookup_note = load_gene_names(args, home_bed, query_bed, home_gff_index)
+    slots, goi_slot_id = build_home_slots(home_bed, query_bed, home_gff_index, names)
     if not goi_slot_id:
         print(f"WARN: no GOI slot synthesized — query_bed empty or unmatched. "
               f"Home row will lack a GOI cell.", file=sys.stderr)
@@ -1205,9 +1246,35 @@ def main():
         f' · {len(species_rows) - 1} target genomes'
     )
     svg = render_svg(slots, species_rows, args.home_species, goi_slot_id,
-                     rooted_tree=rooted_tree)
+                     rooted_tree=rooted_tree,
+                     names=names if args.gene_legend else None, lookup_note=lookup_note)
     write_output(svg, title, subtitle, args.output)
     print(f"Wrote {args.output}", file=sys.stderr)
+
+
+def load_gene_names(args, home_bed, query_bed, home_gff_index):
+    """Gene-names table for the home genes of the matrix: ``(table, lookup_note)``.
+
+    Same sources as plot_synteny.py (names table, home GFF, NCBI Gene, product
+    name); the pipeline hands over the table plot_synteny.py wrote, so the two
+    figures carry the same labels.
+    """
+    ids = [r["name"] for r in sorted(home_bed, key=lambda r: r["start"])
+           if not (r["name"].startswith("GOI_") or r["name"].startswith("gene-GOI"))]
+    goi = _make_goi_slot(query_bed, home_gff_index, home_bed[0]["chrom"])
+    if goi and goi.get("gene_id") and goi["gene_id"] not in ids:
+        ids.append(goi["gene_id"])
+    given = gene_names.read_names_tsv(args.gene_names_tsv)
+    overrides = {}
+    for gid in ids:
+        bare = gid[5:] if gid.startswith("gene-") else gid
+        for cand in (gid, bare, "gene-" + bare):
+            if cand in given:
+                overrides[gid] = given[cand]
+                break
+    return gene_names.resolve_gene_names(
+        ids, gene_names.load_gff_gene_info(args.home_gff, wanted=ids), overrides,
+        allow_network=not args.no_network)
 
 
 def _label_species(scientific, mode):

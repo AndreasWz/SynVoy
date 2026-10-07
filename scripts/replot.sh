@@ -13,10 +13,16 @@
 #  Examples:
 #     scripts/replot.sh results/my_run/plot_inputs_synteny_block_locus_1 results/my_run/replot
 #     scripts/replot.sh results/my_run/plot_inputs_synteny_block_locus_1 /tmp/fig \
-#         --home_species "Apis mellifera" --grid_goi_style genomic --no_fragment_variant
+#         --home_species "Apis mellifera" --print_grid_numbers --no_fragment_variant
 #
 #  --home_species labels the home row (the pipeline passes it; without it the row
 #  reads "Home genome").
+#
+#  Gene names: the run's own names table (<plot_inputs_dir>/gene_names.tsv) is
+#  reused, so the labels are those of the run. A run without that table, or one
+#  whose figures were drawn offline, gets its names looked up at NCBI Gene (one
+#  request). To change a label, edit a copy of the table and pass it with
+#  --gene_names_tsv <file>.
 #
 #  Run it with the SynVoy environment active (conda activate synvoy_env).
 #  All options: python3 bin/plot_synteny.py --help
@@ -24,7 +30,7 @@
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-    sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 
@@ -65,6 +71,12 @@ args=(--home_bed "$home_bed" --target_gffs "${target_gffs[@]}")
 [ ${#regions[@]} -ge 1 ]    && args+=(--candidate_beds "${regions[@]}")
 [ ${#trees[@]} -ge 1 ]      && args+=(--tree "${trees[0]}")
 [ -f "$IN/species_mapping.tsv" ] && args+=(--species_map "$IN/species_mapping.tsv")
+if [ -f "$IN/gene_names.tsv" ] && ! grep -qE '^# NCBI Gene lookup: (FAILED|skipped)' "$IN/gene_names.tsv"; then
+    args+=(--gene_names_tsv "$IN/gene_names.tsv")
+else
+    # No saved table, or one made without NCBI Gene (offline run): look the names up now.
+    args+=(--gene_name_lookup)
+fi
 
 # Same defaults as the pipeline (modules/plot_synteny.nf); later options win, so
 # anything passed on the command line overrides these.

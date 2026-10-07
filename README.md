@@ -16,7 +16,7 @@ It is built for **divergent, single-copy genes** (e.g. toxins, micro-exon genes)
 <p align="center">
   <img src="assets/example_anchor_grid.svg" alt="SynVoy anchor grid — honeybee melittin searched in 19 Hymenoptera genomes" width="860"/>
 </p>
-<p align="center"><sub>Example: honeybee <b>melittin</b> searched in 19 Hymenoptera genomes. Each row is a species (the 9 with a placed call; the 10 without one are hidden), each column a gene: the searched gene in red, its neighbours either side. Numbers are % identity. The outline is the confidence — solid = HIGH, dashed = MEDIUM, pale dotted = AMBIGUOUS (in the right neighbourhood, but not shown to be the gene), striped = LOW. An empty cell means no ortholog was <i>placed</i> there, not that the gene is absent. The report for this run counts 2 HIGH and 2 MEDIUM calls and names 6 AMBIGUOUS candidates separately.</sub></p>
+<p align="center"><sub>Example: honeybee <b>melittin</b> searched in 19 Hymenoptera genomes. Each row is a species (the 9 with a placed call; the 10 without one are hidden), each column a gene: the searched gene in red, its neighbours either side. Numbers are % identity. The outline is the confidence — solid = HIGH, dashed = MEDIUM, dotted = LOW, palest and most broken = AMBIGUOUS (in the right neighbourhood, but not shown to be the gene). The panel on the right draws the exon structure of every copy of the searched gene, with its identity to the query. An empty cell means no ortholog was <i>placed</i> there, not that the gene is absent. The report for this run counts 2 HIGH and 2 MEDIUM calls and names 6 AMBIGUOUS candidates separately.</sub></p>
 
 ---
 
@@ -99,6 +99,7 @@ Everything is written under `--outdir`. The files you will usually open:
 |---|---|
 | `synvoy_report.json` | **The result.** `summary.headline` is the one-line answer; `goi_dedup.records` lists one record per gene found, with coordinates and a `confidence`: **`HIGH` / `MEDIUM` = orthologs, `AMBIGUOUS` = a candidate in the right neighbourhood that is not shown to be the gene, `LOW` (counted only) = leads.** |
 | `*_anchor_grid.html` | The interactive version of the figure above (hover for details). |
+| `*_anchor_grid_print.svg` | The same figure at print size: 183 mm wide, text of 5 to 7 pt, with its legend text and a table of every cell. |
 | `plot_inputs_*/*.gff`, `*.homology.tsv` | Per genome: the gene models with exon coordinates, and a table of every model with its evidence. |
 
 A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).

@@ -20,11 +20,16 @@ process PLOT_SYNTENY {
     path "*_synteny_matrix.svg", emit: matrix_plot, optional: true
     path "*_anchor_grid.html", emit: anchor_grid, optional: true
     path "*_anchor_grid.svg", emit: anchor_grid_svg, optional: true
+    // The anchor grid at print size (183 mm wide, text 5-7 pt) with the sentences of
+    // its figure legend (.legend.txt) and the values of every cell (.source.tsv).
+    path "*_anchor_grid_print.*", emit: anchor_grid_print, optional: true
     path "*_gene_positions.html", emit: gene_positions, optional: true
     path "*_gene_positions.svg", emit: gene_positions_svg, optional: true
     path "*_anchor_positions.html", emit: anchor_positions, optional: true
     path "*_anchor_positions.svg", emit: anchor_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
+    // Label, full name and source of every home gene, as drawn in the figures.
+    path "*_gene_names.tsv", emit: gene_names, optional: true
     // Ribbon plot + anchor grid that also draw ModelStatus=fragment GOI models
     // (hidden in the default figures); written only when a run has fragments.
     path "*_with_fragments.*", emit: with_fragments, optional: true
@@ -112,6 +117,10 @@ process PLOT_SYNTENY {
         ${plot_extra_args} \\
         --output ${home_bed.baseName}_synteny_plot.html
 
+    # The names table the figures were drawn with, kept beside the plot inputs: a
+    # re-draw (scripts/replot.sh) then uses the same labels without asking NCBI again.
+    cp ${home_bed.baseName}_gene_names.tsv "\$inputs_dir/gene_names.tsv" || true
+
     # Phylogeny-anchored matrix view (paper-ready SVG). Opt-in: the anchor-grid
     # (aligned columns + species tree) and the gene-position map cover the same
     # ground more compactly, so this is off unless --enable_matrix_plot is set.
@@ -130,6 +139,7 @@ process PLOT_SYNTENY {
             --home_species "${home_species ?: 'Home'}" \\
             --common_names scientific \\
             --no_network \\
+            --gene_names_tsv ${home_bed.baseName}_gene_names.tsv \\
             --output ${home_bed.baseName}_synteny_matrix.svg
     fi
     """
