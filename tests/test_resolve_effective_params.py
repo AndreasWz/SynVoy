@@ -272,3 +272,151 @@ def test_preset_overrides_match_groovy_configs():
             if not ok:
                 drifts.append(f"{preset}.{k}: groovy={gv!r} python={pv!r}")
     assert not drifts, "PRESET_OVERRIDES drift:\n  " + "\n  ".join(drifts)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4) User-set values win over a preset
+#
+# The --defaults map is the launch-time `params`, so it already holds whatever
+# the user set. Before --shipped_config existed a preset silently overwrote
+# those values. A value counts as user-set when it differs from the default
+# shipped in nextflow.config.
+# ──────────────────────────────────────────────────────────────────────
+
+# Must list exactly the keys main.nf feeds the resolver (preset_default_keys).
+def _preset_default_keys_from_main_nf() -> list[str]:
+    text = (ROOT / "main.nf").read_text()
+    m = re.search(r"def preset_default_keys = \[(.*?)\]", text, re.S)
+    assert m, "main.nf no longer defines preset_default_keys"
+    return re.findall(r"'([a-z_]+)'", m.group(1))
+
+
+def test_shipped_defaults_are_found_for_every_preset_key():
+    """If nextflow.config changes shape and a key stops being parsed, user-set
+    detection silently stops working for it. Fail here instead."""
+    keys = _preset_default_keys_from_main_nf()
+    assert len(keys) >= 20
+    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
+    assert sorted(shipped) == sorted(keys), sorted(set(keys) - set(shipped))
+    # Spot-check literals and that trailing comments/quotes are stripped.
+    assert rep._norm(shipped["classify_high_min_identity"]) == ("num", 50.0)
+    assert rep._norm(shipped["strict_goi_family"]) == ("bool", False)
+    assert shipped["goi_family_tokens"] == ""
+    assert rep._norm(shipped["min_query_length"]) == ("num", 30.0)
+
+
+def test_every_preset_key_is_fed_by_main_nf():
+    """A preset key missing from preset_default_keys never reaches `settings`
+    with a default, and modules reading settings.<key> would get null."""
+    keys = set(_preset_default_keys_from_main_nf())
+    for preset, overrides in rep.PRESET_OVERRIDES.items():
+        assert set(overrides) <= keys, (preset, sorted(set(overrides) - keys))
+
+
+def test_detect_user_set_is_type_tolerant():
+    shipped = {"a": "50.0", "b": "false", "c": "", "d": "20", "e": "true"}
+    # Nextflow hands CLI values over as strings: none of these is a change.
+    same = {"a": 50, "b": False, "c": "", "d": "20", "e": "True"}
+    assert rep.detect_user_set(same, shipped) == {}
+    changed = {"a": "35", "b": "true", "c": "TP53", "d": 10, "e": False}
+    assert rep.detect_user_set(changed, shipped) == changed
+    # A key the shipped config does not declare is never called user-set.
+    assert rep.detect_user_set({"zzz": 1}, shipped) == {}
+
+
+def test_user_set_value_beats_auto_preset_and_is_reported():
+    defaults = dict(DEFAULTS, classify_high_min_identity="35")   # user typed 35
+    res = rep.resolve(defaults, auto_preset={"preset": "preset_short_peptide"},
+                      user_set={"classify_high_min_identity": "35"})
+    assert res["settings"]["classify_high_min_identity"] == "35"
+    assert res["source"]["classify_high_min_identity"] == "user_set"
+    assert res["user_set_kept"] == ["classify_high_min_identity"]
+    # Keys the user did not touch still take the preset's value.
+    assert res["settings"]["classify_medium_min_identity"] == 25.0
+    assert res["source"]["classify_medium_min_identity"] == "preset:preset_short_peptide"
+
+
+def test_user_set_equal_to_preset_value_is_not_reported_as_kept():
+    res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
+                      user_set={"classify_high_min_identity": 40})
+    assert res["settings"]["classify_high_min_identity"] == 40
+    assert res["user_set_kept"] == []
+
+
+def test_explicit_user_override_still_beats_user_set():
+    res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
+                      user_set={"sw_min_score": 15}, user_overrides={"sw_min_score": 12})
+    assert res["settings"]["sw_min_score"] == 12
+    assert res["source"]["sw_min_score"] == "user_cli"
+
+
+def test_cli_keeps_a_value_the_user_set(tmp_path: Path):
+    """End to end against the real nextflow.config: a launch-time value that
+    differs from the shipped default survives an auto-applied preset."""
+    keys = _preset_default_keys_from_main_nf()
+    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
+    defaults = dict(shipped)
+    defaults["classify_medium_min_identity"] = "20"       # as typed on the CLI
+    (tmp_path / "defaults.json").write_text(json.dumps(defaults))
+    (tmp_path / "auto.json").write_text(json.dumps({"preset": "preset_short_peptide"}))
+    out = tmp_path / "eff.json"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "resolve_effective_params.py"),
+         "--auto_preset", str(tmp_path / "auto.json"),
+         "--defaults", str(tmp_path / "defaults.json"),
+         "--shipped_config", str(ROOT / "nextflow.config"),
+         "--output", str(out)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    res = json.loads(out.read_text())
+    assert res["preset_applied"] == "preset_short_peptide"
+    assert res["settings"]["classify_medium_min_identity"] == "20"
+    assert res["user_set_kept"] == ["classify_medium_min_identity"]
+    assert "kept 1 user-set value(s)" in proc.stdout
+    # An untouched key takes the preset.
+    assert res["settings"]["classify_high_min_identity"] == 40.0
+
+
+def test_cli_without_shipped_config_keeps_the_old_behaviour(tmp_path: Path):
+    defaults = dict(DEFAULTS, classify_medium_min_identity="20")
+    (tmp_path / "defaults.json").write_text(json.dumps(defaults))
+    (tmp_path / "auto.json").write_text(json.dumps({"preset": "preset_short_peptide"}))
+    out = tmp_path / "eff.json"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "resolve_effective_params.py"),
+         "--auto_preset", str(tmp_path / "auto.json"),
+         "--defaults", str(tmp_path / "defaults.json"), "--output", str(out)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["settings"]["classify_medium_min_identity"] == 25.0
+
+
+def test_unreadable_shipped_config_warns_and_falls_back(tmp_path: Path):
+    assert rep.load_shipped_defaults(str(tmp_path / "missing.config"), ["a"]) == {}
+    (tmp_path / "defaults.json").write_text(json.dumps(DEFAULTS))
+    out = tmp_path / "eff.json"
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "resolve_effective_params.py"),
+         "--defaults", str(tmp_path / "defaults.json"),
+         "--shipped_config", str(tmp_path / "missing.config"), "--output", str(out)],
+        capture_output=True, text=True)
+    assert proc.returncode == 0
+    assert "no defaults could be read" in proc.stderr
+
+
+def test_strip_config_comment_respects_quotes():
+    assert rep._strip_config_comment("a = 5 // note") == "a = 5 "
+    assert rep._strip_config_comment("a = 'x//y'  // note") == "a = 'x//y'  "
+    assert rep._strip_config_comment('url = "http://h/p"') == 'url = "http://h/p"'
+
+
+def test_no_preset_carries_gene_specific_family_tokens():
+    """Presets are auto-applied to arbitrary queries. The paralog preset used to
+    ship the TP53 family names, so an Adh query was searched with strict TP53
+    tokens and its hit-chain calls on annotated genes were demoted to LOW."""
+    for preset, overrides in rep.PRESET_OVERRIDES.items():
+        assert "goi_family_tokens" not in overrides, preset
+    for cfg in (ROOT / "conf" / "presets").glob("*.config"):
+        code = "\n".join(l for l in cfg.read_text().splitlines()
+                         if not l.strip().startswith("//"))
+        assert "goi_family_tokens" not in code, cfg.name

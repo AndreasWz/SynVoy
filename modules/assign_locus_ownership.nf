@@ -21,7 +21,7 @@ process BUILD_HOME_PARALOG_PANEL {
     // NON-zero exit here means a genuine failure (e.g. parasail missing → the §1m ownership
     // safety net silently dies). Fail loud by default; --require_paralog_panel false (or
     // --disable_locus_ownership) opts back into tolerating it.
-    errorStrategy { params.require_paralog_panel ? 'terminate' : 'ignore' }
+    errorStrategy { params.require_paralog_panel.toString().toBoolean() ? 'terminate' : 'ignore' }
 
     input:
     path home_gff
@@ -34,7 +34,7 @@ process BUILD_HOME_PARALOG_PANEL {
     path "home_paralog_panel.faa.meta.tsv", emit: meta
 
     when:
-    !params.disable_locus_ownership
+    !params.disable_locus_ownership.toString().toBoolean()
 
     script:
     def query_arg = query.name != 'NO_QUERY' ? "--query ${query}" : ""
@@ -77,7 +77,7 @@ process ASSIGN_LOCUS_OWNERSHIP {
     tuple val(locus_id), path("${locus_id}__${genome_name}.locus_ownership.tsv"), emit: tsv
 
     when:
-    !params.disable_locus_ownership
+    !params.disable_locus_ownership.toString().toBoolean()
 
     script:
     """

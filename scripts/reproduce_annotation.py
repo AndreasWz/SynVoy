@@ -17,7 +17,6 @@ from iterative_search_runner import (
     process_region_block,
     extract_base_gene_id,
     deduplicate_flanking_models,
-    collapse_flanking_cds_to_gene_span
 )
 from sequence_utils import load_genome, parse_gff, parse_fasta, write_fasta
 from flanking_query_utils import collapse_flanking_query_records
@@ -368,7 +367,6 @@ def main():
         genome_name="test_genome",
         locus_gap_bp=max(5000, int(runner_args.cluster_dist)),  # cluster_dist is the attr name on runner_args
     )
-    all_gff_lines = collapse_flanking_cds_to_gene_span(all_gff_lines)
         
     # 5. Parse GFF lines to hits for comparison
     final_hits = []

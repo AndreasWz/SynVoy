@@ -10,6 +10,7 @@ import os
 import select
 import subprocess
 import sys
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -22,6 +23,8 @@ try:
     _HAS_ROBUST_DOWNLOADER = True
 except ImportError:
     _HAS_ROBUST_DOWNLOADER = False
+
+from sequence_utils import strip_species_qualifier  # noqa: E402
 
 LARGE_RANK = 10**18
 
@@ -323,6 +326,20 @@ def ask_keep_bad_quality(entry, reasons, timeout_seconds):
     return False
 
 
+def normalize_species_name(species_name):
+    """Strip a strain/isolate qualifier that NCBI `datasets` will not accept.
+
+    ``datasets summary genome taxon`` rejects UniProt's ``Saccharomyces cerevisiae
+    (strain ATCC 204508 / S288c)`` with "The taxonomy name ... is not exact", so easy
+    mode could not fetch the home genome at all. See
+    ``sequence_utils.strip_species_qualifier``.
+
+    Only used as a FALLBACK after the verbatim name has been tried, so a species whose
+    real NCBI name contains parentheses is unaffected.
+    """
+    return strip_species_qualifier(species_name)
+
+
 def get_reference_genome(species_name):
     """Get the reference/representative genome accession for a species.
     Returns (accession, has_annotation, actual_species) tuple.
@@ -364,7 +381,15 @@ def get_reference_genome(species_name):
         print(f"  No reference genome found via datasets: {e.stderr.strip()}", file=sys.stderr)
     except Exception as e:
         print(f"  Error: {e}", file=sys.stderr)
-    
+
+    # Retry once without a strain/isolate qualifier. UniProt hands us names like
+    # "Saccharomyces cerevisiae (strain ATCC 204508 / S288c)", which datasets rejects
+    # as "not exact" — that is a naming mismatch, not a missing genome.
+    bare = normalize_species_name(species_name)
+    if bare and bare != species_name:
+        print(f"  Retrying without the strain qualifier: '{bare}'")
+        return get_reference_genome(bare)
+
     return None, False, species_name
 
 
@@ -381,7 +406,10 @@ def find_any_genome(species_name, ranking_mode="hybrid"):
         cmds_search = ['esearch', '-db', 'assembly', '-query', query]
         cmds_fetch = ['efetch', '-format', 'docsum']
         cmds_extract = [
-            'xtract', '-pattern', 'DocumentSummary', '-element',
+            # -def NA: the same column guard as in get_assembly_quality(). Without
+            # it the N50 values slide into the count columns, and the ranking
+            # below then prefers the assembly with the SMALLEST contig N50.
+            'xtract', '-pattern', 'DocumentSummary', '-def', 'NA', '-element',
             'AssemblyAccession', 'SpeciesName', 'RefSeq_category',
             'AssemblyStatus', 'ScaffoldCount', 'ContigCount',
             'ScaffoldN50', 'ContigN50', 'ScaffoldN80', 'ContigN80'
@@ -400,22 +428,8 @@ def find_any_genome(species_name, ranking_mode="hybrid"):
         
         candidates = []
         for line in results.split('\n'):
-            parts = line.split('\t')
-            if len(parts) >= 2:
-                parts += [''] * (10 - len(parts))
-                entry = {
-                    'accession': parts[0].strip(),
-                    'species': parts[1].strip(),
-                    'category': parts[2].strip() if len(parts) > 2 else None,
-                    'assembly_status': parts[3].strip() if len(parts) > 3 else None,
-                    'scaffold_count': parse_int(parts[4]) if len(parts) > 4 else None,
-                    'contig_count': parse_int(parts[5]) if len(parts) > 5 else None,
-                    'scaffold_n50': parse_float(parts[6]) if len(parts) > 6 else None,
-                    'contig_n50': parse_float(parts[7]) if len(parts) > 7 else None,
-                    'scaffold_n80': parse_float(parts[8]) if len(parts) > 8 else None,
-                    'contig_n80': parse_float(parts[9]) if len(parts) > 9 else None,
-                }
-                candidates.append(entry)
+            if len(line.split('\t')) >= 2:
+                candidates.append(parse_quality_line(line))
 
         if candidates:
             candidates.sort(key=lambda x: assembly_rank_tuple(x, ranking_mode))
@@ -682,8 +696,8 @@ def download_genome_with_annotation(accession, output_dir, max_retries=3):
             extract_zip_archive(zip_file, extract_dir)
 
             # Find files
-            fna_files = list(extract_dir.rglob("*.fna"))
-            gff_files = list(extract_dir.rglob("*.gff"))
+            fna_files = sorted(extract_dir.rglob("*.fna"))
+            gff_files = sorted(extract_dir.rglob("*.gff"))
 
             genome_path = None
             gff_path = None

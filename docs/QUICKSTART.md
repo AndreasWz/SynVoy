@@ -23,8 +23,8 @@ Before starting:
    ```
    conda activate synvoy_env
    ```
-   The env provides Nextflow (≥25.10; 26.04 supported) and OpenJDK 17 — you
-   should not need to install either separately. Sanity check after activation:
+   The env provides Nextflow (≥25.10; 26.04 supported), OpenJDK (17 or newer) and
+   Python 3.10–3.12 — you should not need to install any of them separately. Sanity check after activation:
    ```
    nextflow -version   # provided by the env
    java -version       # provided by the env
@@ -69,32 +69,45 @@ see [USAGE.md](USAGE.md) and [PARAMETERS.md](PARAMETERS.md).
 
 ## What you should see
 
-The pipeline will log progress for each stage. Successful completion
-looks like:
+The pipeline logs one line per stage. Successful completion ends with a
+summary like this (numbers will differ):
 
 ```
-executor > local (~40)
-[...]
-Completed at: ...
-Duration    : ~25m
-Succeeded   : 40
+[OK  ] PIPELINE                 Pipeline completed successfully
+Run Summary
+Duration:          ~25m
+Tasks Completed:   60
+Results Directory: results/quickstart_melittin
+Generated Outputs
+  ✓ synvoy_report.json          (analysis summary)
+    → 1 high-confidence + 2 medium-confidence GOI ortholog annotation(s) (+…) across 4 genome(s).
+  ✓ synteny_block_locus_1_synteny_plot.html (interactive visualization)
+  ✓ regions/                      (5 region BED file(s))
+  ✓ logs/                         (task logs for … process(es))
 ```
+
+A line `Tasks FAILED (ignored): N` in that summary means a rescue or paralog-check
+step failed for some genome; the main results are still complete (see
+[USAGE.md § 8](USAGE.md#the-run-ends-with-tasks-failed-ignored-n)).
 
 Under `results/quickstart_melittin/` you should find roughly:
 
 ```
 results/quickstart_melittin/
-├── synvoy_report.json                        # structured summary (see below)
-├── synteny_block_locus_1_anchor_grid.html    # main figure (species × gene grid)
-├── synteny_block_locus_1_synteny_plot.html   # interactive synteny plot
-├── plot_inputs_synteny_block_locus_1/        # per-species .homology.tsv + GFFs (the ortholog calls)
+├── synvoy_report.json                        # the adjudicated result (see below)
+├── synteny_block_locus_1_anchor_grid.html    # main figure (species × gene grid) + .svg
+├── synteny_block_locus_1_synteny_plot.html   # interactive ribbon plot
+├── synteny_block_locus_1_*_with_fragments.*  # the same figures with fragment hits drawn
+├── synteny_block_locus_1_gene_positions.html # where each gene really sits
+├── plot_inputs_synteny_block_locus_1/        # per-species gene models (.gff) + evidence table (.homology.tsv)
+├── rescue/locus_1/                           # gene models found by the rescue passes (if any)
 ├── locus_1_tree.nwk                          # ortholog tree — PLACEHOLDER on the default profile (see note)
-├── synteny_block_locus_1_tree.html           # interactive tree — only with -profile standard
 ├── regions/
 │   ├── <species_1>.fna.regions.bed
-│   ├── <species_2>.fna.regions.bed
+│   ├── <species_1>.fna.scores.tsv
 │   └── ...
-└── qc/
+├── qc/  intermediate/  logs/
+└── query/  home_genome/  downloaded_genomes/ # Easy Mode: what was fetched
 ```
 
 > **Note — the phylogenetic tree is skipped by default.** The launcher's default
@@ -113,9 +126,12 @@ filenames and scaffold IDs will vary. What to verify qualitatively:
 - *(only with `-profile standard`)* `locus_1_tree.nwk` has one leaf per
   target species that produced a candidate, plus the query. On the default
   laptop profile this file is a placeholder (the tree step is skipped).
-- `synvoy_report.json` summary shows `total_annotations > 0` and
-  `total_goi_annotations > 0`.
-- `staging_diagnostics.empty` is `false`.
+- `synvoy_report.json` has a `summary.headline` that names at least one
+  ortholog annotation, and `staging_diagnostics.empty` is `false`.
+- The anchor grid shows the melittin column (red) filled for the close
+  relatives (*Apis cerana*, *Apis florea*). Further out, expect `AMBIGUOUS`
+  cells: a conserved neighbourhood whose sequence is not shown to be melittin.
+  That is the honest answer — bumblebees, for example, have lost the gene.
 
 If everything is zero, something went wrong — jump to
 [Troubleshooting](#troubleshooting) below.
@@ -123,6 +139,11 @@ If everything is zero, something went wrong — jump to
 ## Inspect the report
 
 ```bash
+# The one-line answer, then the adjudicated calls
+jq -r '.summary.headline' results/quickstart_melittin/synvoy_report.json
+jq -r '.goi_dedup.records[] | [.genome, .chrom, .start, .end, .confidence, .identity] | @tsv' \
+    results/quickstart_melittin/synvoy_report.json
+
 # Top-level summary
 jq '.summary' results/quickstart_melittin/synvoy_report.json
 
@@ -147,7 +168,9 @@ open results/quickstart_melittin/synteny_block_locus_1_synteny_plot.html
 
 You should see one row per target species, with the melittin locus
 and its flanking genes arranged in a (mostly) conserved order. Hover
-tooltips show gene names and identities.
+tooltips show gene names and identities. For the overview across all
+species, open `synteny_block_locus_1_anchor_grid.html` instead; what every
+file is for is in [OUTPUT.md](OUTPUT.md).
 
 ## Going further
 
@@ -161,14 +184,19 @@ tooltips show gene names and identities.
   ```bash
   # Google Gemini (free tier available at aistudio.google.com)
   export GOOGLE_API_KEY=your_key
-  nextflow run main.nf ... --auto_params true
+  ./run_synvoy.sh ... --auto_params true
 
   # OpenAI
   export OPENAI_API_KEY=your_key
-  nextflow run main.nf ... --auto_params true --llm_provider openai
+  ./run_synvoy.sh ... --auto_params true --llm_provider openai
   ```
   Without an API key, `--auto_params true` falls back to built-in
   heuristics (still useful, just not LLM-quality).
+
+  On current Nextflow the estimate is **advisory**: SynVoy cannot change its
+  own parameters mid-run, so it prints the suggested flags (and saves them
+  to `intermediate/estimate_params/estimated_params.json`) for you to re-run
+  with.
 
 ## Troubleshooting
 
@@ -184,6 +212,10 @@ documented in [USAGE.md § 8](USAGE.md#8-troubleshooting), especially:
   → you're running large (vertebrate-scale) targets on a small machine. Add
   `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem`
   (8 GB RAM). See [USAGE.md § Memory tiers](USAGE.md#memory-tiers-combine-with-an-execution-backend).
-- `parasail` import error → re-create the `synvoy_env` environment;
-  Python must be `<3.13` because `ete3` is not Python 3.13-ready yet.
+- `parasail` import error → the run **aborts**, by design: Smith-Waterman is
+  load-bearing for divergent genes, so SynVoy refuses to search without it rather
+  than quietly returning fewer hits. The usual cause is a `.venv` shadowing the
+  conda env (VS Code activates one automatically) — run `deactivate` and relaunch.
+  Otherwise re-create `synvoy_env`; Python must be `<3.13` because `ete3` is not
+  Python 3.13-ready yet.
 - `-resume` reruns everything → check that paths and params didn't change.

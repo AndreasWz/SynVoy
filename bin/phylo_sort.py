@@ -429,7 +429,7 @@ def _collect_targets(args):
         target_list = args.targets
     elif args.targets_dir:
         if os.path.isdir(args.targets_dir):
-            for f in os.listdir(args.targets_dir):
+            for f in sorted(os.listdir(args.targets_dir)):
                 if (f.endswith(args.img_ext) or f.endswith(".fasta") or
                     f.endswith(".fa") or f.endswith(args.img_ext + ".gz") or
                     f.endswith(".fasta.gz") or f.endswith(".fa.gz")):
@@ -459,7 +459,9 @@ def fallback_sort(args, target_list):
         dist_scaled = dist * 1000.0
         results.append((dist_scaled, os.path.basename(tgt)))
     
-    results.sort(key=lambda x: x[0])
+    # (distance, name): a distance tie must not fall back to directory-listing order,
+    # which differs between file systems and would reorder the search waves.
+    results.sort(key=lambda x: (x[0], x[1]))
     with open(args.output, 'w') as f:
         for dist, target in results:
             f.write(f"{target}\t{int(dist)}\n")
@@ -496,7 +498,7 @@ def main():
         target_list = args.targets
     elif args.targets_dir:
         if os.path.isdir(args.targets_dir):
-            for f in os.listdir(args.targets_dir):
+            for f in sorted(os.listdir(args.targets_dir)):
                 if (f.endswith(args.img_ext) or f.endswith(".fasta") or
                     f.endswith(".fa") or f.endswith(args.img_ext + ".gz") or
                     f.endswith(".fasta.gz") or f.endswith(".fa.gz")):

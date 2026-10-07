@@ -53,6 +53,13 @@ def _safe_float(value, default=0.0):
         return default
 
 
+def _safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
 def _is_true(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
@@ -443,6 +450,10 @@ def scan_dir_by_suffix(dir_path, suffix_buckets):
                         break
     except OSError:
         pass
+    # scandir order is file-system dependent (ext4 hash order vs. e.g. GPFS); the
+    # report must not depend on which machine staged the files.
+    for bucket in result:
+        result[bucket].sort()
     return result
 
 
@@ -480,6 +491,85 @@ def _dir_diagnostics(dir_path, patterns, sample_size=5):
     }
 
 
+NONSYNTENIC_SUFFIX = ".nonsyntenic.tsv"
+
+
+def collect_nonsyntenic_candidates(paths):
+    """§1x: load the GOI hits that cleared the quality bar and were then refused by a
+    synteny gate.
+
+    These are the run's *false negatives that it knows about*. Refusing a hit whose
+    neighbourhood cannot be confirmed is the correct call — at 250 My a translocated
+    ortholog is genuinely indistinguishable from a paralog by synteny alone — but the
+    old behaviour reported such a genome as "no ortholog" while holding a 54-72 %
+    identity hit sitting inside the real gene. `goi_absent` and
+    `goi_found_but_not_syntenic` are scientifically opposite claims and must not share
+    a field.
+
+    Returns (records, per_genome_map). Malformed or unreadable files are skipped rather
+    than failing the report — this is diagnostic output, never a reason to lose a run.
+    """
+    records, per_genome = [], {}
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if not row.get("chrom"):
+                        continue
+                    genome = canonical_genome_id(
+                        row.get("genome") or os.path.basename(path).split(NONSYNTENIC_SUFFIX)[0])
+                    rec = {
+                        "genome": genome,
+                        "query": row.get("query", ""),
+                        "chrom": row.get("chrom", ""),
+                        "start": _safe_int(row.get("start")),
+                        "end": _safe_int(row.get("end")),
+                        "identity": _safe_float(row.get("identity")),
+                        "evalue": row.get("evalue", ""),
+                        "alnlen": _safe_int(row.get("alnlen")),
+                        "rejected_by": row.get("rejected_by", ""),
+                        "nearest_anchor_gene": row.get("nearest_anchor_gene", ""),
+                        "nearest_anchor_bp": _safe_int(row.get("nearest_anchor_bp")),
+                        "nearest_anchor_same_chrom":
+                            str(row.get("nearest_anchor_same_chrom", "")).lower() == "true",
+                    }
+                    records.append(rec)
+                    per_genome.setdefault(genome, []).append(rec)
+        except (OSError, csv.Error):
+            continue
+    records.sort(key=lambda r: (-r["identity"], r["genome"], r["chrom"], r["start"]))
+    return records, per_genome
+
+
+def summarize_nonsyntenic_candidates(records, per_genome):
+    """Report block for §1x. `best_per_genome` is what a reader should look at: the
+    strongest hit we found and declined to call, per genome."""
+    by_gate = {}
+    for r in records:
+        by_gate[r["rejected_by"]] = by_gate.get(r["rejected_by"], 0) + 1
+    best = {}
+    for genome, recs in per_genome.items():
+        top = max(recs, key=lambda r: r["identity"])
+        best[genome] = {
+            "chrom": top["chrom"], "start": top["start"], "end": top["end"],
+            "identity": top["identity"], "rejected_by": top["rejected_by"],
+            "nearest_anchor_bp": top["nearest_anchor_bp"],
+            "nearest_anchor_same_chrom": top["nearest_anchor_same_chrom"],
+        }
+    return {
+        "total": len(records),
+        "genomes": sorted(per_genome),
+        "by_gate": by_gate,
+        "best_per_genome": best,
+        "note": ("GOI hits that passed the identity/e-value/alignment-length bar but "
+                 "were refused by a synteny gate. Not orthology calls: at long "
+                 "divergences a translocated ortholog and a paralog are "
+                 "indistinguishable by gene order. Listed so a genome with a strong "
+                 "unplaceable hit is not read as a genome with no hit."),
+        "candidates": records,
+    }
+
+
 def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
     diagnostics = {
         "results_dir": results_dir,
@@ -492,29 +582,46 @@ def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
     return diagnostics
 
 
-def _format_goi_headline(high, medium, low, n_genomes):
+def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0):
     """One-line, unambiguous summary of the GOI ortholog yield, for the summary block.
 
     Replaces the old reliance on `total_hits` (raw .m8 count, often 0) as the at-a-glance
     signal — that made successful runs look empty. See docs/TODO.md §1k.
+
+    ``ambiguous`` is reported SEPARATELY and never folded into the ortholog count. An
+    AMBIGUOUS call is a candidate sitting in a conserved neighbourhood whose sequence
+    evidence does not establish that it is the gene — on the melittin benchmark that
+    evidence is statistically indistinguishable between species that have the gene and
+    species that lost it, so counting these as orthologs is what produced the
+    over-calling. They are named in the headline so they cannot be silently dropped
+    either.
     """
-    if not (high or medium or low):
+    if not (high or medium or low or ambiguous):
         return "No GOI ortholog annotations were produced."
     confident = []
     if high:
         confident.append(f"{high} high-confidence")
     if medium:
         confident.append(f"{medium} medium-confidence")
+    extra = []
+    if ambiguous:
+        extra.append(f"{ambiguous} ambiguous (syntenic candidate, orthology not established)")
+    if low:
+        extra.append(f"{low} low-confidence")
+    tail = f" (+{'; +'.join(extra)})" if extra else ""
     if confident:
         lead = " + ".join(confident)
-        tail = f" (+{low} low-confidence/ambiguous)" if low else ""
-    else:
-        lead, tail = f"{low} low-confidence/ambiguous", ""
-    return f"{lead} GOI ortholog annotation(s){tail} across {n_genomes} genome(s)."
+        return f"{lead} GOI ortholog annotation(s){tail} across {n_genomes} genome(s)."
+    if ambiguous:
+        return (f"NO confident GOI ortholog; {ambiguous} ambiguous syntenic candidate(s)"
+                + (f" and {low} low-confidence hit(s)" if low else "")
+                + f" across {n_genomes} genome(s).")
+    return f"{low} low-confidence/ambiguous GOI ortholog annotation(s) across {n_genomes} genome(s)."
 
 
 def _confidence_rank(confidence):
-    return {"HIGH": 2, "MEDIUM": 1}.get((confidence or "").upper(), 0)
+    """HIGH > MEDIUM > AMBIGUOUS > LOW/unknown — used to keep the best member in dedup."""
+    return {"HIGH": 3, "MEDIUM": 2, "AMBIGUOUS": 1}.get((confidence or "").upper(), 0)
 
 
 def collect_goi_annotations(gff_files):
@@ -548,8 +655,45 @@ def _reciprocal_overlap(a, b):
     return min(inter / len_a, inter / len_b)
 
 
-def dedupe_goi_annotations(annotations, min_overlap=0.8):
-    """Collapse HIGH/MEDIUM GOI hits that are the same target gene found from
+def _containment(a, b):
+    """overlap / length of the SHORTER span — 1.0 when one span sits wholly inside the other."""
+    inter = min(a["end"], b["end"]) - max(a["start"], b["start"]) + 1
+    if inter <= 0:
+        return 0.0
+    shorter = min(a["end"] - a["start"] + 1, b["end"] - b["start"] + 1)
+    return inter / shorter if shorter > 0 else 0.0
+
+
+def _span(r):
+    return max(1, r["end"] - r["start"] + 1)
+
+
+def _prefers_contained_model(wide, compact, span_ratio, qcov_margin):
+    """True when ``compact`` should represent the pair instead of the wider ``wide``.
+
+    A model that spans several times more genome than a model of the same gene at the same
+    place, while aligning barely more of the query, has chained in sequence that does not
+    belong to the gene — a fused model. Family benchmark 2026-09-15: one serine-protease
+    call was reported as an 11.4-kb hull rescue (query coverage 0.988) while the 2.6-kb
+    in-block model of the same gene, matching the curated annotation exon for exon, covered
+    0.904 and lost the tie on confidence; the extra 8.8 kb bought 8 points of coverage.
+
+    Refuses to decide when either coverage is unrecorded: then the wider model may be the
+    complete gene and the compact one a fragment of it.
+    """
+    if _span(wide) < span_ratio * _span(compact):
+        return False
+    try:
+        wide_cov = float(str(wide.get("query_cov") or "").strip())
+        compact_cov = float(str(compact.get("query_cov") or "").strip())
+    except ValueError:
+        return False
+    return (wide_cov - compact_cov) < qcov_margin
+
+
+def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
+                           fused_span_ratio=2.0, fused_qcov_margin=0.15):
+    """Collapse HIGH/MEDIUM/AMBIGUOUS GOI hits that are the same target gene found from
     multiple home loci (docs/TODO.md §1h).
 
     Key: ``(genome, target_chrom)`` plus reciprocal coordinate overlap > ``min_overlap``.
@@ -560,8 +704,11 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
 
     LOW-confidence hits are left untouched (they are noisy fallback spans, not
     ortholog calls), matching the headline metric which only counts HIGH/MEDIUM.
+    AMBIGUOUS calls ARE deduped: they are reported (separately from the ortholog
+    count), so the same candidate must not appear once per home locus.
     """
-    considered = [a for a in annotations if a["confidence"] in {"HIGH", "MEDIUM"}]
+    considered = [a for a in annotations
+                  if a["confidence"] in {"HIGH", "MEDIUM", "AMBIGUOUS"}]
     groups = defaultdict(list)
     for a in considered:
         groups[(a["genome"], a["chrom"])].append(a)
@@ -573,12 +720,24 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
         for a in items:
             placed = False
             for cl in clusters:
-                if _reciprocal_overlap(a, cl["rep"]) > min_overlap:
+                rep = cl["rep"]
+                # Same target gene: near-identical spans (one gene found from several home
+                # loci), or one span wholly inside the other (a fused or rescue model that
+                # swallowed the compact model of the same gene).
+                contained = _containment(a, rep) >= contain_min
+                if _reciprocal_overlap(a, rep) > min_overlap or contained:
                     cl["members"].append(a)
-                    better = (_confidence_rank(a["confidence"]), _safe_float(a["identity"]))
-                    current = (_confidence_rank(cl["rep"]["confidence"]), _safe_float(cl["rep"]["identity"]))
-                    if better > current:
-                        cl["rep"] = a
+                    wide, compact = (a, rep) if _span(a) >= _span(rep) else (rep, a)
+                    if contained and wide is not compact and _prefers_contained_model(
+                            wide, compact, fused_span_ratio, fused_qcov_margin):
+                        if cl["rep"] is not compact:
+                            compact["superseded_wide_model"] = True
+                            cl["rep"] = compact
+                    else:
+                        better = (_confidence_rank(a["confidence"]), _safe_float(a["identity"]))
+                        current = (_confidence_rank(cl["rep"]["confidence"]), _safe_float(cl["rep"]["identity"]))
+                        if better > current:
+                            cl["rep"] = a
                     placed = True
                     break
             if not placed:
@@ -608,6 +767,15 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
                 "n_source_loci": len(sources),
                 "n_merged_hits": len(members),
                 "cross_locus_duplicate": is_cross_dup,
+                # Carried so the coverage demotion can distinguish "coverage is low"
+                # from "coverage was never recorded" (see apply_coverage_demotion).
+                "query_cov": rep.get("query_cov", ""),
+                # Set when this compact model replaced a wider model of the same gene that
+                # aligned barely more of the query (see _prefers_contained_model).
+                "superseded_wide_model": bool(rep.get("superseded_wide_model")),
+                # Join key for the F9 phylo-placement verdicts, which are computed from
+                # goi_for_tree.faa and so are keyed by model id, not coordinates.
+                "mrna_id": rep.get("mrna_id", ""),
             })
 
     records.sort(key=lambda r: (-_confidence_rank(r["confidence"]), -_safe_float(r["identity"]), r["genome"], r["chrom"]))
@@ -615,8 +783,10 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8):
         "records": records,
         "high_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "HIGH"),
         "medium_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "MEDIUM"),
+        "ambiguous_goi_deduped": sum(1 for r in records if r["confidence"] == "AMBIGUOUS"),
         "cross_locus_duplicates": sum(1 for r in records if r["cross_locus_duplicate"]),
         "hits_collapsed_by_dedup": len(considered) - len(records),
+        "wide_models_superseded": sum(1 for r in records if r["superseded_wide_model"]),
         "pre_dedup_high_medium": len(considered),
         "post_dedup_records": len(records),
     }
@@ -634,7 +804,7 @@ def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
     if not paralog_check_dir or not os.path.isdir(paralog_check_dir):
         return rows
     with os.scandir(paralog_check_dir) as it:
-        for entry in it:
+        for entry in sorted(it, key=lambda e: e.name):
             if not entry.is_file() or not entry.name.endswith(suffix):
                 continue
             try:
@@ -791,6 +961,95 @@ def _panel_locus(panel_label):
     return panel_label.split("|", 1)[0] if "|" in panel_label else panel_label
 
 
+def load_phylo_placement_rows(phylo_dir):
+    """Read the per-locus TSVs from PHYLO_PLACEMENT_CHECK (F9).
+
+    Returns {model_id: row}. Header-only files (the no-op case, and the sentinel) are
+    skipped, and a missing directory is not an error -- the check is optional.
+    """
+    rows = {}
+    if not phylo_dir or not os.path.isdir(phylo_dir):
+        return rows
+    with os.scandir(phylo_dir) as it:
+        for entry in sorted(it, key=lambda e: e.name):
+            if not entry.is_file() or not entry.name.endswith(".tsv"):
+                continue
+            try:
+                with open(entry.path) as fh:
+                    for row in csv.DictReader(fh, delimiter="\t"):
+                        mid = (row.get("model_id") or "").strip()
+                        if mid:
+                            rows[mid] = row
+            except OSError:
+                continue
+    return rows
+
+
+def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
+    """Attach F9 phylogenetic-placement verdicts to the deduped GOI records.
+
+    Why this check and not another threshold: identity, coverage, flanking support and
+    home-paralog RBH were each measured on the melittin benchmark and none separates a
+    true ortholog from a lineage-specific paralog -- the highest-identity call in the run
+    (93.8 %, Bombus terrestris, melittin known lost) beats every true positive. Those are
+    all PER-CALL signals, and one call in isolation cannot carry the answer. Whether a
+    call's divergence tracks its SPECIES' divergence is a property of the whole set.
+
+    Two effects:
+
+      * ``phylo_discordant`` -- the call is more diverged than orthology predicts for its
+        species distance. Recorded on the record and surfaced as a self-consistency flag.
+      * with ``promote``, an AMBIGUOUS call that is phylo_concordant is raised to MEDIUM.
+        This is how recall lost to the AMBIGUOUS tier is meant to come back, so it is
+        OFF by default until a run shows the verdicts are trustworthy: ``would_promote``
+        reports what it *would* have done.
+
+    Mutates records in place; returns (flags, summary).
+    """
+    records = goi_dedup.get("records", [])
+    summary = {"evaluated": 0, "concordant": 0, "discordant": 0,
+               "insufficient_data": 0, "promoted": 0, "would_promote": 0,
+               "promotion_enabled": bool(promote)}
+    if not records or not phylo_rows:
+        return [], summary
+
+    flags = []
+    for rec in records:
+        row = phylo_rows.get(rec.get("mrna_id", ""))
+        if not row:
+            continue
+        verdict = (row.get("verdict") or "").strip()
+        rec["phylo_verdict"] = verdict
+        rec["phylo_z"] = row.get("z_score", "")
+        summary["evaluated"] += 1
+        if verdict == "phylo_discordant":
+            summary["discordant"] += 1
+            flags.append({
+                "type": "phylo_discordant",
+                "genome": rec["genome"], "chrom": rec["chrom"], "start": rec["start"],
+                "confidence": rec["confidence"], "identity": rec.get("identity", ""),
+                "z_score": row.get("z_score", ""),
+                "gene_divergence": row.get("gene_divergence", ""),
+                "expected_divergence": row.get("expected_divergence", ""),
+                "species_distance": row.get("species_distance", ""),
+                "detail": ("sequence is more diverged than orthology predicts for this "
+                           "species distance — consistent with a lineage-specific "
+                           "paralog rather than the ortholog"),
+            })
+        elif verdict == "phylo_concordant":
+            summary["concordant"] += 1
+            if rec["confidence"] == "AMBIGUOUS":
+                summary["would_promote"] += 1
+                if promote:
+                    rec["confidence"] = "MEDIUM"
+                    rec["goi_class"] = "probable_goi"
+                    rec["phylo_promoted"] = True
+                    summary["promoted"] += 1
+        else:
+            summary["insufficient_data"] += 1
+    return flags, summary
+
+
 def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_locus,
                           *, tiebreak_gap=15.0):
     """Re-attribute each deduped GOI ortholog to the home locus it *truly* belongs
@@ -821,9 +1080,16 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
                     "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0}
 
     # Index ownership rows by genome+chrom for coordinate matching.
+    # canonical_genome_id() on the row's genome is load-bearing: the rescue-pass
+    # ownership tasks are tagged "<genome>.hull_rescue" so their output filename cannot
+    # collide with the seeded task's, and that tag is written verbatim into the TSV's
+    # `genome` column. The dedup records on the other side of this lookup are ALREADY
+    # canonicalized, so without stripping it here the key never matches and every
+    # rescue-derived call silently skips the RBH paralog check — i.e. the guard misses
+    # exactly the calls most likely to need it (most HIGH calls now come from rescue).
     rows_by_gc = defaultdict(list)
     for r in ownership_rows:
-        rows_by_gc[(r["genome"], r["chrom"])].append(r)
+        rows_by_gc[(canonical_genome_id(r["genome"]), r["chrom"])].append(r)
 
     flags = []
     n_reattributed = n_paralog = n_fumble = n_tiebreak = n_eval = 0
@@ -963,6 +1229,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                            paralog_modal_per_locus=None,
                            paralog_min_gap=5.0,
                            ownership_flags=None, ownership_summary=None,
+                           phylo_flags=None, phylo_summary=None,
                            identity_decoupled_min_identity=50.0,
                            identity_decoupled_max_qcov=0.35):
     """End-of-run sanity checks (docs/TODO.md §1j).
@@ -1051,11 +1318,16 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "mrna_id": a.get("mrna_id"),
                 "identity": ident,
                 "query_coverage": qc,  # None = coverage not recorded for this call
+                "coverage_recorded": qc is not None,
                 "confidence": a.get("confidence"),
                 "advice": (
-                    "High %identity but missing/low query coverage — likely a short "
-                    "high-identity local window, not a full-length match. Treat the "
-                    "identity as unreliable and inspect the alignment span/coverage."
+                    "High %identity over a small fraction of the query — a short "
+                    "high-identity local window, not a full-length match. This call is "
+                    "DEMOTED out of the headline counts."
+                    if qc is not None else
+                    "High %identity but query coverage was never recorded for this call, "
+                    "so it cannot be verified as full-length. Advisory only — not demoted; "
+                    "inspect the alignment span manually."
                 ),
             })
 
@@ -1070,8 +1342,10 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     # §1m locus-ownership flags (locus_reattributed / goi_owner_search_fumble /
     # paralog_misassignment) computed in build_locus_ownership and threaded through.
     ownership_flags = ownership_flags or []
+    phylo_flags = phylo_flags or []
     ownership_summary = ownership_summary or {}
     flags.extend(ownership_flags)
+    flags.extend(phylo_flags)
 
     checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate",
                         "identity_coverage_decoupled"]
@@ -1084,6 +1358,10 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
         checks_performed.append("locus_ownership")
     else:
         deferred_checks.append("locus_ownership")
+    if (phylo_summary or {}).get("evaluated"):
+        checks_performed.append("phylo_placement")
+    else:
+        deferred_checks.append("phylo_placement")
 
     return {
         "checks_performed": checks_performed,
@@ -1103,6 +1381,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
             for (g, l), p in sorted(paralog_modal_per_locus.items())
         ],
         "locus_ownership_summary": ownership_summary,
+        "phylo_placement_summary": phylo_summary or {},
         "summary": {
             "n_strong_synteny_no_goi": sum(1 for f in flags if f["type"] == "strong_synteny_no_goi"),
             "n_cross_locus_duplicates": sum(1 for f in flags if f["type"] == "cross_locus_duplicate"),
@@ -1116,10 +1395,58 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     }
 
 
+def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35):
+    """Demote a high-identity / low-coverage GOI call out of the headline counts.
+
+    A short high-identity local window is not an ortholog call: 100 % over 10 aa of a
+    70 aa query says almost nothing. ``build_self_consistency`` has flagged this as
+    ``identity_coverage_decoupled`` since QW3, but only advisorily — the headline counted
+    the call anyway. This makes the existing, already-calibrated detector actually demote.
+
+    **Only demotes when coverage is KNOWN and low.** A call whose coverage was never
+    recorded stays where it is and remains advisory: absence of evidence is not evidence
+    of low coverage, and demoting on it would take out good full-length rescue models
+    (before ``rescue_goi_hull.py`` learned to emit ``QueryCoverage``, that was every
+    single one of them — including the true Apis cerana melittin).
+
+    Mutates ``goi_dedup["records"]`` in place, mirroring how §1m relabels
+    ``paralog_not_goi``. Returns a summary dict.
+    """
+    demoted, unknown = 0, 0
+    for rec in goi_dedup.get("records", []):
+        if rec.get("confidence") not in ("HIGH", "MEDIUM"):
+            continue
+        if _safe_float(rec.get("identity"), 0.0) < min_identity:
+            continue
+        raw = str(rec.get("query_cov") or "").strip()
+        qc = _safe_float(raw, None) if raw else None
+        if qc is None:
+            unknown += 1
+            continue
+        if qc >= max_qcov:
+            continue
+        rec.setdefault("original_goi_class", rec.get("goi_class"))
+        rec["goi_class"] = "identity_coverage_decoupled"
+        rec["coverage_demoted"] = True
+        rec["query_coverage"] = qc
+        demoted += 1
+    return {
+        "demoted": demoted,
+        "coverage_not_recorded": unknown,
+        "min_identity": min_identity,
+        "max_qcov": max_qcov,
+    }
+
+
 def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
-                 locus_ownership_tiebreak_gap=10.0):
+                 locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
+                 identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
+                 phylo_placement_dir=None, phylo_placement_promote=False):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
+
+    if phylo_placement_dir is None:
+        phylo_placement_dir = os.path.join(results_dir, "phylo_placement")
 
     regions_dir = os.path.join(results_dir, "regions")
     hits_dir = os.path.join(results_dir, "hits")
@@ -1131,11 +1458,19 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "gff": (".gff", ".gff3"),
     })
     scores_scan = scan_dir_by_suffix(scores_dir, {"scores": (".scores.tsv",)})
-    hits_scan = scan_dir_by_suffix(hits_dir, {"hits": (".m8",)})
+    # §1x candidates ride along in hits/ (staged wholesale by generate_report.nf),
+    # so they need no channel of their own.
+    hits_scan = scan_dir_by_suffix(
+        hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,)})
     fasta_files = regions_scan["fasta"]
     gff_files = regions_scan["gff"]
     score_files = scores_scan["scores"]
     hit_files = hits_scan["hits"]
+    nonsyntenic_files = hits_scan["nonsyntenic"]
+    nonsyntenic_records, nonsyntenic_by_genome = collect_nonsyntenic_candidates(
+        nonsyntenic_files)
+    nonsyntenic_block = summarize_nonsyntenic_candidates(
+        nonsyntenic_records, nonsyntenic_by_genome)
 
     staging_diagnostics = build_staging_diagnostics(
         results_dir,
@@ -1190,8 +1525,23 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # flag bit-for-bit-identical multi-locus hits as cross_locus_duplicate. docs/TODO.md §1h.
     # ``goi_annotations`` + ``flanking_per_locus`` came out of the unified GFF pass above.
     goi_dedup = dedupe_goi_annotations(goi_annotations)
+    # F9 phylogenetic placement — runs BEFORE the headline counts are read, because
+    # promotion (when enabled) changes a record's confidence.
+    phylo_rows = load_phylo_placement_rows(phylo_placement_dir)
+    phylo_flags, phylo_summary = apply_phylo_placement(
+        goi_dedup, phylo_rows, promote=phylo_placement_promote)
+    if phylo_flags or phylo_summary["evaluated"]:
+        recount = [r for r in goi_dedup.get("records", [])]
+        goi_dedup["high_confidence_goi_deduped"] = sum(
+            1 for r in recount if r["confidence"] == "HIGH")
+        goi_dedup["medium_confidence_goi_deduped"] = sum(
+            1 for r in recount if r["confidence"] == "MEDIUM")
+        goi_dedup["ambiguous_goi_deduped"] = sum(
+            1 for r in recount if r["confidence"] == "AMBIGUOUS")
+
     dedup_high = goi_dedup["high_confidence_goi_deduped"]
     dedup_medium = goi_dedup["medium_confidence_goi_deduped"]
+    dedup_ambiguous = goi_dedup.get("ambiguous_goi_deduped", 0)
 
     # §1j Phase B: per-call reciprocal-best paralog check (run by RECIPROCAL_BEST_PARALOG
     # per (locus, genome) and staged under paralog_check/). Aggregated here so the
@@ -1226,16 +1576,29 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # a GOI ortholog, so drop it from the headline HIGH/MEDIUM counts. It stays in
     # goi_dedup["records"] with its flag for transparency; the pre-ownership counts are kept
     # as *_pre_ownership. This is what makes the RBH check actually demote the false positive.
+    # A high-identity call over a tiny slice of the query is not an ortholog call either.
+    # Same treatment as paralog_not_goi: relabel, keep the record, drop it from the
+    # headline. Only fires on KNOWN-low coverage (see apply_coverage_demotion).
+    coverage_demotion_summary = (
+        apply_coverage_demotion(goi_dedup,
+                                min_identity=identity_decoupled_min_identity,
+                                max_qcov=identity_decoupled_max_qcov)
+        if coverage_demotion else
+        {"demoted": 0, "coverage_not_recorded": 0, "disabled": True}
+    )
+
+    _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
     _own_recs = goi_dedup.get("records", [])
     dedup_high = sum(1 for r in _own_recs
-                     if r.get("confidence") == "HIGH" and r.get("goi_class") != "paralog_not_goi")
+                     if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
     dedup_medium = sum(1 for r in _own_recs
-                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") != "paralog_not_goi")
+                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
     # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
     # The flanking-only-block surfacing is the §1e piece that lives in cluster_grs.py.
+    goi_dedup["coverage_demotion"] = coverage_demotion_summary
     self_consistency = build_self_consistency(
         goi_annotations, goi_dedup, flanking_per_locus,
         paralog_flags=paralog_flags,
@@ -1243,7 +1606,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         paralog_modal_per_locus=paralog_modal,
         paralog_min_gap=paralog_confusion_min_gap,
         ownership_flags=ownership_flags,
+        phylo_flags=phylo_flags,
+        phylo_summary=phylo_summary,
         ownership_summary=ownership_summary,
+        identity_decoupled_min_identity=identity_decoupled_min_identity,
+        identity_decoupled_max_qcov=identity_decoupled_max_qcov,
     )
 
     # §1.1 honesty: detect a gene-family / multi-paralog query and advise treating GOI
@@ -1269,16 +1636,27 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "annotations": annotation_summary,
         "regions": region_summary,
         "goi_dedup": goi_dedup,
+        # §1x — the run's known false negatives: strong GOI hits it refused on synteny
+        # grounds and used to discard in silence.
+        "rejected_candidates": nonsyntenic_block,
         "self_consistency": self_consistency,
         "staging_diagnostics": staging_diagnostics,
         "summary": {
             # --- Headline: the number(s) a user actually cares about ---
             # Post-dedup (docs/TODO.md §1h): distinct HIGH/MEDIUM ortholog genes, not the
             # per-home-locus seed count, so the same gene found from N loci reads as one.
-            "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low, genomes_with_goi),
+            "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low,
+                                             genomes_with_goi, ambiguous=dedup_ambiguous),
+            # How many calls the coverage rule removed from the headline above.
+            "coverage_demoted_calls": coverage_demotion_summary.get("demoted", 0),
+            "coverage_not_recorded_calls": coverage_demotion_summary.get("coverage_not_recorded", 0),
             "headline_metric": dedup_high,  # distinct high-confidence GOI orthologs (post-dedup)
             "high_confidence_goi": dedup_high,
             "medium_confidence_goi": dedup_medium,
+            # Reported, never folded into the ortholog counts. See _format_goi_headline.
+            "ambiguous_goi": dedup_ambiguous,
+            "phylo_discordant_calls": phylo_summary["discordant"],
+            "phylo_would_promote": phylo_summary["would_promote"],
             "high_confidence_goi_pre_dedup": goi_high,
             "medium_confidence_goi_pre_dedup": goi_medium,
             # Pre-ownership = before §1m relabeled paralog_not_goi calls out of the headline.
@@ -1304,7 +1682,21 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "ambiguous_goi_annotations": annotation_summary["goi_class_counts"].get("ambiguous_goi_family_member", 0),
             "fallback_goi_annotations": annotation_summary["fallback_goi_annotations"],
             "low_confidence_regions": region_summary["confidence_counts"].get("LOW", 0),
-            "goi_absent_genomes": annotation_summary["genomes_without_goi"],
+            # §1x: "we found nothing" and "we found something and could not place it"
+            # are opposite claims. goi_absent_genomes is now the former ONLY; a genome
+            # holding a strong-but-unplaceable hit moves to goi_found_but_not_syntenic.
+            # Derived from the genomes that produced no GOI call, which is NOT the same
+            # set as genomes_without_goi: a genome whose search emitted no GFF at all
+            # never reaches that list, yet is exactly the case where a refused hit is
+            # the only thing we know about it.
+            "goi_absent_genomes": sorted(
+                g for g in annotation_summary["genomes_without_goi"]
+                if g not in nonsyntenic_by_genome),
+            "goi_found_but_not_syntenic": sorted(
+                set(nonsyntenic_by_genome) - {
+                    row["genome"] for row in annotation_summary["per_genome"]
+                    if row.get("goi_annotations", 0) > 0}),
+            "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
             "staging_empty": staging_diagnostics["empty"],
@@ -1356,6 +1748,31 @@ def main():
              "flanking-synteny tiebreak (docs/TODO.md §1m)",
     )
     parser.add_argument(
+        "--phylo_placement_dir", default=None,
+        help="Directory of PHYLO_PLACEMENT_CHECK TSVs (F9). Defaults to "
+             "<results_dir>/phylo_placement.",
+    )
+    parser.add_argument(
+        "--phylo_placement_promote", action="store_true",
+        help="Raise an AMBIGUOUS call to MEDIUM when its phylogenetic placement is "
+             "concordant. OFF by default: the report first reports what it WOULD "
+             "promote (summary.phylo_would_promote), so a run can show whether the "
+             "verdicts are trustworthy before they move any number.",
+    )
+    parser.add_argument(
+        "--disable_coverage_demotion", action="store_true",
+        help="Keep high-identity/low-coverage GOI calls in the headline counts "
+             "(advisory-only, the pre-2026-08-22 behaviour).",
+    )
+    parser.add_argument(
+        "--identity_decoupled_min_identity", type=float, default=50.0,
+        help="Identity at or above which a low-coverage GOI call is demoted.",
+    )
+    parser.add_argument(
+        "--identity_decoupled_max_qcov", type=float, default=0.35,
+        help="Query coverage below which a high-identity GOI call is demoted.",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -1368,6 +1785,11 @@ def main():
         qc_policy=args.qc_policy,
         paralog_confusion_min_gap=args.paralog_confusion_min_gap,
         locus_ownership_tiebreak_gap=args.locus_ownership_tiebreak_gap,
+        coverage_demotion=not args.disable_coverage_demotion,
+        phylo_placement_dir=args.phylo_placement_dir,
+        phylo_placement_promote=args.phylo_placement_promote,
+        identity_decoupled_min_identity=args.identity_decoupled_min_identity,
+        identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
     )
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)

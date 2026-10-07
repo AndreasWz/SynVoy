@@ -13,6 +13,13 @@
 process RESCUE_GOI_HULL {
     tag "${locus_id}/${genome_name}"
     errorStrategy 'ignore'  // never block the pipeline on a single failed rescue
+    // Publish the rescued models. Until 2026-10-05 nothing did: a hull-rescued ortholog
+    // appeared in synvoy_report.json as a span only, with its exon coordinates and
+    // protein left behind in the work directory. One folder per home locus (the file
+    // name carries only the genome, so a flat folder would let loci overwrite each
+    // other); header-only files from a rescue that did not fire are not published.
+    publishDir path: { "${params.outdir}/rescue/${locus_id}" }, mode: 'copy',
+               saveAs: { fn -> task.workDir.resolve(fn).toFile().readLines().any { l -> l && !l.startsWith('#') } ? fn : null }
 
     input:
     // Same 4-tuple as paralog_inputs_ch (region_faa unused here) so main.nf needn't
@@ -23,19 +30,25 @@ process RESCUE_GOI_HULL {
 
     output:
     tuple val(locus_id), path("${genome_name}.hull_rescue.gff"), emit: gff
+    // Protein of the rescued model, so the §1m ownership check can RBH it against the
+    // home paralog panel. Rescue models used to bypass ownership entirely (they are
+    // mixed in at STAGE_REGION_GFF, downstream of it), which is how a mislabelled
+    // rescue call reached the headline unchecked.
+    tuple val(locus_id), val(genome_name), path("${genome_name}.hull_rescue.faa"), emit: faa
 
     when:
-    !params.disable_goi_hull_rescue
+    !params.disable_goi_hull_rescue.toString().toBoolean()
 
     script:
     """
     target_genome=\$(find -L ${genomes_dir} -name "${genome_name}*" -type f \\
-        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" \\) \\
+        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" -o -name "*.fasta.gz" \\) \\
         | head -n 1)
     if [[ -z "\$target_genome" ]]; then
         echo "##gff-version 3" > ${genome_name}.hull_rescue.gff
         echo "# RESCUE_GOI_HULL: target genome ${genome_name} not found in ${genomes_dir}" \\
             >> ${genome_name}.hull_rescue.gff
+        : > ${genome_name}.hull_rescue.faa
         exit 0
     fi
 
@@ -45,6 +58,7 @@ process RESCUE_GOI_HULL {
         --query ${query_faa} \\
         --genome_name ${genome_name} \\
         --output ${genome_name}.hull_rescue.gff \\
+        --output_faa ${genome_name}.hull_rescue.faa \\
         --min_flanking ${params.goi_hull_min_flanking} \\
         --cluster_max_gap ${params.goi_hull_cluster_max_gap} \\
         --window_pad ${params.goi_hull_window_pad} \\

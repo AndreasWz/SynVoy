@@ -38,6 +38,7 @@ __SYNVOY_DEFAULTS__
     ${projectDir}/bin/resolve_effective_params.py \\
         --auto_preset ${auto_preset} \\
         --defaults defaults.json \\
+        --shipped_config ${projectDir}/nextflow.config \\
         ${override_arg} \\
         ${disable_arg} \\
         --output effective_params.json

@@ -7,6 +7,30 @@
 > This is written to be honest, not encouraging. The "it's breaking apart" feeling is
 > a real signal and it points at something specific and fixable — not at a doomed tool.
 
+> ## ⚠️ Historical snapshot — read §0 with this correction
+>
+> **This document is a dated record of the 2026-06-03 state; it is not maintained.**
+> Its central recommendation — *"there is exactly one architectural root bug worth
+> fixing properly right now (the locus fumble — GOI annotation is gated on
+> flanking-seeded blocks)"* — **was acted on and is fixed.** Collinearity-aware seed
+> placement landed 2026-06-04: `identify_synteny_blocks` now keeps two same-chromosome
+> flanking clusters as one block across a rearrangement gap when they collinearly
+> continue the home gene order (`_can_bridge`), and ranks blocks by their longest
+> monotonic run of home-ordered flanking (`_longest_collinear_run`) rather than by raw
+> gene count. Kill switch: `--disable_synteny_collinearity`. Tests:
+> `tests/test_synteny_collinearity.py`.
+>
+> Verified end-to-end on the decorin case this document uses as its example: true
+> decorin is now recovered HIGH in cow (chr5:21.0 Mb, 90 %), mouse and chicken, where
+> it was previously missed entirely and biglycan was returned in its place. The
+> paralog misassignment it describes is separately handled by the home-paralog RBH
+> panel, which demotes a call whose best home match is a family paralog rather than
+> the GOI.
+>
+> **What still stands:** the scoping argument in §0 — SynVoy is for divergent, low-copy
+> genes located by conserved gene order, and large promiscuous families remain out of
+> its validated domain. That framing is now stated in the [README](../README.md#scope).
+
 ---
 
 ## 0. TL;DR

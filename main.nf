@@ -23,18 +23,10 @@ include { RESOLVE_GENE_INPUT } from './modules/resolve_query.nf'
 include { PHYLO_SORT } from './modules/phylo_sort.nf'
 include { FETCH_RELATED_GENOMES } from './modules/fetch_related.nf'
 include { FETCH_HOME_GENOME } from './modules/fetch_home.nf'
-include { GENERATE_REPORT } from './modules/generate_report.nf'
+include { ADJUDICATE_AND_REPORT } from './subworkflows/adjudicate_and_report.nf'
 // 4 aliases so each per-locus file type (gff / faa / homology.tsv / scores.tsv) gets
 // its own STAGE_REGION_FOR_REPORT instance — each prefixes basenames with the locus_id
 // before they reach GENERATE_REPORT's flat-cp staging (docs/TODO.md §1h + follow-up).
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_GFF       } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_FAA       } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_HOMOLOGY  } from './modules/stage_for_report.nf'
-include { STAGE_REGION_FOR_REPORT as STAGE_REGION_SCORES    } from './modules/stage_for_report.nf'
-include { RESCUE_STRONG_SYNTENY } from './modules/rescue_strong_synteny.nf'
-include { RESCUE_GOI_HULL } from './modules/rescue_goi_hull.nf'  // §1m fumble fix
-include { RECIPROCAL_BEST_PARALOG } from './modules/reciprocal_best_paralog.nf'
-include { BUILD_HOME_PARALOG_PANEL; ASSIGN_LOCUS_OWNERSHIP } from './modules/assign_locus_ownership.nf'
 include { RESOLVE_EFFECTIVE_PARAMS } from './modules/resolve_effective_params.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
@@ -196,6 +188,214 @@ def paramBool(value) {
     return text in ['true', '1', 'yes', 'y', 'on']
 }
 
+// --- Numeric parameter validation (docs/TODO.md §1s) -------------------------
+// Nextflow types a value from `nextflow.config` by its literal (9.5 -> Double)
+// but types EVERY `--param value` from the command line as a **String**. Groovy
+// refuses to order a String against a Number, so a range check that is silent
+// for the config value aborts the whole run for the identical value passed as a
+// flag:
+//
+//     $ nextflow run main.nf --mmseqs_sensitivity 9.5
+//     ERROR ~ Cannot compare java.lang.String with value '9.5'
+//             and java.lang.Integer with value '1'
+//
+// It fails in the validation block, i.e. before any work starts, and the message
+// names neither the parameter nor the fact that the value is fine — so the whole
+// numeric surface of the CLI looked broken. `num()` below coerces first, which
+// makes config and CLI behave identically and turns unparseable input into a
+// normal validation error instead of a stack trace.
+//
+// Living in its own method also keeps ~130 lines out of the `workflow {}` body,
+// which is at the JVM 64 kB method-size limit (see CLAUDE.md §17).
+def validateNumericParams(validationErrors, validationWarnings) {
+    // Coerce to a Number. `safe` is an in-range stand-in used when the value is
+    // unparseable, so one bad flag yields one clear error instead of cascading
+    // range complaints about a value we could not read.
+    def num = { String name, value, Number safe ->
+        if (value instanceof Number) {
+            return value
+        }
+        if (value == null) {
+            return safe
+        }
+        def text = value.toString().trim()
+        if (!text) {
+            return safe
+        }
+        try {
+            return new BigDecimal(text)
+        } catch (NumberFormatException e) {
+            validationErrors << "Invalid --${name} '${text}'. Expected a number."
+            return safe
+        }
+    }
+
+    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
+        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
+    }
+
+    def nFlanking = num.call('n_flanking_genes', params.n_flanking_genes, 1)
+    if (nFlanking < 1) {
+        validationErrors << "Invalid --n_flanking_genes (${params.n_flanking_genes}). Must be >= 1."
+    }
+    def minSynteny = num.call('min_synteny_score', params.min_synteny_score, 0)
+    if (minSynteny < 0 || minSynteny > 1) {
+        validationErrors << "Invalid --min_synteny_score (${params.min_synteny_score}). Must be between 0 and 1."
+    }
+    def minHitIdentity = num.call('min_hit_identity', params.min_hit_identity, 0)
+    if (minHitIdentity < 0 || minHitIdentity > 100) {
+        validationErrors << "Invalid --min_hit_identity (${params.min_hit_identity}). Must be between 0 and 100."
+    }
+    def minHitLength = num.call('min_hit_length', params.min_hit_length, 1)
+    if (minHitLength < 1) {
+        validationErrors << "Invalid --min_hit_length (${params.min_hit_length}). Must be >= 1."
+    }
+    def searchEvalue = num.call('search_evalue', params.search_evalue, 1)
+    if (searchEvalue <= 0) {
+        validationErrors << "Invalid --search_evalue (${params.search_evalue}). Must be > 0."
+    }
+    def maxIntron = num.call('max_intron', params.max_intron, 0)
+    if (maxIntron < 0) {
+        validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
+    }
+    def clusterDistance = num.call('cluster_distance', params.cluster_distance, 0)
+    if (clusterDistance < 0 && clusterDistance != -1) {
+        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
+    }
+    def mmseqsSensitivity = num.call('mmseqs_sensitivity', params.mmseqs_sensitivity, 7)
+    if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
+        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
+    }
+    def swTimeout = num.call('sw_timeout_seconds', params.sw_timeout_seconds, 1)
+    if (swTimeout < 1) {
+        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
+    }
+    if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
+        validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
+    }
+    def swMinIdentity = num.call('sw_min_identity', params.sw_min_identity, 0)
+    if (swMinIdentity < 0 || swMinIdentity > 100) {
+        validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
+    }
+    def regionPadding = num.call('region_padding', params.region_padding, 0)
+    def paddingMin = num.call('padding_min', params.padding_min, 0)
+    def paddingMax = num.call('padding_max', params.padding_max, 0)
+    if (regionPadding < 0 || paddingMin < 0 || paddingMax < 0) {
+        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
+    }
+    if (paddingMax < paddingMin) {
+        validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
+    }
+    def maxBlocks = num.call('max_blocks_per_genome', params.max_blocks_per_genome, 0)
+    if (maxBlocks < 0) {
+        validationErrors << "Invalid --max_blocks_per_genome (${params.max_blocks_per_genome}). Must be >= 0."
+    }
+    def minBlockGenes = num.call('min_block_genes', params.min_block_genes, 1)
+    if (minBlockGenes < 1) {
+        validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
+    }
+    def maxFlankSim = num.call('max_flanking_goi_similarity', params.max_flanking_goi_similarity, 0)
+    if (maxFlankSim < 0 || maxFlankSim > 100) {
+        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
+    }
+    def minFlankSize = num.call('min_flanking_size', params.min_flanking_size, 0)
+    if (minFlankSize < 0) {
+        validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
+    }
+    def badQualityTimeout = num.call('bad_quality_timeout', params.bad_quality_timeout, 0)
+    if (badQualityTimeout < 0) {
+        validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
+    }
+
+    // Classification thresholds
+    def classifyHigh = num.call('classify_high_min_identity', params.classify_high_min_identity, 0)
+    if (classifyHigh < 0 || classifyHigh > 100) {
+        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
+    }
+    def classifyMedium = num.call('classify_medium_min_identity', params.classify_medium_min_identity, 0)
+    if (classifyMedium < 0 || classifyMedium > 100) {
+        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
+    }
+    def classifyTandem = num.call('classify_tandem_min_identity', params.classify_tandem_min_identity, 0)
+    if (classifyTandem < 0 || classifyTandem > 100) {
+        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
+    }
+    def fragmentMaxQcov = num.call('classify_fragment_max_qcov', params.classify_fragment_max_qcov, 0)
+    if (fragmentMaxQcov < 0 || fragmentMaxQcov > 1) {
+        validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
+    }
+    def completeMinQcov = num.call('classify_complete_min_qcov', params.classify_complete_min_qcov, 1)
+    if (completeMinQcov < 0 || completeMinQcov > 1) {
+        validationErrors << "Invalid --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Must be between 0 and 1."
+    }
+    if (fragmentMaxQcov >= completeMinQcov) {
+        validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
+    }
+
+    // Gene predictor validation
+    if (!(params.gene_predictor in ['auto', 'augustus', 'prodigal'])) {
+        validationErrors << "Invalid --gene_predictor (${params.gene_predictor}). Must be 'auto', 'augustus', or 'prodigal'."
+    }
+
+    // PLM embedding search thresholds
+    if (paramBool(params.enable_plm_search)) {
+        if (!(params.plm_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
+        }
+        def plmSimilarity = num.call('plm_similarity_threshold', params.plm_similarity_threshold, 0)
+        if (plmSimilarity < 0 || plmSimilarity > 1) {
+            validationErrors << "Invalid --plm_similarity_threshold (${params.plm_similarity_threshold}). Must be between 0 and 1."
+        }
+        def plmMedium = num.call('plm_medium_threshold', params.plm_medium_threshold, 0)
+        if (plmMedium < 0 || plmMedium > 1) {
+            validationErrors << "Invalid --plm_medium_threshold (${params.plm_medium_threshold}). Must be between 0 and 1."
+        }
+        def plmHigh = num.call('plm_high_threshold', params.plm_high_threshold, 1)
+        if (plmHigh < 0 || plmHigh > 1) {
+            validationErrors << "Invalid --plm_high_threshold (${params.plm_high_threshold}). Must be between 0 and 1."
+        }
+        if (plmMedium >= plmHigh) {
+            validationWarnings << "PLM thresholds: --plm_medium_threshold (${params.plm_medium_threshold}) >= --plm_high_threshold (${params.plm_high_threshold})."
+        }
+    }
+
+    // Structural search (ESMFold + Foldseek) thresholds
+    if (paramBool(params.enable_structural_search)) {
+        if (!(params.structural_device in ['cpu', 'cuda'])) {
+            validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
+        }
+        def structTm = num.call('structural_tm_threshold', params.structural_tm_threshold, 0)
+        if (structTm < 0 || structTm > 1) {
+            validationErrors << "Invalid --structural_tm_threshold (${params.structural_tm_threshold}). Must be between 0 and 1."
+        }
+        def structMedium = num.call('structural_medium_threshold', params.structural_medium_threshold, 0)
+        if (structMedium < 0 || structMedium > 1) {
+            validationErrors << "Invalid --structural_medium_threshold (${params.structural_medium_threshold}). Must be between 0 and 1."
+        }
+        def structHigh = num.call('structural_high_threshold', params.structural_high_threshold, 1)
+        if (structHigh < 0 || structHigh > 1) {
+            validationErrors << "Invalid --structural_high_threshold (${params.structural_high_threshold}). Must be between 0 and 1."
+        }
+        if (structMedium >= structHigh) {
+            validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
+        }
+        def structMaxLength = num.call('structural_max_length', params.structural_max_length, 10)
+        if (structMaxLength < 10) {
+            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
+        }
+    }
+
+    // Synteny scoring weights should sum to ~1. These need coercion too: with a
+    // String from the CLI, `+` is string CONCATENATION ("0.4" + 0.3 -> "0.40.3")
+    // and the subtraction below then throws instead of comparing.
+    def weightSum = num.call('synteny_weight_base', params.synteny_weight_base, 0) +
+                    num.call('synteny_weight_consistency', params.synteny_weight_consistency, 0) +
+                    num.call('synteny_weight_strand', params.synteny_weight_strand, 0)
+    if (Math.abs(weightSum - 1.0) > 0.01) {
+        validationWarnings << "Synteny score weights sum to ${weightSum} (expected ~1.0). Scoring may behave unexpectedly."
+    }
+}
+
 def flattenNestedList(value) {
     if (!(value instanceof List)) {
         return [value]
@@ -284,6 +484,33 @@ def targetGffChannel() {
 // body) because the main workflow{} method sits at the JVM method-size limit —
 // see docs/TODO.md §1m; long literal strings there have re-triggered
 // "UTF8 string too large" before. Appends to the caller's lists in place.
+// Genome file names become identifiers: the stem is the genome name inside sequence
+// IDs (GOI_x|<genome>_b0_l1), GFF attributes and output file names. Whitespace cuts
+// a FASTA ID at the first word, '|' is SynVoy's own ID separator, ';' '=' ',' are GFF
+// syntax, and shell metacharacters break the task scripts -- each of those used to
+// surface hours into a run. Two targets that differ only by extension (Apis.fa,
+// Apis.fna) share one genome name and would overwrite each other's results.
+// Script scope, like the other validators, to stay out of the workflow{} method.
+def validateInputFileNames(List targetFiles, List errors) {
+    def bad = ~/[\s|;=,'"`$&()<>*?!\[\]{}#%\\]/
+    def offending = []
+    def check = { f -> if (f && (f.toString().tokenize('/').last() =~ bad).find()) offending << f.toString().tokenize('/').last() }
+    targetFiles.each { f -> check.call(f) }
+    [params.home_genome, params.home_gff, params.query].each { f -> check.call(f) }
+    if (offending) {
+        errors << "File name(s) with whitespace or special characters: ${offending.unique().take(8).collect { n -> "'${n}'" }.join(', ')}. SynVoy uses the file name as the genome name inside sequence IDs and GFF attributes. Rename them using only letters, digits, '.', '_' and '-' (e.g. 'Apis_mellifera.fna')."
+    }
+    def stems = [:].withDefault { [] }
+    targetFiles.each { f ->
+        def name = f.toString().tokenize('/').last()
+        stems[name.replaceAll(/\.gz$/, '').replaceAll(/\.(fna|fa|fasta)$/, '')] << name
+    }
+    def dup = stems.findAll { _k, v -> v.size() > 1 }
+    if (dup) {
+        errors << "Target genomes that would share one genome name: ${dup.collect { k, v -> "${k} <- ${v.join(' + ')}" }.take(5).join('; ')}. Each target needs a unique file name before the extension."
+    }
+}
+
 def validateTargetGffs(List errors, List warnings) {
     if (!params.target_gffs) {
         return
@@ -481,140 +708,15 @@ workflow {
             if (matches.isEmpty()) {
                 validationErrors << "No target genomes found for --target_genomes '${params.target_genomes}'. Pass a folder containing genome FASTAs (.fna/.fa/.fasta), a quoted glob (\"path/to/*.fna\"), or a comma-separated list. Relative paths resolve against the Nextflow launch dir; quote globs so the shell doesn't expand them."
             }
+            validateInputFileNames(matches, validationErrors)
         }
     }
     validateTargetGffs(validationErrors, validationWarnings)
 
     // --- Universal parameter range validation ---
-    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
-        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
-    }
-    if (params.n_flanking_genes < 1) {
-        validationErrors << "Invalid --n_flanking_genes (${params.n_flanking_genes}). Must be >= 1."
-    }
-    if (params.min_synteny_score < 0 || params.min_synteny_score > 1) {
-        validationErrors << "Invalid --min_synteny_score (${params.min_synteny_score}). Must be between 0 and 1."
-    }
-    if (params.min_hit_identity < 0 || params.min_hit_identity > 100) {
-        validationErrors << "Invalid --min_hit_identity (${params.min_hit_identity}). Must be between 0 and 100."
-    }
-    if (params.min_hit_length < 1) {
-        validationErrors << "Invalid --min_hit_length (${params.min_hit_length}). Must be >= 1."
-    }
-    if (params.search_evalue <= 0) {
-        validationErrors << "Invalid --search_evalue (${params.search_evalue}). Must be > 0."
-    }
-    if (params.max_intron < 0) {
-        validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
-    }
-    if (params.cluster_distance < 0 && params.cluster_distance != -1) {
-        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
-    }
-    if (params.mmseqs_sensitivity < 1 || params.mmseqs_sensitivity > 12) {
-        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
-    }
-    if (params.sw_timeout_seconds < 1) {
-        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
-    }
-    if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
-        validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
-    }
-    if (params.sw_min_identity < 0 || params.sw_min_identity > 100) {
-        validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
-    }
-    if (params.region_padding < 0 || params.padding_min < 0 || params.padding_max < 0) {
-        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
-    }
-    if (params.padding_max < params.padding_min) {
-        validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
-    }
-    if (params.max_blocks_per_genome < 0) {
-        validationErrors << "Invalid --max_blocks_per_genome (${params.max_blocks_per_genome}). Must be >= 0."
-    }
-    if (params.min_block_genes < 1) {
-        validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
-    }
-    if (params.max_flanking_goi_similarity < 0 || params.max_flanking_goi_similarity > 100) {
-        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
-    }
-    if (params.min_flanking_size < 0) {
-        validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
-    }
-    if (params.bad_quality_timeout < 0) {
-        validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
-    }
-
-    // Classification thresholds
-    if (params.classify_high_min_identity < 0 || params.classify_high_min_identity > 100) {
-        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_medium_min_identity < 0 || params.classify_medium_min_identity > 100) {
-        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_tandem_min_identity < 0 || params.classify_tandem_min_identity > 100) {
-        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
-    }
-    if (params.classify_fragment_max_qcov < 0 || params.classify_fragment_max_qcov > 1) {
-        validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
-    }
-    if (params.classify_complete_min_qcov < 0 || params.classify_complete_min_qcov > 1) {
-        validationErrors << "Invalid --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Must be between 0 and 1."
-    }
-    if (params.classify_fragment_max_qcov >= params.classify_complete_min_qcov) {
-        validationWarnings << "Unusual thresholds: --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}) >= --classify_complete_min_qcov (${params.classify_complete_min_qcov}). Fragment and complete ranges overlap."
-    }
-
-    // Gene predictor validation
-    if (!(params.gene_predictor in ['auto', 'augustus', 'prodigal'])) {
-        validationErrors << "Invalid --gene_predictor (${params.gene_predictor}). Must be 'auto', 'augustus', or 'prodigal'."
-    }
-
-    // PLM embedding search thresholds
-    if (paramBool(params.enable_plm_search)) {
-        if (!(params.plm_device in ['cpu', 'cuda'])) {
-            validationErrors << "Invalid --plm_device (${params.plm_device}). Must be 'cpu' or 'cuda'."
-        }
-        if (params.plm_similarity_threshold < 0 || params.plm_similarity_threshold > 1) {
-            validationErrors << "Invalid --plm_similarity_threshold (${params.plm_similarity_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_medium_threshold < 0 || params.plm_medium_threshold > 1) {
-            validationErrors << "Invalid --plm_medium_threshold (${params.plm_medium_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_high_threshold < 0 || params.plm_high_threshold > 1) {
-            validationErrors << "Invalid --plm_high_threshold (${params.plm_high_threshold}). Must be between 0 and 1."
-        }
-        if (params.plm_medium_threshold >= params.plm_high_threshold) {
-            validationWarnings << "PLM thresholds: --plm_medium_threshold (${params.plm_medium_threshold}) >= --plm_high_threshold (${params.plm_high_threshold})."
-        }
-    }
-
-    // Structural search (ESMFold + Foldseek) thresholds
-    if (paramBool(params.enable_structural_search)) {
-        if (!(params.structural_device in ['cpu', 'cuda'])) {
-            validationErrors << "Invalid --structural_device (${params.structural_device}). Must be 'cpu' or 'cuda'."
-        }
-        if (params.structural_tm_threshold < 0 || params.structural_tm_threshold > 1) {
-            validationErrors << "Invalid --structural_tm_threshold (${params.structural_tm_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_medium_threshold < 0 || params.structural_medium_threshold > 1) {
-            validationErrors << "Invalid --structural_medium_threshold (${params.structural_medium_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_high_threshold < 0 || params.structural_high_threshold > 1) {
-            validationErrors << "Invalid --structural_high_threshold (${params.structural_high_threshold}). Must be between 0 and 1."
-        }
-        if (params.structural_medium_threshold >= params.structural_high_threshold) {
-            validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
-        }
-        if (params.structural_max_length < 10) {
-            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
-        }
-    }
-
-    // Synteny scoring weights should sum to ~1
-    def weightSum = (params.synteny_weight_base ?: 0) + (params.synteny_weight_consistency ?: 0) + (params.synteny_weight_strand ?: 0)
-    if (Math.abs(weightSum - 1.0) > 0.01) {
-        validationWarnings << "Synteny score weights sum to ${weightSum} (expected ~1.0). Scoring may behave unexpectedly."
-    }
+    // Extracted to script scope so CLI Strings are coerced before comparison
+    // (docs/TODO.md §1s) and so this does not consume workflow{} method bytes.
+    validateNumericParams(validationErrors, validationWarnings)
 
     // --- Print all warnings ---
     validationWarnings.each { msg ->
@@ -629,7 +731,7 @@ workflow {
             log.info "${c.red}  ${idx + 1}. ${msg}${c.reset}"
         }
         log.info ""
-        log.info "${c.dim}Run with --help or see USAGE.md for parameter documentation.${c.reset}"
+        log.info "${c.dim}See docs/USAGE.md and docs/PARAMETERS.md for parameter documentation.${c.reset}"
         exit 1
     }
 
@@ -690,7 +792,7 @@ workflow {
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
-        if (max_genomes < 3) {
+        if (max_genomes > 0 && max_genomes < 3) {
             log.warn("max_genomes=${max_genomes}: synteny scoring derives signal from consensus across species; with <3 target genomes, fallback GOI calls tend to be classified as 'ambiguous' (no multi-genome conservation evidence). Consider raising max_genomes to >=3.")
         }
         def target_species = params.target_species ?: ''
@@ -827,12 +929,25 @@ workflow {
                     allowed.remove('enable_structural_search')
                 }
 
+                // Nextflow >= 25 no longer lets params change after launch: params.put()
+                // returns quietly and the value stays what it was. This block used to log
+                // every estimate as applied while no process ever saw one. Check instead,
+                // and when an estimate did not take, hand the user the flags to re-run with.
+                def notApplied = [:]
                 overrides.each { key, value ->
                     if (allowed.contains(key)) {
                         def old_val = params.get(key)
                         params.put(key, value)
-                        log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
+                        if (params.get(key)?.toString() == value?.toString()) {
+                            log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
+                        } else {
+                            notApplied[key] = value
+                        }
                     }
+                }
+                if (notApplied) {
+                    msg += " — ADVISORY ONLY, ${notApplied.size()} value(s) NOT applied"
+                    log.warn "ESTIMATE_PARAMS: this Nextflow version does not allow parameters to change after launch, so ${notApplied.size()} estimated value(s) were NOT applied and this run uses the launch-time values. To use the estimate, re-run with: ${notApplied.collect { k, v -> "--${k} ${v}" }.join(' ')}   (also saved to ${params.outdir}/intermediate/estimate_params/estimated_params.json)"
                 }
 
                 // Log any warnings/issues
@@ -1323,170 +1438,27 @@ workflow {
         uiPhase(5, 'Report Generation')
         uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
         
-        // Use sentinel files so that collect() always yields a valid path list
-        // that Nextflow can stage into the process work directory.
-        def no_regions_sentinel = file("${projectDir}/assets/sentinels/NO_REGIONS")
-        def no_gffs_sentinel    = file("${projectDir}/assets/sentinels/NO_GFFS")
-        def no_homology_sentinel = file("${projectDir}/assets/sentinels/NO_HOMOLOGY")
-        def no_hits_sentinel    = file("${projectDir}/assets/sentinels/NO_HITS")
-        def no_augmented_sentinel = file("${projectDir}/assets/sentinels/NO_AUGMENTED")
-        def no_scores_sentinel = file("${projectDir}/assets/sentinels/NO_SCORES")
-        
-        // Tag every per-locus region file (.gff / .faa / .homology.tsv / .scores.tsv)
-        // with its home-locus id before GENERATE_REPORT's flat-cp staging, so same-named
-        // files from different loci no longer overwrite each other. The GFF case landed
-        // first (docs/TODO.md §1h); this also covers .faa / .homology.tsv / .scores.tsv
-        // (the §1h follow-up that previously under-reported `total_new_genes` and the
-        // per-locus region score counts in multi-locus runs).
-        // Python side: generate_report.py's canonical_genome_id() strips the locus prefix
-        // before grouping by genome, so no parser change is needed.
-
-        // §1e follow-up: rescue pass against blocks cluster_grs classified as
-        // goi_missing_but_strong_synteny. Inputs: scores.tsv per (locus, genome),
-        // the genomes dir to resolve the target FASTA, and the GOI query FASTA.
-        // Output GFFs are mixed with iterative_search's per-locus GFFs into the
-        // staging channel so the report parser sees them via the same path.
-        rescue_query_ch = ( params.query
-            ? channel.value(file(params.query))
-            : EXTRACT_FLANKING.out.faa.map { rec -> rec[1] }.first() )
-
-        RESCUE_STRONG_SYNTENY(
+        // Adjudication, staging and reporting live in a sub-workflow: the two rescue
+        // passes, the reciprocal-best paralog check, locus ownership, per-locus staging
+        // and GENERATE_REPORT. Moved out of this body so it stays clear of the JVM
+        // 64 kB method-size limit — new steps of that kind belong in the sub-workflow.
+        ADJUDICATE_AND_REPORT(
+            ITERATIVE_SEARCH.out.gff,
+            ITERATIVE_SEARCH.out.region_genes,
+            ITERATIVE_SEARCH.out.homology,
+            ITERATIVE_SEARCH.out.hits,
             CLUSTER_REGIONS.out.scores,
             genomes_dir_ch.first(),
-            rescue_query_ch
-        )
-
-        // §1j Phase B: reciprocal-best paralog check. Per (locus, genome), align
-        // each recovered GOI target protein against every paralog in the home
-        // query FASTA. generate_report.py uses the result to flag MEDIUM-confidence
-        // calls whose best home paralog differs from the modal best at the same
-        // locus — the TP63 ↔ TP73 bleed observed in docs/TP53_PARALOG_ASSESSMENT.md.
-        // No-op when params.query has a single sequence (nothing reciprocal).
-        paralog_faa_ch = ITERATIVE_SEARCH.out.region_genes.transpose()
-            .map { locus_id, faa ->
-                def stem = faa.name.replaceFirst(/\.faa$/, '')
-                tuple("${locus_id}::${stem}", locus_id, stem, faa)
-            }
-        paralog_gff_ch = ITERATIVE_SEARCH.out.gff.transpose()
-            .map { locus_id, gff ->
-                def stem = gff.name.replaceFirst(/\.gff3?$/, '')
-                tuple("${locus_id}::${stem}", gff)
-            }
-        paralog_inputs_ch = paralog_faa_ch
-            .map { key, locus_id, stem, faa -> tuple(key, locus_id, stem, faa) }
-            .join(paralog_gff_ch)
-            .map { key, locus_id, stem, faa, gff ->
-                def genome_name = stem.replaceFirst(/\.(fna|fa|fasta)$/, '')
-                tuple(locus_id, genome_name, faa, gff)
-            }
-
-        RECIPROCAL_BEST_PARALOG(
-            paralog_inputs_ch,
-            rescue_query_ch   // same home query as the rescue pass — multi-FASTA = paralog panel
-        )
-
-        // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
-        // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
-        // STAGE_REGION_GFF like the strong-synteny rescue.
-        RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir_ch.first(), rescue_query_ch)
-
-        // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
-        // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target
-        // against it so the report can re-attribute orthologs filed under the wrong
-        // home locus (decorin recovered by the chr9 OMD locus belongs to the chr12
-        // DCN locus) and relabel paralogs carried under the GOI name (asporin at
-        // 49.5% labelled GOI_DCN). No-op when --disable_locus_ownership.
-        BUILD_HOME_PARALOG_PANEL(
+            normalized_gene_ready_ch.first(),
             effective_home_gff_ch,
             PREPARE_HOME_PROTEOME.out.faa,
-            SPLIT_LOCI.out.beds.flatten().collect(),
-            normalized_gene_ready_ch.first()
-        )
-
-        ASSIGN_LOCUS_OWNERSHIP(
-            paralog_inputs_ch,
-            BUILD_HOME_PARALOG_PANEL.out.faa.first()  // value channel: broadcast panel to every genome (see module)
-        )
-
-        STAGE_REGION_GFF(
-            ITERATIVE_SEARCH.out.gff.transpose()
-                .mix(RESCUE_STRONG_SYNTENY.out.gff)
-                .mix(RESCUE_GOI_HULL.out.gff)
-        )
-        STAGE_REGION_GFF.out
-            .ifEmpty(no_gffs_sentinel)
-            .collect()
-            .set { collected_region_gffs }
-
-        STAGE_REGION_FAA(
-            ITERATIVE_SEARCH.out.region_genes.transpose()
-        )
-        STAGE_REGION_FAA.out
-            .ifEmpty(no_regions_sentinel)
-            .collect()
-            .set { collected_regions }
-
-        STAGE_REGION_HOMOLOGY(
-            ITERATIVE_SEARCH.out.homology.transpose()
-        )
-        STAGE_REGION_HOMOLOGY.out
-            .ifEmpty(no_homology_sentinel)
-            .collect()
-            .set { collected_homology }
-
-        ITERATIVE_SEARCH.out.hits
-            .map { rec -> rec[1] }
-            .ifEmpty(no_hits_sentinel)
-            .collect()
-            .set { collected_hits }
-
-        // CLUSTER_REGIONS.out.scores tuple is (locus_id, genome_name, score_file).
-        // Drop genome_name and feed (locus_id, score_file) into STAGE_REGION_SCORES.
-        STAGE_REGION_SCORES(
-            CLUSTER_REGIONS.out.scores.map { rec -> tuple(rec[0], rec[2]) }
-        )
-        STAGE_REGION_SCORES.out
-            .ifEmpty(no_scores_sentinel)
-            .collect()
-            .set { collected_scores }
-
-        // §1j Phase B paralog-check TSVs (one per (locus, genome) when params.query
-        // has >=2 paralogs; the script no-ops to a header-only TSV when it has 1).
-        def no_paralog_sentinel = file("${projectDir}/assets/sentinels/NO_PARALOG_CHECK")
-        RECIPROCAL_BEST_PARALOG.out.tsv
-            .map { rec -> rec[1] }
-            .ifEmpty(no_paralog_sentinel)
-            .collect()
-            .set { collected_paralog_check }
-
-        // §1m locus-ownership TSVs (one per (locus, genome)) + the panel meta sidecar.
-        def no_ownership_sentinel = file("${projectDir}/assets/sentinels/NO_LOCUS_OWNERSHIP")
-        ASSIGN_LOCUS_OWNERSHIP.out.tsv
-            .map { rec -> rec[1] }
-            .ifEmpty(no_ownership_sentinel)
-            .collect()
-            .set { collected_locus_ownership }
-        collected_panel_meta = BUILD_HOME_PARALOG_PANEL.out.meta.ifEmpty(no_ownership_sentinel)
-
-        // No standalone augmented proteins - pass sentinel file
-        collected_augmented = channel.value(no_augmented_sentinel)
-
-        GENERATE_REPORT(
-            collected_regions,
-            collected_region_gffs,
-            collected_homology,
-            collected_hits,
-            collected_augmented,
+            SPLIT_LOCI.out.beds,
             qc_summary_ch,
-            collected_scores,
-            collected_paralog_check,
-            params.paralog_confusion_min_gap,
-            params.qc_fail_policy,
-            collected_locus_ownership,
-            collected_panel_meta
+            ITERATIVE_SEARCH.out.goi_for_tree,
+            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first()
         )
-        
-        GENERATE_REPORT.out.report.view { report ->
+
+        ADJUDICATE_AND_REPORT.out.report.view { report ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'GENERATE_REPORT'.padRight(24)}${c.reset} analysis report generated"
         }
     }
@@ -1513,6 +1485,10 @@ workflow {
             if (workflow.stats.cachedCount > 0) {
                 log.info "${done_c.dim}Tasks Cached:     ${done_c.reset} ${workflow.stats.cachedCount} (reused from previous run)"
             }
+            // The rescue / paralog / ownership steps run with errorStrategy 'ignore'.
+            if (workflow.stats.ignoredCount > 0) {
+                log.info "${done_c.yellow}Tasks FAILED (ignored): ${workflow.stats.ignoredCount} — a rescue or ownership step failed for some genomes, so their results are incomplete. See ${params.outdir}/logs/ and .nextflow.log${done_c.reset}"
+            }
             log.info "${done_c.dim}Results Directory: ${done_c.reset} ${done_c.cyan}${params.outdir}${done_c.reset}"
             log.info uiRule()
 
@@ -1530,12 +1506,18 @@ workflow {
                     def report = new groovy.json.JsonSlurper().parse(report_file)
                     def summary = report.summary
                     if (summary) {
-                        def goi_count = summary.total_goi_annotations ?: 0
-                        def genomes_hit = summary.genomes_with_annotations ?: 0
+                        // The report's own headline (adjudicated, post-dedup). This used to
+                        // print genomes_with_annotations -- genomes with ANY model, flanking
+                        // included -- as "GOI found in N genome(s)", so a run with the GOI
+                        // in 3 of 4 genomes read "found in 4" next to "absent in 1".
                         def absent = summary.goi_absent_genomes?.size() ?: 0
-                        log.info "${done_c.dim}    → GOI found in ${genomes_hit} genome(s) (${goi_count} annotation(s) total)${done_c.reset}"
+                        def unplaced = summary.goi_found_but_not_syntenic?.size() ?: 0
+                        log.info "${done_c.dim}    → ${summary.headline ?: "${summary.total_goi_annotations ?: 0} GOI annotation(s)"}${done_c.reset}"
                         if (absent > 0) {
-                            log.info "${done_c.yellow}    → GOI absent in ${absent} genome(s)${done_c.reset}"
+                            log.info "${done_c.yellow}    → no GOI call placed in ${absent} genome(s)${done_c.reset}"
+                        }
+                        if (unplaced > 0) {
+                            log.info "${done_c.yellow}    → ${unplaced} genome(s) hold a strong GOI hit that no synteny gate accepted (report: rejected_candidates)${done_c.reset}"
                         }
                     }
                 } catch (Exception ignored) {}
