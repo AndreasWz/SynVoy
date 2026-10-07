@@ -404,19 +404,27 @@ The region score is **coverage-dominated**: `synteny_score = Q × C` with `Q = 0
 | `--pub_width_mm` | `183` | Publication SVG width in mm (183 = Nature double column). |
 | `--pub_palette` | `okabe_ito` | Colour palette for the publication SVG. Default is the colourblind-safe Okabe–Ito set. |
 | `--enable_matrix_plot` | `false` | Also render the phylogeny-anchored presence/absence matrix (`*_synteny_matrix.svg`). Off because the anchor grid covers the same ground more compactly. |
-| `--plot_extra_args` | _(empty)_ | Extra options passed verbatim to `bin/plot_synteny.py`, for the figure controls below. Quote the whole value: `--plot_extra_args '--grid_goi_style genomic --no_fragment_variant'`. |
+| `--plot_extra_args` | _(empty)_ | Extra options passed verbatim to `bin/plot_synteny.py`, for the figure controls below. Quote the whole value: `--plot_extra_args '--print_grid_numbers --no_fragment_variant'`. |
 
 Figure controls available through `--plot_extra_args`, or after the run with `scripts/replot.sh <outdir>/plot_inputs_synteny_block_locus_1 <new_folder> [options]`, which re-draws the figures of a finished run without re-running the search:
 
 | Option | Default | Effect |
 |---|---|---|
-| `--grid_goi_style` | `cds` | How the GOI column of the anchor grid draws a model: `cds` (exons to scale on one shared scale, fixed-width introns), `cds_aligned`, `genomic` (true intron lengths) or `notched` (the old evenly notched arrow). |
-| `--grid_goi_max_models` | `3` | A grid cell with more GOI models than this shows the best one plus `×N`. |
+| `--print_grid_numbers` | off | Print version of the anchor grid (`*_anchor_grid_print.svg`): write the identity into every flanking arrow. The full grid always has it. |
+| `--print_width_mm` | `183` | Width of the print grid in mm (183 = two journal columns, 89 = one). Columns with the fewest orthologs are left out when the grid does not fit, and reported. |
+| `--print_height_mm` | `170` | Largest height of the print grid; rows are packed tighter before it is exceeded. |
+| `--no_print_grid` | off | Do not write the print grid. |
+| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid; a longer tandem array shows `+N more`. |
 | `--no_fragment_variant` | off | Do not write the `*_with_fragments` figures. By default `ModelStatus=fragment` GOI models are hidden in the main figures and drawn in these siblings. |
 | `--no_orient_to_home` | off | Do not flip scaffolds that read in the opposite direction to the home genome. |
 | `--no_anchor_grid` | off | Skip the anchor grid. |
+| `--gene_names_tsv` | _(none)_ | Names table that sets the label of the home genes it lists (`gene_id`, `label`, optional `full_name`, `source`). Start from the `<locus>_gene_names.tsv` a run writes. In `--plot_extra_args` give an absolute path. See [OUTPUT.md § Gene names in the figures](OUTPUT.md#gene-names-in-the-figures). |
+| `--no_gene_legend` | off | Do not draw the "Gene names" table under the figures. |
+| `--no_network` | off | Skip the NCBI lookups of the plot step: species common names, and the current gene symbols of home genes the GFF does not name. |
 | `--max_goi_per_genome` | `10` | How many GOI models steer the choice of neighbourhood to draw (all models inside the chosen view are drawn regardless). |
 | `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Tandem-array figure controls. |
+
+`--grid_goi_style` and `--grid_goi_max_models` were removed on 2026-10-07 and are now rejected; see [PARAMETERS.md § `plot_extra_args`](PARAMETERS.md#plot_extra_args).
 
 ### Resource Tuning
 
@@ -665,6 +673,7 @@ All output goes into `--outdir` (default: `results/`):
 |---|---|
 | `*_anchor_grid.html` | **Primary figure.** Species × gene grid (rows = species with the phylo tree at left, columns = home genes; the GOI is the red column). Always emitted. (`bin/plot_synteny.py` has a `--no_anchor_grid` switch, but `modules/plot_synteny.nf` does not forward it — there is no pipeline-level flag to turn the grid off.) |
 | `*_synteny_plot.html` | Interactive HTML visualization. Open in a browser — shows syntenic blocks, gene arrows, homology links, and a phylogenetic tree. |
+| `*_gene_names.tsv` | The label every home gene carries in the figures, with its full name, gene ID and the source of the label (home GFF, NCBI Gene, or an abbreviation of the product name). Editable: pass it back with `--gene_names_tsv`. |
 | `*_tree.nwk` | Newick-format phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes (multiple per genome when paralogs are found). |
 | `regions/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome. |
 | `synvoy_report.json` | Machine-readable JSON report: input parameters, genome QC metrics, per-target results, internal exit codes. |
@@ -961,7 +970,7 @@ Check these in order:
 2. **Is the parameter inert?** `--keep_intermediate`, `--max_retries`, `--multi_profile`,
    `--multi_profile_max_jobs` and `--locus_ownership_synteny_window` are declared but not
    read by any step.
-3. **Is it a script-level option?** Figure controls such as `--grid_goi_style` belong to
+3. **Is it a script-level option?** Figure controls such as `--print_grid_numbers` belong to
    `bin/plot_synteny.py`; pass them through `--plot_extra_args '…'`.
 4. **Did you pass `false` to switch something off?** That works since 2026-10-05. On an
    older checkout `--require_paralog_panel false`, `--disable_goi_hull_rescue false` and

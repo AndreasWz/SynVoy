@@ -11,7 +11,8 @@
 > - **1.1–1.4** at most 3 lanes with priority, lanes assigned before widening,
 >   `--orient_to_home` on by default (`--no_orient_to_home`);
 > - **2.1/2.4** GOI column drawn from CDS blocks on one shared scale
->   (`--grid_goi_style cds|cds_aligned|genomic|notched`). Hit-based calls get a thin glyph;
+>   (`--grid_goi_style cds|cds_aligned|genomic|notched`; option removed 2026-10-07, when
+>   the grid got one GOI layout). Hit-based calls get a thin glyph;
 >   row labels are italic binomials sized from Arial metrics;
 > - AMBIGUOUS GOI calls were styled as HIGH in the grid; fixed;
 > - the location column of all three grids printed gap-compressed (and, with orientation,
@@ -38,7 +39,8 @@
 > `tmp/plot_review/2026-09-17_round2/`.
 >
 > **Round 3: many GOI models.** A GOI cell with more than 3 models draws the best one plus `×N`
-> (`--grid_goi_max_models`); the synteny plot draws them all. The 10-per-genome GOI cap used to
+> (`--grid_goi_max_models`; option removed 2026-10-07, replaced by the copy rule and
+> `--grid_max_models`); the synteny plot draws them all. The 10-per-genome GOI cap used to
 > truncate every figure; it now only steers the neighbourhood choice, and all models inside the
 > chosen view are restored. Renders: `tmp/plot_review/2026-09-17_round3_many_goi/` (SPIN, SP
 > locus 3). Tests 26; full suite 782 passed. Still open: 1.5, Phase 3 (print styling), Phase 4.

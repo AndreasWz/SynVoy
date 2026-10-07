@@ -96,9 +96,11 @@ Under `results/quickstart_melittin/` you should find roughly:
 results/quickstart_melittin/
 ├── synvoy_report.json                        # the adjudicated result (see below)
 ├── synteny_block_locus_1_anchor_grid.html    # main figure (species × gene grid) + .svg
+├── synteny_block_locus_1_anchor_grid_print.svg   # the same at print size (183 mm, 5-7 pt text)
 ├── synteny_block_locus_1_synteny_plot.html   # interactive ribbon plot
 ├── synteny_block_locus_1_*_with_fragments.*  # the same figures with fragment hits drawn
 ├── synteny_block_locus_1_gene_positions.html # where each gene really sits
+├── synteny_block_locus_1_gene_names.tsv      # gene labels used in the figures (name, ID, source)
 ├── plot_inputs_synteny_block_locus_1/        # per-species gene models (.gff) + evidence table (.homology.tsv)
 ├── rescue/locus_1/                           # gene models found by the rescue passes (if any)
 ├── locus_1_tree.nwk                          # ortholog tree — PLACEHOLDER on the default profile (see note)

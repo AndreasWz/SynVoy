@@ -100,9 +100,10 @@ def test_rendered_grid_prints_the_local_copy_count():
                is_home=False, genome_id="spar", offset=0, breaks=[])
     html = ps.render_anchor_grid([home, tgt], {"gene-A": "#4e79a7", "gene-B": "#59a14f"},
                                  {}, {}, SimpleNamespace())
-    badges = re.findall(r">×(\d+)</text>", html)
-    assert badges == ["2"], badges
-    assert "N copies at this locus" in html
+    # Two of the nine models are at the locus: a second arrow behind the first, the
+    # count in the tooltip, and no other cell claims copies.
+    assert re.findall(r"(\d+) copies at the locus", html) == ["2"]
+    assert "more than one copy at the locus" in html
 
 
 # ------------------------------------------------------- synteny plot labels ----
@@ -182,7 +183,11 @@ def test_label_jobs_tag_the_best_goi_with_the_copy_count():
                                start=400, end=480, start_plot=400, end_plot=480))
     jobs = ps._track_label_jobs(track, {}, False)
     assert len(jobs) == 1 and jobs[0][2] is True
-    assert jobs[0][0]["name"] == "GOI_match" and jobs[0][1].endswith("×2")
+    # The second call has no confidence of at least medium: it is a weak call, not a copy.
+    assert jobs[0][0]["name"] == "GOI_match" and jobs[0][1].endswith("+1 weak")
+    assert "×" not in jobs[0][1]
+    track["genes"][1]["confidence"], track["genes"][-1]["confidence"] = "HIGH", "MEDIUM"
+    assert ps._track_label_jobs(track, {}, False)[0][1].endswith("×2")
 
 
 def test_home_row_prints_its_scaffold_once():

@@ -739,20 +739,28 @@ When enabled, genomic tracks (species rows) where no GOI candidate was found are
 Extra options appended verbatim to the `bin/plot_synteny.py` call. Use it for the figure controls that have no parameter of their own, quoting the whole value:
 
 ```
---plot_extra_args '--grid_goi_style genomic --no_fragment_variant'
+--plot_extra_args '--print_grid_numbers --no_fragment_variant'
 ```
 
 | Option | Default | Effect |
 |---|---|---|
-| `--grid_goi_style` | `cds` | How the anchor grid's GOI column draws a gene model. `cds`: exons to scale on one shared scale with fixed-width intron marks (∧); `cds_aligned`; `genomic`: true intron lengths; `notched`: the old evenly notched arrow. Only miniprot models get intron marks — calls built from search hits are drawn as a thin bar. |
-| `--grid_goi_max_models` | `3` | A cell with more GOI models than this shows the best one plus `×N`; the tooltip gives the confidence breakdown, and the synteny plot draws them all. |
+| `--print_grid_numbers` | off | Write the identity into every flanking arrow of the print anchor grid (`*_anchor_grid_print.svg`). Off by default: at 183 mm the number is 5 pt, and whether it helps depends on the size the figure is printed at. The full grid (`*_anchor_grid.svg`) always has it. A query coverage below 80 % is written in brackets under the arrow, which makes that row about 1 mm taller; a figure that would pass `--print_height_mm` that way marks the identity with `*` instead (the log says so). |
+| `--print_width_mm` | `183` | Width of the print grid in mm: 183 for two journal columns, 89 for one. When the grid does not fit, the spacing shrinks first; then the columns with the fewest orthologs are left out and named in the log and in `_print.legend.txt`. Text stays at 5 to 7 pt. |
+| `--print_height_mm` | `170` | Largest height of the print grid in mm. Rows are packed tighter before it is exceeded; a grid that still does not fit is written anyway and the log says so. |
+| `--no_print_grid` | off | Do not write the print grid. |
+| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid. A longer tandem array shows the first ten and `+N more`; every copy keeps its small arrow and its row in `_print.source.tsv`. |
 | `--no_fragment_variant` | off | Skip the `*_with_fragments` figures. By default GOI models with `ModelStatus=fragment` are hidden in the main ribbon plot and grid (they are single-exon hits that otherwise stack into extra lanes) and drawn in these sibling files. |
 | `--no_orient_to_home` | off | By default a scaffold whose flanking genes run opposite to the home genome is mirrored so the ribbons run straight. This switches the mirroring off. |
 | `--no_anchor_grid` | off | Do not write the anchor grid. |
+| `--gene_names_tsv` | _(none)_ | Names table (`gene_id`, `label`, optional `full_name`, `source`) that sets the label of the home genes it lists; give an absolute path. Without it a home gene is labelled with its symbol in the home GFF, else its current symbol at NCBI Gene, else an abbreviation of its product name (marked `*`), else its ID. Each run writes the table it used to `<locus>_gene_names.tsv`. |
+| `--no_gene_legend` | off | Do not draw the "Gene names" table (label, full name, gene ID, source) under the figures. |
+| `--no_network` | off | Skip the plot step's NCBI lookups: species common names, and gene symbols of home genes the GFF leaves unnamed. |
 | `--max_goi_per_genome` | `10` | How many GOI models steer the choice of which neighbourhood to draw. Every GOI model inside the chosen view is drawn regardless. |
 | `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Controls for tandem-array figures; see `bin/plot_synteny.py --help`. |
 
 Do not repeat an option the pipeline already sets (`--plot_width`, `--gap_threshold`, …); use the parameter instead. You can also re-render any figure by hand from a finished run's `plot_inputs_*` folder.
+
+**Removed on 2026-10-07: `--grid_goi_style` and `--grid_goi_max_models`.** They belonged to the earlier anchor grid: the first chose one of four ways to draw a GOI cell (`cds`, `cds_aligned`, `genomic`, `notched`), the second set how many models a cell drew before it showed the best one plus `×N`. The grid now has one GOI layout ([OUTPUT.md § The GOI column of the anchor grid](OUTPUT.md#the-goi-column-of-the-anchor-grid)), so neither has anything left to control. `plot_synteny.py` stops with `unrecognized arguments` when it gets one, and a pipeline run then ends at the plot step: take the option out of `--plot_extra_args` and re-run with `-resume` (the search is not repeated). `--grid_max_models` is the nearest equivalent of the second.
 
 ---
 

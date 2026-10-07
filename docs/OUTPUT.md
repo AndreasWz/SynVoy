@@ -8,10 +8,13 @@ which question**, in order of how often they're useful.
 ```
 <outdir>/
 ├── synvoy_report.json                      the adjudicated result (start here)
-├── synteny_block_locus_<N>_anchor_grid.html / .svg      main figure
+├── synteny_block_locus_<N>_anchor_grid.html / .svg      main figure (full version)
+├── synteny_block_locus_<N>_anchor_grid_print.svg        the same at print size (183 mm)
+│       + _print.legend.txt / _print.source.tsv          its legend text and cell values
 ├── synteny_block_locus_<N>_synteny_plot.html            ribbon plot (exploration)
 ├── synteny_block_locus_<N>_*_with_fragments.*           same figures, fragments drawn
 ├── synteny_block_locus_<N>_gene_positions.* / _anchor_positions.*
+├── synteny_block_locus_<N>_gene_names.tsv               gene labels used in the figures
 ├── locus_<N>_tree.nwk  (+ synteny_block_locus_<N>_tree.html with a real tree)
 ├── plot_inputs_synteny_block_locus_<N>/    per-genome GFF + homology table
 ├── regions/                                per-genome region BED + scores
@@ -221,7 +224,8 @@ print('self-consistency flags:', s.get('self_consistency_flag_count', 0))
 
 | File | When to use |
 |---|---|
-| `<locus>_anchor_grid.html` / `.svg` | **The headline figure.** Species × gene grid — rows are species (species tree at left), columns are home genes, the GOI column in red. Arrows are shaded by % identity and styled by confidence (HIGH solid, MEDIUM dashed, AMBIGUOUS palest and most broken, LOW striped). An empty cell means **no ortholog was placed in this neighbourhood**, not that the gene is absent. The GOI column draws each gene model's exons to scale; a call built from search hits, not a gene model, is a thin bar; a cell with many models shows the best one plus `×N`. `×N` above a flanking arrow means N copies of that gene at this locus (hits elsewhere in the genome are not counted; the synteny plot shows them). The GOI model shows coding exons only, so it can have fewer exons than NCBI's exon count, which includes non-coding UTR exons of all transcripts. |
+| `<locus>_anchor_grid.html` / `.svg` | **The headline figure, full version.** Species × gene grid — rows are species (species tree at left), columns are home genes, the GOI column in red. An arrow is the ortholog placed in that neighbourhood: its colour is the home gene, the number its % identity, a number in brackets under the arrow its query coverage when that is below 80 % (`100` over `(7)` = 100 % identity over 7 % of the home protein), its outline the confidence (solid high, dashed medium, dotted low, most broken ambiguous), a second arrow behind it more than one copy at the locus. An empty cell means **no ortholog was placed in this neighbourhood**, not that the gene is absent. The axis above the grid shows where the home genes really lie; the right-hand column gives each row's scaffold and position. See [The GOI column](#the-goi-column-of-the-anchor-grid) below. |
+| `<locus>_anchor_grid_print.svg` | **The same grid at print size**: 183 mm wide, at most 170 mm tall, text of 7, 6 and 5 pt in Arial, as a journal asks for a two-column figure. No title, coordinates or names table: `_print.legend.txt` holds the sentences of a figure legend, `_print.source.tsv` one row per cell and GOI call (identity, coverage, confidence, scaffold, coordinates, exons). When a grid is too wide the spacing shrinks first; then the columns with the fewest orthologs are left out, and the log, the legend text and nothing else say which. Options: `--print_grid_numbers` (identity in every arrow, and low query coverage in brackets under it; where that extra line would break the height limit, the identity gets a `*` instead and the value stays in the source table), `--print_width_mm 89` (one column), `--print_height_mm`, `--no_print_grid`. |
 | `<locus>_synteny_plot.html` | Interactive ribbon plot: one track per genome (at most three lanes), ribbons between orthologous flanking genes. Scaffolds that read in the opposite direction to the home genome are flipped so ribbons run straight. For exploring one locus. |
 | `<locus>_synteny_plot_view.svg` | Static mirror of the ribbon plot (always written). |
 | `*_with_fragments.html` / `.svg` | The ribbon plot and the anchor grid again, **with** `ModelStatus=fragment` GOI models drawn. The main figures hide them: they are single-exon hits that otherwise fill the plot. Written only when a run has fragments. |
@@ -235,9 +239,96 @@ Flanking genes are drawn with their real exons. Runs made before 2026-09-17 stor
 a single block per flanking gene, and the plot then drew evenly spaced exons that do
 not exist — re-run the search to get real ones.
 
-Figure options that have no pipeline parameter (`--grid_goi_style`,
-`--grid_goi_max_models`, `--no_fragment_variant`, `--no_orient_to_home`,
-`--no_anchor_grid`, …) go through `--plot_extra_args '…'`; see
+Every figure has its legend under the plot, in titled groups: **Layout** (what a
+row, a column, a line is), **Flanking genes**, **GOI** and **Numbers**.
+
+### The GOI column of the anchor grid
+
+SynVoy reports GOI *calls*: everything in a genome's neighbourhood that looks like
+the GOI. Many are weak hits on another scaffold. The figures count a call as a
+**copy** when it is the best call of its genome or has at least medium confidence;
+every other call is a **weak call**.
+
+- **One small arrow per copy** in the GOI column, in genomic order and pointing in
+  its coding direction, numbered along the chromosome when a genome has several.
+- **A panel right of the grid** draws the exon structure of each copy on a line of
+  its own, 5′→3′, under the same number: coding exons to scale, `∧` for an intron,
+  the identity to the query after it (`56 (44)` = 56 % identity over 44 % of the
+  query). A call built from search hits, not a gene model, is a thin bar.
+- **A small pale mark per weak call** at its place (a box for a gene model, a bar
+  for aligned hits); at most eight per cell, then `+N`.
+- **`//`** stands before what is not at the locus: another scaffold, or farther
+  away than the neighbourhood is long.
+- **When no genome has two copies** (the home genome included) there is no panel:
+  the gene model is drawn in the GOI column itself, in its genomic orientation.
+- A genome with more than ten copies shows the first ten models and `+N more`
+  (`--grid_max_models`); every copy keeps its small arrow and its row in the
+  source table.
+
+The same rule counts copies elsewhere: `×N` in the ribbon plot's GOI label and in
+the gene-position map is the number of copies, `+N weak` the weak calls. Earlier
+versions drew one model per cell and `×N` for all calls, which read as N copies;
+their options `--grid_goi_style` and `--grid_goi_max_models` no longer exist.
+The GOI model shows coding exons only, so it can have fewer exons than NCBI's exon
+count, which includes non-coding UTR exons of all transcripts.
+
+### Gene names in the figures
+
+Every figure labels a home gene with a gene name, not with its annotation ID. The
+static figures (anchor grid, gene positions, anchor positions, tree, matrix,
+publication SVG) list the names in a **Gene names** table under the plot: label,
+full name, gene ID and where the label comes from. The interactive ribbon plot
+(`*_synteny_plot.html` and its `_view.svg` copy) has no table: hover over a gene
+for its label, full name and gene ID. The table is also written to
+`<locus>_gene_names.tsv` (and copied to `plot_inputs_<locus>/gene_names.tsv`).
+
+A label comes from the first source that names the gene:
+
+| Source (as printed in the table) | What it is |
+|---|---|
+| `names table` | A table you supply with `--gene_names_tsv` (see below). |
+| `home GFF` | The gene symbol in the home GFF (`gene=` / `Name=`), e.g. `Adh`, `ACT1`. |
+| `NCBI Gene` | The gene's current symbol at NCBI Gene, looked up by the `GeneID` in the GFF. Asked only for genes the GFF leaves without a symbol (one request per figure run). Annotation releases are frozen while NCBI keeps naming genes, so this recovers many names for genomes whose GFF is mostly `LOC…` ids. |
+| `product name` | No symbol anywhere, but the annotation has a product name: SynVoy abbreviates it. **These labels end in `*`**: they are not official gene symbols. |
+| `no name annotated` | "uncharacterized LOC…" and the like: the gene keeps its ID. |
+
+How a product name is abbreviated:
+
+1. A gene symbol at the end of the name is used as it stands
+   (`E3 ubiquitin-protein ligase MYLIP` → `MYLIP*`, `segmentation protein Runt` → `Runt*`).
+2. A short name with one real word is kept whole (`protein lozenge` → `lozenge*`,
+   `formin-2` → `formin-2*`, `annexin B9` → `annexin B9*`): up to 16 characters
+   for a single word, 12 with a designator after it.
+3. Otherwise the name is split at spaces, hyphens and slashes. Filler words
+   (protein, of, and, …) are dropped; numbers, single letters and existing
+   abbreviations are kept whole; every other word gives its first letter, and
+   "like" gives `L`. The result is upper case:
+   `pancreatic triacylglycerol lipase` → `PTL*`,
+   `coiled-coil domain-containing protein 170` → `CCDC170*`,
+   `zinc finger protein 629-like` → `ZF629L*`.
+   If that leaves fewer than four characters and the name has only one or two
+   words, the first word gives its first three letters: `arginine kinase` → `ARGK*`.
+4. Two genes with the same abbreviation are numbered in genomic order
+   (`lozenge-1*`, `lozenge-2*`). No abbreviation is longer than 12 characters.
+
+In the ribbon plot a gene of a *target* genome keeps the name its own annotation
+gives it, when target GFFs were supplied: its symbol, else the abbreviation of its
+product name (also marked `*`); otherwise it carries the label of the home gene it
+is the ortholog of. Its tooltip names that home gene.
+
+To change a label, edit a copy of `<locus>_gene_names.tsv` (columns `gene_id`,
+`label`, `full_name`, `source`; set `source` to `user` on the rows you change) and
+re-draw with `--gene_names_tsv <file>`. A two-column table (`gene_id`, `label`) is
+enough. Genes the table does not list are named as usual.
+
+Without network access the NCBI lookup is skipped or fails; the figures are still
+drawn, from the GFF alone, and both the log and the line under the table say so.
+`--no_network` skips the lookup on purpose, `--no_gene_legend` leaves the table out.
+
+Figure options that have no pipeline parameter (`--print_grid_numbers`,
+`--print_width_mm`, `--grid_max_models`, `--no_fragment_variant`, `--no_orient_to_home`,
+`--no_anchor_grid`, `--gene_names_tsv`, `--no_gene_legend`, …) go through
+`--plot_extra_args '…'`; see
 [USAGE.md § Visualization](USAGE.md#visualization). To try figure options without
 re-running the search, re-draw the figures of a finished run (the originals are
 not touched):
@@ -245,10 +336,13 @@ not touched):
 ```bash
 conda activate synvoy_env
 scripts/replot.sh results/my_run/plot_inputs_synteny_block_locus_1 results/my_run/replot \
-    --home_species "Apis mellifera" --grid_goi_style genomic
+    --home_species "Apis mellifera" --print_grid_numbers
 ```
 
 Every option of `python3 bin/plot_synteny.py --help` can follow the two folders.
+A re-draw reuses the run's own `gene_names.tsv`, so the labels do not change. For a
+run without that table, or one whose figures were drawn without network access (a
+cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 
 ---
 
