@@ -3598,10 +3598,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                         gspan_max = max(h.get('gend', 0) for h in ordered_hits)
                                         actual_span = gspan_max - gspan_min
                                         if actual_span > max_span_nt:
-                                            print(
-                                                f"[DEBUG FALLBACK] REJECTED span={actual_span} "
-                                                f"> max_span={max_span_nt} for {parent_id}",
-                                                flush=True,
+                                            logger.debug(
+                                                f"[FALLBACK] REJECTED span={actual_span} "
+                                                f"> max_span={max_span_nt} for {parent_id}"
                                             )
                                             valid_fallback = False
 
@@ -4502,9 +4501,20 @@ def merge_synteny_blocks(blocks, padding):
             current_block['start'] = min(current_block['start'], next_block['start'])
             current_block['end'] = max(current_block['end'], next_block['end'])
             
-            # 2. Update stats
-            # Sum gene counts (approximate, but safe for filtering)
-            current_block['genes_count'] = current_block.get('genes_count', 0) + next_block.get('genes_count', 0)
+            # 2. Update stats: the merged block holds the UNION of both parts' genes.
+            # The counts used to be summed and `genes` kept the first part's list, so
+            # two loci of ONE flanking gene less than 2 x padding apart read as a
+            # 2-gene block and passed min_block_genes (local luciferase + yeast runs,
+            # 2026-10-06: 89 of 544 retained blocks held a single distinct gene), and
+            # the proxy / cap checks never saw the genes of the later parts.
+            merged_genes = set(current_block.get('genes') or []) | set(next_block.get('genes') or [])
+            if merged_genes:
+                current_block['genes'] = sorted(merged_genes)
+                current_block['genes_count'] = len(merged_genes)
+            else:
+                # Blocks without a gene list (older callers): keep the summed count.
+                current_block['genes_count'] = (current_block.get('genes_count', 0)
+                                                + next_block.get('genes_count', 0))
             # Max score (best local evidence)
             current_block['score'] = max(current_block.get('score', 0), next_block.get('score', 0))
             # Preserve the stronger collinear-run length so the §1m cap re-sort
