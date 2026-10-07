@@ -255,3 +255,55 @@ def test_llm_key_is_not_exported_as_an_empty_env_var():
     assert "PYTHONHASHSEED" in m.group(1)
     for scope in ("docker", "singularity", "apptainer"):
         assert re.search(rf"^{scope}\.envWhitelist\s*=.*LLM_API_KEY", text, re.M), scope
+
+
+# ---- options a plot script accepts but never reads --------------------------------
+# An option that is parsed and then ignored looks like a control and changes nothing.
+# The ones listed here are older than this test and are still passed by a module or
+# named in a test; the lists may only shrink.
+PLOT_HELPERS = ("synvoy_grid.py", "synvoy_legend.py", "synvoy_gene_names.py")
+UNREAD_PLOT_OPTIONS = {
+    "plot_synteny.py": {"--target_names", "--max_legend_entries", "--ribbon_alpha_dense",
+                        "--pub_width", "--pub_palette"},
+    "plot_synteny_matrix.py": {"--clade_depth_frac"},
+}
+
+
+def _unread_options(script: str) -> set[str]:
+    text = (ROOT / "bin" / script).read_text()
+    pool = text + "".join((ROOT / "bin" / h).read_text() for h in PLOT_HELPERS)
+    unread = set()
+    for node in ast.walk(ast.parse(text)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        flags = [a.value for a in node.args
+                 if isinstance(a, ast.Constant) and str(a.value).startswith("--")]
+        if not flags:
+            continue
+        dest = next((k.value.value for k in node.keywords if k.arg == "dest"),
+                    flags[0].lstrip("-").replace("-", "_"))
+        read = re.search(rf"\bargs\.{re.escape(dest)}\b", pool) or \
+            re.search(rf"getattr\(\s*args\s*,\s*[\"']{re.escape(dest)}[\"']", pool)
+        if not read:
+            unread.add(flags[0])
+    return unread
+
+
+@pytest.mark.parametrize("script", sorted(UNREAD_PLOT_OPTIONS))
+def test_plot_scripts_read_every_option_they_accept(script):
+    assert _unread_options(script) == UNREAD_PLOT_OPTIONS[script]
+
+
+@pytest.mark.parametrize("option", [["--grid_goi_style", "cds"], ["--grid_goi_max_models", "3"]])
+def test_removed_grid_options_are_rejected(option, tmp_path):
+    """Both belonged to the earlier grid renderer. They were kept for a while as
+    accepted-and-ignored, which hid that they no longer did anything."""
+    import subprocess
+    import sys
+    run = subprocess.run([sys.executable, str(ROOT / "bin" / "plot_synteny.py"),
+                          "--home_bed", str(tmp_path / "home.bed"),
+                          "--output", str(tmp_path / "plot.html"), *option],
+                         capture_output=True, text=True)
+    assert run.returncode == 2
+    assert "unrecognized arguments" in run.stderr and option[0] in run.stderr
