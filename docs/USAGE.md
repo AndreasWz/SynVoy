@@ -280,7 +280,7 @@ All parameters can be set on the command line (`--param value`) or in a custom c
 | `--padding_max` | `200000` | Maximum padding (bp) |
 | `--max_blocks_per_genome` | `80` | Safety cap on candidate blocks per target genome |
 | `--min_block_genes` | `2` | Minimum flanking-gene hits in a block to keep it |
-| `--max_consecutive_empty_blocks` | `25` | Stop expanding after this many consecutive empty blocks |
+| `--max_consecutive_empty_blocks` | `25` | No effect: the early stop is switched off in the code, every retained block is searched |
 | `--disable_synteny_collinearity` | `false` | Disable collinearity-aware block scoring + gap-bridging (revert to legacy gene-count clustering). When on (default), blocks are ranked by their longest run of home-ordered flanking genes and a GOI sitting in a rearrangement gap between two collinear clusters is kept inside one searched block. |
 | `--synteny_bridge_max_gap` | `6000000` | Max bp gap between two same-chromosome flanking clusters to bridge into one block when they collinearly continue the home gene order. `0` disables bridging. |
 | `--synteny_bridge_max_rank_gap` | `5` | Max home-rank jump still treated as a collinear continuation when bridging. |
@@ -331,13 +331,13 @@ Controls the increasingly permissive search passes used for highly divergent tar
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--gff_search_window` | `100000` | Window (bp) around GOI to search in GFF for flanking genes |
-| `--gap_search_window` | `50000` | Window for gap-filling searches |
-| `--gap_min_size` | `10` | Minimum gap size (bp) to attempt fill |
-| `--gap_evalue` | `10` | E-value for gap search |
-| `--gap_min_identity` | `15.0` | Minimum identity (%) for gap hits |
-| `--gap_min_alnlen` | `10` | Minimum alignment length for gap hits |
-| `--gap_max_hits` | `5` | Max gap hits to report |
+| `--gff_search_window` | `100000` | Distance (bp) from the query's hits within which annotated home genes are compared with the query to find the home gene |
+| `--gap_search_window` | `50000` | Margin (bp) around the flanking block inside which GOI hits are kept, and around a candidate's hits for the miniprot model |
+| `--gap_min_size` | `10` | No effect (leftover of a removed gap-filling search) |
+| `--gap_evalue` | `10` | No effect (leftover of a removed gap-filling search) |
+| `--gap_min_identity` | `15.0` | Lower bound of the identity for last-resort `raw_hit` rows; the bound used is `max(value, 90)` |
+| `--gap_min_alnlen` | `10` | No effect (leftover of a removed gap-filling search) |
+| `--gap_max_hits` | `5` | Maximum number of last-resort `raw_hit` rows per candidate locus |
 | `--min_exon_query_cov` | `0.25` | Minimum query coverage fraction for exon annotation |
 | `--min_exon_alnlen` | `30` | Minimum exon alignment length |
 | `--pred_flank_window` | `50000` | Prodigal prediction window around locus |
