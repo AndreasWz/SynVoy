@@ -3,8 +3,8 @@
 This document describes what SynVoy computes, step by step, with the rule and the
 default value at every decision. It is written from the code, not from earlier
 descriptions: every statement was checked against the source of branch `dev` on
-2026-10-07 (commit `18300a9` plus the block-merge fix of that day). Code locations
-are given as `file` → `function`, because line numbers drift.
+2026-10-07 (commit `b5b4bcf`). Code locations are given as `file` → `function`,
+because line numbers drift.
 
 It does not explain how to run the pipeline ([USAGE.md](USAGE.md)), what the output
 files contain ([OUTPUT.md](OUTPUT.md)) or what every parameter does
