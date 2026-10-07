@@ -53,16 +53,20 @@ tree-building switches to a method that produces different branch
 lengths), regenerate with:
 
 ```bash
-nextflow run main.nf \
+./run_synvoy.sh \
     --mode pro \
     --query local_data/queries/mellettin/GOI_melittin.fasta \
     --home_genome local_data/ground_truth/melettin/home/Apis_mellifera.fa \
     --home_gff local_data/ground_truth/melettin/home/Apis_mellifera.gff \
+    --home_species "Apis mellifera" \
     --target_genomes "local_data/ground_truth/melettin/targets/*.fa" \
     --outdir results/melettin_gt_v4 \
     --n_flanking_genes 5 \
-    --auto_params false --multi_profile false
+    -profile standard
 ```
+
+`-profile standard` matters here: the launcher's default is `auto,low_mem`, which sets
+`--skip_tree` and would emit a placeholder newick instead of the tree this fixture pins.
 
 Then:
 ```bash
@@ -81,6 +85,12 @@ fixture.
   (`Reg1_G7_CMEDIUM_S0.47`). Regenerated fixtures will include a
   species prefix (`Colletes_gigas|Reg1_G7_CMEDIUM_S0.47`) because
   `cluster_grs.py` now consumes `species_mapping.tsv`.
+- The name's middle field is the region *class*, and there are now five:
+  `G<n>` (synteny cluster, `n` unique flanking hits), `GOI_anchor`
+  (region anchored on a GOI hit), `FLANKonly<n>` (strong flanking, no GOI
+  model — the §1e case), `DISP` (dispersed-GOI rescue), and the same
+  `G<n>` form for GOI-overlapping regions. A class change between fixture
+  and rerun is a behaviour change to explain, not necessarily a break.
 - `scripts/validate_melettin_gt_v3.py` does not compare the `name`
   column directly, so both formats are acceptable for regression
   diffing.
@@ -106,7 +116,44 @@ which:
    Euglossa's GOI sequence falls below the new tree-inclusion bar
    even though the BED region is still emitted.
 
-Both are intentional changes, not regressions — but the validator
+3. **Collinearity-aware seed placement (2026-06-04)** widened the region
+   windows to the full block neighbourhood, and added two region
+   classes. Verified against the 5-species regression run: Euglossa,
+   Tetragonula and Xylocopa moved `Reg1_G7_CMEDIUM_S0.47` →
+   `Reg1_G8_CMEDIUM_S0.55` (one more flanking gene captured, so a higher
+   score); Colletes gained a `Reg1_GOI_anchor_…` row above the fixture's
+   region, which became `Reg2_FLANKonly6_…`; Melipona's became
+   `Reg1_FLANKonly7_CMEDIUM_S0.40`. **The recovered GOI coordinates did
+   not change** — this is a wider window around the same call, which is
+   the intended effect. Bridging fired once (on Colletes, whose melittin
+   family genuinely spans a flanking gap); it is not a strict no-op on
+   this benchmark, but it is benign here.
+
+4. **Region scores were redefined on 2026-07-26.** The strand term now
+   compares each flanking gene with its home strand (it used to reward
+   scrambled neighbourhoods), and the order term uses the same
+   longest-collinear-run measure as the search. Every `score`,
+   `consistency` and `strand_consistency` value in this fixture, and every
+   region name that embeds a score (`…_S0.47`), predates that and cannot
+   match a current run. The `p_value` column changed meaning too: it now
+   tests the neighbourhood score without the GOI bonus.
+5. **Call-level changes in 2026-09** (tandem copies need context, real
+   Smith-Waterman E-values, in-frame model proteins, extended model ends)
+   changed which weak calls exist and what the models look like. The
+   strong calls on these five bees kept their coordinates.
+6. **Since 2026-10-05 region scores no longer depend on the line order of
+   the hit table**, so they can differ in the third decimal from any
+   earlier run of the same inputs.
+
+**What this fixture is still good for:** scaffold and coordinate checks.
+Its scores and its tree are historical. For "did the call land on the
+gene", the current regression check is the coordinate scorer,
+`scripts/benchmark/score_coordinates.py` against
+`tests/benchmark_truth/melittin_loci.tsv` (see `scripts/benchmark/README.md`).
+The fixture has not been regenerated since 2026-03-28; do that the next
+time the five bee assemblies are at hand.
+
+Items 1–3 are intentional changes, not regressions — but the validator
 will report (1) as informational notes and (2) as a hard FAIL because
 the leaf set genuinely changed. To clear the tree FAIL:
 

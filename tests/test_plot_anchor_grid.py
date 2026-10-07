@@ -132,10 +132,33 @@ def test_inversion_is_flagged():
     assert ", inverted" in html
 
 
-def test_tandem_copy_badge():
+def test_tandem_copies_are_enrolled_as_separate_arrows():
+    """Tandem GOI copies each get their own arrow in the GOI column.
+
+    Superseded the old '×2' badge: the count used to be a number floating above a
+    single arrow, and is now conveyed structurally by drawing one notched arrow per
+    copy. So the contract is that BOTH copies are individually visible with their
+    own identity, not that a badge exists.
+    """
     html = _render()
-    # mouse has two GOI copies -> a '×2' badge.
-    assert "×2" in html
+    # mouse carries two GOI copies at 80 % and 78 % -> both labelled, not collapsed.
+    assert ">80<" in html, "first mouse GOI copy missing its identity label"
+    assert ">78<" in html, "second mouse GOI copy missing its identity label"
+
+
+def test_goi_column_identity_labels_match_flanking_columns():
+    """The GOI column must not be the one column without a number on it.
+
+    Regression guard for the toxin-array rework, which routed the GOI column through
+    draw_goi_array_grid and past the only code that draws identity labels — leaving
+    every flanking column numbered and the GOI column blank, while the legend still
+    said "number = % identity".
+    """
+    html = _render()
+    for ident in (">90<", ">80<"):          # cow / mouse decorin
+        assert ident in html, f"GOI identity {ident} not drawn"
+    for ident in (">99<", ">88<", ">97<"):  # flanking, for contrast
+        assert ident in html
 
 
 def test_coverage_shown_only_when_low():
@@ -316,3 +339,19 @@ def test_span_gutter_label_always_has_accession_when_known():
     assert ps._span_gutter_label("NC_1", 2_000_000, 2_000_000) == "NC_1: 2.00 Mb"
     # Nothing known → empty (caller skips drawing).
     assert ps._span_gutter_label("", 0, 0) == ""
+
+
+def test_absent_cell_does_not_claim_the_gene_is_missing():
+    """§1x: an empty cell means 'not placed here', not 'no ortholog'.
+
+    The figure is not entitled to claim absence: a strong hit refused by the synteny
+    gate (a translocated gene at long divergence) also produces an empty cell. The old
+    legend read 'no ortholog', which is the misreading the whole §1x fix exists to
+    prevent.
+    """
+    html = _render()
+    # the standalone legend LABEL, not the phrase anywhere in prose
+    assert ">no ortholog</text>" not in html
+    assert ">not placed here</text>" in html
+    assert "rejected_candidates" in html, "legend must point at where refusals are listed"
+    assert "not that the gene is absent" in html

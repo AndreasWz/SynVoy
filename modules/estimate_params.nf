@@ -1,6 +1,9 @@
 process ESTIMATE_PARAMS {
     tag "llm_params"
     label 'process_low'
+    // Kept in the results: on Nextflow >= 25 the estimate is advisory (params cannot be
+    // changed after launch), so the user needs the file to re-run with its values.
+    publishDir "${params.outdir}/intermediate/estimate_params", mode: 'copy'
 
     input:
     path resolved_query_json

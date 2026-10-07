@@ -25,6 +25,9 @@ process PLOT_SYNTENY {
     path "*_anchor_positions.html", emit: anchor_positions, optional: true
     path "*_anchor_positions.svg", emit: anchor_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
+    // Ribbon plot + anchor grid that also draw ModelStatus=fragment GOI models
+    // (hidden in the default figures); written only when a run has fragments.
+    path "*_with_fragments.*", emit: with_fragments, optional: true
     path "plot_inputs_*", emit: inputs, optional: true
 
     script:
@@ -41,7 +44,8 @@ process PLOT_SYNTENY {
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     def hide_absent_arg = params.hide_goi_absent_tracks.toString().toBoolean() ? "--hide_goi_absent" : ""
-    def pub_svg_arg = params.pub_svg ? "--pub_svg --pub_width ${params.pub_width_mm} --pub_palette ${params.pub_palette}" : ""
+    def plot_extra_args = params.plot_extra_args ?: ''
+    def pub_svg_arg = params.pub_svg.toString().toBoolean() ? "--pub_svg --pub_width ${params.pub_width_mm} --pub_palette ${params.pub_palette}" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -98,13 +102,14 @@ process PLOT_SYNTENY {
         --tree $tree \\
         $species_arg \\
         --home_species "${home_species ?: ''}" \\
-        $hide_absent_arg \
+        $hide_absent_arg \\
         $pub_svg_arg \\
         --gap_threshold ${params.gap_threshold} \\
         --gap_visual_size ${params.gap_visual_size} \\
         --flank_fallback_bp ${params.flank_fallback_bp} \\
         --scale_bar_len ${params.scale_bar_len} \\
         --plot_width ${params.plot_width} \\
+        ${plot_extra_args} \\
         --output ${home_bed.baseName}_synteny_plot.html
 
     # Phylogeny-anchored matrix view (paper-ready SVG). Opt-in: the anchor-grid

@@ -49,8 +49,10 @@ class TestA2TandemCoverage(unittest.TestCase):
         CLASSIFY_THRESHOLDS.clear()
         CLASSIFY_THRESHOLDS.update(self._saved)
 
-    def _conf(self, identity, qcov):
-        return _classify_goi_evidence("tandem_copy", identity=identity, query_cov=qcov)
+    def _conf(self, identity, qcov, flanking=8):
+        # Default: a strongly supported block, so these tests isolate identity/coverage.
+        return _classify_goi_evidence("tandem_copy", identity=identity, query_cov=qcov,
+                                      flanking_support=flanking)
 
     def test_high_identity_low_coverage_demoted(self):
         """Vollenhovia: 79% identity but qcov 0.30 → LOW (low coverage)."""
@@ -81,6 +83,47 @@ class TestA2TandemCoverage(unittest.TestCase):
     def test_exactly_on_floors_passes(self):
         conf, _cls, _r = self._conf(40.0, 0.35)
         self.assertEqual(conf, "MEDIUM")
+
+
+class TestTandemContext(unittest.TestCase):
+    """Family benchmark 2026-09-11: a tandem copy needs context, like every other
+    evidence type -- strong block flanking, or the sequence covering the query."""
+
+    def setUp(self):
+        self._saved = dict(CLASSIFY_THRESHOLDS)
+        CLASSIFY_THRESHOLDS.update(tandem_min_identity=40.0, tandem_min_qcov=0.35,
+                                   fallback_strong_min_flanking=5, medium_min_qcov=0.65)
+
+    def tearDown(self):
+        CLASSIFY_THRESHOLDS.clear()
+        CLASSIFY_THRESHOLDS.update(self._saved)
+
+    def _conf(self, identity, qcov, flanking):
+        return _classify_goi_evidence("tandem_copy", identity=identity, query_cov=qcov,
+                                      flanking_support=flanking)
+
+    def test_chance_window_hit_in_weak_block_is_low(self):
+        """SECP junk: 50 % over 0.39 of a 77-aa query, block flanking 4 -> LOW."""
+        conf, cls, reason = self._conf(50.0, 0.39, 4)
+        self.assertEqual((conf, cls, reason),
+                         ("LOW", "tandem_goi_copy", "goi_tandem_copy_weak_context"))
+
+    def test_strong_block_keeps_partial_copy(self):
+        """Melittin bee copy: 57 % over ~0.5, block flanking 8 -> MEDIUM."""
+        self.assertEqual(self._conf(57.0, 0.5, 8)[0], "MEDIUM")
+
+    def test_full_length_copy_needs_no_flanking(self):
+        """KAZA copy in a 2-flanking block: 87 % over 0.87 -> MEDIUM on sequence alone."""
+        self.assertEqual(self._conf(87.4, 0.869, 2)[0], "MEDIUM")
+
+    def test_context_bars_are_inclusive(self):
+        self.assertEqual(self._conf(40.0, 0.35, 5)[0], "MEDIUM")
+        self.assertEqual(self._conf(40.0, 0.65, 0)[0], "MEDIUM")
+        self.assertEqual(self._conf(40.0, 0.64, 4)[0], "LOW")
+
+    def test_identity_and_coverage_floors_still_come_first(self):
+        self.assertEqual(self._conf(39.9, 0.9, 10)[2], "goi_tandem_copy_low_identity")
+        self.assertEqual(self._conf(90.0, 0.30, 10)[2], "goi_tandem_copy_low_coverage")
 
 
 class TestA3FlankingSeed(unittest.TestCase):

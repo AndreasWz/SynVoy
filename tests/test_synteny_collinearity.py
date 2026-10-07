@@ -99,6 +99,36 @@ def test_can_bridge_rejects_direction_break():
     assert not isr._can_bridge(block, cand, home_rank, max_rank_gap=5, min_anchors=3)
 
 
+def test_can_bridge_accepts_uniformly_inverted_block():
+    """A wholly inverted neighbourhood bridges — only a direction REVERSAL is refused.
+
+    The docstring used to claim "inversions are deliberately not bridged", which is
+    wrong: _can_bridge takes the direction from the BLOCK's own anchors, so a block
+    running g5,g4,g3 continues correctly into g2. Pinning it so the wrong reading
+    cannot come back (docs corrected 2026-07-21).
+    """
+    home_rank = {"g1": 1, "g2": 2, "g3": 3, "g4": 4, "g5": 5}
+    block = _block([("g5", 0), ("g4", 100), ("g3", 200)], home_rank)
+    cand = {"query": "g2", "chrom": "chr1", "start": 9999, "end": 10999}
+    assert isr._can_bridge(block, cand, home_rank, max_rank_gap=5, min_anchors=3)
+
+
+def test_bridge_spans_gap_for_inverted_neighbourhood():
+    """End-to-end counterpart: inverted anchors either side of a 2.8 Mb gap = ONE block."""
+    home_rank = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5}
+    hits = [{"query": q, "chrom": "chr1", "start": s, "end": s + 5000,
+             "strand": "+", "bits": 100}
+            for q, s in [("F", 100_000), ("E", 150_000), ("D", 200_000),
+                         ("C", 3_000_000), ("B", 3_050_000), ("A", 3_100_000)]]
+    blocks = isr.identify_synteny_blocks(
+        hits, max_intron=20_000, cluster_distance=150_000, home_rank=home_rank,
+        bridge_max_gap=6_000_000, bridge_max_rank_gap=5, bridge_min_anchors=3)
+    assert len(blocks) == 1
+    assert blocks[0]["bridged"] is True
+    assert blocks[0]["collinear_chain_len"] == 6
+    assert blocks[0]["collinear_direction"] == "-"
+
+
 # --------------------------------------------------------------------------- #
 # build_home_rank
 # --------------------------------------------------------------------------- #
@@ -216,3 +246,134 @@ def test_legacy_sorts_by_gene_count():
     ]
     blocks = isr.identify_synteny_blocks(hits, cluster_distance=500)
     assert blocks[0]["genes_count"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# Two-sided bridging (docs/CAN_BRIDGE_ANALYSIS.md, 2026-09-09)
+#
+# The one-sided rule counts anchors on the LEFT of a gap and inspects exactly ONE
+# locus on the right, because it runs inside a left-to-right walk. Consequences,
+# all measured before these tests were written:
+#   * identical collinear evidence decides differently depending on where the gap
+#     falls  ("A B | C D E" refused, "A B C | D E" bridged);
+#   * the first locus after the gap gatekeeps everything behind it, so
+#     "A B C | D A A" bridges while "A B C | A A D" does not.
+# --------------------------------------------------------------------------- #
+_HOME_ORDER = {c: i for i, c in enumerate("ABCDEFGHIJ")}
+_HOME_RANK = {f"gene-{g}": r for g, r in _HOME_ORDER.items()}
+_CD, _GAP = 150_000, 6_000_000
+
+
+def _two_segments(left, right, gap_start=3_000_000):
+    """Two same-chromosome clusters separated by ~2 Mb, genes 20 kb apart within each."""
+    hits = []
+    for i, g in enumerate(left):
+        hits.append(_hit(f"gene-{g}", "c1", 1_000_000 + i * 20_000))
+    for i, g in enumerate(right):
+        hits.append(_hit(f"gene-{g}", "c1", gap_start + i * 20_000))
+    return hits
+
+
+def _n_blocks(left, right, two_sided):
+    blocks = isr.identify_synteny_blocks(
+        _two_segments(left, right), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP, bridge_max_rank_gap=5,
+        bridge_min_anchors=3, bridge_two_sided=two_sided)
+    return len(blocks)
+
+
+def test_two_sided_bridges_when_the_gap_falls_early():
+    # "A B …gap… D E F": 5 collinear anchors, refused by the one-sided rule purely
+    # because only 2 of them sit to the left of the gap.
+    assert _n_blocks("AB", "DEF", two_sided=False) == 2
+    assert _n_blocks("AB", "DEF", two_sided=True) == 1
+
+
+def test_two_sided_is_insensitive_to_where_the_gap_falls():
+    # Same 5 genes in perfect home order; only the split point moves. The one-sided
+    # rule flips its answer, the two-sided rule does not.
+    one = [_n_blocks(l, r, False) for l, r in [("AB", "CDE"), ("ABC", "DE"),
+                                               ("ABCD", "E"), ("A", "BCDE")]]
+    two = [_n_blocks(l, r, True) for l, r in [("AB", "CDE"), ("ABC", "DE"),
+                                              ("ABCD", "E"), ("A", "BCDE")]]
+    assert one == [2, 1, 1, 2]      # legacy: depends on the split point
+    assert two == [1, 1, 1, 1]      # two-sided: one neighbourhood either way
+
+
+def test_two_sided_refuses_a_duplicated_continuation_either_ordering():
+    # "A A D" after the gap is a paralog-cluster signature, not a continuation.
+    # One-sided bridges it whenever D happens to come first, because only D is tested.
+    assert _n_blocks("ABC", "AAD", two_sided=False) == 2
+    assert _n_blocks("ABC", "DAA", two_sided=False) == 1   # the current false admit
+    assert _n_blocks("ABC", "AAD", two_sided=True) == 2
+    assert _n_blocks("ABC", "DAA", two_sided=True) == 2    # fixed
+
+
+def test_two_sided_still_bridges_a_uniform_inversion():
+    assert _n_blocks("FED", "CBA", two_sided=True) == 1
+
+
+def test_two_sided_bridges_an_inverted_second_segment():
+    # "D E F …gap… C B A" — every home flanking gene present on one chromosome with
+    # the second segment inverted. Refused by the one-sided frontier test.
+    assert _n_blocks("DEF", "CBA", two_sided=False) == 2
+    assert _n_blocks("DEF", "CBA", two_sided=True) == 1
+
+
+def test_two_sided_still_refuses_a_rank_jump_beyond_the_cap():
+    # J is rank 9; the block frontier is C (rank 2) -> jump 7 > max_rank_gap 5.
+    assert _n_blocks("ABC", "J", two_sided=True) == 2
+
+
+def test_two_sided_needs_min_anchors_across_the_union():
+    # Two anchors total cannot bridge, however they are distributed.
+    assert _n_blocks("A", "D", two_sided=True) == 2
+
+
+def test_two_sided_is_off_by_default():
+    # identify_synteny_blocks must keep the legacy rule unless asked.
+    default = isr.identify_synteny_blocks(
+        _two_segments("AB", "DEF"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert len(default) == 2
+
+
+def test_bridge_max_per_block_caps_a_chained_block():
+    hits = []
+    for seg, at in [("AB", 1_000_000), ("CD", 3_000_000), ("EF", 5_000_000)]:
+        for i, g in enumerate(seg):
+            hits.append(_hit(f"gene-{g}", "c1", at + i * 20_000))
+
+    def n(cap):
+        return len(isr.identify_synteny_blocks(
+            hits, max_intron=20_000, cluster_distance=_CD, home_rank=_HOME_RANK,
+            bridge_max_gap=_GAP, bridge_two_sided=True, bridge_max_per_block=cap))
+
+    assert n(0) == 1    # unlimited: both gaps bridged
+    assert n(1) == 2    # only the first bridge allowed
+    assert n(2) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Duplicate-rank inflation of collinear_chain_len (block ranking only)
+# --------------------------------------------------------------------------- #
+def test_repeated_gene_does_not_inflate_collinear_chain_len():
+    # longest_collinear_run's LIS is NON-decreasing, so [5,5,5,5] scored 4. One gene
+    # hit four times therefore claimed a collinear run of 4 and outranked genuinely
+    # ordered blocks in the sort and the per-genome cap. Observed on real oskar data
+    # (NC_045757.1 / gene-Dmel_CG31100, loci=4, chain=4).
+    hits = [_hit("gene-C", "c1", 1_000_000 + i * 100_000) for i in range(4)]
+    blocks = isr.identify_synteny_blocks(hits, max_intron=20_000, cluster_distance=_CD,
+                                         home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert blocks[0]["genes_count"] == 1
+    assert blocks[0]["collinear_chain_len"] == 1
+
+
+def test_ordered_block_outranks_a_repeated_single_gene():
+    hits = [_hit("gene-C", "c1", 1_000_000 + i * 100_000) for i in range(4)]
+    for i, g in enumerate("FGH"):
+        hits.append(_hit(f"gene-{g}", "c2", 500_000 + i * 20_000))
+    blocks = isr.identify_synteny_blocks(hits, max_intron=20_000, cluster_distance=_CD,
+                                         home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert blocks[0]["chrom"] == "c2"
+    assert blocks[0]["collinear_chain_len"] == 3

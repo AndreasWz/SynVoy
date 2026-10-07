@@ -42,6 +42,7 @@ from urllib.parse import unquote
 # Shared helpers (single source of truth for BED/GFF parsing).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_bed, parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
+from sequence_utils import strip_species_qualifier  # noqa: E402
 
 try:
     from ete3 import Tree
@@ -190,6 +191,37 @@ TRACK_BG_CLR  = "#f3f5f8"   # very light blue-gray track background
 # as a full-length ortholog. Below this fraction we append "(cov%)".
 COVERAGE_FLAG_THRESHOLD = 0.80
 
+# Print figures are set in Arial/Helvetica. Liberation Sans is metric-compatible
+# with Arial, so these advance widths (1/1000 em, ASCII 32-126, measured from
+# LiberationSans-{Regular,Bold}.ttf) size label columns without a font library.
+# Arial Italic shares the regular advances.
+FIGURE_FONT = "Arial, Helvetica, 'Liberation Sans', sans-serif"
+_ARIAL_W = {
+    False: [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+            556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
+            1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,
+            667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
+            333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+            556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584],
+    True: [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
+           556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611,
+           975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778,
+           667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556,
+           333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611,
+           611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584],
+}
+_ARIAL_W_EXTRA = {"×": 584, "–": 556, "—": 1000, "·": 333, "→": 1000, "…": 1000, "°": 400}
+
+
+def text_width(text, size, bold=False):
+    """Rendered width (px) of `text` set in Arial at `size` px."""
+    table = _ARIAL_W[bool(bold)]
+    total = 0
+    for ch in text or "":
+        o = ord(ch)
+        total += table[o - 32] if 32 <= o < 127 else _ARIAL_W_EXTRA.get(ch, 556)
+    return total * size / 1000.0
+
 
 # ======================================================================
 # Parsing helpers
@@ -259,7 +291,13 @@ def filter_genes_to_candidate_regions(genes, candidate_regions):
 
 
 def _confidence_rank(value):
-    return {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get((value or "").upper(), -1)
+    """HIGH > MEDIUM > AMBIGUOUS > LOW; -1 for anything unrecognised.
+
+    AMBIGUOUS ranks between LOW and MEDIUM: a candidate in a conserved neighbourhood
+    whose sequence evidence does not establish orthology. It must outrank a bare LOW
+    hit but must never be drawn as a confident call.
+    """
+    return {"LOW": 0, "AMBIGUOUS": 1, "MEDIUM": 2, "HIGH": 3}.get((value or "").upper(), -1)
 
 
 def _is_goi_target_gene(gene):
@@ -269,6 +307,18 @@ def _is_goi_target_gene(gene):
     name = gene.get("name", "") or ""
     home_id = gene.get("home_gene_id", "") or ""
     return name.startswith("GOI_") or home_id.startswith("GOI_")
+
+
+def _is_fragment_goi(gene):
+    """A GOI model the pipeline itself labels a fragment (ModelStatus=fragment).
+
+    These are single-exon rescue hits (EvidenceType=rescued_exon), usually several
+    per locus and overlapping one another. Drawn as GOI copies they swamp the real
+    model (APYR: 297 fragments against 32 HIGH models), so the default figures hide
+    them and a '_with_fragments' variant shows them.
+    """
+    return (_is_goi_target_gene(gene)
+            and (gene.get("model_status") or "").strip().lower() == "fragment")
 
 
 def _is_resolved_goi_target_gene(gene):
@@ -440,7 +490,7 @@ def _goi_priority_key(gene):
     )
 
 
-def parse_target_gff(gff_file):
+def parse_target_gff(gff_file, cap=True):
     """
     Parse a SynVoy target-genome GFF.
 
@@ -540,6 +590,16 @@ def parse_target_gff(gff_file):
                 "inference_reason": attrs.get("InferenceReason", ""),
             })
 
+    # Fragment GOI models go before dedup and the GOI cap: dedup always prefers a
+    # GOI entry, so a fragment overlapping a flanking model would otherwise erase
+    # that flanking gene, and fragments would compete with real models for the cap.
+    if not _SHOW_GOI_FRAGMENTS:
+        n_frag = sum(1 for g in genes if _is_fragment_goi(g))
+        if n_frag:
+            genes = [g for g in genes if not _is_fragment_goi(g)]
+            _HIDDEN_FRAGMENT_COUNT[0] += n_frag
+            print(f"[plot] {os.path.basename(gff_file)}: hid {n_frag} fragment GOI model(s)")
+
     # Deduplicate overlapping entries (same genomic region from different queries)
     # GOI entries are ALWAYS preferred over non-GOI entries at the same locus.
     if len(genes) > 1:
@@ -570,23 +630,41 @@ def parse_target_gff(gff_file):
                 kept.append(g)
         genes = kept
 
-    # Cap GOI entries per genome: keep only the N best by identity.
-    # Iterative search can produce hundreds of low-quality fallback GOI
-    # annotations (especially without target GFFs) scattered across many
-    # chromosomes.  Keeping all of them clutters the plot with noisy
-    # connections.  Retain the best MAX_GOI_PER_GENOME entries.
-    MAX_GOI_PER_GENOME = _MAX_GOI_PER_GENOME
-    goi_genes = [g for g in genes if _is_goi_target_gene(g)]
-    if len(goi_genes) > MAX_GOI_PER_GENOME:
-        goi_genes.sort(key=_goi_priority_key, reverse=True)
-        goi_to_drop = set(id(g) for g in goi_genes[MAX_GOI_PER_GENOME:])
-        genes = [g for g in genes if id(g) not in goi_to_drop]
-        print(
-            f"[plot] GOI cap: kept {MAX_GOI_PER_GENOME}/{len(goi_genes)} GOI entries "
-            f"(dropped {len(goi_to_drop)} lower-priority GOI-like entries)"
-        )
-
+    if cap:
+        genes, _ = _cap_goi_genes(genes, _MAX_GOI_PER_GENOME)
     return genes
+
+
+def _cap_goi_genes(genes, max_goi):
+    """Keep the `max_goi` best GOI entries of a genome; returns (kept, dropped).
+
+    Iterative search can produce hundreds of low-quality fallback GOI annotations
+    scattered across many chromosomes, and the neighbourhood selection in main()
+    must not be steered by them. The cap therefore applies while the neighbourhood
+    is chosen; GOI models that fall inside the chosen view are restored afterwards
+    (_restore_goi_in_view), so the plots still show every copy there.
+    """
+    goi_genes = [g for g in genes if _is_goi_target_gene(g)]
+    if len(goi_genes) <= max_goi:
+        return genes, []
+    goi_genes.sort(key=_goi_priority_key, reverse=True)
+    dropped = goi_genes[max_goi:]
+    drop_ids = {id(g) for g in dropped}
+    print(f"[plot] GOI cap: kept {max_goi}/{len(goi_genes)} GOI entries "
+          f"(dropped {len(dropped)} lower-priority GOI-like entries)")
+    return [g for g in genes if id(g) not in drop_ids], dropped
+
+
+def _restore_goi_in_view(genes, capped):
+    """Return the capped GOI entries lying inside the displayed view of `genes`:
+    on a chromosome the view shows, between its first and last displayed gene."""
+    spans = {}
+    for g in genes:
+        lo, hi = spans.get(g["chrom"], (g["start"], g["end"]))
+        spans[g["chrom"]] = (min(lo, g["start"]), max(hi, g["end"]))
+    return [g for g in capped
+            if g["chrom"] in spans
+            and g["start"] >= spans[g["chrom"]][0] and g["end"] <= spans[g["chrom"]][1]]
 
 
 def parse_homology_tsvs(tsv_files):
@@ -826,6 +904,10 @@ _GOI_NAMES = set()
 # Raise for tandem-array loci (e.g. a 31-copy GR1 toxin cluster) so the array isn't truncated.
 _MAX_GOI_PER_GENOME = 10
 
+# Draw ModelStatus=fragment GOI models (set per figure variant in main()).
+_SHOW_GOI_FRAGMENTS = False
+_HIDDEN_FRAGMENT_COUNT = [0]   # fragments hidden in the current variant
+
 
 def is_goi(name):
     """Return True if *name* represents the Gene of Interest."""
@@ -942,6 +1024,119 @@ def _synthesize_home_goi_gene(home_genes, query_intervals, home_gff_path):
         file=sys.stderr,
     )
     return best["name"]
+
+
+def _load_home_gene_models(home_gff_path, chrom, lo, hi):
+    """Annotated genes on `chrom` overlapping [lo, hi] with their CDS per transcript.
+
+    Returns {gene_id: {"start", "end" (1-based, inclusive), "strand", "label",
+    "transcripts": {mrna_id: [(cds_start, cds_end), ...]}}}. Only genes with at
+    least one CDS-bearing transcript are returned.
+    """
+    genes, mrna_parent, cds = {}, {}, defaultdict(list)
+    with open(home_gff_path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            p = line.rstrip("\n").split("\t")
+            if len(p) < 9 or p[0] != chrom or p[2] not in ("gene", "mRNA", "CDS"):
+                continue
+            try:
+                s, e = int(p[3]), int(p[4])
+            except ValueError:
+                continue
+            if e < lo or s > hi:
+                continue
+            attrs = _parse_gff_attrs(p[8])
+            if p[2] == "gene":
+                gid = attrs.get("ID", "")
+                if gid:
+                    genes[gid] = {"start": s, "end": e, "strand": p[6],
+                                  "label": attrs.get("Name") or attrs.get("gene") or gid,
+                                  "transcripts": {}}
+            elif p[2] == "mRNA":
+                if attrs.get("ID") and attrs.get("Parent"):
+                    mrna_parent[attrs["ID"]] = attrs["Parent"]
+            else:
+                for parent in (attrs.get("Parent") or "").split(","):
+                    if parent:
+                        cds[parent].append((s, e))
+    for mrna_id, blocks in cds.items():
+        gid = mrna_parent.get(mrna_id)
+        if gid in genes:
+            genes[gid]["transcripts"][mrna_id] = sorted(set(blocks))
+    return {gid: g for gid, g in genes.items() if g["transcripts"]}
+
+
+def _cds_overlap(blocks, intervals):
+    """bp of `intervals` (BED half-open) covered by GFF CDS `blocks` (1-based)."""
+    return sum(max(0, min(e, q["end"]) - max(s - 1, q["start"]))
+               for s, e in blocks for q in intervals)
+
+
+def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path):
+    """Replace per-hit GOI placeholder rows with the annotated home gene(s).
+
+    The home BED carries one `GOI_<chrom>_<pos>` row per query hit, always on the
+    '+' strand, so a multi-exon GOI was drawn as several copies pointing the wrong
+    way (one apyrase query: 4 hits = 2 exon groups of the home gene on '-' plus 2 in
+    the adjacent paralog). Each hit is assigned to the annotated gene whose CDS it
+    overlaps most -- a container gene whose intron holds the hit has no CDS overlap
+    -- and each such gene becomes ONE home GOI entry with its real strand and the
+    CDS of the transcript that best covers its hits (exon_coords).
+
+    Mutates `home_genes`; returns the resolved gene names ([] when the GFF has no
+    CDS under the hits, leaving the placeholder / synthesis path unchanged).
+    """
+    if not query_intervals or not home_gff_path or home_gff_path == "NO_GFF" \
+            or not os.path.exists(home_gff_path):
+        return []
+    chrom = query_intervals[0]["chrom"]
+    hits = [q for q in query_intervals if q["chrom"] == chrom]
+    try:
+        models = _load_home_gene_models(home_gff_path, chrom,
+                                        min(q["start"] for q in hits),
+                                        max(q["end"] for q in hits) + 1)
+    except OSError as exc:
+        print(f"[plot] WARN: could not read home GFF for GOI models: {exc}", file=sys.stderr)
+        return []
+
+    hits_by_gene = defaultdict(list)
+    for q in hits:
+        scored = [(max(_cds_overlap(b, [q]) for b in m["transcripts"].values()), gid)
+                  for gid, m in models.items()]
+        scored = [(ov, gid) for ov, gid in scored if ov > 0]
+        if scored:
+            hits_by_gene[max(scored)[1]].append(q)
+    if not hits_by_gene:
+        return []
+
+    resolved = []
+    for gid in sorted(hits_by_gene):
+        m, qs = models[gid], hits_by_gene[gid]
+        tid = max(m["transcripts"], key=lambda t: (
+            _cds_overlap(m["transcripts"][t], qs),
+            sum(e - s + 1 for s, e in m["transcripts"][t]), t))
+        resolved.append({
+            "chrom": chrom, "start": m["start"] - 1, "end": m["end"], "name": gid,
+            "strand": m["strand"] if m["strand"] in ("+", "-") else "+",
+            "display_name": m["label"], "exon_coords": m["transcripts"][tid],
+            "n_exons": len(m["transcripts"][tid]), "goi_model_source": tid,
+        })
+
+    covered = [q for qs in hits_by_gene.values() for q in qs]
+    names = {r["name"] for r in resolved}
+    home_genes[:] = [
+        g for g in home_genes
+        if g["name"] not in names
+        and not (g["name"].startswith("GOI_") and _overlaps_any(g, covered))
+    ] + resolved
+    home_genes.sort(key=lambda g: g["start"])
+    for r in resolved:
+        print(f"[plot] Home GOI model: {r['display_name']} ({r['name']}) "
+              f"{chrom}:{r['start'] + 1:,}-{r['end']:,} ({r['strand']}), "
+              f"{r['n_exons']} CDS from {r['goi_model_source']}")
+    return sorted(names)
 
 
 def identify_goi_names(home_genes, query_intervals):
@@ -1316,81 +1511,122 @@ def get_anchor_center(genes):
     return (start + end) / 2
 
 
-def _reverse_complement_track(track):
-    """Reflect a track around its anchor (offset) so it reads in the opposite
-    direction: mirror every gene's plotted position, flip its strand/arrow, and
-    mirror its exon model within the gene. Used to align a natively
-    reverse-oriented scaffold to the home reference (see _orient_tracks_to_home).
-    """
-    off = track.get("offset", 0.0)
-    for g in track["genes"]:
+def _is_spliced_model(gene):
+    """True for a gene model with real exon structure: a miniprot model (GOI
+    exon_annotation, flanking_miniprot, rearranged_flanking) or an annotated home
+    transcript. Hit-based calls (fallback_hit_span, flanking_hit_span, tandem_copy,
+    rescued_exon) carry aligned hit segments, not exons, and are drawn thinner."""
+    if gene.get("goi_model_source"):
+        return True
+    return (gene.get("evidence_type") or "").strip().lower() in {
+        "exon_annotation", "flanking_miniprot", "rearranged_flanking"}
+
+
+def _reverse_complement_segment(track, chrom):
+    """Reflect one scaffold's genes in place within that scaffold's plot extent:
+    mirror positions, flip strands, and mirror each exon model within its gene.
+    The genomic strand is kept as `genomic_strand` for labels and tooltips."""
+    genes = [g for g in track["genes"] if g["chrom"] == chrom]
+    if not genes:
+        return
+    lo = min(g["start_plot"] for g in genes)
+    hi = max(g["end_plot"] for g in genes)
+    for g in genes:
         s_plot, e_plot = g["start_plot"], g["end_plot"]
-        g["start_plot"] = 2 * off - e_plot
-        g["end_plot"]   = 2 * off - s_plot
-        g["strand"]     = "-" if g.get("strand", "+") == "+" else "+"
-        # Mirror the exon/intron model within the gene's own native span so the
-        # fine structure (and terminal-exon arrow tip) reads in the new direction.
+        g["start_plot"] = lo + hi - e_plot
+        g["end_plot"] = lo + hi - s_plot
+        g.setdefault("genomic_strand", g.get("strand", "+"))
+        g["strand"] = "-" if g.get("strand", "+") == "+" else "+"
         ex = g.get("exon_coords") or []
         if ex:
             gs, ge = g["start"], g["end"]
             g["exon_coords"] = [(gs + (ge - ee), gs + (ge - es)) for (es, ee) in reversed(ex)]
     for brk in track.get("breaks", []):
-        brk["x"] = 2 * off - brk["x"]
+        if not brk.get("is_chrom_break") and lo < brk["x"] < hi:
+            brk["x"] = lo + hi - brk["x"]
+
+
+def _reverse_complement_track(track):
+    """Reflect every scaffold of a track (see _reverse_complement_segment)."""
+    for chrom in sorted({g["chrom"] for g in track["genes"]}):
+        _reverse_complement_segment(track, chrom)
     track["flipped"] = True
+    track["offset"] = get_anchor_center(track["genes"])
 
 
-def _orient_tracks_to_home(all_tracks, min_anchors=4, min_concordance=0.15):
-    """Reverse-complement (in plot space) any target track whose flanking-anchor
-    order runs opposite to the home reference, so no row appears mirror-imaged.
+def _order_concordance(pairs):
+    """Kendall-style concordance in [-1, 1] of (target_pos, home_pos) pairs."""
+    conc = disc = 0
+    for i in range(len(pairs)):
+        ti, hi = pairs[i]
+        for j in range(i + 1, len(pairs)):
+            dt, dh = ti - pairs[j][0], hi - pairs[j][1]
+            if dt == 0 or dh == 0:
+                continue
+            if (dt > 0) == (dh > 0):
+                conc += 1
+            else:
+                disc += 1
+    tot = conc + disc
+    return (conc - disc) / tot if tot else 0.0
 
-    Orientation is decided from the *flanking* genes only (toxin/GOI copies have
-    mixed strands and are unreliable): for genes shared with home, we measure the
-    rank concordance between each track's plotted order and the home's. Negative
-    concordance ⇒ the scaffold is assembled antiparallel to home ⇒ flip it.
-    Tracks with too few shared anchors or an ambiguous (|concordance| small)
-    signal are left untouched. Returns the number of tracks flipped.
+
+def _orient_tracks_to_home(all_tracks, min_anchors=3, min_opposite=0.7,
+                           max_concordance=0.15):
+    """Flip (in plot space) every target SCAFFOLD that is read the wrong way round
+    relative to home, so no row appears mirror-imaged.
+
+    Each scaffold is decided on its own: a neighbourhood split across scaffolds
+    has one arbitrary assembly orientation per scaffold, and pooling them made the
+    order signal cancel out (DPP4: Acromyrmex/Atta rows with 14/14 flanking genes
+    on the opposite strand stayed unflipped at concordance -0.07). A scaffold
+    read backwards has its flanking genes on the opposite strand AND in reversed
+    order, so it is flipped when >= `min_opposite` of its (>= `min_anchors`)
+    flanking anchors are on the opposite strand and the order does not contradict
+    it (concordance <= `max_concordance`), or when the order is clearly reversed
+    (concordance <= -0.5) with at least half the strands opposite. GOI copies are
+    ignored (mixed strands). Returns the number of scaffolds flipped.
     """
     if not all_tracks:
         return 0
     home = all_tracks[0]
-    home_center = {}
+    home_center, home_strand = {}, {}
     for g in home["genes"]:
         nm = g.get("name")
         if nm and nm not in home_center:
             home_center[nm] = (g["start_plot"] + g["end_plot"]) / 2.0
-
-    def _concordance(pairs):
-        conc = disc = 0
-        for i in range(len(pairs)):
-            ti, hi = pairs[i]
-            for j in range(i + 1, len(pairs)):
-                tj, hj = pairs[j]
-                dt, dh = ti - tj, hi - hj
-                if dt == 0 or dh == 0:
-                    continue
-                if (dt > 0) == (dh > 0):
-                    conc += 1
-                else:
-                    disc += 1
-        tot = conc + disc
-        return (conc - disc) / tot if tot else 0.0
+            home_strand[nm] = g.get("strand")
 
     n_flipped = 0
     for track in all_tracks[1:]:
         if track.get("is_home"):
             continue
-        pairs = []
+        by_chrom = defaultdict(list)
         for g in track["genes"]:
             if _is_goi_target_gene(g) or is_goi(g.get("name")):
-                continue  # flanking only
+                continue
             hid = g.get("home_gene_id", "")
-            if hid in home_center:
-                pairs.append(((g["start_plot"] + g["end_plot"]) / 2.0, home_center[hid]))
-        if len(pairs) < min_anchors:
-            continue
-        if _concordance(pairs) < -min_concordance:
-            _reverse_complement_track(track)
-            n_flipped += 1
+            if hid in home_center and home_strand.get(hid) in ("+", "-") \
+                    and g.get("strand") in ("+", "-"):
+                by_chrom[g["chrom"]].append(g)
+        flipped = []
+        for chrom in sorted(by_chrom):
+            anchors = by_chrom[chrom]
+            if len(anchors) < min_anchors:
+                continue
+            opposite = sum(1 for g in anchors
+                           if g["strand"] != home_strand[g["home_gene_id"]]) / len(anchors)
+            conc = _order_concordance([((g["start_plot"] + g["end_plot"]) / 2.0,
+                                        home_center[g["home_gene_id"]]) for g in anchors])
+            if (opposite >= min_opposite and conc <= max_concordance) or \
+                    (conc <= -0.5 and opposite >= 0.5):
+                _reverse_complement_segment(track, chrom)
+                flipped.append(chrom)
+        if flipped:
+            track["flipped"] = True
+            track["flipped_chroms"] = flipped
+            track["offset"] = get_anchor_center(track["genes"])
+            n_flipped += len(flipped)
     return n_flipped
 
 
@@ -1437,46 +1673,78 @@ def _widen_sparse_plot(all_tracks, target_coverage=0.25, max_factor=4.0):
         # widened ACROSS a break, or it would be drawn over the gap — implying
         # it is ~gap-bp longer than it really is. Clamp each widened gene to the
         # nearest break on either side of its centre (with a small margin so the
-        # gap stays visible).
+        # gap stays visible). When lanes are already assigned, the neighbours in
+        # the same lane bound it the same way, so widening never adds a lane.
         bxs = sorted(b["x"] for b in t.get("breaks", []))
-        for g in t["genes"]:
-            os_, oe_ = g["start_plot"], g["end_plot"]   # original (pre-widen)
+        orig = [(g["start_plot"], g["end_plot"]) for g in t["genes"]]
+        for gi, g in enumerate(t["genes"]):
+            os_, oe_ = orig[gi]   # original (pre-widen)
             c = (os_ + oe_) / 2.0
             half = (oe_ - os_) / 2.0 * factor
             ns, ne = c - half, c + half
             # Keep ≥ half of each adjacent gap, so a widened gene never reaches
             # (let alone crosses) the gap break beside it.
-            left = max((bx for bx in bxs if bx <= os_), default=None)
-            right = min((bx for bx in bxs if bx >= oe_), default=None)
-            if left is not None:
-                ns = max(ns, left + 0.5 * (os_ - left))
-            if right is not None:
-                ne = min(ne, right - 0.5 * (right - oe_))
+            # (bound, share of the gap this gene may take): half the gap up to a
+            # break; a third of it towards a lane neighbour, which widens too.
+            bounds_l = [(bx, 0.5) for bx in bxs if bx <= os_]
+            bounds_r = [(bx, 0.5) for bx in bxs if bx >= oe_]
+            if "_sub_track" in g and not g.get("_lane_overflow"):
+                for gj, other in enumerate(t["genes"]):
+                    if gj == gi or other.get("_sub_track") != g["_sub_track"] \
+                            or other.get("_lane_overflow"):
+                        continue
+                    o0, o1 = orig[gj]
+                    if o1 <= os_:
+                        bounds_l.append((o1, 0.35))
+                    elif o0 >= oe_:
+                        bounds_r.append((o0, 0.35))
+            for bx, share in bounds_l:
+                ns = max(ns, os_ - share * (os_ - bx))
+            for bx, share in bounds_r:
+                ne = min(ne, oe_ + share * (bx - oe_))
             g["start_plot"], g["end_plot"] = ns, ne
     return factor
 
 
-def _assign_sub_tracks(genes, x_off, min_gap=800):
-    """Greedy interval scheduling: writes gene['_sub_track'] in-place.
+MAX_SUB_TRACKS = 3
 
-    Sub-tracks are spent only when genes would visually overlap. No strand
-    awareness — strand stays a property of each gene model, not of a row.
+
+def _assign_sub_tracks(genes, x_off, min_gap=800, max_lanes=MAX_SUB_TRACKS,
+                       is_priority=None):
+    """Lane assignment: writes gene['_sub_track'] (and '_lane_overflow') in-place.
+
+    Lanes are spent only when genes would overlap, and never more than
+    `max_lanes`. Priority genes (the GOI and genes that carry a ribbon) are placed
+    first, by start, into the first free lane; the rest fill free space afterwards.
+    A gene that fits no lane goes to the lane it overlaps least and is flagged
+    `_lane_overflow` (drawn translucent) -- it is never dropped. No strand
+    awareness: strand stays a property of each gene model, not of a row.
     """
-    sorted_genes = sorted(genes, key=lambda g: g["start_plot"] - x_off)
-    sub_ends = []  # rightmost x used by each sub-track so far
-    for gene in sorted_genes:
-        x0 = gene["start_plot"] - x_off
-        x1 = gene["end_plot"]   - x_off
-        placed = False
-        for i, end_x in enumerate(sub_ends):
-            if end_x + min_gap <= x0:
-                gene["_sub_track"] = i
-                sub_ends[i] = x1
-                placed = True
-                break
-        if not placed:
-            gene["_sub_track"] = len(sub_ends)
-            sub_ends.append(x1)
+    for g in genes:
+        g.pop("_lane_overflow", None)
+    lanes = []  # per lane: [(x0, x1), ...]
+
+    def _span(g):
+        return g["start_plot"] - x_off, g["end_plot"] - x_off
+
+    def _conflict(lane, x0, x1):
+        return sum(max(0.0, min(x1 + min_gap, b1) - max(x0 - min_gap, b0))
+                   for b0, b1 in lane)
+
+    ordered = sorted(genes, key=lambda g: (
+        0 if (is_priority and is_priority(g)) else 1, g["start_plot"] - x_off))
+    for gene in ordered:
+        x0, x1 = _span(gene)
+        lane_i = next((i for i, lane in enumerate(lanes)
+                       if _conflict(lane, x0, x1) == 0), None)
+        if lane_i is None and len(lanes) < max(1, max_lanes):
+            lanes.append([])
+            lane_i = len(lanes) - 1
+        if lane_i is None:
+            lane_i = min(range(len(lanes)), key=lambda i: (_conflict(lanes[i], x0, x1), i))
+            gene["_lane_overflow"] = True
+        gene["_sub_track"] = lane_i
+        lanes[lane_i].append((x0, x1))
 
 
 # ======================================================================
@@ -1747,6 +2015,99 @@ def _gene_display_label(gene, track, home_products, goi_f, resolved_goi_f):
     return label or name
 
 
+# A label longer than this is cut with an ellipsis: rotated by 45 degrees it would
+# otherwise need a header band taller than the plot. The tooltip has the full name.
+GOI_LABEL_MAX_CHARS = 34
+# Bottom edge of the subtitle line (baseline at 60) plus a small gap; the top track's
+# labels stay below it.
+_HEADER_TEXT_BOTTOM = 66
+
+
+def _clip_label(text, max_chars=GOI_LABEL_MAX_CHARS):
+    return text if len(text) <= max_chars else text[:max_chars - 1].rstrip() + "…"
+
+
+def _track_label_font_size(track):
+    return max(9, 13 - (len(track["genes"]) // 6))
+
+
+def _track_label_jobs(track, home_products, force_home_labels):
+    """The on-canvas labels of one track as ``[(gene, text, is_goi)]``.
+
+    A divergent or tandem GOI family can put many copies in one track; stacking one
+    rotated label per copy produced an unreadable pile (e.g. five "★ ~ Melt" on top
+    of each other). Only the single best copy is labelled (resolved > ambiguous, then
+    highest identity) and tagged with the copy count "×N"; the other copies stay
+    drawn, with their details in the hover tooltip / click-to-pin layer.
+    """
+    is_home = track["is_home"]
+    goi_genes, flank_force = [], []
+    for gene in track["genes"]:
+        name = gene["name"]
+        home_id = gene.get("home_gene_id", name)
+        goi_f = (_is_goi_target_gene(gene) if not is_home
+                 else (is_goi(name) or is_goi(home_id)))
+        if goi_f:
+            resolved = (_is_resolved_goi_target_gene(gene) if not is_home
+                        else True)
+            goi_genes.append((gene, resolved))
+        elif force_home_labels and is_home:
+            flank_force.append(gene)
+
+    jobs = []
+    if goi_genes:
+        goi_genes.sort(key=lambda gr: (gr[1], gr[0].get("identity", 0.0)),
+                       reverse=True)
+        best_gene, best_resolved = goi_genes[0]
+        label = _clip_label(_gene_display_label(best_gene, track, home_products,
+                                                True, best_resolved))
+        if len(goi_genes) > 1:
+            label = f"{label} ×{len(goi_genes)}"
+        jobs.append((best_gene, "★ " + label, True))
+    for gene in flank_force:
+        jobs.append((gene, _clip_label(_gene_display_label(gene, track, home_products,
+                                                           False, False)), False))
+    return jobs
+
+
+def _rotated_label_rise(text, size, bold):
+    """Height in px that a label drawn at 45 degrees reaches above its anchor point.
+
+    The baseline climbs by the text width, the glyphs stand an ascent (0.72 em) above
+    it. 1.12: the fallback font on machines without the plot's font runs wider than
+    the Arial metrics ``text_width`` uses.
+    """
+    return (text_width(text, size, bold=bold) * 1.12 + 0.72 * size) * 0.7071
+
+
+def _rotated_label_crosses(xa, ya, text, size, bold, box):
+    """True when a label drawn at 45 degrees from (xa, ya) runs through *box*.
+
+    *box* is ``(x0, y0, x1, y1)`` in px. The label is treated as a band one font size
+    thick around its baseline.
+    """
+    x0, y0, x1, y1 = box
+    length = text_width(text, size, bold=bold) * 1.12
+    lo = max(0.0, (x0 - size - xa) / 0.7071, (ya - y1 - size) / 0.7071)
+    hi = min(length, (x1 + size - xa) / 0.7071, (ya - y0 + size) / 0.7071)
+    return lo <= hi
+
+
+def _top_margin_for_labels(track, home_products, force_home_labels, lane_pitch):
+    """Header height the first track needs so its rotated labels clear the subtitle.
+
+    A label starts 4 px above its gene and climbs at 45 degrees. With a fixed header
+    a long home GOI name ("4-coumarate--CoA ligase 1-like") ran through the subtitle
+    and was cut off at the top edge of the figure.
+    """
+    size = _track_label_font_size(track)
+    need = 0.0
+    for gene, text, is_goi_lbl in _track_label_jobs(track, home_products, force_home_labels):
+        rise = _rotated_label_rise(text, size, is_goi_lbl)
+        need = max(need, _HEADER_TEXT_BOTTOM + rise + 4 - gene.get("_sub_track", 0) * lane_pitch)
+    return int(math.ceil(need))
+
+
 def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                         home_products, args,
                         subtitle_bits, hidden_absent_tracks,
@@ -1772,6 +2133,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     # neither the subtitle nor the centred "GOI" guide tag lands on the home
     # panel. The first track starts at TOP_MARGIN.
     TOP_MARGIN    = 104
+    if all_tracks:
+        TOP_MARGIN = max(TOP_MARGIN, _top_margin_for_labels(
+            all_tracks[0], home_products, force_home_labels, GENE_H + SUB_TRACK_GAP))
     BOTTOM_MARGIN = 90  # More room for legend
     TRACK_PAD     = 10
     MIN_GENE_PX   = 4
@@ -2005,11 +2369,23 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             f'x2="{x_guide:.1f}" y2="{y_bot:.1f}" stroke="{GOI_COLOUR}" '
             f'stroke-width="1" stroke-dasharray="4,4" opacity="0.45"/>'
         )
-        svg_parts.append(
-            f'<text class="goi-guide-tag" x="{x_guide:.1f}" y="{y_top - 2:.1f}" '
-            f'text-anchor="middle" font-size="10" font-weight="700" '
-            f'fill="{GOI_BORDER}" opacity="0.8">GOI</text>'
-        )
+        # The tag is dropped when a label of the first track runs through it (a home
+        # GOI with several copies is labelled left of the guide, and its label then
+        # climbs across the tag): the starred label already marks the GOI.
+        tag_box = (x_guide - 11, y_top - 12, x_guide + 11, y_top - 2)
+        top = all_tracks[0]
+        tag_is_covered = any(
+            _rotated_label_crosses(
+                bp2px(sum(_get_coords(gene)) / 2 - top["offset"]), gene_yb(0, gene) - 4,
+                text, _track_label_font_size(top), is_goi_lbl, tag_box)
+            for gene, text, is_goi_lbl in _track_label_jobs(top, home_products,
+                                                            force_home_labels))
+        if not tag_is_covered:
+            svg_parts.append(
+                f'<text class="goi-guide-tag" x="{x_guide:.1f}" y="{y_top - 2:.1f}" '
+                f'text-anchor="middle" font-size="10" font-weight="700" '
+                f'fill="{GOI_BORDER}" opacity="0.8">GOI</text>'
+            )
 
     # ---- Ribbons (drawn first, behind genes) ----
     # ONE ribbon per orthology — not a quadratic fan-out. The GOI matches
@@ -2208,6 +2584,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 gene, track, home_products, goi_like, resolved_goi
             )
             label_attr = _svg_esc(display_label)
+            # Built outside the f-string: a backslash inside an f-string expression
+            # is a SyntaxError before Python 3.12, and environment.yml allows 3.10+.
+            overflow_attr = ' opacity="0.45"' if gene.get("_lane_overflow") else ''
 
             svg_parts.append(
                 f'<g class="gene-group" data-homology="{hom_id_attr}" '
@@ -2215,17 +2594,18 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                 f'data-x0="{x0_attr}" data-x1="{x1_attr}" data-yb="{yb_attr}" '
                 f'data-fill="{colour}" data-identity="{gene.get("identity", 0.0)}" '
                 f'data-label="{label_attr}" '
-                f'data-tooltip=\'{tooltip_json}\'{goi_attr}>'
+                f'data-tooltip=\'{tooltip_json}\'{goi_attr}{overflow_attr}>'
             )
 
             # Render gene body
             exon_coords = gene.get("exon_coords", [])
-            n_exons_attr = gene.get("n_exons", 0)
             has_real_exons = len(exon_coords) >= 2 and w_px > 25
-            has_synth_exons = (not has_real_exons and n_exons_attr
-                               and n_exons_attr >= 2 and w_px > 25)
+            # Never draw exons from the Exons=N count alone: without CDS rows the
+            # positions would be invented (evenly spaced). Such genes are drawn as
+            # one arrow. Hit-based chains are drawn thinner than spliced models.
+            hit_chain = (not track["is_home"]) and not _is_spliced_model(gene)
 
-            if has_real_exons or has_synth_exons:
+            if has_real_exons:
                 # --- Exon/intron model ---
                 mid_y = yb + GENE_H / 2
 
@@ -2236,72 +2616,46 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
                     f'class="intron-line"{dash}/>'
                 )
 
-                if has_real_exons:
-                    gene_s = gene["start"]
-                    gene_e = gene["end"]
-                    gene_span = max(1, gene_e - gene_s)
-                    for ei, (es, ee) in enumerate(exon_coords):
-                        frac_s = max(0, min(1, (es - gene_s) / gene_span))
-                        frac_e = max(0, min(1, (ee - gene_s) / gene_span))
-                        ex0 = x0 + frac_s * w_px
-                        ex1 = x0 + frac_e * w_px
-                        ew = max(2, ex1 - ex0)
+                gene_s = gene["start"]
+                gene_e = gene["end"]
+                gene_span = max(1, gene_e - gene_s)
+                for ei, (es, ee) in enumerate(exon_coords):
+                    frac_s = max(0, min(1, (es - gene_s) / gene_span))
+                    frac_e = max(0, min(1, (ee - gene_s) / gene_span))
+                    ex0 = x0 + frac_s * w_px
+                    ex1 = x0 + frac_e * w_px
+                    ew = max(2, ex1 - ex0)
+                    if hit_chain:
+                        svg_parts.append(
+                            f'<rect x="{ex0:.1f}" y="{yb + GENE_H * 0.2:.1f}" '
+                            f'width="{ew:.1f}" height="{GENE_H * 0.6:.1f}" rx="{EXON_RX}" '
+                            f'fill="{colour}" stroke="{bclr}" stroke-width="{bw}" '
+                            f'class="exon"{dash}/>')
+                        continue
 
-                        # Last/first exon gets arrow tip
-                        is_terminal = ((strand == "+" and ei == len(exon_coords) - 1) or
-                                       (strand == "-" and ei == 0))
-                        if is_terminal and ew > 10:
-                            aw = min(ew * 0.3, GENE_H * 0.5)
-                            if strand == "+":
-                                d = (f"M{ex0:.1f},{yb:.1f} L{ex0 + ew - aw:.1f},{yb:.1f} "
-                                     f"L{ex0 + ew:.1f},{mid_y:.1f} L{ex0 + ew - aw:.1f},{yb + GENE_H:.1f} "
-                                     f"L{ex0:.1f},{yb + GENE_H:.1f} Z")
-                            else:
-                                d = (f"M{ex0:.1f},{mid_y:.1f} L{ex0 + aw:.1f},{yb:.1f} "
-                                     f"L{ex0 + ew:.1f},{yb:.1f} L{ex0 + ew:.1f},{yb + GENE_H:.1f} "
-                                     f"L{ex0 + aw:.1f},{yb + GENE_H:.1f} Z")
-                            svg_parts.append(
-                                f'<path d="{d}" fill="{colour}" stroke="{bclr}" '
-                                f'stroke-width="{bw}" class="exon"{dash}/>'
-                            )
+                    # Last/first exon gets arrow tip
+                    is_terminal = ((strand == "+" and ei == len(exon_coords) - 1) or
+                                   (strand == "-" and ei == 0))
+                    if is_terminal and ew > 10:
+                        aw = min(ew * 0.3, GENE_H * 0.5)
+                        if strand == "+":
+                            d = (f"M{ex0:.1f},{yb:.1f} L{ex0 + ew - aw:.1f},{yb:.1f} "
+                                 f"L{ex0 + ew:.1f},{mid_y:.1f} L{ex0 + ew - aw:.1f},{yb + GENE_H:.1f} "
+                                 f"L{ex0:.1f},{yb + GENE_H:.1f} Z")
                         else:
-                            svg_parts.append(
-                                f'<rect x="{ex0:.1f}" y="{yb:.1f}" width="{ew:.1f}" '
-                                f'height="{GENE_H}" rx="{EXON_RX}" fill="{colour}" '
-                                f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
-                            )
-                else:
-                    # Synthesized evenly-spaced exons
-                    for k in range(n_exons_attr):
-                        frac_s = k / n_exons_attr
-                        frac_e = (k + 0.65) / n_exons_attr
-                        ex0 = x0 + frac_s * w_px
-                        ex1 = x0 + frac_e * w_px
-                        ew = max(2, ex1 - ex0)
-
-                        is_terminal = ((strand == "+" and k == n_exons_attr - 1) or
-                                       (strand == "-" and k == 0))
-                        if is_terminal and ew > 10:
-                            aw = min(ew * 0.3, GENE_H * 0.5)
-                            if strand == "+":
-                                d = (f"M{ex0:.1f},{yb:.1f} L{ex0 + ew - aw:.1f},{yb:.1f} "
-                                     f"L{ex0 + ew:.1f},{mid_y:.1f} L{ex0 + ew - aw:.1f},{yb + GENE_H:.1f} "
-                                     f"L{ex0:.1f},{yb + GENE_H:.1f} Z")
-                            else:
-                                d = (f"M{ex0:.1f},{mid_y:.1f} L{ex0 + aw:.1f},{yb:.1f} "
-                                     f"L{ex0 + ew:.1f},{yb:.1f} L{ex0 + ew:.1f},{yb + GENE_H:.1f} "
-                                     f"L{ex0 + aw:.1f},{yb + GENE_H:.1f} Z")
-                            svg_parts.append(
-                                f'<path d="{d}" fill="{colour}" stroke="{bclr}" '
-                                f'stroke-width="{bw}" class="exon"{dash}/>'
-                            )
-                        else:
-                            svg_parts.append(
-                                f'<rect x="{ex0:.1f}" y="{yb:.1f}" width="{ew:.1f}" '
-                                f'height="{GENE_H}" rx="{EXON_RX}" fill="{colour}" '
-                                f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
-                            )
-
+                            d = (f"M{ex0:.1f},{mid_y:.1f} L{ex0 + aw:.1f},{yb:.1f} "
+                                 f"L{ex0 + ew:.1f},{yb:.1f} L{ex0 + ew:.1f},{yb + GENE_H:.1f} "
+                                 f"L{ex0 + aw:.1f},{yb + GENE_H:.1f} Z")
+                        svg_parts.append(
+                            f'<path d="{d}" fill="{colour}" stroke="{bclr}" '
+                            f'stroke-width="{bw}" class="exon"{dash}/>'
+                        )
+                    else:
+                        svg_parts.append(
+                            f'<rect x="{ex0:.1f}" y="{yb:.1f}" width="{ew:.1f}" '
+                            f'height="{GENE_H}" rx="{EXON_RX}" fill="{colour}" '
+                            f'stroke="{bclr}" stroke-width="{bw}" class="exon"{dash}/>'
+                        )
                 # Direction chevrons on the backbone: the strand stays obvious
                 # even when the terminal exon is too narrow to show an arrow-tip.
                 _chev_clr = "#475569" if str(colour).startswith("url") else _darken_hex(colour, 0.5)
@@ -2350,44 +2704,8 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     svg_parts.append('<g class="gene-labels">')
     for ti, track in enumerate(all_tracks):
         x_off = track["offset"]
-        n_genes = len(track["genes"])
-        fsize = max(9, 13 - (n_genes // 6))
-        is_home = track["is_home"]
-
-        # Separate GOI hits from forced home-flanking labels. A divergent or
-        # tandem GOI family can put many copies in one track; stacking one
-        # rotated label per copy produced an unreadable pile (e.g. five
-        # "★ ~ Melt" on top of each other). Instead label only the single best
-        # copy (resolved > ambiguous, then highest identity) and tag it with
-        # the copy count "×N" — the other copies stay drawn, just unlabelled,
-        # with their details in the hover tooltip / click-to-pin layer.
-        goi_genes, flank_force = [], []
-        for gene in track["genes"]:
-            name = gene["name"]
-            home_id = gene.get("home_gene_id", name)
-            goi_f = (_is_goi_target_gene(gene) if not is_home
-                     else (is_goi(name) or is_goi(home_id)))
-            if goi_f:
-                resolved = (_is_resolved_goi_target_gene(gene) if not is_home
-                            else True)
-                goi_genes.append((gene, resolved))
-            elif force_home_labels and is_home:
-                flank_force.append(gene)
-
-        label_jobs = []  # (gene, label_text, is_goi)
-        if goi_genes:
-            goi_genes.sort(key=lambda gr: (gr[1], gr[0].get("identity", 0.0)),
-                           reverse=True)
-            best_gene, best_resolved = goi_genes[0]
-            label = _gene_display_label(best_gene, track, home_products,
-                                        True, best_resolved)
-            if len(goi_genes) > 1:
-                label = f"{label} ×{len(goi_genes)}"
-            label_jobs.append((best_gene, "★ " + label, True))
-        for gene in flank_force:
-            label_jobs.append(
-                (gene, _gene_display_label(gene, track, home_products, False, False),
-                 False))
+        fsize = _track_label_font_size(track)
+        label_jobs = _track_label_jobs(track, home_products, force_home_labels)
 
         for gene, label, is_goi_lbl in label_jobs:
             g_start, g_end = _get_coords(gene)
@@ -2552,7 +2870,8 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             if track["genes"]:
                 chroms = sorted({g["chrom"] for g in track["genes"]})
                 chr_str = chroms[0] if len(chroms) == 1 else f"{len(chroms)} chr"
-                span_str = f"{acc} • {chr_str}"
+                # The home track is labelled with its scaffold: print it once.
+                span_str = acc if chr_str == acc else f"{acc} • {chr_str}"
 
             svg_parts.append(
                 f'<text x="{TEXT_RIGHT_X}" y="{yb + 14:.1f}" data-track-idx="{ti}" '
@@ -2565,7 +2884,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
             if status == "absent":
                 svg_parts.append(
                     f'<text x="{TEXT_RIGHT_X}" y="{yb + 28:.1f}" data-track-idx="{ti}" '
-                    f'text-anchor="end" class="goi-status absent track-item">✗ GOI not found</text>'
+                    f'text-anchor="end" class="goi-status absent track-item">✗ GOI not placed</text>'
                 )
             elif status == "ambiguous":
                 svg_parts.append(
@@ -3826,11 +4145,37 @@ def _goi_display_label(all_tracks):
     return cand.most_common(1)[0][0] if cand else "GOI"
 
 
-def _grid_target_map(track, anchor_keys, goi_key):
+def _is_local_copy(gene, best, reach_bp):
+    """True when *gene* lies on *best*'s scaffold, no farther from it than *reach_bp*."""
+    if gene is best:
+        return True
+    if gene.get("chrom", "") != best.get("chrom", ""):
+        return False
+    gap = max(gene["start"], best["start"]) - min(gene["end"], best["end"])
+    return gap <= reach_bp
+
+
+def _home_locus_span(anchors):
+    """Length in bp of the home neighbourhood the grid's columns cover."""
+    placed = [a for a in anchors if a.get("end", 0) > 0]
+    if not placed:
+        return 0
+    return max(a["end"] for a in placed) - min(a["start"] for a in placed)
+
+
+def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
     """Map a target track's genes onto anchor columns.
 
-    Returns {anchor_key: {"best": gene, "n": copies}}. The best gene per anchor
-    is the highest-confidence, highest-identity hit; `n` counts tandem copies.
+    Returns {anchor_key: {"best": gene, "n": copies, "genes": all}}. The best gene
+    per anchor is the highest-confidence, highest-identity hit.
+
+    For a flanking column ``n`` counts the copies AT THE LOCUS: the models on the
+    best gene's scaffold that lie no farther from it than the neighbourhood is long
+    (the longer of the home neighbourhood, *locus_span_bp*, and this row's own
+    stretch). A track also carries that gene's paralog hits elsewhere in the genome
+    -- one yeast flanking gene had nine models on six chromosomes -- and counting
+    all of them printed "x9" above a single-copy ortholog. The GOI column keeps
+    every model of the chosen view; its cell draws them.
     """
     buckets = defaultdict(list)
     for g in track.get("genes", []):
@@ -3844,7 +4189,20 @@ def _grid_target_map(track, anchor_keys, goi_key):
     for key, genes in buckets.items():
         genes.sort(key=lambda g: (_confidence_rank(g.get("confidence")),
                                    g.get("identity", 0.0)), reverse=True)
-        out[key] = {"best": genes[0], "n": len(genes)}
+        # `genes` (all copies, genomic order) lets the GOI column enrol every
+        # tandem toxin copy as its own notched arrow instead of collapsing to ×N.
+        out[key] = {"best": genes[0], "n": len(genes),
+                    "genes": sorted(genes, key=lambda g: _get_coords(g)[0])}
+
+    goi_chrom = out[goi_key]["best"].get("chrom", "") if goi_key in out else ""
+    _, lo, hi, _ = _dominant_chrom_span(
+        [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
+         for e in out.values()], goi_chrom)
+    reach = max(float(locus_span_bp or 0), hi - lo)
+    for key, entry in out.items():
+        if key != goi_key:
+            entry["n"] = sum(1 for g in entry["genes"]
+                             if _is_local_copy(g, entry["best"], reach))
     return out
 
 
@@ -4031,6 +4389,267 @@ def _render_grid_tree_panel(rooted_tree, row_species, x0, x1, y_of_row,
     return out
 
 
+# --- notch-style gene glyph (preprint / Koludarov convention) ----------------
+# Each toxin copy = ONE directional gene arrow; internal V-notches on the top &
+# bottom edges mark exon–exon junctions: no notch = single-exon, one notch =
+# two-exon, two notches = three-exon (the preprint's exact convention). Arrow
+# WIDTH follows a schematic length class (not to real scale), with a floor so the
+# notches always have room. Used to enrol every toxin copy at the GOI column.
+def _gene_total_width(gene):
+    """Schematic single-arrow width for one toxin copy, by total CDS length
+    class, floored so (n_exons-1) notches always fit."""
+    ex = gene.get("exon_coords") or []
+    n = len(ex) or int(gene.get("n_exons") or 1)
+    total_nt = (sum(abs(e - s) + 1 for (s, e) in ex) if ex
+                else 150 * max(1, int(gene.get("n_exons") or 1)))
+    if total_nt < 220:
+        base = 18.0      # short
+    elif total_nt < 480:
+        base = 24.0      # normal
+    elif total_nt < 950:
+        base = 30.0      # long
+    else:
+        base = 37.0      # very long
+    return max(base, 16.0 + (n - 1) * 12.0)
+
+
+def _notched_arrow(x0, x1, yb, h, strand, n_exons, fill, stroke,
+                   dash="", notch_bg="#ffffff"):
+    """A gene arrow with (n_exons-1) exon-junction notches cut into the top and
+    bottom edges (background-coloured V's + a hairline divider)."""
+    d = _svg_arrow_path(x0, x1, yb, h, strand)
+    parts = [f'<path d="{d}" fill="{fill}" stroke="{stroke}" '
+             f'stroke-width="1.0"{dash}/>']
+    nn = max(0, int(n_exons or 1) - 1)
+    if nn:
+        w = x1 - x0
+        aw = min(w * 0.35, h * 0.8)  # arrow-head width (matches _svg_arrow_path)
+        if strand == "-":
+            bx0, bx1 = x0 + aw, x1
+        else:
+            bx0, bx1 = x0, x1 - aw
+        if bx1 - bx0 > 3:
+            yt, yb2 = yb, yb + h
+            nd = h * 0.34          # notch depth from each edge
+            nw = max(2.2, h * 0.15)  # notch half-width
+            for k in range(1, nn + 1):
+                nx = bx0 + (bx1 - bx0) * k / (nn + 1)
+                parts.append(f'<path d="M{nx - nw:.1f},{yt:.1f} '
+                             f'L{nx + nw:.1f},{yt:.1f} L{nx:.1f},{yt + nd:.1f} Z" '
+                             f'fill="{notch_bg}"/>')
+                parts.append(f'<path d="M{nx - nw:.1f},{yb2:.1f} '
+                             f'L{nx + nw:.1f},{yb2:.1f} L{nx:.1f},{yb2 - nd:.1f} Z" '
+                             f'fill="{notch_bg}"/>')
+                parts.append(f'<line x1="{nx:.1f}" y1="{yt + nd * 0.7:.1f}" '
+                             f'x2="{nx:.1f}" y2="{yb2 - nd * 0.7:.1f}" '
+                             f'stroke="{stroke}" stroke-width="0.9" opacity="0.85"/>')
+    return "".join(parts)
+
+
+def _goi_copy_fill(ident, conf, is_home):
+    """(fill, dash) for one enrolled toxin copy, GOI-red, keyed by confidence."""
+    conf = (conf or "").upper()
+    if is_home:
+        return _shade_by_identity(GOI_COLOUR, 96), ""
+    if conf == "AMBIGUOUS":
+        # Palest and most broken outline, as in the legend -- it used to fall
+        # through to the HIGH branch and render as a solid confident call.
+        return _lerp_hex(GOI_COLOUR, "#ffffff", 0.72), ' stroke-dasharray="1.5,2.5"'
+    if conf == "LOW":
+        return _lerp_hex(GOI_COLOUR, "#ffffff", 0.55), ' stroke-dasharray="2,2"'
+    if conf == "MEDIUM":
+        return _lerp_hex(GOI_COLOUR, "#ffffff", 0.36), ' stroke-dasharray="3.5,2"'
+    return _shade_by_identity(GOI_COLOUR, max(ident or 0, 55)), ""
+
+
+def _goi_array_width(genes, copy_gap):
+    """Total px width to lay out every toxin copy as a notched gene arrow."""
+    if not genes:
+        return 0.0
+    return sum(_gene_total_width(g) for g in genes) + copy_gap * (len(genes) - 1)
+
+
+# ---- GOI gene models inside the anchor-grid GOI column -----------------------
+# Exons come from the pipeline's final GOI model (the miniprot-derived CDS rows of
+# the target GFF; the annotated transcript's CDS for home). All models in the
+# column share ONE bp->px scale, so exon and gene lengths compare across species.
+#   cds          exons to scale, introns as a fixed caret, genomic orientation
+#   cds_aligned  exons to scale, introns as a fixed caret, drawn 5'->3' left-aligned
+#   genomic      exons AND introns to scale, genomic orientation
+#   notched      legacy schematic arrow with evenly spaced exon notches
+GOI_CELL_STYLES = ("cds", "cds_aligned", "genomic", "notched")
+GOI_MODEL_MAX_W = 150.0    # px of the longest model at the shared scale
+GOI_COL_MAX_W = 460.0      # hard cap on the GOI column; the scale shrinks to fit
+GOI_INTRON_PX = 8.0        # caret width for the exon-scaled styles
+GOI_MIN_EXON_PX = 2.0
+GOI_MODEL_H = 16.0
+GOI_NUM_SIZE = 14.0
+GOI_NUM_GAP = 5.0          # model -> identity number
+GOI_COPY_GAP = 14.0        # number -> next copy
+GOI_FRAG_GAP = 3.0
+
+
+def _goi_model_blocks(gene):
+    """Sorted CDS blocks (GFF 1-based) of a GOI model; the span when it has none."""
+    blocks = sorted(gene.get("exon_coords") or [])
+    return blocks or [(gene["start"], gene["end"])]
+
+
+def _goi_model_extent(gene, style):
+    """Scale-free model length in bp: genomic span for 'genomic', CDS otherwise."""
+    b = _goi_model_blocks(gene)
+    if style == "genomic":
+        return max(1, b[-1][1] - b[0][0] + 1)
+    return max(1, sum(e - s + 1 for s, e in b))
+
+
+def _goi_model_geometry(gene, style, bp_px):
+    """Layout of one model at `bp_px`: (width, exon boxes, intron spans, pointing).
+
+    Boxes and spans are (x0, x1) in px from the model's left edge, in drawing
+    order. `pointing` is the arrow direction of the 3' exon: the strand for the
+    genomic-orientation styles, always '+' for cds_aligned (drawn 5'->3').
+    """
+    b = _goi_model_blocks(gene)
+    strand = gene.get("strand", "+")
+    if style == "genomic":
+        g0 = b[0][0]
+        exons = []
+        for s, e in b:
+            x0, x1 = (s - g0) * bp_px, (e - g0 + 1) * bp_px
+            if x1 - x0 < GOI_MIN_EXON_PX:
+                mid = (x0 + x1) / 2
+                x0, x1 = mid - GOI_MIN_EXON_PX / 2, mid + GOI_MIN_EXON_PX / 2
+            exons.append((x0, x1))
+        shift = -min(0.0, exons[0][0])
+        exons = [(x0 + shift, x1 + shift) for x0, x1 in exons]
+        introns = [(exons[i][1], exons[i + 1][0]) for i in range(len(exons) - 1)]
+        return exons[-1][1], exons, introns, strand
+    lens = [e - s + 1 for s, e in b]
+    if style == "cds_aligned" and strand == "-":
+        lens = lens[::-1]
+    x, exons, introns = 0.0, [], []
+    for i, n_bp in enumerate(lens):
+        if i:
+            introns.append((x, x + GOI_INTRON_PX))
+            x += GOI_INTRON_PX
+        w = max(GOI_MIN_EXON_PX, n_bp * bp_px)
+        exons.append((x, x + w))
+        x += w
+    return x, exons, introns, ("+" if style == "cds_aligned" else strand)
+
+
+def _goi_number_label(gene):
+    """'69', or '56 (44)' when query coverage is below the flag threshold."""
+    ident = gene.get("identity", 0.0) or 0.0
+    if ident < 25:
+        return ""
+    cov = gene.get("query_coverage")
+    if cov is not None and cov < COVERAGE_FLAG_THRESHOLD:
+        return f"{ident:.0f} ({cov * 100:.0f})"
+    return f"{ident:.0f}"
+
+
+GOI_MAX_MODELS_PER_CELL = 3   # more GOI models than this: best one + "×N"
+
+
+def _goi_best(genes):
+    """Representative GOI model: confidence, then identity, then query coverage."""
+    return max(genes, key=lambda g: (_confidence_rank(g.get("confidence")),
+                                     g.get("identity", 0.0) or 0.0,
+                                     g.get("query_coverage") or 0.0,
+                                     -g.get("start", 0)))
+
+
+def _goi_cell_items(genes, max_models=GOI_MAX_MODELS_PER_CELL):
+    """What one GOI cell draws: (models, n_models, fragments, n_fragments).
+
+    Up to `max_models` models are drawn in genomic order; a cell with more
+    (a tandem array, or a family with many chance hits) draws only its best model
+    and reports the total as "×N" -- every copy stays in the synteny plot. Fragments
+    (shown in the '_with_fragments' variant only) collapse the same way.
+    """
+    models = [g for g in genes if not _is_fragment_goi(g)]
+    frags = [g for g in genes if _is_fragment_goi(g)]
+    shown_models = models if len(models) <= max_models else [_goi_best(models)]
+    shown_frags = frags if len(frags) <= max_models else [_goi_best(frags)]
+    return shown_models, len(models), shown_frags, len(frags)
+
+
+def _goi_count_label(n):
+    return f"×{n}"
+
+
+def _goi_row_width(genes, style, bp_px, is_home, max_models=GOI_MAX_MODELS_PER_CELL):
+    """Px width of one row of the GOI column: models + numbers + fragments + counts."""
+    models, n_models, frags, n_frags = _goi_cell_items(genes, max_models)
+    w = 0.0
+    for k, g in enumerate(models):
+        if k:
+            w += GOI_COPY_GAP
+        w += _goi_model_geometry(g, style, bp_px)[0]
+        num = "" if is_home else _goi_number_label(g)
+        if num:
+            w += GOI_NUM_GAP + text_width(num, GOI_NUM_SIZE, bold=True)
+    if n_models > len(models):
+        w += GOI_NUM_GAP + text_width(_goi_count_label(n_models), GOI_NUM_SIZE, bold=True)
+    for g in frags:
+        w += GOI_FRAG_GAP + _goi_model_geometry(g, style, bp_px)[0]
+    if n_frags > len(frags):
+        w += GOI_NUM_GAP + text_width(_goi_count_label(n_frags), GOI_NUM_SIZE * 0.8)
+    return w
+
+
+def _goi_column_scale(gene_lists, style, max_models=GOI_MAX_MODELS_PER_CELL):
+    """Shared bp->px scale and column width for the GOI column.
+
+    The longest model gets GOI_MODEL_MAX_W; when a row of tandem copies would push
+    the column past GOI_COL_MAX_W, the scale shrinks until the widest row fits.
+    """
+    drawn = [_goi_cell_items(gl, max_models) for gl in gene_lists]
+    models = [g for m, _, _, _ in drawn for g in m] or [g for _, _, f, _ in drawn for g in f]
+    if not models:
+        return 0.05, 72.0
+    bp_px = GOI_MODEL_MAX_W / max(_goi_model_extent(g, style) for g in models)
+    for _ in range(12):
+        widest = max(_goi_row_width(gl, style, bp_px, ri == 0, max_models)
+                     for ri, gl in enumerate(gene_lists))
+        if widest + 16 <= GOI_COL_MAX_W:
+            break
+        bp_px *= 0.8
+    return bp_px, max(72.0, min(GOI_COL_MAX_W, widest + 16))
+
+
+def _goi_model_svg(gene, x, ymid, style, bp_px, fill, stroke, dash, is_fragment=False):
+    """SVG for one GOI model with its left edge at x; returns (svg, width)."""
+    width, exons, introns, pointing = _goi_model_geometry(gene, style, bp_px)
+    is_model = _is_spliced_model(gene) and not is_fragment
+    h = GOI_MODEL_H * (1.0 if is_model else 0.62)
+    yb = ymid - h / 2
+    parts = []
+    for x0, x1 in introns:
+        if style == "genomic" or not is_model:
+            parts.append(f'<line x1="{x + x0:.2f}" y1="{ymid:.2f}" x2="{x + x1:.2f}" '
+                         f'y2="{ymid:.2f}" stroke="{stroke}" stroke-width="1"/>')
+        else:
+            parts.append(f'<polyline points="{x + x0:.2f},{ymid:.2f} '
+                         f'{x + (x0 + x1) / 2:.2f},{yb - 4.0:.2f} {x + x1:.2f},{ymid:.2f}" '
+                         f'fill="none" stroke="{stroke}" stroke-width="0.9" '
+                         f'stroke-linejoin="round"/>')
+    tip_i = len(exons) - 1 if pointing == "+" else 0
+    for k, (x0, x1) in enumerate(exons):
+        if k == tip_i and not is_fragment and (x1 - x0) >= 3.0:
+            # The 3' exon carries the arrow tip, so direction reads at any exon count.
+            d = _svg_arrow_path(x + x0, x + x1, yb, h, pointing, rx=1.2)
+            parts.append(f'<path d="{d}" fill="{fill}" stroke="{stroke}" '
+                         f'stroke-width="0.9"{dash}/>')
+        else:
+            parts.append(f'<rect x="{x + x0:.2f}" y="{yb:.2f}" width="{x1 - x0:.2f}" '
+                         f'height="{h:.2f}" rx="1" fill="{fill}" stroke="{stroke}" '
+                         f'stroke-width="0.9"{dash}/>')
+    return "".join(parts), width
+
+
 def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
                        home_products, args, max_cols=50):
     """Render the anchor-grid (aligned-column) figure as self-contained HTML."""
@@ -4072,7 +4691,8 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     anchor_keys = {a["key"] for a in anchors}
 
     # ---- 2. Map every target onto the anchor columns -----------------------
-    target_maps = [_grid_target_map(t, anchor_keys, goi_key) for t in targets]
+    target_maps = [_grid_target_map(t, anchor_keys, goi_key, _home_locus_span(anchors))
+                   for t in targets]
 
     # ---- 3. Focus + cap columns (GOI always kept) --------------------------
     # This is an ortholog-*alignment* view: a home gene recovered in no target
@@ -4104,16 +4724,39 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     # those have to clear the top of the grid or the home row's opaque
     # background paints over them (the hidden-gap-label bug). Keeping the band
     # tall shifts the whole grid down so the gap annotation stays visible.
-    MARGIN_TOP, HEADER_H, AXIS_H = 68, 130, 86
-    ROW_H, ARROW_H = 42, 20
-    COL_W, GOI_COL_W, RIGHT, LEGEND_H = 46, 68, 56, 132
+    MARGIN_TOP, HEADER_H, AXIS_H = 78, 150, 92
+    ROW_H, ARROW_H = 52, 26
+    COL_W, RIGHT, LEGEND_H = 48, 56, 138  # GOI_COL_W computed below (enrolment)
 
-    # labels follow the (reordered) row order: home first, then tree-sorted
-    # targets — so labels[ri] always matches row_tracks[ri].
-    labels = [_svg_esc(re.sub(r"<[^>]+>", "", (t.get("label") or "")).strip())
-              for t in row_tracks]
+    # ---- GOI enrolment: every toxin copy as its own notched gene arrow --------
+    home_goi_genes = sorted(
+        [g for g in home_track.get("genes", [])
+         if is_goi(g.get("name", "") or "") or is_goi(g.get("home_gene_id", "") or "")],
+        key=lambda g: _get_coords(g)[0])
+    NOTCH_COPY_GAP = 10.0
+    _goi_gene_lists = [home_goi_genes] + [
+        (m.get(goi_key) or {}).get("genes", []) for m in target_maps]
+    goi_style = getattr(args, "grid_goi_style", "cds")
+    goi_max_models = max(1, int(getattr(args, "grid_goi_max_models", GOI_MAX_MODELS_PER_CELL)))
+    if goi_style == "notched":
+        goi_bp_px = 0.0
+        _max_goi_w = max([_goi_array_width(gl, NOTCH_COPY_GAP)
+                          for gl in _goi_gene_lists] + [30.0])
+        GOI_COL_W = max(72.0, min(680.0, _max_goi_w + 16))
+    else:
+        goi_bp_px, GOI_COL_W = _goi_column_scale(_goi_gene_lists, goi_style, goi_max_models)
+
+    # Row labels are the species binomial alone, in italics: the accession sits in
+    # the right-hand location column, and the old "Species (Genome_id)" repeated
+    # the name whenever the common-name lookup was offline. The column is sized
+    # from Arial advance widths, so no label can run into the cells.
+    LABEL_SIZE = 18
+    labels_raw = [(t.get("species") or re.sub(r"<[^>]+>", "", t.get("label") or "")).strip()
+                  for t in row_tracks]
+    labels = [_svg_esc(l) for l in labels_raw]
     TREE_W = 144 if (rooted_tree is not None) else 0
-    LABEL_W = max(190, min(360, int(max((len(l) for l in labels), default=12) * 7.0 + 40)))
+    LABEL_W = int(max([text_width(l, LABEL_SIZE, bold=(ri == 0))
+                       for ri, l in enumerate(labels_raw)] + [120]) + 30)
     LEFT = TREE_W + LABEL_W
 
     col_x, col_w, cx = [], [], LEFT
@@ -4139,7 +4782,9 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
             entry = tmap.get(a["key"])
             if not entry:
                 continue
-            gs, ge = _get_coords(entry["best"])
+            # Genomic coordinates: the plot coordinates are gap-compressed and,
+            # for tracks oriented to home, reflected -- not locations to print.
+            gs, ge = entry["best"]["start"], entry["best"]["end"]
             ch = entry["best"].get("chrom", "")
             items.append((ch, (gs + ge) / 2.0))
             if a["is_goi"] and ch:
@@ -4157,7 +4802,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     # caption line, and the legend row so nothing spills outside.
     _caption = ("Columns = home gene order   ·   Rows = species "
                 "(phylogenetic order)   ·   arrow points in coding strand")
-    _legend_row_w = 560  # widest legend row (confidence tiers + GOI + no-ortholog)
+    _legend_row_w = 1000  # widest legend row (GOI model + hit keys)
     content_w = max(grid_w + SPAN_W, len(_caption) * 5.7, _legend_row_w)
     width = LEFT + content_w + RIGHT
     height = grid_y0 + grid_h + LEGEND_H
@@ -4244,7 +4889,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
         fill = GOI_BORDER if a["is_goi"] else "#42495a"
         weight = "700" if a["is_goi"] else "500"
         P.append(f'<text class="acol-lbl {cls}" x="{cc:.1f}" y="{ly:.1f}" '
-                 f'font-size="10.5" fill="{fill}" font-weight="{weight}" '
+                 f'font-size="17" fill="{fill}" font-weight="{weight}" '
                  f'transform="rotate(-55 {cc:.1f} {ly:.1f})">{_svg_esc(a["label"])}</text>')
 
     # ---- 9. Rows: home first, then targets ---------------------------------
@@ -4279,7 +4924,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
             else:
                 num = f"{identity:.0f}"
             avail = (x1 - x0) - 5
-            fsz = max(6.5, min(10.5, avail / (len(num) * 0.60)))
+            fsz = max(10.5, min(16.5, avail / (len(num) * 0.60)))
             inner.append(
                 f'<text x="{(x0+x1)/2:.1f}" y="{yb + ARROW_H/2 + 3.2:.1f}" '
                 f'text-anchor="middle" font-size="{fsz:.1f}" fill="#15181f" '
@@ -4295,7 +4940,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
             # the home genome. White halo keeps it legible over the frame line.
             inner.append(
                 f'<text x="{x1:.1f}" y="{yb - 3:.1f}" text-anchor="end" '
-                f'font-size="8.5" fill="{_darken_hex(base, 0.55)}" font-weight="700" '
+                f'font-size="12" fill="{_darken_hex(base, 0.55)}" font-weight="700" '
                 f'pointer-events="none" '
                 f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.8">'
                 f'×{n_copies}</text>')
@@ -4307,6 +4952,121 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
         P.append(f'<circle cx="{cc:.1f}" cy="{ymid:.1f}" r="4.4" '
              f'fill="none" stroke="#d7dbe3" stroke-width="1" '
              f'stroke-dasharray="2,2"/>')
+
+    def draw_goi_models(i, genes, ri, is_home, row_label):
+        """GOI column cell: each GOI model drawn from its real CDS blocks at the
+        column's shared scale, followed by its identity number; fragment models
+        (shown only in the '_with_fragments' variant) as small unlabelled boxes."""
+        ymid = grid_y0 + ri * ROW_H + ROW_H / 2
+        x = col_x[i] + 8
+        models, n_models, frags, n_frags = _goi_cell_items(genes, goi_max_models)
+        all_models = [g for g in genes if not _is_fragment_goi(g)]
+        breakdown = ", ".join(
+            f"{n} {c}" for c, n in collections.Counter(
+                (g.get("confidence") or "unrated").upper() for g in all_models).most_common())
+        for k, g in enumerate(models + frags):
+            is_frag = k >= len(models)
+            if k and not is_frag:
+                x += GOI_COPY_GAP
+            elif is_frag:
+                x += GOI_FRAG_GAP
+            ident = g.get("identity", 0.0) or 0.0
+            conf = (g.get("confidence") or "").upper()
+            fill, dash = _goi_copy_fill(ident, conf, is_home)
+            blocks = _goi_model_blocks(g)
+            cds_bp = sum(e - s + 1 for s, e in blocks)
+            cov = g.get("query_coverage")
+            title = (f'{"Fragment of " if is_frag else ""}{g.get("name", "GOI")} in {row_label} — '
+                     f'{len(blocks)} exon{"s" if len(blocks) != 1 else ""}, CDS {cds_bp:,} bp, '
+                     f'{g.get("chrom", "")}:{blocks[0][0]:,}-{blocks[-1][1]:,} '
+                     f'({g.get("genomic_strand", g.get("strand", "+"))}'
+                     f'{", scaffold drawn reversed" if "genomic_strand" in g else ""})'
+                     + (f', identity {ident:.0f}%' if ident else '')
+                     + (f', coverage {cov * 100:.0f}%' if cov is not None else '')
+                     + (f', {conf}' if conf else '')
+                     + (f', {g.get("evidence_type")}' if g.get("evidence_type") else '')
+                     + (f' — best of {n_models} GOI models in this neighbourhood '
+                        f'({breakdown}); all are drawn in the synteny plot'
+                        if (not is_frag and n_models > len(models)) else '')
+                     + (f' — one of {n_frags} fragment models'
+                        if (is_frag and n_frags > len(frags)) else ''))
+            svg, w = _goi_model_svg(g, x, ymid, goi_style, goi_bp_px, fill, GOI_BORDER,
+                                    dash, is_fragment=is_frag)
+            cell = ['<title>' + _svg_esc(title) + '</title>', svg]
+            x += w
+            num = "" if (is_home or is_frag) else _goi_number_label(g)
+            if num:
+                x += GOI_NUM_GAP
+                cell.append(f'<text x="{x:.1f}" y="{ymid + GOI_NUM_SIZE * 0.36:.1f}" '
+                            f'font-size="{GOI_NUM_SIZE:.1f}" fill="#15181f" '
+                            f'font-weight="{"700" if conf == "HIGH" else "400"}" '
+                            f'pointer-events="none">{num}</text>')
+                x += text_width(num, GOI_NUM_SIZE, bold=True)
+            is_last_model = (not is_frag) and k == len(models) - 1
+            is_last_frag = is_frag and k == len(models) + len(frags) - 1
+            if (is_last_model and n_models > len(models)) or (is_last_frag and n_frags > len(frags)):
+                cnt = _goi_count_label(n_models if is_last_model else n_frags)
+                size = GOI_NUM_SIZE if is_last_model else GOI_NUM_SIZE * 0.8
+                x += GOI_NUM_GAP
+                cell.append(f'<text x="{x:.1f}" y="{ymid + size * 0.36:.1f}" '
+                            f'font-size="{size:.1f}" fill="{GOI_BORDER if is_last_model else "#6b7280"}" '
+                            f'font-weight="{"700" if is_last_model else "400"}" '
+                            f'pointer-events="none">{cnt}</text>')
+                x += text_width(cnt, size, bold=is_last_model)
+            P.append('<g class="acell">' + "".join(cell) + '</g>')
+
+    def draw_goi_array_grid(i, genes, ri, is_home, row_label, notch_bg):
+        """Enrol every toxin copy at the GOI column as its own notched gene arrow
+        (V-notches = exon junctions), left-aligned in genomic order."""
+        if not genes:
+            return
+        if goi_style != "notched":
+            draw_goi_models(i, genes, ri, is_home, row_label)
+            return
+        yb = grid_y0 + ri * ROW_H + (ROW_H - ARROW_H) / 2
+        x = col_x[i] + 4
+        for g in genes:
+            strand = g.get("strand", "+")
+            n_ex = int(g.get("n_exons") or len(g.get("exon_coords") or []) or 1)
+            ident = g.get("identity", 0.0)
+            conf = g.get("confidence", "")
+            fill, dash = _goi_copy_fill(ident, conf, is_home)
+            w = _gene_total_width(g)
+            x1 = x + w
+            ex_txt = f"{n_ex} exon{'s' if n_ex != 1 else ''}"
+            cov = g.get("query_coverage")
+            cov_txt = f", coverage {cov*100:.0f}%" if cov is not None else ""
+            title = (f'{g.get("name", "toxin")} in {row_label} — {ex_txt}'
+                     + (f', identity {ident:.0f}%' if ident else '')
+                     + cov_txt
+                     + (f', {conf.upper()}' if conf else ''))
+            cell = ['<title>' + _svg_esc(title) + '</title>',
+                    _notched_arrow(x, x1, yb, ARROW_H, strand, n_ex,
+                                   fill, GOI_BORDER, dash, notch_bg)]
+            # The GOI column carries the identity number like every other column.
+            # Each copy is enrolled as its own arrow here rather than going through
+            # draw_arrow, so the label has to be drawn explicitly — without this the
+            # ONE column a reader cares about most is the only one with no number on
+            # it, while the legend still promises "number = % identity" (regression
+            # introduced with the toxin-array rework, 2026-07). Same rule and styling
+            # as draw_arrow; the font floor is lower because a tandem array splits the
+            # column into several narrower arrows.
+            if (not is_home) and ident >= 25:
+                if cov is not None and cov < COVERAGE_FLAG_THRESHOLD:
+                    num = f"{ident:.0f} ({cov*100:.0f})"
+                else:
+                    num = f"{ident:.0f}"
+                avail = (x1 - x) - 4
+                fsz = max(8.5, min(16.5, avail / (len(num) * 0.60)))
+                cell.append(
+                    f'<text x="{(x+x1)/2:.1f}" y="{yb + ARROW_H/2 + 3.2:.1f}" '
+                    f'text-anchor="middle" font-size="{fsz:.1f}" fill="#15181f" '
+                    f'font-weight="{"700" if (conf or "").upper()=="HIGH" else "600"}" '
+                    f'pointer-events="none" '
+                    f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.4">'
+                    f'{num}</text>')
+            P.append('<g class="acell">' + "".join(cell) + '</g>')
+            x = x1 + NOTCH_COPY_GAP
 
     for ri in range(n_rows):
         is_home = ri == 0
@@ -4326,7 +5086,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
         # genomic-location label in the right gutter ("chrom: lo–hi Mb")
         if span_texts[ri]:
             P.append(f'<text x="{grid_x1 + 10:.1f}" y="{row_y + ROW_H / 2 + 3:.1f}" '
-                     f'font-size="9" fill="{GRID_AXIS_TEXT}">'
+                     f'font-size="12" fill="{GRID_AXIS_TEXT}">'
                      f'{_svg_esc(span_texts[ri])}</text>')
         # collinear thread between present columns
         present_cc = [col_center(i) for i, a in enumerate(anchors)
@@ -4343,18 +5103,24 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
             lbl = lbl or "Home"
         ly = row_y + ROW_H / 2 + 4
         P.append(f'<text class="arow-lbl" x="{TREE_W + 8:.1f}" y="{ly:.1f}" '
-                 f'font-size="12" fill="#1a1d26" '
-                 f'font-weight="{"700" if is_home else "600"}">'
+                 f'font-size="{LABEL_SIZE}" fill="#1a1d26" font-style="italic" '
+                 f'font-weight="{"700" if is_home else "400"}">'
                  f'{lbl}</text>')
         # cells
         for i, a in enumerate(anchors):
             if is_home:
+                if a["is_goi"] and home_goi_genes:
+                    draw_goi_array_grid(i, home_goi_genes, ri, True, lbl, row_fill)
+                    continue
                 title = f'{a["label"]} (home reference) — {a["product"] or a["key"]}'
                 draw_arrow(i, ri, a["colour"], a["strand"], 0.0, "", 1, False, True, title)
                 continue
             entry = tmap.get(a["key"]) if tmap else None
             if not entry:
                 draw_absent(i, ri)
+                continue
+            if a["is_goi"] and entry.get("genes"):
+                draw_goi_array_grid(i, entry["genes"], ri, False, lbl, row_fill)
                 continue
             g = entry["best"]
             ident = g.get("identity", 0.0)
@@ -4389,7 +5155,7 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     ly0 = grid_y0 + n_rows * ROW_H + 34
     lx = LEFT
     ARROW_W, SYM_GAP = 26, 9   # SYM_GAP: clear space between a symbol and its label
-    P.append(f'<text x="{lx:.1f}" y="{ly0 - 16:.1f}" font-size="10.5" fill="#8c95a6">'
+    P.append(f'<text x="{lx:.1f}" y="{ly0 - 16:.1f}" font-size="13" fill="#8c95a6">'
              f'{_svg_esc(_caption)}</text>')
     # Row 1 — confidence tiers (HIGH/MEDIUM/LOW arrow styles) + GOI + no-ortholog.
     cur = lx
@@ -4399,6 +5165,11 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     for name, dash, fill in [
         ("HIGH", "", _shade_by_identity(GENE_PALETTE[0], 95)),
         ("MEDIUM", ' stroke-dasharray="3.5,2"', _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.42)),
+        # AMBIGUOUS: the most broken outline in the row, and the palest. It IS drawn --
+        # hiding it would repeat the §1x mistake of a figure making a claim it is not
+        # entitled to — but it must not read as a confident call at a glance.
+        ("AMBIGUOUS", ' stroke-dasharray="1.5,2.5"',
+         _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.78)),
         ("LOW", ' stroke-dasharray="2,2"', _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.6)),
     ]:
         d = _svg_arrow_path(cur, cur + ARROW_W, ly0, 14, "+")
@@ -4418,12 +5189,51 @@ def render_anchor_grid(all_tracks, gene_colours, goi_genome_colours,
     # absent marker
     P.append(f'<circle cx="{cur + 5:.1f}" cy="{ly0 + 5:.1f}" r="4.5" '
              f'fill="none" stroke="#d7dbe3" stroke-dasharray="2,2"/>')
+    # §1x: "no ortholog" was a claim the figure is not entitled to make. An empty cell
+    # means SynVoy did not PLACE an ortholog in this neighbourhood — which also happens
+    # when it found a strong hit and the synteny gate refused it (a translocated gene at
+    # long divergence is indistinguishable from a paralog by gene order). Those refusals
+    # are listed in synvoy_report.json -> rejected_candidates. Absence of a call is not
+    # evidence of absence of the gene, and the legend must not say otherwise.
     P.append(f'<text x="{cur + 9.5 + SYM_GAP:.1f}" y="{ly0 + 9:.1f}" font-size="10" '
-             f'fill="#42495a">no ortholog</text>')
-    # Row 2 — metric note: each cell shows "%identity / %query-coverage"; shade = identity.
-    P.append(f'<text x="{lx:.1f}" y="{ly0 + 33:.1f}" font-size="10" '
+             f'fill="#42495a">not placed here</text>')
+    # Row 2 — how the GOI column draws its gene models.
+    if goi_style != "notched":
+        key_gene = {"start": 1, "end": 1400, "strand": "+",
+                    "exon_coords": [(1, 180), (420, 520), (900, 1400)]}
+        key_bp_px = 46.0 / _goi_model_extent(key_gene, goi_style)
+        key_svg, key_w = _goi_model_svg(key_gene, lx, ly0 + 33, goi_style, key_bp_px,
+                                        _shade_by_identity(GOI_COLOUR, 95), GOI_BORDER, "")
+        P.append(key_svg)
+        key_txt = {
+            "cds": "GOI gene model: exons (CDS) to scale, &#8743; = intron (not to scale), "
+                   "genomic orientation",
+            "cds_aligned": "GOI gene model drawn 5&#8242;&#8594;3&#8242;: exons (CDS) to scale, "
+                           "&#8743; = intron (not to scale)",
+            "genomic": "GOI gene model: exons and introns to scale, genomic orientation",
+        }[goi_style]
+        key_txt += "; one scale for the whole column"
+        P.append(f'<text x="{lx + key_w + SYM_GAP:.1f}" y="{ly0 + 37:.1f}" font-size="10" '
+                 f'fill="#42495a">{key_txt}</text>')
+        hx = lx + key_w + SYM_GAP + text_width(key_txt, 10) + 22
+        hit_gene = {"start": 1, "end": 1400, "strand": "+", "evidence_type": "fallback_hit_span",
+                    "exon_coords": [(1, 300), (900, 1400)]}
+        hit_svg, hit_w = _goi_model_svg(hit_gene, hx, ly0 + 33, goi_style, key_bp_px,
+                                        _lerp_hex(GOI_COLOUR, "#ffffff", 0.36), GOI_BORDER, "")
+        P.append(hit_svg)
+        P.append(f'<text x="{hx + hit_w + SYM_GAP:.1f}" y="{ly0 + 37:.1f}" font-size="10" '
+                 f'fill="#42495a">thin = aligned hit segments, no gene model</text>')
+    # Row 3 — metric note: each cell shows "%identity / %query-coverage"; shade = identity.
+    P.append(f'<text x="{lx:.1f}" y="{ly0 + 57:.1f}" font-size="10" '
              f'fill="#8c95a6">number = % identity &#183; (n) = % coverage when '
-             f'&lt; 80% &#183; shade = % identity</text>')
+             f'&lt; 80% &#183; shade = % identity &#183; &#215;N above an arrow = N copies '
+             f'at this locus &#183; GOI &#215;N = N models in the neighbourhood, best one '
+             f'drawn (all in the synteny plot)</text>')
+    P.append(f'<text x="{lx:.1f}" y="{ly0 + 71:.1f}" font-size="10" '
+             f'fill="#8c95a6">an empty cell means no ortholog was PLACED in this '
+             f'neighbourhood, not that the gene is absent &#183; strong hits refused '
+             f'on synteny are listed in synvoy_report.json &#8594; '
+             f'rejected_candidates</text>')
 
     # ---- 11. Title ---------------------------------------------------------
     title_txt = f"Anchor-grid synteny - GOI: {_svg_esc(goi_label)}"
@@ -4486,7 +5296,8 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
     anchor_colour = {a["key"]: a["colour"] for a in anchors}
     anchor_label = {a["key"]: a["label"] for a in anchors}
     anchor_strand = {a["key"]: a["strand"] for a in anchors}
-    target_maps = [_grid_target_map(t, anchor_keys, goi_key) for t in targets]
+    target_maps = [_grid_target_map(t, anchor_keys, goi_key, _home_locus_span(anchors))
+                   for t in targets]
     home_chrom = next((g.get("chrom", "") for g in home_track.get("genes", [])), "")
 
     # Per-row points: each is (x_real_bp, key, colour, is_goi, ident, conf,
@@ -4507,7 +5318,7 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             g = entry["best"]
             gs, ge = _get_coords(g)
             is_g = (key == goi_key)
-            pts.append({"x": (gs + ge) / 2.0, "key": key,
+            pts.append({"x": (gs + ge) / 2.0, "gx": (g["start"] + g["end"]) / 2.0, "key": key,
                         "colour": GOI_COLOUR if is_g else anchor_colour.get(key, UNMATCHED_CLR),
                         "is_goi": is_g, "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
@@ -4539,7 +5350,7 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             return 0
         goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
         c, lo, hi, n_other = _dominant_chrom_span(
-            [(p["chrom"], p["x"]) for p in pts], goi_ch)
+            [(p["chrom"], p.get("gx", p["x"])) for p in pts], goi_ch)
         return len(_span_gutter_label(c, lo, hi, n_other))
     max_span_len = max((_span_label_len(ri) for ri in range(len(row_tracks))),
                        default=14)
@@ -4614,7 +5425,8 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                  f'y2="{cy:.1f}" stroke="{GRID_BACKBONE}" stroke-width="1.6"/>')
 
         # Coordinate-span label in the right gutter.
-        span_txt = _span_gutter_label(prim, lo, hi, n_other)
+        gxs = [p.get("gx", p["x"]) for p in pts]
+        span_txt = _span_gutter_label(prim, min(gxs), max(gxs), n_other)
         if span_txt:
             P.append(f'<text x="{grid_x1 + 10:.1f}" y="{cy + 3.5:.1f}" font-size="9" '
                      f'fill="{GRID_AXIS_TEXT}">{_svg_esc(span_txt)}</text>')
@@ -4706,9 +5518,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
 
     # Title.
     title_txt = f"Gene-position map - GOI: {_svg_esc(goi_label)}"
-    P.insert(1, f'<text class="grid-title" x="{LEFT:.1f}" y="30" font-size="17" '
+    P.insert(1, f'<text class="grid-title" x="{LEFT:.1f}" y="26" font-size="26" '
                 f'font-weight="700" fill="#1a1d26">{title_txt}</text>')
-    P.insert(2, f'<text class="grid-subtitle" x="{LEFT:.1f}" y="48" font-size="11" '
+    P.insert(2, f'<text class="grid-subtitle" x="{LEFT:.1f}" y="44" font-size="16" '
                 f'fill="{GRID_AXIS_TEXT}">{len(anchors)} home genes x {n_rows} '
                 f'genomes | true genomic positions per row</text>')
 
@@ -4753,7 +5565,8 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
                         "strand": hg.get("strand", "+"),
                         "start": hg.get("start", 0), "end": hg.get("end", 0)})
     anchor_keys = {a["key"] for a in anchors}
-    target_maps = [_grid_target_map(t, anchor_keys, goi_key) for t in targets]
+    target_maps = [_grid_target_map(t, anchor_keys, goi_key, _home_locus_span(anchors))
+                   for t in targets]
 
     # focus + cap columns (GOI always kept) — same policy as the aligned grid
     cov = {a["key"]: sum(1 for m in target_maps if a["key"] in m) for a in anchors}
@@ -4767,6 +5580,21 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     n_rows = len(row_tracks)
     home_chrom = next((g.get("chrom", "") for g in home_track.get("genes", [])), "")
 
+    # ---- GOI enrolment geometry -------------------------------------------
+    # Draw EVERY tandem toxin copy as its own notched arrow (n-1 notches = n
+    # exons, per the preprint) rather than one arrow + "×N". The GOI column is
+    # widened to fit the busiest genome's array; per-copy width is shared across
+    # rows so copies are visually comparable.
+    home_goi_genes = sorted(
+        [g for g in home_track.get("genes", [])
+         if is_goi(g.get("name", "") or "") or is_goi(g.get("home_gene_id", "") or "")],
+        key=lambda g: _get_coords(g)[0])
+    _goi_gene_lists = [home_goi_genes] + [
+        (m.get(goi_key) or {}).get("genes", []) for m in target_maps]
+    GOI_COPY_GAP = 10.0  # clear separation between copies (> the exon-junction gap)
+    _max_goi_w = max([_goi_array_width(gl, GOI_COPY_GAP) for gl in _goi_gene_lists] + [30.0])
+    GOI_COL_W = max(72.0, min(680.0, _max_goi_w + 16))
+
     # ---- per-row present points (col index + true midpoint + the gene) ----
     def _row_points(ri):
         pts = []
@@ -4775,9 +5603,11 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
                 if not a["start"]:
                     continue
                 pts.append({"i": i, "key": a["key"], "mid": (a["start"] + a["end"]) / 2.0,
-                            "ident": 0.0, "conf": "", "strand": a["strand"], "n": 1,
+                            "ident": 0.0, "conf": "", "strand": a["strand"],
+                            "n": (len(home_goi_genes) if a["is_goi"] else 1),
                             "cov": None, "is_goi": a["is_goi"], "label": a["label"],
-                            "chrom": home_chrom})
+                            "chrom": home_chrom,
+                            "genes": (home_goi_genes if a["is_goi"] else [])})
             return pts, home_chrom, 0
         tmap = target_maps[ri - 1]
         for i, a in enumerate(anchors):
@@ -4787,11 +5617,13 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
             g = entry["best"]
             gs, ge = _get_coords(g)
             pts.append({"i": i, "key": a["key"], "mid": (gs + ge) / 2.0,
+                        "gmid": (g["start"] + g["end"]) / 2.0,
                         "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
                         "strand": g.get("strand", "+"), "n": entry["n"],
                         "cov": g.get("query_coverage"), "is_goi": a["is_goi"],
-                        "label": a["label"], "chrom": g.get("chrom", "")})
+                        "label": a["label"], "chrom": g.get("chrom", ""),
+                        "genes": (entry.get("genes", []) if a["is_goi"] else [])})
         # On a fragmented assembly a row can straddle >1 scaffold; keep the
         # dominant (or GOI-bearing) one so the position line + label stay coherent.
         goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
@@ -4809,10 +5641,10 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     GRID_HEADER = "#f5f7fb"; GRID_FRAME = "#d8dee8"
     GRID_ROW_ALT = "#f8f9fc"; GRID_ROW_HOME = "#eef2f7"
     GRID_AXIS_TEXT = "#6b7280"; POS_LINE = "#c2cad6"; LEADER = "#c7cedb"
-    MARGIN_TOP, HEADER_H = 60, 120
-    POS_H, ARROW_LANE, ARROW_H = 26, 34, 18
+    MARGIN_TOP, HEADER_H = 70, 146
+    POS_H, ARROW_LANE, ARROW_H = 32, 50, 26
     ROW_H = POS_H + ARROW_LANE
-    COL_W, GOI_COL_W, RIGHT, LEGEND_H = 46, 66, 60, 120
+    COL_W, RIGHT, LEGEND_H = 46, 60, 120  # GOI_COL_W computed above (enrolment)
 
     labels = [_svg_esc(re.sub(r"<[^>]+>", "", (t.get("label") or "")).strip())
               for t in row_tracks]
@@ -4834,7 +5666,7 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
 
     # per-row span label (chrom: lo-hi Mb) → adaptive right gutter
     def _span_text(ri):
-        mids = [p["mid"] for p in row_pts[ri]]
+        mids = [p.get("gmid", p["mid"]) for p in row_pts[ri]]
         if not mids:
             return ""
         return _span_gutter_label(row_chrom[ri], min(mids), max(mids), row_other[ri])
@@ -4853,8 +5685,8 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     P = []
     P.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>')
     # header backplate behind column labels
-    P.append(f'<rect x="{LEFT - 8:.1f}" y="{MARGIN_TOP - 12:.1f}" '
-             f'width="{grid_w + SPAN_W + 16:.1f}" height="{HEADER_H + 12:.1f}" '
+    P.append(f'<rect x="{LEFT - 8:.1f}" y="{MARGIN_TOP - 4:.1f}" '
+             f'width="{grid_w + SPAN_W + 16:.1f}" height="{HEADER_H + 4:.1f}" '
              f'fill="{GRID_HEADER}" stroke="{GRID_FRAME}" stroke-width="1" rx="8"/>')
 
     # GOI guide band (full height)
@@ -4874,7 +5706,7 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
         cc = col_center(i)
         ly = MARGIN_TOP + HEADER_H - 8
         fill = GOI_BORDER if a["is_goi"] else "#42495a"
-        P.append(f'<text x="{cc:.1f}" y="{ly:.1f}" font-size="10.5" fill="{fill}" '
+        P.append(f'<text x="{cc:.1f}" y="{ly:.1f}" font-size="17" fill="{fill}" '
                  f'font-weight="{"700" if a["is_goi"] else "500"}" '
                  f'transform="rotate(-55 {cc:.1f} {ly:.1f})">{_svg_esc(a["label"])}</text>')
 
@@ -4896,16 +5728,66 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
             num = (f"{identity:.0f} ({cov*100:.0f})" if (cov is not None and cov < COVERAGE_FLAG_THRESHOLD)
                    else f"{identity:.0f}")
             avail = (x1 - x0) - 5
-            fsz = max(6.5, min(10.0, avail / (len(num) * 0.60)))
+            fsz = max(11.0, min(16.5, avail / (len(num) * 0.60)))
             inner.append(f'<text x="{(x0+x1)/2:.1f}" y="{yb + ARROW_H/2 + 3.0:.1f}" '
                          f'text-anchor="middle" font-size="{fsz:.1f}" fill="#15181f" '
                          f'font-weight="{"700" if conf=="HIGH" else "600"}" pointer-events="none" '
                          f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.4">{num}</text>')
         if n_copies > 1:
-            inner.append(f'<text x="{x1:.1f}" y="{yb - 2:.1f}" text-anchor="end" font-size="8.5" '
+            inner.append(f'<text x="{x1:.1f}" y="{yb - 2:.1f}" text-anchor="end" font-size="13" '
                          f'fill="{_darken_hex(base, 0.55)}" font-weight="700" pointer-events="none" '
                          f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.8">×{n_copies}</text>')
         P.append('<g class="acell">' + "".join(inner) + '</g>')
+
+    def draw_goi_array(i, genes, yb, is_home, row_label, notch_bg):
+        """Enrol every toxin copy at the GOI column as its own notched gene arrow
+        (V-notches = exon junctions), left-aligned in genomic order so each
+        copy's exon count reads directly."""
+        if not genes:
+            return
+        x = col_x[i] + 4
+        for g in genes:
+            strand = g.get("strand", "+")
+            n_ex = int(g.get("n_exons") or len(g.get("exon_coords") or []) or 1)
+            ident = g.get("identity", 0.0)
+            conf = g.get("confidence", "")
+            fill, dash = _goi_copy_fill(ident, conf, is_home)
+            w = _gene_total_width(g)
+            x1 = x + w
+            ex_txt = f"{n_ex} exon{'s' if n_ex != 1 else ''}"
+            cov = g.get("query_coverage")
+            cov_txt = f", coverage {cov*100:.0f}%" if cov is not None else ""
+            title = (f'{g.get("name", "toxin")} in {row_label} — {ex_txt}'
+                     + (f', identity {ident:.0f}%' if ident else '')
+                     + cov_txt
+                     + (f', {conf.upper()}' if conf else ''))
+            cell = ['<title>' + _svg_esc(title) + '</title>',
+                    _notched_arrow(x, x1, yb, ARROW_H, strand, n_ex,
+                                   fill, GOI_BORDER, dash, notch_bg)]
+            # The GOI column carries the identity number like every other column.
+            # Each copy is enrolled as its own arrow here rather than going through
+            # draw_arrow, so the label has to be drawn explicitly — without this the
+            # ONE column a reader cares about most is the only one with no number on
+            # it, while the legend still promises "number = % identity" (regression
+            # introduced with the toxin-array rework, 2026-07). Same rule and styling
+            # as draw_arrow; the font floor is lower because a tandem array splits the
+            # column into several narrower arrows.
+            if (not is_home) and ident >= 25:
+                if cov is not None and cov < COVERAGE_FLAG_THRESHOLD:
+                    num = f"{ident:.0f} ({cov*100:.0f})"
+                else:
+                    num = f"{ident:.0f}"
+                avail = (x1 - x) - 4
+                fsz = max(8.5, min(16.5, avail / (len(num) * 0.60)))
+                cell.append(
+                    f'<text x="{(x+x1)/2:.1f}" y="{yb + ARROW_H/2 + 3.2:.1f}" '
+                    f'text-anchor="middle" font-size="{fsz:.1f}" fill="#15181f" '
+                    f'font-weight="{"700" if (conf or "").upper()=="HIGH" else "600"}" '
+                    f'pointer-events="none" '
+                    f'style="paint-order:stroke;stroke:#ffffff;stroke-width:1.4">'
+                    f'{num}</text>')
+            P.append('<g class="acell">' + "".join(cell) + '</g>')
+            x = x1 + GOI_COPY_GAP
 
     # ---- rows ----
     for ri in range(n_rows):
@@ -4921,11 +5803,21 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
 
         pts = row_pts[ri]
         # --- position lane: line + dots at TRUE positions + slanted leaders ---
+        # EVERY toxin copy gets its own true-position dot (not just the best),
+        # so a tandem array shows all its copies dropping to the GOI column.
+        def _goi_mid(g):
+            gs, ge = _get_coords(g)
+            return (gs + ge) / 2.0
         if len(pts) >= 1:
             present_i = [p["i"] for p in pts]
             x_lo, x_hi = col_center(min(present_i)), col_center(max(present_i))
-            mids = [p["mid"] for p in pts]
-            lo, hi = min(mids), max(mids)
+            all_mids = []
+            for p in pts:
+                if p["is_goi"] and p.get("genes"):
+                    all_mids += [_goi_mid(g) for g in p["genes"]]
+                else:
+                    all_mids.append(p["mid"])
+            lo, hi = min(all_mids), max(all_mids)
             def _posx(mid):
                 if hi <= lo or x_hi <= x_lo:
                     return (x_lo + x_hi) / 2.0
@@ -4933,26 +5825,44 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
             if len(pts) >= 2:
                 P.append(f'<line x1="{x_lo:.1f}" y1="{pos_line_y:.1f}" x2="{x_hi:.1f}" '
                          f'y2="{pos_line_y:.1f}" stroke="{POS_LINE}" stroke-width="1"/>')
+            # leaders
             for p in pts:
-                px = _posx(p["mid"]); cc = col_center(p["i"])
+                cc = col_center(p["i"])
+                mids_p = ([_goi_mid(g) for g in p["genes"]]
+                          if (p["is_goi"] and p.get("genes")) else [p["mid"]])
                 lcol = GOI_COLOUR if p["is_goi"] else LEADER
-                P.append(f'<path d="M{px:.1f},{pos_line_y + 2:.1f} L{cc:.1f},{arrow_top - 1:.1f}" '
-                         f'stroke="{lcol}" stroke-width="{1.1 if p["is_goi"] else 0.6:.1f}" '
-                         f'fill="none" opacity="{0.85 if p["is_goi"] else 0.55}"/>')
+                for m in mids_p:
+                    px = _posx(m)
+                    P.append(f'<path d="M{px:.1f},{pos_line_y + 2:.1f} '
+                             f'L{cc:.1f},{arrow_top - 1:.1f}" stroke="{lcol}" '
+                             f'stroke-width="{1.0 if p["is_goi"] else 0.6:.1f}" '
+                             f'fill="none" opacity="{0.75 if p["is_goi"] else 0.55}"/>')
+            # dots (anchors first, GOI copies on top)
             for p in sorted(pts, key=lambda q: q["is_goi"]):
-                px = _posx(p["mid"])
-                base = GOI_COLOUR if p["is_goi"] else anchors[p["i"]]["colour"]
                 if p["is_goi"]:
-                    P.append(f'<circle cx="{px:.1f}" cy="{pos_line_y:.1f}" r="3.4" '
-                             f'fill="{base}" stroke="{GOI_BORDER}" stroke-width="0.9"/>')
+                    mids_p = ([_goi_mid(g) for g in p["genes"]]
+                              if p.get("genes") else [p["mid"]])
+                    for m in mids_p:
+                        px = _posx(m)
+                        P.append(f'<circle cx="{px:.1f}" cy="{pos_line_y:.1f}" r="3.0" '
+                                 f'fill="{GOI_COLOUR}" stroke="{GOI_BORDER}" '
+                                 f'stroke-width="0.8"/>')
                 else:
+                    base = anchors[p["i"]]["colour"]
+                    px = _posx(p["mid"])
                     P.append(f'<circle cx="{px:.1f}" cy="{pos_line_y:.1f}" r="2.4" '
-                             f'fill="{base}" stroke="{_darken_hex(base, 0.6)}" stroke-width="0.6"/>')
+                             f'fill="{base}" stroke="{_darken_hex(base, 0.6)}" '
+                             f'stroke-width="0.6"/>')
 
         # --- arrow lane ---
         for p in pts:
             a = anchors[p["i"]]
-            if is_home:
+            # GOI column: enrol every tandem toxin copy as its own notched arrow
+            # (exon count via notches), instead of one arrow + "×N".
+            if p["is_goi"] and p.get("genes"):
+                draw_goi_array(p["i"], p["genes"], arrow_yb, is_home,
+                               labels[ri] or "home", row_fill)
+            elif is_home:
                 title = f'{a["label"]} (home reference)'
                 draw_arrow(p["i"], a["colour"], a["strand"], 0.0, "", 1, True, arrow_yb, title)
             else:
@@ -4965,12 +5875,12 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
 
         # row label
         ly = row_y + ROW_H / 2 + 4
-        P.append(f'<text x="{TREE_W + 8:.1f}" y="{ly:.1f}" font-size="12" '
+        P.append(f'<text x="{TREE_W + 8:.1f}" y="{ly:.1f}" font-size="18" '
                  f'fill="#1a1d26" font-weight="{"700" if is_home else "600"}">'
                  f'{labels[ri] or "Home"}</text>')
         # span label
         if span_texts[ri]:
-            P.append(f'<text x="{grid_x1 + 10:.1f}" y="{pos_line_y + 3:.1f}" font-size="9" '
+            P.append(f'<text x="{grid_x1 + 10:.1f}" y="{pos_line_y + 3:.1f}" font-size="13" '
                      f'fill="{GRID_AXIS_TEXT}">{_svg_esc(span_texts[ri])}</text>')
 
     # ---- tree panel ----
@@ -4981,7 +5891,7 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
             rooted_tree, row_species, 12, TREE_W - 6,
             lambda ri: grid_y0 + ri * ROW_H + ROW_H / 2))
         P.append(f'<text x="{TREE_W / 2:.1f}" y="{grid_y0 - 9:.1f}" text-anchor="middle" '
-                 f'font-size="9.5" fill="{GRID_AXIS_TEXT}" font-style="italic">{_tree_label}</text>')
+                 f'font-size="14" fill="{GRID_AXIS_TEXT}" font-style="italic">{_tree_label}</text>')
 
     # ---- frame ----
     P.append(f'<rect x="{LEFT:.1f}" y="{grid_y0:.1f}" width="{grid_w:.1f}" height="{grid_h:.1f}" '
@@ -4991,7 +5901,7 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     ly0 = grid_y0 + grid_h + 34
     lx = LEFT
     ARROW_W, SYM_GAP = 26, 9
-    P.append(f'<text x="{lx:.1f}" y="{ly0 - 16:.1f}" font-size="10.5" fill="#8c95a6">'
+    P.append(f'<text x="{lx:.1f}" y="{ly0 - 16:.1f}" font-size="13" fill="#8c95a6">'
              f'{_svg_esc(_caption)}</text>')
     cur = lx
     P.append(f'<text x="{cur:.1f}" y="{ly0 + 11:.1f}" font-size="10" font-weight="700" '
@@ -5000,6 +5910,11 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     for name, dash, fill in [
         ("HIGH", "", _shade_by_identity(GENE_PALETTE[0], 95)),
         ("MEDIUM", ' stroke-dasharray="3.5,2"', _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.42)),
+        # AMBIGUOUS: the most broken outline in the row, and the palest. It IS drawn --
+        # hiding it would repeat the §1x mistake of a figure making a claim it is not
+        # entitled to — but it must not read as a confident call at a glance.
+        ("AMBIGUOUS", ' stroke-dasharray="1.5,2.5"',
+         _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.78)),
         ("LOW", ' stroke-dasharray="2,2"', _lerp_hex(GENE_PALETTE[0], "#ffffff", 0.6)),
     ]:
         d = _svg_arrow_path(cur, cur + ARROW_W, ly0, 14, "+")
@@ -5018,15 +5933,17 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
     P.append(f'<circle cx="{cur + 4:.1f}" cy="{ly0 + 5:.1f}" r="2.6" fill="{GENE_PALETTE[0]}"/>')
     P.append(f'<text x="{cur + 4 + 2.6 + SYM_GAP:.1f}" y="{ly0 + 9:.1f}" font-size="10" '
              f'fill="#42495a">true position (dot) → aligned column</text>')
-    P.append(f'<text x="{lx:.1f}" y="{ly0 + 33:.1f}" font-size="10" fill="#8c95a6">'
+    P.append(f'<text x="{lx:.1f}" y="{ly0 + 33:.1f}" font-size="12.5" fill="#8c95a6">'
              f'number = % identity &#183; (n) = % coverage when &lt; 80% &#183; '
-             f'shade = % identity &#183; per-row dots normalised to that genome</text>')
+             f'shade = % identity &#183; per-row dots normalised to that genome &#183; '
+             f'each GOI copy = one toxin gene; edge notches mark exon junctions '
+             f'(0 = single-exon, 1 = two-exon, 2 = three-exon); arrowhead = coding strand</text>')
 
     # ---- title ----
     title_txt = f"Anchor positions - GOI: {_svg_esc(goi_label)}"
-    P.insert(1, f'<text class="grid-title" x="{LEFT:.1f}" y="30" font-size="17" '
+    P.insert(1, f'<text class="grid-title" x="{LEFT:.1f}" y="26" font-size="26" '
                 f'font-weight="700" fill="#1a1d26">{title_txt}</text>')
-    P.insert(2, f'<text class="grid-subtitle" x="{LEFT:.1f}" y="48" font-size="11" '
+    P.insert(2, f'<text class="grid-subtitle" x="{LEFT:.1f}" y="44" font-size="16" '
                 f'fill="{GRID_AXIS_TEXT}">{n_cols} anchor genes x {n_rows} genomes | '
                 f'aligned columns + true positions per row</text>')
 
@@ -5059,18 +5976,7 @@ body {
     box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.06);
     display: block;
 }
-.grid-svg text {
-    font-family: "IBM Plex Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
-    letter-spacing: 0.1px;
-}
-.grid-title {
-    font-family: "Source Serif 4", "Georgia", "Times New Roman", serif;
-    letter-spacing: 0.2px;
-}
-.grid-subtitle {
-    font-family: "IBM Plex Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
-    letter-spacing: 0.1px;
-}
+.grid-svg text { font-family: Arial, Helvetica, "Liberation Sans", sans-serif; }
 .acell { transition: opacity 0.15s ease; }
 .acell:hover { opacity: 0.65; }
 .acol-lbl { font-family: inherit; letter-spacing: 0.15px; }
@@ -5107,6 +6013,11 @@ def main():
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
+    ap.add_argument("--species_tree_newick", default=None,
+                    help="Newick file with a curated SPECIES tree (leaves = species "
+                         "names). When given, it overrides the NCBI-taxonomy build for "
+                         "the grid cladograms + row order — deterministic and offline. "
+                         "Opt-in; default None keeps the taxonomy-network behaviour.")
     ap.add_argument("--sorted_genomes", default=None)
     ap.add_argument("--species_map",    default=None,
                     help="TSV mapping accession → species name")
@@ -5132,11 +6043,16 @@ def main():
                          "genes and left at 1x for flanking regions (piecewise-linear 'broken' axis). "
                          "Spreads tandem toxin arrays apart so they stop overlapping while keeping "
                          "flanking spacing compact (1.0=off; ~8-12 for dense arrays).")
-    ap.add_argument("--orient_to_home", action="store_true",
+    ap.add_argument("--orient_to_home", dest="orient_to_home", action="store_true",
                     help="Reverse-complement (in plot space) any target track whose flanking-anchor "
                          "order runs opposite to the home reference, so every track reads in the same "
                          "left-to-right orientation (no mirror-imaged 'flipped' rows). Reflects gene "
-                         "positions, flips strands/arrows, and mirrors the exon model per gene.")
+                         "positions, flips strands/arrows, and mirrors the exon model per gene. "
+                         "On by default: a scaffold's assembly orientation is arbitrary, so only "
+                         "strand relative to the oriented neighbourhood means an inversion.")
+    ap.add_argument("--no_orient_to_home", dest="orient_to_home", action="store_false",
+                    help="Keep every target track in its native assembly orientation.")
+    ap.set_defaults(orient_to_home=True)
     ap.add_argument("--max_legend_entries", type=int, default=25, help="Maximum number of flanking genes to show in legend")
     ap.add_argument("--ribbon_alpha_dense", type=float, default=0.20, help="Alpha for flanking ribbons")
     ap.add_argument("--hide_goi_absent", action="store_true",
@@ -5149,6 +6065,17 @@ def main():
                          "default an additional '*_anchor_grid.html'/'.svg' is "
                          "written alongside the ribbon plot and matrix.")
     ap.set_defaults(anchor_grid=True)
+    ap.add_argument("--grid_goi_style", choices=GOI_CELL_STYLES, default="cds",
+                    help="GOI column of the anchor grid: 'cds' (exons to scale, introns as "
+                         "fixed carets), 'cds_aligned' (same, drawn 5'->3'), 'genomic' (exons "
+                         "and introns to scale) or 'notched' (legacy schematic arrow).")
+    ap.add_argument("--grid_goi_max_models", type=int, default=GOI_MAX_MODELS_PER_CELL,
+                    help="Anchor grid: a GOI cell with more models than this draws only its "
+                         "best model and the total as '×N' (all copies stay in the synteny plot).")
+    ap.add_argument("--no_fragment_variant", dest="fragment_variant", action="store_false",
+                    help="Do not write the '*_with_fragments' ribbon plot / anchor grid "
+                         "that also draw ModelStatus=fragment GOI models (hidden by default).")
+    ap.set_defaults(fragment_variant=True)
     # Legacy flags from the previous narrow-layout publication renderer.
     # Accepted but ignored so existing Nextflow invocations keep working.
     ap.add_argument("--pub_width", type=int, default=183, help=argparse.SUPPRESS)
@@ -5188,6 +6115,37 @@ def main():
             print(f"[plot] Common-name lookup unavailable: {exc}", file=sys.stderr)
             globals()["_synvoy_taxa"] = None
     globals()["_common_name_mode"] = args.common_names
+
+    _run_figures(args)
+    # Fragment GOI models are hidden in the default figures; when any were hidden,
+    # a '*_with_fragments' sibling of the ribbon plot and anchor grid shows them.
+    if _HIDDEN_FRAGMENT_COUNT[0] and args.fragment_variant:
+        print(f"[plot] Rendering '_with_fragments' variant "
+              f"({_HIDDEN_FRAGMENT_COUNT[0]} fragment GOI model(s))")
+        _run_figures(args, show_fragments=True, suffix="_with_fragments")
+
+
+def _variant_path(path, suffix):
+    """'x_anchor_grid.svg' + '_with_fragments' -> 'x_anchor_grid_with_fragments.svg'."""
+    if not suffix:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}{suffix}{ext}"
+
+
+def _run_figures(args, show_fragments=False, suffix=""):
+    """Build the tracks and write every figure for one fragment-display variant.
+
+    The '_with_fragments' variant (suffix set) writes only the ribbon plot and
+    the anchor grid; the tree and position figures do not depend on fragments.
+    """
+    global _SHOW_GOI_FRAGMENTS
+    _SHOW_GOI_FRAGMENTS = show_fragments
+    _HIDDEN_FRAGMENT_COUNT[0] = 0
+    is_variant = bool(suffix)
+
+    def _vp(path):
+        return _variant_path(path, suffix)
 
     # -- 0. Load species mapping -----------------------------------------
     species_map = {}  # accession -> species name
@@ -5230,18 +6188,25 @@ def main():
     # legacy plot from drawing the GOI on the home row at all (severe bug).
     # Synthesize one from query_bed + home_gff before downstream track
     # construction sees `home_genes`.
-    _synthesize_home_goi_gene(home_genes, query_intervals, args.home_gff)
+    # Prefer the annotated gene model(s) under the query hits; synthesize from
+    # the hit span only when the home GFF has no CDS there.
+    resolved_goi = _resolve_home_goi_models(home_genes, query_intervals, args.home_gff)
+    if not resolved_goi:
+        _synthesize_home_goi_gene(home_genes, query_intervals, args.home_gff)
 
     # Identify GOI gene names dynamically from query_bed overlap
     identify_goi_names(home_genes, query_intervals)
+    _GOI_NAMES.update(resolved_goi)
 
     home_products = parse_home_gff_products(args.home_gff) if args.home_gff else {}
 
-    # Parse exon boundaries for home genes from the home GFF
+    # Parse exon boundaries for home genes from the home GFF. A resolved GOI
+    # model already carries the CDS of one transcript; the parser would replace
+    # it with the union over all isoforms.
     home_gene_names = {g["name"] for g in home_genes}
     home_exons = parse_home_gff_exons(args.home_gff, home_gene_names) if args.home_gff else {}
     for g in home_genes:
-        if g["name"] in home_exons:
+        if g["name"] in home_exons and not g.get("goi_model_source"):
             g["exon_coords"] = home_exons[g["name"]]
 
     homology_map  = parse_homology_tsvs(args.homology_tsvs)
@@ -5253,8 +6218,41 @@ def main():
     # spp. split, ants among bees). Build a proper species tree once, from the
     # run's species list, and let every cladogram/row-order use it; fall back to
     # the gene tree only when taxonomy is unavailable.
+    class _CuratedTreeSet(Exception):
+        """Signal: a curated species tree is already set; skip the taxonomy build."""
     args._species_tree_newick = None
+    # A curated species-tree newick (offline, deterministic) takes precedence over
+    # the NCBI-taxonomy build below. Opt-in via --species_tree_newick; when it
+    # yields a usable topology we skip the network path entirely.
+    if getattr(args, "species_tree_newick", None) and os.path.exists(args.species_tree_newick):
+        try:
+            import synvoy_tree as _stree
+            _curated = open(args.species_tree_newick).read()
+            # The grid/row matching keys on each track's genome_id, which is the
+            # assembly accession (e.g. GCF_003672135.1), NOT the species name. The
+            # curated newick is written with human-readable species-name leaves, so
+            # relabel each leaf species -> accession via species_map before use;
+            # then leaf name == genome_id and _grid_order_targets / the tree panel
+            # align exactly. Leaves with no accession (e.g. the home species, which
+            # is excluded from the targets) keep their name and simply carry no row.
+            _sp2acc = {v: k for k, v in species_map.items()}
+            for _sp in sorted(_sp2acc, key=len, reverse=True):
+                _curated = _curated.replace(f"{_sp}:", f"{_sp2acc[_sp]}:")
+            _ct = _stree.parse_newick_tree(_curated)
+            _order = [lf.name for lf in _ct.leaves()] if _ct is not None else []
+            if _ct is not None and _order:
+                args._species_tree_newick = _curated
+                tree_target_order = _order
+                _n_acc = sum(1 for o in _order if o in species_map)
+                print(f"[plot] curated species tree loaded from "
+                      f"{args.species_tree_newick} ({len(_order)} leaves, "
+                      f"{_n_acc} matched to accessions) — skipping NCBI-taxonomy build")
+        except Exception as exc:
+            print(f"[plot] curated species tree unusable ({exc}); "
+                  f"falling back to taxonomy build", file=sys.stderr)
     try:
+        if args._species_tree_newick:
+            raise _CuratedTreeSet  # curated tree already set; skip taxonomy build
         import synvoy_tree as _stree
         sp_list = []
         _hs = (getattr(args, "home_species", "") or "").strip()
@@ -5276,6 +6274,8 @@ def main():
                 tree_target_order = order
         else:
             print("[plot] taxonomy species tree unavailable — falling back to the GOI gene tree")
+    except _CuratedTreeSet:
+        pass  # curated species tree already in place; nothing to do
     except Exception as exc:
         print(f"[plot] species-tree build failed ({exc}); using GOI gene tree", file=sys.stderr)
 
@@ -5291,7 +6291,8 @@ def main():
     for gff_file in args.target_gffs:
         genome_id = clean_genome_name(
             os.path.basename(gff_file).replace(".gff", ""))
-        genes_all = parse_target_gff(gff_file)
+        genes_all, capped_goi = _cap_goi_genes(parse_target_gff(gff_file, cap=False),
+                                               _MAX_GOI_PER_GENOME)
         candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
         genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
 
@@ -5352,7 +6353,9 @@ def main():
 
                 if goi_bids:
                     # Pick richest block that contains a GOI
-                    best_block = max(goi_bids, key=lambda bid: block_counter.get(bid, 0))
+                    # sorted(): a tie in max() over a set of strings resolves by hash order
+                    best_block = max(sorted(goi_bids, key=int),
+                                     key=lambda bid: block_counter.get(bid, 0))
                 else:
                     best_block = block_counter.most_common(1)[0][0]
 
@@ -5423,13 +6426,23 @@ def main():
                     )
                 genes = filtered
 
+        # The cap steered the neighbourhood choice only: every GOI model inside the
+        # chosen view is drawn (tandem arrays), and counted in the anchor grid.
+        restored = _restore_goi_in_view(genes, capped_goi)
+        if restored:
+            genes = genes + restored
+            print(f"[plot] {genome_id}: restored {len(restored)} capped GOI model(s) "
+                  f"inside the displayed neighbourhood")
+
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
         # Use species name from mapping if available, format: "Species name (accession)"
         display = genome_id
+        species = re.sub(r"\.(fa|fna|fasta)$", "", genome_id).replace("_", " ")
         for acc, sp_name in species_map.items():
             if acc in genome_id:
                 display = f"{sp_name} ({genome_id})"
+                species = sp_name.replace("_", " ")
                 break
         gene_chroms = sorted({g["chrom"] for g in genes}) if genes else []
         if len(gene_chroms) == 1:
@@ -5442,6 +6455,7 @@ def main():
         target_tracks.append({
             "genome_id":    genome_id,
             "display_name": display,
+            "species":      species,
             "genes":        genes,
             "chrom":        target_chrom,
         })
@@ -5480,7 +6494,10 @@ def main():
     home_chrom = home_genes[0]["chrom"]
     # Label the home track with the real species name when known, falling back
     # to the generic "Home genome" only when it's unset/unknown.
-    _hs = (getattr(args, "home_species", "") or "").strip().replace("_", " ")
+    # Without a strain qualifier: UniProt's "Saccharomyces cerevisiae (strain ATCC
+    # 204508 / S288c)" is not a row label.
+    _hs = strip_species_qualifier(
+        (getattr(args, "home_species", "") or "").strip().replace("_", " "))
     if _hs and _hs.lower() not in ("home", "unknown", ""):
         home_label = f"{_format_species_label(_hs)} ({home_chrom})"
     else:
@@ -5488,6 +6505,7 @@ def main():
 
     raw_tracks = [{
         "label":        home_label,
+        "species":      _hs if _hs and _hs.lower() not in ("home", "unknown") else "Home genome",
         "genes":        home_genes,
         "is_home":      True,
         "genome_id":    "home",
@@ -5497,6 +6515,7 @@ def main():
         genes = tt["genes"]
         raw_tracks.append({
             "label":        tt['display_name'],
+            "species":      tt.get("species", ""),
             "genes":        genes,
             "is_home":      False,
             "genome_id":    tt["genome_id"],
@@ -5526,22 +6545,36 @@ def main():
     if getattr(args, "orient_to_home", False):
         n_flipped = _orient_tracks_to_home(all_tracks)
         if n_flipped:
-            print(f"[plot] Oriented {n_flipped} track(s) to home (reverse-complemented)")
+            print(f"[plot] Oriented {n_flipped} scaffold(s) to home (reverse-complemented)")
 
     # -- 4b. Adaptive widening for sparse plots --------------------------
     # When most tracks have few genes spread across a wide bp range, the
     # default px-per-bp scale leaves gene models too narrow to read. Scale
     # each gene's visual width around its center; centers don't move so
     # ortholog ribbons stay aligned. No-op on dense plots.
+    # -- 5. Lane assignment (before widening, so widening never adds a lane) --
+    # At most MAX_SUB_TRACKS lanes per genome. The GOI and every gene that
+    # carries a ribbon (an ortholog present on the other side) get lanes first.
+    home_ids_in_targets = {g.get("home_gene_id") for t in all_tracks[1:] for g in t["genes"]}
+    home_names = {g.get("name") for g in all_tracks[0]["genes"]} if all_tracks else set()
+
+    def _lane_priority(track):
+        if track["is_home"]:
+            return lambda g: (is_goi(g.get("name")) or g.get("name") in home_ids_in_targets)
+        return lambda g: (_is_goi_target_gene(g) or g.get("home_gene_id") in home_names)
+
+    n_overflow = 0
+    for track in all_tracks:
+        _assign_sub_tracks(track["genes"], track["offset"],
+                           is_priority=_lane_priority(track))
+        n_overflow += sum(1 for g in track["genes"] if g.get("_lane_overflow"))
+    if n_overflow:
+        print(f"[plot] {n_overflow} gene(s) did not fit {MAX_SUB_TRACKS} lanes; "
+              f"drawn translucent in the least-crowded lane")
+
     widen_factor = _widen_sparse_plot(all_tracks)
     if widen_factor > 1.0:
         print(f"[plot] Adaptive gene widening factor: {widen_factor:.2f}×")
-
-    # -- 5. Sub-track assignment -----------------------------------------
-    # Pure overlap-based bumping: a sub-track is spent only when genes
-    # would collide on a single row.
-    for track in all_tracks:
-        _assign_sub_tracks(track["genes"], track["offset"])
 
     # -- 6. Build subtitle -----------------------------------------------
 
@@ -5567,9 +6600,9 @@ def main():
         ambiguous_track_count, resolved_track_count,
     )
 
-    with open(args.output, "w") as f:
+    with open(_vp(args.output), "w") as f:
         f.write(html)
-    print(f"Synteny plot (HTML) saved to {args.output}")
+    print(f"Synteny plot (HTML) saved to {_vp(args.output)}")
 
     # -- 7a-bis. Always export a static-SVG sibling of the interactive HTML.
     # This is a verbatim extraction of the inline <svg> with the page's CSS
@@ -5579,8 +6612,9 @@ def main():
     static_svg_path = args.output.replace(".html", "_view.svg")
     if static_svg_path == args.output:
         static_svg_path = args.output + ".view.svg"
+    static_svg_path = _vp(static_svg_path)
     try:
-        _export_html_inline_svg(args.output, static_svg_path)
+        _export_html_inline_svg(_vp(args.output), static_svg_path)
         print(f"Static-view SVG saved to {static_svg_path}")
     except Exception as exc:
         print(f"  (could not export static-view SVG: {exc})", file=sys.stderr)
@@ -5588,7 +6622,7 @@ def main():
     # -- 7b. Render Publication SVG --------------------------------------
     # Same content as the interactive HTML but with every home-genome gene
     # labelled on the canvas, so the figure is self-describing in print.
-    if args.pub_svg:
+    if args.pub_svg and not is_variant:
         pub_svg_content = render_publication_svg(
             all_tracks, gene_colours, goi_genome_colours,
             home_products, args,
@@ -5621,6 +6655,7 @@ def main():
             grid_output = args.output.replace("_synteny_plot.html", "_anchor_grid.html")
             if grid_output == args.output:
                 grid_output = args.output.replace(".html", "_anchor_grid.html")
+            grid_output = _vp(grid_output)
             with open(grid_output, "w") as f:
                 f.write(grid_html)
             print(f"Anchor-grid plot (HTML) saved to {grid_output}")
@@ -5636,6 +6671,8 @@ def main():
         # Companion real-position variant: same orthologs, true per-row
         # genomic positions (shows spacing / gaps / rearrangements the aligned
         # column grid hides). Written as '*_gene_positions.html'/'.svg'.
+        if is_variant:
+            return
         try:
             pos_html = render_anchor_grid_positional(
                 all_tracks, gene_colours, goi_genome_colours,
@@ -5678,6 +6715,8 @@ def main():
             print(f"  (anchor-positions render failed: {exc})", file=sys.stderr)
 
     # -- 8. Tree plot (separate HTML) ------------------------------------
+    if is_variant:
+        return
     tree_output = args.output.replace("_synteny_plot.html", "_tree.html")
     if tree_output == args.output:
         tree_output = args.output.replace(".html", "_tree.html")

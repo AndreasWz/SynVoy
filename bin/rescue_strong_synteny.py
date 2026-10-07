@@ -103,6 +103,43 @@ def _parse_miniprot_gff(gff_text: str):
         yield cur_mrna, cur_cds
 
 
+def _refine_rescue_termini(window_seq: str, mrna, cds_rows) -> None:
+    """Give a rescue model the gene's own start and stop codon, in place.
+
+    The rescue passes call miniprot directly, so they bypass the terminal refinement
+    ``annotate_goi_exons`` applies on the main path (CLAUDE.md §21). Measured on the
+    2026-09-15 boundary audit: for 8 of 31 recovered apyrase genes the coordinates the
+    report shows came from an unrefined hull-rescue model, 9-24 bp short of the curated
+    gene at the 5' end, while the refined in-block model of the same gene matched exactly.
+
+    ``mrna`` and ``cds_rows`` are GFF fields in WINDOW coordinates (1-based inclusive,
+    ascending); both are updated. Refusal rules and bounds are the shared helper's.
+    """
+    if not cds_rows or not window_seq:
+        return
+    try:
+        from annotate_goi_exons import refine_model_termini
+    except ImportError:
+        return
+    strand = cds_rows[0][6]
+    rows = sorted(cds_rows, key=lambda c: int(c[3]))
+    coding = list(reversed(rows)) if strand == "-" else rows
+    cds = []
+    for r in coding:
+        try:
+            phase = int(r[7])
+        except (TypeError, ValueError):
+            phase = 0
+        cds.append({"gstart": int(r[3]) - 1, "gend": int(r[4]), "phase": phase,
+                    "qstart": 0, "qend": 0})
+    refine_model_termini(cds, window_seq, strand)
+    for r, c in zip(coding, cds):
+        r[3] = str(int(c["gstart"]) + 1)
+        r[4] = str(int(c["gend"]))
+    mrna[3] = str(min(int(r[3]) for r in cds_rows))
+    mrna[4] = str(max(int(r[4]) for r in cds_rows))
+
+
 def _get_attr(attr_str: str, key: str, default: str = "") -> str:
     for kv in attr_str.split(";"):
         if "=" in kv:
@@ -239,6 +276,8 @@ def main() -> None:
                 continue
 
             for mrna, cds_rows in _parse_miniprot_gff(gff_text):
+                # Same terminal refinement as the main path (CLAUDE.md §21).
+                _refine_rescue_termini(subseq, mrna, cds_rows)
                 parent_id = (
                     f"GOI_rescue_{args.genome_name}_locus_{block['name'] or idx}_{idx}"
                 )

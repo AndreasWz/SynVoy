@@ -78,6 +78,9 @@ process ITERATIVE_SEARCH {
         --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
         --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
+        --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\
+        --synteny_bridge_max_per_block ${params.synteny_bridge_max_per_block} \\
+        --disable_ambiguous_tier ${params.disable_ambiguous_tier} \\
         --fallback_short_query_len ${params.fallback_short_query_len} \\
         --fallback_short_min_aln_aa ${params.fallback_short_min_aln_aa} \\
         --fallback_short_min_bits ${params.fallback_short_min_bits} \\
@@ -88,10 +91,13 @@ process ITERATIVE_SEARCH {
         --classify_tandem_min_identity ${settings.classify_tandem_min_identity} \\
         --classify_tandem_min_qcov ${params.classify_tandem_min_qcov} \\
         --classify_high_min_collinear ${params.classify_high_min_collinear} \\
+        --classify_fallback_strong_min_identity_floor ${params.classify_fallback_strong_min_identity_floor} \\
+        --report_nonsyntenic_candidates ${params.report_nonsyntenic_candidates} \\
         --seed_on_flanking_support ${params.seed_on_flanking_support} \\
         --seed_flanking_min_count ${params.seed_flanking_min_count} \\
         --seed_flanking_min_qcov ${params.seed_flanking_min_qcov} \\
         --rank_wave_binning ${params.rank_wave_binning} \\
+        --disable_wavefront ${params.disable_wavefront} \\
         --disable_distance_autotune ${params.disable_distance_autotune} \\
         --distance_autotune_close_pct ${params.distance_autotune_close_pct} \\
         --distance_autotune_far_pct ${params.distance_autotune_far_pct} \\
