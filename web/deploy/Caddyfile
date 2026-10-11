@@ -1,0 +1,46 @@
+# Reverse proxy in front of the SynVoy web service (https://caddyserver.com).
+# Caddy gets and renews the certificate by itself.
+#
+# Everything is passed to the service: it sends the pages with the security headers
+# they were tested with (figures of a result, for one, are served in a sandbox).
+# Set "trust_proxy": true in the service's settings, or all visitors share one limit.
+
+synvoy.example.org {
+    encode zstd gzip
+
+    # Nothing a visitor sends is larger than a protein sequence.
+    request_body {
+        max_size 256KB
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+
+    reverse_proxy 127.0.0.1:8080 {
+        # A slow or dead service must not hold connections open for ever.
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 60s
+        }
+    }
+
+    # Access log without the visitor's address. Search links contain the key to a
+    # search, so the log is as private as the results; keep it short.
+    log {
+        output file /var/log/caddy/synvoy.log {
+            roll_size 20MiB
+            roll_keep 5
+            roll_keep_for 168h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>remote_ip delete
+                request>client_ip delete
+                request>headers>X-Forwarded-For delete
+            }
+        }
+    }
+}

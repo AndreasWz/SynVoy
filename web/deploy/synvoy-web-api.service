@@ -1,0 +1,23 @@
+# /etc/systemd/system/synvoy-web-api.service
+# Pages and API of the SynVoy web service. Starts no searches itself.
+[Unit]
+Description=SynVoy web: pages and API
+After=network.target
+
+[Service]
+User=synvoy
+Group=synvoy
+WorkingDirectory=/opt/synvoy/web
+Environment=SYNVOY_WEB_CONFIG=/etc/synvoy-web/settings.json
+ExecStart=/usr/bin/python3 -m synvoy_web serve
+Restart=always
+RestartSec=2
+
+# It needs to read the checkout and the genome library and to write its data folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/synvoy-web
+
+[Install]
+WantedBy=multi-user.target

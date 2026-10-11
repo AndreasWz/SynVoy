@@ -1,0 +1,23 @@
+{
+  "_comment": "The genome library. Do not write it by hand: `python -m synvoy_web library add ...` reads the genome, counts it, looks up the taxonomy and adds the entry. This file shows the result.",
+  "groups": [
+    {"id": "yeasts", "name": "Yeasts", "note": "budding yeasts, about 11 Mb each"}
+  ],
+  "genomes": [
+    {
+      "id": "saccharomyces_cerevisiae",
+      "species": "Saccharomyces cerevisiae",
+      "common_name": "baker's yeast",
+      "group": "yeasts",
+      "assembly": "GCF_000146045.2",
+      "taxon_id": 4932,
+      "lineage": [131567, 2759, 33154, 4751, 451864, 4890, 716545, 147537, 4891, 4892, 4893, 4930, 4932],
+      "fasta": "/srv/genomes/Saccharomyces_cerevisiae.fna",
+      "gff": "/srv/genomes/Saccharomyces_cerevisiae.gff",
+      "size_bp": 12157105,
+      "n_sequences": 17,
+      "n50": 924431,
+      "checksum": "sha256:..."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# /etc/systemd/system/synvoy-web-worker.service
+# Runs the searches. One per data folder (a second one refuses to start).
+[Unit]
+Description=SynVoy web: worker (runs the searches)
+After=network.target
+
+[Service]
+User=synvoy
+Group=synvoy
+WorkingDirectory=/opt/synvoy/web
+Environment=SYNVOY_WEB_CONFIG=/etc/synvoy-web/settings.json
+# The mail password, if e-mail is used, belongs here and not in the settings file:
+# Environment=SYNVOY_WEB_SMTP_PASSWORD=...
+ExecStart=/usr/bin/python3 -m synvoy_web worker
+Restart=always
+RestartSec=5
+
+# Stopping or restarting the worker ends the worker only. Searches that are running
+# go on, and the new worker takes them over. (Without this line systemd would kill
+# them; they would then be resumed, which works but costs the step that was running.)
+KillMode=process
+
+# A ceiling for the worker and everything its searches start, so that one search
+# cannot take the machine down. Leave room for the system and the API.
+MemoryMax=56G
+TasksMax=8192
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

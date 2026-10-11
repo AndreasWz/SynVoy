@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>How it works · SynVoy</title>
+<meta name="description" content="How SynVoy searches, what its answers mean, and what this server can and cannot do.">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="config.js"></script>
+<script type="module" src="assets/js/page.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="site-header">
+<div class="wrap">
+<a class="brand" href="index.html"><img src="assets/favicon.svg" alt="" width="28" height="28">SynVoy</a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+<nav class="site-nav" id="site-nav" aria-label="Site">
+<a href="index.html#examples">Examples</a>
+<a href="about.html">How it works</a>
+<a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">Source code</a>
+<a class="button" href="search.html" data-if-service>Start a search</a>
+</nav>
+</div>
+</header>
+<div class="banner" id="service-banner" role="status" hidden></div>
+
+<main class="wrap page" id="main">
+<div class="prose">
+<h1 class="page-title">How it works</h1>
+<p class="lead">SynVoy looks for a gene in other species. It does not start with the gene itself. It starts with the genes around it.</p>
+
+<h2>Why the neighbours</h2>
+<p>The usual way to find a gene in another species is to compare sequences. That works while the two sequences are still similar. Some genes change fast, and some are very short: toxins, receptors, small peptides. After enough time their sequences no longer look alike, and the search finds nothing or finds the wrong gene.</p>
+<p>The order of genes along a chromosome changes much more slowly. If a gene sits between the same neighbours in two species, it is very likely the same gene, even when its own sequence has changed a lot. SynVoy uses this.</p>
+
+<h2>What a search does</h2>
+<ol>
+<li><strong>It locates your gene in its home genome</strong>, the genome of the species the protein comes from.</li>
+<li><strong>It reads the neighbouring genes</strong> from that genome's annotation, about ten on each side. They are the landmarks.</li>
+<li><strong>It looks for the landmarks in each genome you chose.</strong> Where several of them lie together, in the same order, there is the neighbourhood.</li>
+<li><strong>It searches for your gene inside that neighbourhood</strong>, with settings that would give too many false hits on a whole genome but are safe in a small region.</li>
+<li><strong>It checks every call.</strong> A call that matches another gene of the home genome better than your gene is set aside as a related gene.</li>
+<li><strong>It writes the figures and the summary.</strong></li>
+</ol>
+<p>The genomes are searched from the closest relative to the most distant one, and genes found on the way help to find the next.</p>
+
+<h2 id="words">What the answers mean</h2>
+<p><span class="found">Found.</span> A gene model with matching sequence, in a neighbourhood whose genes are the same and in the same order as at home. In the report file this is the label HIGH.</p>
+<p><span class="found">Probable.</span> The same, with weaker evidence: lower similarity, or only part of the gene. In the report file: MEDIUM. Found and probable calls are the ones counted as the gene.</p>
+<p><span class="candidate">Candidate.</span> The neighbourhood matches, and something sits where the gene should be, but its own sequence does not show that it is the gene. In the report file: AMBIGUOUS. Read it as a place worth a closer look. A gene that was lost leaves the same neighbourhood behind, so the neighbourhood alone cannot tell "present" from "lost".</p>
+<p><span class="nocall">Not found.</span> Nothing passed the checks. This does not show that the species lacks the gene. The gene may have changed too much, the region may have been rearranged, or that part of the genome may not have been assembled. A genome without the gene is a result all the same: the result page lists it, says how many of the neighbouring genes were found there, and the figures show them.</p>
+<p><strong>Set aside.</strong> A call that fits a related gene of the home genome better than your gene, or that matches only a short piece of it. It is listed, with the reason, and not counted.</p>
+<p>Next to each call stand two numbers. <strong>Identical</strong> is the share of residues that match your protein. <strong>Covered</strong> is how much of your protein the copy spans. A high identity over a small part means little.</p>
+
+<h2>What works well and what does not</h2>
+<ul>
+<li>Proteins of a few hundred residues in related species are found in almost every genome.</li>
+<li>Short peptides (under 100 residues) rarely give confident calls; expect candidates.</li>
+<li>Members of large gene families are hard to tell apart. Expect several copies per genome and calls that are set aside.</li>
+<li>A fragmented genome assembly can break the neighbourhood apart. Such genomes are marked.</li>
+<li>The gene must be present and annotated well enough in its home genome. If it cannot be located there, the search stops and says so.</li>
+</ul>
+
+<h2 data-if-service>What this server does</h2>
+<p data-if-service>This server searches the genomes that are kept on it, up to <span data-limit="max_targets">a fixed number</span> per search.<span data-if-downloads hidden> A species that is not there can be named in the search form: its genome is fetched from NCBI, checked, and kept for later searches. The space for such genomes is limited, so the ones used least are removed again and fetched anew when somebody needs them.</span> It takes proteins of <span data-limit="min_query_length">30</span> to <span data-limit="max_query_length">3000</span> residues. Searches run one after another and take from a few minutes to several hours. A result is kept for <span data-limit="retention_days">a number of</span> days. The same gene, genomes and software always give the same result, so a search that was run before is answered at once.</p>
+<p data-if-service>It takes no uploaded genomes and no batches. For those, install SynVoy on your own machine or cluster: it is the same program.</p>
+
+<h2 id="cite">How to cite</h2>
+<p>A paper describing SynVoy is in preparation. Until it is out, cite the software and what your result page names as the software that made it (a release number, or "pre-release" with a commit):</p>
+<p class="notice plain">Weitz FA. SynVoy: finding orthologous genes by conserved gene neighbourhood. https://github.com/AndreasWz/SynVoy</p>
+
+<h2>Licence and source code</h2>
+<p>SynVoy, including the code of this site, is free software under the GNU Affero General Public License, version 3. The <a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">source code</a> is public. What is in use is shown at the bottom of every page and on every result: a release number, or "pre-release" with the commit of the source code.</p>
+<p>The typeface is IBM Plex, used under the SIL Open Font License (<a href="assets/fonts/OFL.txt">text of the licence</a>).</p>
+</div>
+</main>
+
+<footer class="site-footer">
+<div class="wrap">
+<div><span data-version>SynVoy</span> · Frank Andreas Weitz, TUM · AGPL-3.0</div>
+<nav aria-label="About this site">
+<a href="about.html">About</a>
+<a href="about.html#cite">How to cite</a>
+<a href="privacy.html">Privacy</a>
+<a href="imprint.html">Imprint</a>
+</nav>
+</div>
+</footer>
+</body>
+</html>

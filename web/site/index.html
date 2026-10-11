@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>SynVoy: find a gene by its neighbours</title>
+<meta name="description" content="SynVoy finds a gene in other species by first finding the genes next to it. Free to use, open source.">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="config.js"></script>
+<script type="module" src="assets/js/home.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="site-header">
+<div class="wrap">
+<a class="brand" href="index.html"><img src="assets/favicon.svg" alt="" width="28" height="28">SynVoy</a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+<nav class="site-nav" id="site-nav" aria-label="Site">
+<a href="index.html#examples">Examples</a>
+<a href="about.html">How it works</a>
+<a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">Source code</a>
+<a class="button" href="search.html" data-if-service>Start a search</a>
+</nav>
+</div>
+</header>
+<div class="banner" id="service-banner" role="status" hidden></div>
+
+<main id="main">
+<div class="hero-band">
+<section class="wrap hero">
+<div class="stack">
+<h1>Find a gene in other species by looking at its neighbours</h1>
+<p class="lead">Some genes change so fast that a sequence search no longer finds them in related species. The genes next to them usually change much less. SynVoy finds that neighbourhood first and then looks for your gene inside it.</p>
+<form class="stack-s" action="search.html" method="get" data-if-service>
+<label class="field" for="acc">Protein accession (UniProt or NCBI)</label>
+<div class="hero-form">
+<input class="mono" id="acc" name="acc" type="text" placeholder="P00334" autocomplete="off" spellcheck="false" maxlength="20">
+<button class="button" type="submit">Choose species</button>
+</div>
+<div class="small muted">No account needed. You can also paste a sequence on the next page.</div>
+</form>
+<p class="notice plain" data-if-no-service hidden>This copy of the site shows finished searches only. To run your own, install SynVoy from the <a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">source code</a>.</p>
+</div>
+
+<div class="card stack" aria-label="The idea in one picture">
+<div class="kicker">The idea in one picture</div>
+<div class="stack-s">
+<div class="smaller"><strong>Home species: the gene and its neighbours</strong></div>
+<div class="idea-row" aria-hidden="true">
+<div class="gene wide right c1"></div><div class="gene left c2"></div><div class="gene wide right c3"></div><div class="gene goi"></div><div class="gene wide left c4"></div><div class="gene right c5"></div>
+</div>
+</div>
+<div class="stack-s">
+<div class="row-between smaller"><strong>Species A: same neighbours, gene between them</strong><span class="found">Found</span></div>
+<div class="idea-row" aria-hidden="true">
+<div class="gene wide right c1"></div><div class="gene left c2"></div><div class="gene wide right c3"></div><div class="gene goi"></div><div class="gene wide left c4"></div><div class="gene right c5"></div>
+</div>
+</div>
+<div class="stack-s">
+<div class="row-between smaller"><strong>Species B: neighbours there, gene unclear</strong><span class="candidate">Candidate</span></div>
+<div class="idea-row" aria-hidden="true">
+<div class="gene wide right c1"></div><div class="gene left c2"></div><div class="gene wide right c3"></div><div class="gene unclear"></div><div class="gene wide left c4"></div><div class="gene"></div>
+</div>
+</div>
+<div class="stack-s">
+<div class="row-between smaller"><strong>Species C: neighbours there, gene not among them</strong><span class="nocall">Not found</span></div>
+<div class="idea-row" aria-hidden="true">
+<div class="gene wide right c1"></div><div class="gene left c2"></div><div class="gene wide right c3"></div><div class="gene absent"></div><div class="gene wide left c4"></div><div class="gene right c5"></div>
+</div>
+</div>
+<p class="smaller muted">Each arrow is a gene, coloured by which home gene it matches. The dark arrow is the gene you asked for. A species without it is a result too: the page says how much of the neighbourhood was found there.</p>
+</div>
+</section>
+</div>
+
+<section class="wrap" id="recent" hidden>
+<div class="card stack">
+<h2>Your searches on this device</h2>
+<ul class="downloads" id="recent-list"></ul>
+<p class="smaller muted">This list is kept in your browser only. Clearing the browser's data removes the list, not the searches.</p>
+</div>
+</section>
+
+<section class="band" id="how">
+<div class="wrap stack-l">
+<h2 class="section">Three steps</h2>
+<div class="three">
+<div class="stack-s">
+<div class="step-n" aria-hidden="true">1</div>
+<h3>Name a gene</h3>
+<p class="muted">Enter a protein accession or paste a protein sequence. SynVoy looks up the species it comes from.</p>
+</div>
+<div class="stack-s">
+<div class="step-n" aria-hidden="true">2</div>
+<h3>Pick the species to search</h3>
+<p class="muted">Choose from the genomes on this server, closest relatives first.<span data-if-downloads hidden> A species that is not there can be named: its genome is fetched from NCBI.</span></p>
+</div>
+<div class="stack-s">
+<div class="step-n" aria-hidden="true">3</div>
+<h3>Read the answer</h3>
+<p class="muted">One line per species: found, candidate, or not found, and how much of the neighbourhood is there. Figures and files are there for whoever wants the detail.</p>
+</div>
+</div>
+<p><a href="about.html">How the search works, and what the answers mean</a></p>
+</div>
+</section>
+
+<section class="wrap section-pad stack-l" id="examples">
+<div class="stack-s">
+<h2 class="section">Finished searches</h2>
+<p class="muted prose">Real searches, shown as they came out. The outcome depends on the gene: long proteins in related species are found almost everywhere, short peptides rarely are. The bar shows the share of genomes with the gene found, with a candidate, and with neither.</p>
+</div>
+<div class="cards" id="example-cards" aria-live="polite">
+<noscript><p>The examples need JavaScript to be listed.</p></noscript>
+</div>
+<div class="legend" id="example-legend">
+<span><span class="swatch b-found"></span>gene found</span>
+<span><span class="swatch b-candidate"></span>candidate, not confirmed</span>
+<span><span class="swatch b-none"></span>not found</span>
+</div>
+</section>
+
+<section class="band-dark">
+<div class="wrap three">
+<div class="stack-s" data-if-service>
+<h2>What this server does</h2>
+<p>It searches the genomes kept here<span data-if-downloads hidden>, and fetches others from NCBI when you name them</span>. A limited number per search. A search takes minutes to hours, so you get a link to come back to.</p>
+</div>
+<div class="stack-s" data-if-service>
+<h2>What it does not do</h2>
+<p>It takes no uploaded genomes and no large batches. For those, and for data that must stay private, install SynVoy on your own machine or cluster. The same code runs there.</p>
+</div>
+<div class="stack-s">
+<h2>Open source</h2>
+<p>SynVoy is free software under the AGPL-3.0 licence. Every result names the software that produced it, and the <a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">source code</a> is public.</p>
+</div>
+</div>
+</section>
+</main>
+
+<footer class="site-footer">
+<div class="wrap">
+<div><span data-version>SynVoy</span> · Frank Andreas Weitz, TUM · AGPL-3.0</div>
+<nav aria-label="About this site">
+<a href="about.html">About</a>
+<a href="about.html#cite">How to cite</a>
+<a href="privacy.html">Privacy</a>
+<a href="imprint.html">Imprint</a>
+</nav>
+</div>
+</footer>
+</body>
+</html>

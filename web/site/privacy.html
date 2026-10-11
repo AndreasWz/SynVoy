@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Privacy · SynVoy</title>
+<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="config.js"></script>
+<script type="module" src="assets/js/page.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="site-header">
+<div class="wrap">
+<a class="brand" href="index.html"><img src="assets/favicon.svg" alt="" width="28" height="28">SynVoy</a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+<nav class="site-nav" id="site-nav" aria-label="Site">
+<a href="index.html#examples">Examples</a>
+<a href="about.html">How it works</a>
+<a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">Source code</a>
+<a class="button" href="search.html" data-if-service>Start a search</a>
+</nav>
+</div>
+</header>
+<div class="banner" id="service-banner" role="status" hidden></div>
+
+<main class="wrap page" id="main">
+<div class="prose">
+<h1 class="page-title">Privacy</h1>
+<p class="notice warn"><strong>For the operator of this site:</strong> the sections below describe what the SynVoy software stores. Before the site is opened to the public, add who is responsible, the legal basis, how long the web server in front keeps its access logs, and the rights of visitors as your law requires, and then remove this notice.</p>
+
+<h2>In short</h2>
+<p>There are no accounts, no cookies and no tracking. The pages load nothing from other websites: fonts and scripts come from this site.</p>
+
+<h2>What is stored when you start a search</h2>
+<ul>
+<li><strong>The search itself:</strong> the accession or the protein sequence you entered, the name you gave it, the genomes you chose, and the time. They are needed to run the search and to show the result.</li>
+<li><strong>The result</strong> and the logs of the search. They are deleted, together with the sequence, when the result expires: <span data-limit="retention_days">a set number of</span> days after the search, or after it was last asked for again. What stays is the name of the search and the list of genomes, so that an old link can still say what it once showed.</li>
+<li><strong>Your address on the internet is not stored as it is.</strong> A code made from it with a key kept on this server is used to keep to the limits per visitor. The code is removed from your search when the search has ended; the note that you started a search, used for the limit per day, is deleted after two days.</li>
+<li><strong>Your e-mail address,</strong> only if you enter one. It is used for the single message that tells you the search has ended and is deleted right after.</li>
+</ul>
+
+<h2>Who can see a search</h2>
+<p>Every search has a link with a long random part. Whoever has the link can see the search and its result; there is no other way to reach it, and the links are not listed anywhere. If you paste a sequence that is not public, treat the link like the sequence.</p>
+<p>If someone else starts exactly the same search (the same sequence, the same genomes), they get the same result page. They had the sequence already.</p>
+
+<h2>What is kept in your browser</h2>
+<p>The list "Your searches on this device" is kept in your browser's storage, with the links and a key that lets this browser cancel its own searches. It never leaves your browser. Clearing the browser's data removes it.</p>
+
+<h2>What leaves this server</h2>
+<p>When you enter an accession, the server asks UniProt or NCBI for that protein. They see the accession and the address of this server, not yours. Sequences you paste are not sent anywhere.</p>
+<p data-if-downloads hidden>When you name a species or a genome that is not on this server, the server asks NCBI for it and downloads the genome from there. NCBI sees the species name or the genome's accession and the address of this server, not yours. A genome fetched this way stays on the server and is listed for other visitors; who asked for it is not recorded.</p>
+
+<h2>Contact</h2>
+<p>Questions about this site: <span data-contact>[contact address of the operator]</span>.</p>
+</div>
+</main>
+
+<footer class="site-footer">
+<div class="wrap">
+<div><span data-version>SynVoy</span> · Frank Andreas Weitz, TUM · AGPL-3.0</div>
+<nav aria-label="About this site">
+<a href="about.html">About</a>
+<a href="about.html#cite">How to cite</a>
+<a href="privacy.html">Privacy</a>
+<a href="imprint.html">Imprint</a>
+</nav>
+</div>
+</footer>
+</body>
+</html>

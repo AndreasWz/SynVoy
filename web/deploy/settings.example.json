@@ -1,0 +1,45 @@
+{
+  "_comment": "Settings of the SynVoy web service. Copy, adjust, and point $SYNVOY_WEB_CONFIG at the copy. Every key is optional; the defaults are in synvoy_web/config.py. Keys starting with _ are comments.",
+
+  "_where": "data_dir must be on a local disk (database, search folders, conda cache).",
+  "data_dir": "/var/lib/synvoy-web",
+  "repo_dir": "/opt/synvoy",
+  "site_dir": "/opt/synvoy/web/site",
+  "library_file": "/var/lib/synvoy-web/library.json",
+
+  "_pipeline": "conda_base is the folder that contains etc/profile.d/conda.sh. The profile and nextflow_config decide how much memory and how many cores one search may use.",
+  "conda_base": "/opt/miniforge3",
+  "conda_env": "synvoy_env",
+  "nextflow_profile": "auto",
+  "nextflow_config": "/etc/synvoy-web/server.config",
+
+  "_http": "The service listens on localhost; the reverse proxy in front adds TLS. With a proxy, trust_proxy must be true, or every visitor looks like the proxy and shares one set of limits.",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "trust_proxy": true,
+  "public_base_url": "https://synvoy.example.org",
+
+  "_genomes": "Genomes a visitor names that are not on the server are fetched from NCBI into genome_store_dir, which may grow to genome_store_gb (0 = nothing is fetched). When room is needed, the genomes used least in the last store_score_days days are removed. Fill part of it yourself first: `python -m synvoy_web library fetch --from-file genomes.txt --fill-to 50`.",
+  "genome_store_dir": "/var/lib/synvoy-web/genomes",
+  "genome_store_gb": 200,
+  "max_fetches_per_day": 5,
+  "store_score_days": 90,
+
+  "_limits": "What one visitor may ask for.",
+  "max_targets": 10,
+  "max_genome_mb": 1000,
+  "max_total_mb": 6000,
+  "max_active_per_client": 2,
+  "max_submissions_per_day": 10,
+  "max_queue": 20,
+
+  "_running": "One search at a time is the safe choice: a search uses all the cores it is given.",
+  "max_running": 1,
+  "max_runtime_hours": 12,
+  "retention_days": 30,
+  "min_free_gb": 40,
+
+  "_operator": "Shown in the footer, the imprint and the privacy page.",
+  "operator_name": "",
+  "contact_email": ""
+}

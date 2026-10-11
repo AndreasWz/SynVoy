@@ -1,0 +1,33 @@
+{
+  "_comment": "Examples on the start page: `python -m synvoy_web gallery build --spec THIS_FILE`. Paths are relative to this file. An example is either a pipeline output folder (run_dir) or a search that was run on this server (job). Optional per example: label (the release that made the run; without it the example reads pre-release), rename (a run started under an internal label is published under another name) and must_not_contain (words no published file may hold; the build stops and names the file).",
+  "examples": [
+    {
+      "slug": "ste2",
+      "name": "STE2",
+      "about": "Yeast pheromone receptor",
+      "accession": "D6VTK4",
+      "gene": "STE2",
+      "scope": "yeasts",
+      "run_dir": "runs/demo_ste2",
+      "console_log": "runs/demo_ste2.console.log",
+      "home": {"species": "Saccharomyces cerevisiae", "common_name": "baker's yeast", "assembly": "GCF_000146045.2"}
+    },
+    {
+      "slug": "apyrase",
+      "name": "Apyrase",
+      "about": "Venom enzyme; honeybee protein as the query",
+      "scope": "ants and wasps",
+      "run_dir": "runs/apyrase",
+      "figures_dir": "runs/apyrase_figures",
+      "home": {"species": "Apis mellifera", "common_name": "western honeybee", "assembly": "GCF_003254395.2"},
+      "rename": {"internal_label_of_the_query": "apyrase"},
+      "must_not_contain": ["internal_label_of_the_query"]
+    },
+    {
+      "slug": "my-search",
+      "job": "THE-22-CHARACTER-ID-OF-A-FINISHED-SEARCH",
+      "about": "One line about the gene",
+      "scope": "yeasts"
+    }
+  ]
+}

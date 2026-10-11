@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Start a search · SynVoy</title>
+<meta name="description" content="Start a SynVoy search: name a gene, pick the species, get a link to the result.">
+<link rel="stylesheet" href="assets/site.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script src="config.js"></script>
+<script type="module" src="assets/js/search.js"></script>
+</head>
+<body data-needs-service>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="site-header">
+<div class="wrap">
+<a class="brand" href="index.html"><img src="assets/favicon.svg" alt="" width="28" height="28">SynVoy</a>
+<button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+<nav class="site-nav" id="site-nav" aria-label="Site">
+<a href="index.html#examples">Examples</a>
+<a href="about.html">How it works</a>
+<a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">Source code</a>
+</nav>
+</div>
+</header>
+<div class="banner" id="service-banner" role="status" hidden></div>
+
+<main class="wrap page stack-l" id="main">
+<div class="stack-s">
+<h1 class="page-title">Start a search</h1>
+<p class="lead">Three questions. Everything else is set for you.</p>
+</div>
+
+<noscript><p class="notice warn">This form needs JavaScript.</p></noscript>
+<p class="notice warn" id="unavailable" role="alert" hidden></p>
+
+<div class="columns">
+<form class="main stack-l" id="search-form" novalidate>
+
+<section class="card stack" aria-labelledby="q1">
+<div class="stack-s">
+<div class="eyebrow">1 of 3</div>
+<h2 id="q1">Which gene?</h2>
+</div>
+<div class="segmented" role="group" aria-label="How to name the gene">
+<button type="button" id="mode-accession" aria-pressed="true">Protein accession</button>
+<button type="button" id="mode-sequence" aria-pressed="false">Paste a sequence</button>
+</div>
+
+<div class="stack" id="accession-pane">
+<div class="stack-s">
+<label class="field" for="acc">Protein accession (UniProt or NCBI)</label>
+<div class="hero-form">
+<input class="mono" id="acc" type="text" autocomplete="off" spellcheck="false" maxlength="20" aria-describedby="acc-hint acc-error">
+<button class="button secondary" type="button" id="lookup">Look up</button>
+</div>
+<div class="hint" id="acc-hint">For example P00334 or XP_031329057.1.</div>
+<div class="field-error" id="acc-error" role="alert" hidden></div>
+</div>
+<div class="stack-s" id="lookup-result" aria-live="polite"></div>
+</div>
+
+<div class="stack" id="sequence-pane" hidden>
+<div class="stack-s">
+<label class="field" for="seq">Protein sequence</label>
+<textarea class="mono" id="seq" spellcheck="false" autocomplete="off" aria-describedby="seq-hint seq-count seq-error" placeholder="&gt;my_protein&#10;MKFLVNVALVFMVVYISYIYAAPEPEPAPEPEAEADAEADPEAGIGAVLKVLTTGLPALISWIKRKRQQG"></textarea>
+<div class="hint" id="seq-hint">One protein, as plain letters or in FASTA form. Not DNA.</div>
+<div class="hint" id="seq-count" aria-live="polite"></div>
+<div class="field-error" id="seq-error" role="alert" hidden></div>
+</div>
+<div class="stack-s">
+<label class="field" for="seq-name">Short name for it (optional)</label>
+<input id="seq-name" type="text" maxlength="40" autocomplete="off">
+<div class="hint">Used as the label in the figures. Letters, digits, dot, dash, underscore.</div>
+</div>
+</div>
+
+<div class="stack" id="home-pane" hidden>
+<div class="stack-s">
+<label class="field" for="home">Starting genome</label>
+<select id="home" aria-describedby="home-hint home-error"></select>
+<div class="hint" id="home-hint"></div>
+<div class="field-error" id="home-error" role="alert" hidden></div>
+</div>
+<div class="stack-s" id="home-ncbi" hidden>
+<label class="field" for="home-term">Or fetch the genome of the species itself from NCBI</label>
+<div class="hero-form">
+<input id="home-term" type="text" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Species name or assembly accession" aria-describedby="home-ncbi-hint home-ncbi-error">
+<button class="button secondary" type="button" id="home-find">Search NCBI</button>
+</div>
+<div class="hint" id="home-ncbi-hint">A starting genome needs a gene annotation at NCBI. It is fetched before the search starts.</div>
+<div class="field-error" id="home-ncbi-error" role="alert" hidden></div>
+<p class="notice info" id="home-chosen" role="status" hidden></p>
+<ul class="offers" id="home-offers" aria-live="polite"></ul>
+</div>
+</div>
+</section>
+
+<section class="card stack" aria-labelledby="q2">
+<div class="stack-s">
+<div class="eyebrow">2 of 3</div>
+<h2 id="q2">Which species should be searched?</h2>
+</div>
+<p class="notice plain" id="species-empty">Choose the gene first. The species are then listed with the closest relatives on top.</p>
+<div class="stack" id="species-pane" hidden>
+<fieldset class="stack-s" id="group-pane" hidden>
+<legend class="field-label">Group</legend>
+<div class="choice-grid" id="groups"></div>
+</fieldset>
+<fieldset class="stack-s">
+<legend class="field-label">Species, closest relatives first</legend>
+<div class="check-grid" id="species-list"></div>
+<div class="row">
+<button class="linklike" type="button" id="pick-closest">Select the closest</button>
+<button class="linklike" type="button" id="pick-none">Clear the selection</button>
+</div>
+</fieldset>
+<div class="stack-s" id="ncbi-pane" hidden>
+<label class="field" for="ncbi-term">A species that is not listed</label>
+<div class="hero-form">
+<input id="ncbi-term" type="text" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Species name or assembly accession" aria-describedby="ncbi-hint ncbi-error">
+<button class="button secondary" type="button" id="ncbi-find">Search NCBI</button>
+</div>
+<div class="hint" id="ncbi-hint">For example Tetramorium bicarinatum or GCA_928718305.1. The server fetches the genome from NCBI before the search starts, and keeps it for later searches.</div>
+<div class="field-error" id="ncbi-error" role="alert" hidden></div>
+<ul class="offers" id="ncbi-offers" aria-live="polite"></ul>
+</div>
+<div class="stack-s" aria-live="polite">
+<div class="row-between small"><strong id="count"></strong><span class="muted" id="size"></span></div>
+<div class="meter" id="meter"><span id="meter-fill"></span></div>
+<div class="hint" id="limit-note" hidden>The limit per search is reached. Untick a species to choose another.</div>
+<div class="field-error" id="targets-error" role="alert" hidden></div>
+</div>
+</div>
+</section>
+
+<section class="card stack" aria-labelledby="q3">
+<div class="stack-s">
+<div class="eyebrow">3 of 3</div>
+<h2 id="q3">How do you get the result?</h2>
+</div>
+<p class="muted">You get a private link right away. The page behind it shows the progress and then the result. Keep the link: it is the only way back to this search.</p>
+<div class="stack-s" id="email-pane" hidden>
+<label class="field" for="email">E-mail me when it is done (optional)</label>
+<input id="email" type="email" autocomplete="email" placeholder="name@example.org" aria-describedby="email-hint email-error">
+<div class="hint" id="email-hint">Used for this one message and then deleted.</div>
+<div class="field-error" id="email-error" role="alert" hidden></div>
+</div>
+<p class="hint" id="retention"></p>
+</section>
+
+<div class="stack">
+<p class="notice error" id="form-error" role="alert" hidden></p>
+<div class="row">
+<button class="button large" type="submit" id="submit">Start search</button>
+<span class="small muted" id="queue-note" aria-live="polite"></span>
+</div>
+</div>
+</form>
+
+<aside class="side stack" aria-label="Good to know">
+<div class="card tight stack-s">
+<h2>What happens after you click</h2>
+<ol class="small">
+<li>The gene is located in its home genome.</li>
+<li>Its neighbouring genes are read from the annotation.</li>
+<li>Each chosen genome is searched for those neighbours.</li>
+<li>Your gene is searched for inside each neighbourhood found.</li>
+<li>Calls that match a related gene better are set aside.</li>
+<li>Figures and a summary are written.</li>
+</ol>
+</div>
+<div class="card tight stack-s">
+<h2>Limits on this server</h2>
+<ul class="small" id="limits"><li>Loading…</li></ul>
+<p class="small"><a href="https://github.com/AndreasWz/SynVoy" rel="noopener noreferrer">Need more? Install SynVoy</a></p>
+</div>
+<div class="card tight stack-s">
+<h2>Already searched</h2>
+<p class="small">The same gene, genomes and software always give the same result. If this search has been run before, you get the result at once.</p>
+</div>
+</aside>
+</div>
+</main>
+
+<footer class="site-footer">
+<div class="wrap">
+<div><span data-version>SynVoy</span> · Frank Andreas Weitz, TUM · AGPL-3.0</div>
+<nav aria-label="About this site">
+<a href="about.html">About</a>
+<a href="about.html#cite">How to cite</a>
+<a href="privacy.html">Privacy</a>
+<a href="imprint.html">Imprint</a>
+</nav>
+</div>
+</footer>
+</body>
+</html>
