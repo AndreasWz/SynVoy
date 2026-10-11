@@ -8,8 +8,7 @@ because line numbers drift.
 
 It does not explain how to run the pipeline ([USAGE.md](USAGE.md)), what the output
 files contain ([OUTPUT.md](OUTPUT.md)) or what every parameter does
-([PARAMETERS.md](PARAMETERS.md)). The history of each rule, with the measurements
-behind it, is in [STATE_OF_THE_PROJECT.md](STATE_OF_THE_PROJECT.md) and
+([PARAMETERS.md](PARAMETERS.md)). Measurements behind several of the rules are in
 [ALGORITHM_AUDIT_2026-09.md](ALGORITHM_AUDIT_2026-09.md).
 
 Contents: [1 Idea](#1-the-idea) · [2 Terms](#2-terms) · [3 Overview](#3-overview) ·
@@ -655,8 +654,7 @@ Consequences of the rules above that a reader of the results should know.
   pairs and do not scale with gene density. In a compact genome a window holds many
   more genes than in a large one.
 - The effect of the growing query set ([§6](#6-target-order-quality-check-and-waves))
-  has been measured on one test set, where switching it off gave the same result
-  ([STATE_OF_THE_PROJECT.md](STATE_OF_THE_PROJECT.md), F4).
+  has been measured on one test set, where switching it off gave the same result.
 
 **Scores**
 
