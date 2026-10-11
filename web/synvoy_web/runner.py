@@ -155,6 +155,7 @@ class Worker:
         self.genomes.log = self.log
         self._fetch_thread = None   # one genome is fetched at a time
         self._fetch_stop = threading.Event()
+        self._taxonomy_due = 0.0    # when to look for genomes without a lineage again
         self._handles = {}          # id -> Popen, for searches this process started
         self._errors = {}           # id -> errors in a row while watching it
         self._last_gc = 0
@@ -234,8 +235,11 @@ class Worker:
         library = self.ctx.library()
         if self.ctx.libraries.error:
             problems.append(self.ctx.libraries.error)
-        elif not library.homes():
-            problems.append("the genome library has no genome with an annotation")
+        elif not library.homes() and not self.ctx.genomes.enabled:
+            # With the genome store on, a visitor can name a starting genome at NCBI.
+            problems.append("no genome with an annotation on this server: register one with "
+                            "`library add --gff`, or set genome_store_gb so that genomes "
+                            "are fetched from NCBI")
         nextflow = ""
         if not settings.pipeline_command:
             if not (Path(settings.repo_dir) / "main.nf").is_file():
@@ -351,11 +355,20 @@ class Worker:
         if not self.genomes.enabled or self._fetch_stop.is_set():
             return
         row = self.genomes.next_wanted()
-        if row is None:
+        if row is not None:
+            thread = threading.Thread(
+                target=self.genomes.fetch, name="genome-fetch", daemon=True,
+                args=(row["accession"], self._fetch_stop.is_set, "worker:%d" % os.getpid()))
+        elif time.monotonic() >= self._taxonomy_due:
+            # Nothing to fetch: a genome that was stored while NCBI's taxonomy did not
+            # answer gets its lineage now. Looked at every ten minutes.
+            self._taxonomy_due = time.monotonic() + 600
+            if not self.genomes.without_taxonomy():
+                return
+            thread = threading.Thread(target=self.genomes.repair_taxonomy,
+                                      name="genome-taxonomy", daemon=True)
+        else:
             return
-        thread = threading.Thread(
-            target=self.genomes.fetch, name="genome-fetch", daemon=True,
-            args=(row["accession"], self._fetch_stop.is_set, "worker:%d" % os.getpid()))
         self._fetch_thread = thread
         thread.start()
 

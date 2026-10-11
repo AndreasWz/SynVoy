@@ -1,6 +1,6 @@
 """A throw-away installation for the browser run-through: the real pages, the
 stand-in pipeline, a made-up genome library, canned accession look-ups, and a stand-in
-NCBI that has two more genomes and hands them out slowly.
+NCBI that has three more genomes and hands them out slowly.
 
     python service.py <folder> <port>
 
@@ -18,7 +18,7 @@ sys.path.insert(0, str(TESTS.parent))
 sys.path.insert(0, str(TESTS))
 os.environ.setdefault("FAKE_SLOW_SECONDS", "900")
 
-from conftest import Env  # noqa: E402
+from conftest import PROTEIN, UNIPROT_JSON, Env, uniprot_replies  # noqa: E402
 from synvoy_web.api import App  # noqa: E402
 from synvoy_web.server import make_server  # noqa: E402
 
@@ -28,11 +28,21 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     env = Env(root, site_dir=str(TESTS.parent / "site"), max_running=2, port=port,
               genome_store_gb=0.001)
-    # Two genomes that are at "NCBI" and not on the server. The download takes some
-    # seconds, so the page of a waiting search can be seen saying what it waits for.
+    # Genomes that are at "NCBI" and not on the server; the last has an annotation and
+    # can be a starting genome. The download takes some seconds, so the page of a
+    # waiting search can be seen saying what it waits for.
     env.ncbi.add("GCA_000000101.1", "Formica nova", size=400000, lineage=[1, 2, 3, 15])
     env.ncbi.add("GCF_000000102.1", "Gigas maximus", reported=5000000000)
+    env.ncbi.add("GCF_000000103.1", "Apis nova", size=400000, annotated=True, lineage=[1, 2, 3, 16])
     env.ncbi.chunk, env.ncbi.delay = 16, 0.15
+    # Two proteins of species whose genome is not on the server as a starting genome.
+    for accession, organism, taxon in (("Q00001", "Apis nova", 16), ("Q00002", "Formica nova", 15)):
+        env.fetch.replies.update(uniprot_replies(
+            accession,
+            data=dict(UNIPROT_JSON, primaryAccession=accession,
+                      organism={"scientificName": organism, "taxonId": taxon}),
+            fasta=">sp|%s|T_TEST Test protein OS=%s OX=%d GN=TST PE=1 SV=1\n%s\n"
+                  % (accession, organism, taxon, PROTEIN)))
     worker = env.worker(log=lambda message: None)
     server = make_server(App(env.ctx, log=lambda message: None), "127.0.0.1", port)
     threading.Thread(target=server.serve_forever, daemon=True).start()

@@ -433,6 +433,59 @@ async function main() {
     await page.waitFor("[...document.querySelectorAll('#species-list label')].some((l) => l.innerText.includes('Formica nova') && l.innerText.includes('from NCBI') && l.querySelector('input').checked)", 15000, "the fetched genome in the list");
     ok("a genome fetched once is on the server for the next search, listed with the others");
 
+    console.log("A starting genome from NCBI");
+    const chosenHome = "!document.querySelector('#home-chosen').hidden && document.querySelector('#home-chosen').innerText.includes('Apis nova')";
+    const noHome = "document.querySelector('#home-chosen').hidden && document.querySelector('#home').value === '' && [...document.querySelector('#home').options].every((o) => !o.value.startsWith('ncbi:'))";
+    const useIt = "[...document.querySelectorAll('#home-offers button')].find((b) => b.innerText === 'Use as starting genome').click()";
+    await page.goto(base + "/search.html");
+    await page.waitFor("document.querySelector('#home').options.length > 1", 15000, "the form");
+    await page.click("#mode-sequence");
+    await page.fill("#seq", ">home_from_ncbi\n" + PROTEIN);
+    await page.waitFor("!document.querySelector('#home-ncbi').hidden", 5000, "the field for a starting genome from NCBI");
+    await page.fill("#home-term", "Apis nova");
+    await page.click("#home-find");
+    await page.waitFor("document.querySelector('#home-offers button')", 15000, "the genome NCBI offers as starting genome");
+    await page.evaluate(useIt);
+    await page.waitFor(chosenHome, 5000, "the chosen starting genome");
+    ok("a genome at NCBI can be made the starting genome");
+    check(await page.evaluate("document.querySelector('#home').selectedOptions[0].text.startsWith('Apis nova (fetched from NCBI')"),
+      "the list of starting genomes says which one is chosen");
+    await page.waitFor("document.querySelectorAll('#species-list input').length > 0", 10000, "the species to search");
+    await page.shot("home-from-ncbi");
+    await page.click("#home-remove");
+    await page.waitFor(noHome, 5000, "the starting genome to be taken back");
+    check(await page.evaluate("!document.querySelector('#species-empty').hidden && document.querySelectorAll('#species-list input:checked').length === 0"),
+      "Remove takes the starting genome back: none is chosen, no species are ticked");
+    check(await page.evaluate("[...document.querySelectorAll('#home-offers button')].map((b) => b.innerText).join('|')") === "Use as starting genome",
+      "it can be chosen again");
+    await page.evaluate(useIt);
+    await page.waitFor(chosenHome, 5000, "the starting genome chosen again");
+    check(await page.evaluate("[...document.querySelectorAll('#home-offers button')].map((b) => b.innerText).join('|')") === "Remove",
+      "the row of the chosen genome says so at once and offers to remove it");
+    await page.evaluate("[...document.querySelectorAll('#home-offers button')].find((b) => b.innerText === 'Remove').click()");
+    await page.waitFor(noHome, 5000, "the starting genome to be taken back in its row");
+    ok("that Remove button takes it back as well");
+    await page.evaluate(useIt);
+    await page.waitFor(chosenHome, 5000, "the starting genome chosen a third time");
+    await page.fill("#home", "");
+    await page.waitFor(noHome, 5000, "the starting genome to be taken back through the list");
+    ok("choosing no species in the list takes it back too");
+    await page.evaluate(useIt);
+    await page.waitFor(chosenHome, 5000, "the starting genome chosen a fourth time");
+    await page.fill("#home", "homus_primus");
+    await page.waitFor("document.querySelector('#home-chosen').hidden && document.querySelector('#home').value === 'homus_primus' && document.querySelectorAll('#species-list input:checked').length >= 4", 15000, "the genome of the server as starting genome");
+    ok("a genome of the server chosen in the list replaces it");
+    // A choice made for one protein must not stay when another protein is looked up.
+    await page.goto(base + "/search.html?acc=Q00001");
+    await page.waitFor("[...document.querySelectorAll('#home-offers button')].some((b) => b.innerText === 'Use as starting genome')", 20000, "the genome of the protein's own species, offered");
+    await page.evaluate(useIt);
+    await page.waitFor(chosenHome, 5000, "the starting genome for the first protein");
+    await page.fill("#acc", "Q00002");
+    await page.click("#lookup");
+    await page.waitFor("document.querySelector('#lookup-result').innerText.includes('Formica nova')", 15000, "the second protein");
+    await page.waitFor(noHome, 5000, "the starting genome of the first protein to be dropped");
+    ok("a starting genome chosen for one protein is not kept for a protein of another species");
+
     console.log("A small screen");
     await page.send("Emulation.setDeviceMetricsOverride", { width: 400, height: 800, deviceScaleFactor: 1, mobile: true });
     await page.goto(base + "/");

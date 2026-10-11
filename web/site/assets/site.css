@@ -166,6 +166,8 @@ h3 { font-size: 18px; line-height: 1.3; font-weight: 600; }
 .notice.info { background: var(--info-bg); color: #173A6A; }
 .notice.plain { background: var(--bg); border: 1px solid var(--line); }
 .notice strong { font-weight: 600; }
+.notice.with-action { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.notice.with-action > :first-child { flex: 1 1 260px; min-width: 0; }
 .banner { background: var(--warn-bg); color: var(--warn-ink); border-bottom: 1px solid #E9D7AE; }
 .banner .wrap { padding-top: 11px; padding-bottom: 11px; font-size: 15px; }
 
@@ -234,6 +236,7 @@ input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; margin:
 .offers { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .offer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 12px 14px; background: var(--card); }
 .offer .what { min-width: 0; flex: 1 1 260px; }
+.offer-actions { display: inline-flex; align-items: center; gap: 12px; }
 .offer .facts-line { font-size: 13px; color: var(--muted); font-family: var(--mono); overflow-wrap: anywhere; }
 .offer.unusable { background: var(--bg); color: var(--muted); }
 

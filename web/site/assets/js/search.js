@@ -22,6 +22,7 @@ const state = {
   group: "all",
   home: "",             // id of the starting genome on the server
   homeExtra: null,      // or: a genome at NCBI that is to be fetched as starting genome
+  homeFor: "",          // the organism a starting genome was chosen for ("" for a pasted sequence)
   limits: null,
   downloads: false,     // does this server fetch genomes from NCBI?
   email: false,
@@ -62,12 +63,27 @@ function setMode(mode) {
   refreshHomePane();
 }
 
+// A starting genome that is to be fetched from NCBI has an entry of its own in the
+// list while it is chosen, so the list always says what the starting genome is and
+// "Choose a species…" takes it back like any other choice.
+const AT_NCBI = "ncbi:";
+
 function homeOptions() {
   const select = $("home");
   const homes = state.library ? state.library.genomes.filter((g) => g.can_be_home) : [];
-  replace(select, el("option", { value: "", text: homes.length ? "Choose a species…" : "No genome with an annotation on this server" }),
+  const extra = state.homeExtra;
+  const none = homes.length ? "Choose a species…" : extra ? "None" : "No genome with an annotation on this server";
+  replace(select, el("option", { value: "", text: none }),
+    extra ? el("option", { value: AT_NCBI + extra.accession, text: extra.species + " (fetched from NCBI, " + extra.accession + ")" }) : null,
     homes.map((g) => el("option", { value: g.id, text: g.species + (g.common_name ? " (" + g.common_name + ")" : "") })));
-  select.value = state.home && homes.some((g) => g.id === state.home) ? state.home : "";
+  select.value = extra ? AT_NCBI + extra.accession
+    : state.home && homes.some((g) => g.id === state.home) ? state.home : "";
+}
+
+// The organism a starting genome is chosen for: the one of the protein that was looked
+// up. A pasted sequence names none.
+function chosenFor() {
+  return state.mode === "accession" && state.found ? plainOrganism(state.found) : "";
 }
 
 function refreshHomePane() {
@@ -123,9 +139,10 @@ async function doLookup() {
     showFound();
     refreshHomePane();
     if (found.home) {
-      state.homeExtra = null;
       await setHome(found.home.id);
     } else {
+      // A starting genome chosen for another protein's species is not carried over.
+      if ((state.home || state.homeExtra) && state.homeFor !== plainOrganism(found)) await setHome("");
       if (!state.home && !state.homeExtra) showSpecies();
       if (state.downloads && plainOrganism(found)) {         // offer the species' own genome
         $("home-term").value = plainOrganism(found);
@@ -171,13 +188,20 @@ function offerAction(kind, c) {
   const again = () => showOffers(kind, shownOffers[kind]);
   if (kind === "home") {
     if (c.on_server) {
+      if (state.home === c.on_server) {
+        return el("span", { class: "offer-actions" }, el("span", { class: "found small", text: "Starting genome" }),
+          el("button", { type: "button", class: "button secondary small", text: "Remove", onclick: () => setHome("") }));
+      }
       return el("button", { type: "button", class: "button secondary small", text: "Use it (on this server)",
-        onclick: async () => { state.homeExtra = null; await setHome(c.on_server); again(); } });
+        onclick: async () => { await setHome(c.on_server); again(); } });
     }
     if (!c.usable) return el("span", { class: "small", text: c.problem });
-    if (state.homeExtra && state.homeExtra.accession === c.accession) return el("span", { class: "found small", text: "Starting genome" });
+    if (state.homeExtra && state.homeExtra.accession === c.accession) {
+      return el("span", { class: "offer-actions" }, el("span", { class: "found small", text: "Starting genome" }),
+        el("button", { type: "button", class: "button secondary small", text: "Remove", onclick: () => setHome("") }));
+    }
     return el("button", { type: "button", class: "button secondary small", text: "Use as starting genome",
-      onclick: async () => { await setHomeExtra(c); again(); } });
+      onclick: () => setHomeExtra(c) });
   }
   if (c.on_server) {
     if (state.selected.has(c.on_server)) return el("span", { class: "found small", text: "Selected" });
@@ -259,21 +283,26 @@ function showHomeExtra() {
   const note = $("home-chosen");
   if (!note) return;
   note.hidden = !chosen;
-  if (!chosen) return;
-  replace(note, el("strong", { text: "Starting genome: " }), species(chosen.species), " (" + chosen.accession + "). ",
-    "It is fetched from NCBI with its gene annotation before the search starts. ",
-    el("button", { type: "button", class: "linklike", text: "Take another", onclick: () => {
-      state.homeExtra = null; state.order = []; showHomeExtra(); showOffers("home", shownOffers.home); showSpecies();
-    } }));
+  if (!chosen) {
+    replace(note);
+    return;
+  }
+  replace(note,
+    el("span", {}, el("strong", { text: "Starting genome: " }), species(chosen.species), " (" + chosen.accession + "). ",
+      "It is fetched from NCBI with its gene annotation before the search starts."),
+    el("button", { type: "button", class: "button secondary small", id: "home-remove", text: "Remove",
+      onclick: () => setHome("") }));
 }
 
 async function setHomeExtra(candidate) {
   state.homeExtra = candidate;
   state.home = "";
-  $("home").value = "";
+  state.homeFor = chosenFor();
   state.extra.delete(candidate.accession);
   setError("home-error", "");
+  homeOptions();
   showHomeExtra();
+  showOffers("home", shownOffers.home);              // its row says so at once
   try {
     const data = await getLibrary(null, candidate.taxon_id || "");
     if (state.homeExtra !== candidate) return;
@@ -290,19 +319,20 @@ async function setHomeExtra(candidate) {
 
 // ── 2. the species ─────────────────────────────────────────────────────────
 
+// The one way to set or take back the starting genome: ``id`` of a genome on the
+// server, or "" for none. Either ends the choice of a genome at NCBI.
 async function setHome(id) {
+  const hadExtra = !!state.homeExtra;
   state.home = id;
-  $("home").value = id || "";
+  state.homeExtra = null;
+  state.homeFor = chosenFor();
   setError("home-error", "");
-  if (id) {
-    state.homeExtra = null;
-    showHomeExtra();
-  }
+  homeOptions();
+  showHomeExtra();
+  if (hadExtra || shownOffers.home.length) showOffers("home", shownOffers.home);
   if (!id) {
-    if (!state.homeExtra) {
-      state.order = [];
-      state.selected.clear();
-    }
+    state.order = [];
+    state.selected.clear();
     showSpecies();
     return;
   }
@@ -365,6 +395,7 @@ function showSpecies() {
   $("species-pane").hidden = !ready;
   $("ncbi-pane").hidden = !(ready && state.downloads);
   if (!ready) {
+    replace($("species-list"));                       // nothing stays ticked out of sight
     $("species-empty").textContent = hasHome
       ? "There is no other genome on this server to search."
       : "Choose the gene first. The species are then listed with the closest relatives on top.";
@@ -559,7 +590,9 @@ async function main() {
     setError("acc-error", "");
   });
   $("seq").addEventListener("input", sequenceHint);
-  $("home").addEventListener("change", (event) => setHome(event.target.value));
+  $("home").addEventListener("change", (event) => {
+    if (!event.target.value.startsWith(AT_NCBI)) setHome(event.target.value);   // else: it is chosen already
+  });
   for (const kind of ["target", "home"]) {
     $(FIND[kind].button).addEventListener("click", () => find(kind));
     $(FIND[kind].term).addEventListener("keydown", (event) => {

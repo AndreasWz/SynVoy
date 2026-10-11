@@ -240,6 +240,21 @@ def test_check_says_how_the_genome_store_stands(config, tmp_path, capsys):
     assert "1 item(s), 0.0 GB, in the store's folder are in no record" in capsys.readouterr().out
 
 
+def test_check_accepts_an_installation_that_has_only_the_genome_store(config, capsys):
+    assert run(config, "check") == 1                     # no library and no store: nothing to search
+    out = capsys.readouterr().out
+    assert "[FAIL] genome library: no file" in out and "genome_store_gb" in out
+    settings = json.loads(config.read_text())
+    settings["genome_store_gb"] = 0.001
+    config.write_text(json.dumps(settings))
+    assert run(config, "check") == 0
+    out = capsys.readouterr().out
+    assert "[FAIL]" not in out
+    assert "[ok]   genome library: no file" in out
+    assert "this server has the genomes its store fetches from NCBI, and no others" in out
+    assert "no genome on this server can be a starting genome yet" in out
+
+
 def test_store_commands_say_when_the_store_is_off(make_env, monkeypatch, tmp_path, capsys):
     env = make_env()
     monkeypatch.setattr(cli, "build_context", lambda settings: env.ctx)

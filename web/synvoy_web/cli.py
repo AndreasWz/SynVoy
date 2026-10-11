@@ -113,13 +113,23 @@ def cmd_check(settings, args):
     def line(ok, text):
         _say("%s %s" % ("[ok]  " if ok else "[FAIL]", text))
 
+    store_on = settings.genome_store_gb > 0     # genomes can then come from NCBI alone
     try:
-        library = load_library(settings.library_path, strict=True)
-        homes = library.homes()
-        line(bool(homes), "genome library: %d genome(s), %d usable as starting genome  (%s)"
-             % (len(library.genomes), len(homes), settings.library_path))
-        failed = failed or not homes
-        for genome in library.genomes:
+        if not Path(settings.library_path).exists():
+            line(store_on, "genome library: no file %s (no genome was registered with "
+                           "`library add`)" % settings.library_path)
+            if store_on:
+                _say("       note: this server has the genomes its store fetches from NCBI, "
+                     "and no others")
+            failed = failed or not store_on
+            library = None
+        else:
+            library = load_library(settings.library_path, strict=True)
+            homes = library.homes()
+            line(bool(homes) or store_on, "genome library: %d genome(s), %d usable as starting "
+                 "genome  (%s)" % (len(library.genomes), len(homes), settings.library_path))
+            failed = failed or not (homes or store_on)
+        for genome in (library.genomes if library else []):
             if genome.size_mb > settings.max_genome_mb:
                 _say("       note: %s (%d Mb) is above max_genome_mb and cannot be searched"
                      % (genome.species, round(genome.size_mb)))
@@ -159,6 +169,9 @@ def cmd_check(settings, args):
         still_gb = (usage["budget"] - usage["used"]) / 1e9
         _say("       genome store: %.1f of %.1f GB used, %d genome(s)  (%s)"
              % (usage["used"] / 1e9, usage["budget"] / 1e9, usage["ready"], store.root))
+        if not ctx.library().homes():
+            _say("       note: no genome on this server can be a starting genome yet. "
+                 "`library fetch NAME --annotation` gets one; a visitor can also name one")
         if disk_gb - settings.min_free_gb < still_gb:
             _say("       note: the store may grow by %.0f GB, the disk has %.0f GB free (%.0f GB "
                  "are kept clear for searches): lower genome_store_gb or free the disk"
@@ -228,6 +241,8 @@ def _store_status(ctx):
         uses, last = counts.get(row["id"], (0, 0))
         notes = [n for n in ("pinned" if row["pinned"] else "",
                              "with annotation" if row["with_gff"] else "",
+                             "no taxonomy yet (listed last)"
+                             if row["state"] == READY and not row["lineage"] else "",
                              row["error_text"] or "") if n]
         _say("  %-17s %-30s %6.0f Mb  %-8s %5d  %-10s %s" % (
             row["accession"], row["species"][:30], row["size_bp"] / 1e6, row["state"], uses,
@@ -320,6 +335,7 @@ def _library_store(settings, args):
                 break
             if not _fetch_one(ctx, term, args):
                 missing += 1
+        store.repair_taxonomy()                 # for genomes NCBI gave no lineage for at first
         _store_status(ctx)
         return 1 if missing else 0
     if args.action == "sweep":

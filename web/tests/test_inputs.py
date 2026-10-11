@@ -199,11 +199,22 @@ def test_library_is_reread_when_the_file_changes(tmp_path):
     assert watcher.current() and watcher.error == ""
 
 
-def test_missing_library_gives_an_empty_one(tmp_path):
-    watcher = LibraryWatcher(tmp_path / "nothing.json")
-    assert watcher.current().genomes == [] and "cannot read" in watcher.error
+def test_no_library_file_is_an_empty_library_and_a_vanished_one_is_a_fault(tmp_path):
+    """Nothing registered yet is not a fault: genomes can come from the genome store
+    alone. A file that was there and is gone is one."""
+    path = tmp_path / "library.json"
+    now = [0.0]
+    watcher = LibraryWatcher(path, check_every=5.0, clock=lambda: now[0])
+    assert watcher.current().genomes == [] and watcher.error == "" and watcher.missing
     with pytest.raises(LibraryError):
-        load_library(tmp_path / "nothing.json")
+        load_library(path)                               # who asks for the file itself is told
+    save_library_data(path, library_data(tmp_path))
+    now[0] = 10.0
+    assert len(watcher.current().genomes) == 6 and not watcher.missing
+    path.unlink()
+    now[0] = 20.0
+    assert len(watcher.current().genomes) == 6           # the last good library stays in use
+    assert "cannot read" in watcher.error
 
 
 def test_taxonomy_lookup_reads_the_lineage():
@@ -215,6 +226,47 @@ def test_taxonomy_lookup_reads_the_lineage():
     assert lookup_taxonomy("Apis mellifera", fetch=fetch) == (7460, [131567, 7459, 7460], "honey bee")
     with pytest.raises(FetchError):
         lookup_taxonomy("No such", fetch=FakeFetch({"esearch": b'{"esearchresult":{"idlist":[]}}'}))
+    # NCBI's newer service is asked first. It counts from the root of all (1) and leaves
+    # the taxon itself out; the lineage is the same list either way.
+    newer = json.dumps({"taxonomy_nodes": [{"query": ["7460"], "taxonomy": {
+        "tax_id": 7460, "organism_name": "Apis mellifera", "genbank_common_name": "honey bee",
+        "lineage": [1, 131567, 7459]}}]}).encode()
+    fetch = FakeFetch({"datasets/v2/taxonomy/taxon/7460": newer})
+    assert lookup_taxonomy("", taxon_id=7460, fetch=fetch) == (7460, [131567, 7459, 7460], "honey bee")
+    assert not any("efetch" in url for url in fetch.calls)
+    unknown = json.dumps({"taxonomy_nodes": [{"errors": [{"reason": "not recognized"}]}]}).encode()
+    fetch = FakeFetch({"datasets/v2/taxonomy/taxon/7460": unknown, "efetch": xml})
+    assert lookup_taxonomy("", taxon_id=7460, fetch=fetch)[1] == [131567, 7459, 7460]
+
+
+def test_taxonomy_lookup_asks_again_when_ncbi_stumbles():
+    """The older service answers "HTTP 400" now and then for a request that works a
+    second later (seen on 2026-10-11 for two of four yeasts)."""
+    xml = (b"<TaxaSet><Taxon><TaxId>27288</TaxId><LineageEx><Taxon><TaxId>4893</TaxId></Taxon>"
+           b"</LineageEx></Taxon></TaxaSet>")
+    answers = [FetchError("not_found", "HTTP 400"), FetchError("unavailable", "HTTP 502"), xml]
+    asked, pauses = [], []
+
+    def fetch(url, timeout=15, max_bytes=2000000, accept="*/*"):
+        asked.append(url)
+        if "datasets" in url:
+            raise FetchError("timeout", "no answer")
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert lookup_taxonomy("", taxon_id=27288, fetch=fetch, sleep=pauses.append) == (27288, [4893, 27288], "")
+    assert len([u for u in asked if "efetch" in u]) == 3 and len(pauses) == 2
+
+    def gone(url, timeout=15, max_bytes=2000000, accept="*/*"):
+        asked.append(url)
+        raise FetchError("not_found", "HTTP 404")
+
+    del asked[:]
+    with pytest.raises(FetchError):
+        lookup_taxonomy("", taxon_id=27288, fetch=gone, sleep=pauses.append)
+    assert len([u for u in asked if "efetch" in u]) == 1 and len(pauses) == 2     # not asked again
 
 
 # ── sequences ───────────────────────────────────────────────────────────────

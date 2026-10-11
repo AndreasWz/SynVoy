@@ -662,6 +662,29 @@ class GenomeStore:
             self._changed()
 
     # ── keeping it tidy ─────────────────────────────────────────────────────
+    def without_taxonomy(self):
+        """Genomes on the server whose lineage NCBI did not give when they were fetched.
+        They are listed last instead of by relatedness until it is known."""
+        return [row for row in self.db.store_genomes(READY) if not row["lineage"]]
+
+    def repair_taxonomy(self, limit=20):
+        """Ask NCBI again for the lineage of such genomes. It makes requests, so it is
+        called where a download would be: from the fetching thread or the command line,
+        never from the worker's loop. Returns how many are known now."""
+        known = 0
+        for row in self.without_taxonomy()[:limit]:
+            try:
+                taxon_id, lineage, common = self.taxonomy(row["species"], taxon_id=row["taxon_id"])
+            except (FetchError, ValueError):
+                break                              # NCBI still does not answer: later
+            self.db.update_store_genome(row["accession"], taxon_id=taxon_id, lineage=lineage,
+                                        common_name=row["common_name"] or common or "")
+            self._changed()
+            self.log("genome store: the taxonomy of %s (%s) is known now"
+                     % (row["accession"], row["species"]))
+            known += 1
+        return known
+
     def recover(self, alive=lambda owner: False):
         """After a restart: a download whose owner is gone is wanted again. What has
         arrived of it stays and is continued."""

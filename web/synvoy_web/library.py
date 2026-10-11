@@ -361,7 +361,10 @@ def save_library_data(path, data):
 class LibraryWatcher:
     """Hands out the current library and re-reads the file when it has changed, so the
     operator can add a genome without restarting anything. A file that has become
-    invalid keeps the last good library in use and reports the error."""
+    invalid, or that was there and is gone, keeps the last good library in use and
+    reports the error. No file at all is an empty library and no error: nothing has
+    been registered yet, and genomes can come from the genome store alone
+    (``missing`` is then true)."""
 
     def __init__(self, path, check_every=5.0, reload_every=300.0, clock=time.monotonic):
         self.path = str(path)
@@ -373,7 +376,9 @@ class LibraryWatcher:
         self._stamp = None
         self._checked = None
         self._loaded = None
+        self._had_file = False
         self.error = ""
+        self.missing = False
 
     def _file_stamp(self):
         try:
@@ -396,11 +401,15 @@ class LibraryWatcher:
             try:
                 library = load_library(self.path, strict=False)
             except LibraryError as exc:
+                if stamp is None and not self._had_file:
+                    self.error, self.missing = "", True      # never been there: empty
+                    self._library = Library([], [], path=self.path)
+                    return self._library
                 self.error = str(exc)
                 if self._library is None:
                     self._library = Library([], [], path=self.path)
                 return self._library
-            self.error = ""
+            self.error, self.missing, self._had_file = "", False, True
             self._library = library
             self._stamp = stamp
             self._loaded = now

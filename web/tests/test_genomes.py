@@ -15,6 +15,8 @@ import pytest
 from conftest import call_json, run_until
 from synvoy_web import db, genomes, jobs, ncbi
 from synvoy_web.genomes import EVICTED, FAILED, FETCHING, READY, WANTED, StoreProblem
+from synvoy_web.library import LibraryWatcher
+from synvoy_web.net import FetchError
 from synvoy_web.query import QueryError
 
 A, B, C, D = "GCF_000000001.1", "GCA_000000002.1", "GCA_000000003.2", "GCF_000000004.1"
@@ -492,6 +494,42 @@ def test_starting_genome_can_come_from_ncbi(make_env):
     assert job["request"]["home"]["identity"][2].startswith("gff:")     # known once fetched
 
 
+def without_library(env):
+    """The same installation before any genome was registered with ``library add``."""
+    env.library_file.unlink()
+    env.ctx.libraries = LibraryWatcher(env.settings.library_path, check_every=0.0)
+    return env
+
+
+def test_server_can_run_on_the_genome_store_alone(make_env):
+    """No genome registered by hand: the store is filled by the operator's
+    ``library fetch`` and by what visitors name."""
+    env = without_library(make_env(genome_store_gb=0.001))
+    env.ncbi.add(A, "Formica alpha", annotated=True)
+    env.ncbi.add(B, "Lasius beta")
+    worker = env.worker()
+    ready = worker.preflight()
+    assert ready["ok"], ready["problems"]
+    worker.tick()
+    assert jobs.service_state(env.ctx)[0] is True         # searches are taken
+    assert env.ctx.library().genomes == []
+    outcome = jobs.submit(env.ctx, env.payload(targets=[{"accession": B}], home={"accession": A}),
+                          "10.0.0.1")
+    run_until(worker, lambda: env.store.get_job(outcome["id"])["state"] in (db.DONE, db.FAILED))
+    job = env.store.get_job(outcome["id"])
+    assert job["state"] == db.DONE, job["error_text"]
+    assert sorted(g.species for g in env.ctx.library().genomes) == ["Formica alpha", "Lasius beta"]
+    assert env.genomes.sweep() == []                     # and the store knows what is its own
+
+
+def test_server_without_any_source_of_genomes_says_so(make_env):
+    env = without_library(make_env())                    # no library, store off
+    ready = env.worker().preflight()
+    assert not ready["ok"] and "genome_store_gb" in " ".join(ready["problems"])
+    env.beat()
+    assert jobs.service_state(env.ctx)[:2] == (False, "library_empty")
+
+
 def test_what_a_request_may_and_may_not_name(make_env):
     env = make_env(genome_store_gb=0.001)
     stocked(env)
@@ -576,6 +614,32 @@ def test_files_that_vanished_take_the_genome_off_the_list(make_env):
     store.housekeeping()
     assert env.store.get_store_genome(A)["state"] == EVICTED
     assert env.ctx.library().get(row["id"]) is None
+
+
+def test_genome_stored_without_its_taxonomy_gets_it_later(make_env):
+    """NCBI's taxonomy did not answer while the genome was fetched: the genome is kept,
+    listed last, and placed among its relatives as soon as the lineage is known."""
+    env = make_env(genome_store_gb=0.001)
+    store = stocked(env, (A, B), lineage=[1, 2, 3, 77])
+    real, down = store.taxonomy, [True]
+
+    def taxonomy(species, taxon_id=None):
+        if down[0]:
+            raise FetchError("not_found", "HTTP 400")
+        return real(species, taxon_id=taxon_id)
+
+    store.taxonomy = taxonomy
+    row = fetched(env, A)
+    assert row["state"] == READY and row["lineage"] == []
+    assert env.ctx.library().get(row["id"]).lineage == []
+    assert [r["accession"] for r in store.without_taxonomy()] == [A]
+    assert store.repair_taxonomy() == 0                         # still no answer: nothing lost
+    down[0] = False
+    worker = env.worker()                                       # the worker does it by itself
+    run_until(worker, lambda: not store.without_taxonomy())
+    assert env.store.get_store_genome(A)["lineage"] == [1, 2, 3, 77]
+    assert env.ctx.library().get(row["id"]).lineage == [1, 2, 3, 77]
+    assert any("taxonomy of %s" % A in line for line in env.logs)
 
 
 # ── files in the store's folder that are in no record ───────────────────────

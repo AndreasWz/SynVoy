@@ -17,25 +17,22 @@ pipeline publishes (`docs/OUTPUT.md`).
 
 ## Try it on this machine
 
-You need what a normal SynVoy run needs (the conda environment `synvoy_env`) and the
-demo genomes (`demo/fetch_data.sh`).
+You need what a normal SynVoy run needs: Linux (or WSL2), conda, and the environment
+`synvoy_env` (`./install.sh` in the repository root makes it). The website itself needs
+nothing else: it is plain Python (3.10 or newer) without extra packages.
 
 ```bash
+conda activate synvoy_env
 cd web
 
-# 1. Settings: where conda is. Everything else has a default.
+# 1. Settings: where conda is, and how much room fetched genomes may take.
 mkdir -p var
-echo '{"conda_base": "'"$(conda info --base)"'"}' > var/settings.json
+echo '{"conda_base": "'"$(conda info --base)"'", "genome_store_gb": 5}' > var/settings.json
 export SYNVOY_WEB_CONFIG=var/settings.json
 
-# 2. Genomes the site may search. With --gff a genome can also be the starting genome.
-D=../local_data/demo
-python -m synvoy_web library add --species "Saccharomyces cerevisiae" --group yeasts \
-    --group-name "Yeasts" --fasta $D/home/Saccharomyces_cerevisiae.fna \
-    --gff $D/home/Saccharomyces_cerevisiae.gff --assembly GCF_000146045.2
-for s in Naumovozyma_castellii Kluyveromyces_lactis Lachancea_thermotolerans; do
-    python -m synvoy_web library add --species "${s/_/ }" --group yeasts --fasta $D/genomes/$s.fna
-done
+# 2. Genomes: four yeasts from NCBI, with their gene annotation (under 100 MB, 1 minute).
+python -m synvoy_web library fetch "Saccharomyces cerevisiae" "Naumovozyma castellii" \
+    "Kluyveromyces lactis" "Lachancea thermotolerans" --annotation
 
 # 3. Is everything in place?  Then start pages, API and worker in one process.
 python -m synvoy_web check
@@ -43,11 +40,41 @@ python -m synvoy_web run          # http://127.0.0.1:8080/
 ```
 
 On the page, enter `D6VTK4` (yeast STE2). On a 12-core laptop that search took
-5 min 14 s.
+5 min 21 s and found the gene in all three other yeasts.
 
 The first search builds the pipeline's tool environment (several GB, several
 minutes, needs the network). It is kept in `var/conda_cache` and reused by every
 later search. To reuse one you already have, set `"conda_cache_dir"` to it.
+
+Genomes of your own (not at NCBI, or your own assembly) are registered instead of
+fetched; with `--gff` a genome can be a starting genome:
+
+```bash
+python -m synvoy_web library add --species "Saccharomyces cerevisiae" --group yeasts \
+    --group-name "Yeasts" --fasta genome.fna --gff genome.gff --assembly GCF_000146045.2
+```
+
+On a machine with little memory, start it under a limit, and never next to another
+pipeline run: `systemd-run --user --unit=synvoy-web -p MemoryMax=10G --working-directory=$PWD
+-E SYNVOY_WEB_CONFIG=var/settings.json $(which python) -m synvoy_web run` (the limit must
+not be below 8 GB: Nextflow reads it as the memory it has).
+
+### Showing it to someone else
+
+The service listens on this machine only (`127.0.0.1`). Ways to let another person see it:
+
+- **On your screen**, in the room or in a video call. Nothing to set up.
+- **From another computer of yours**, through SSH: `ssh -L 8080:127.0.0.1:8080
+  you@this-machine`, then open http://127.0.0.1:8080/ there. Nothing is opened to the
+  network.
+- **For everybody in the same network**: set `"host": "0.0.0.0"` and give out
+  `http://<address of this machine>:8080/`. There is no encryption and anybody in that
+  network can start searches (the limits per visitor apply). Many university networks
+  do not let two devices talk to each other; a home or office network usually does.
+- **The pages and the examples without any server**: everything under `site/` is plain
+  files. Copied to any web space (after `gallery build`), the start page, the examples
+  and the explanations work; the search form says that searches cannot be started there.
+- **For everybody, for good**: a server, see "Running it on a server" below.
 
 ## How it is built
 
@@ -136,6 +163,8 @@ checks that the test notices.
 | A genome is removed while a search that needs it waits | It is fetched again before the search starts. | `test_genome_removed_while_a_search_waited_*` |
 | One visitor asks for many or huge genomes | Size is checked at NCBI before anything is downloaded; a limit per visitor and day; only assembly accessions with a version reach a download address. | `test_genome_larger_than_the_limits_*`, `test_one_visitor_*`, `test_what_a_request_may_and_may_not_name` |
 | Two processes fetch the same genome (worker and `library fetch`) | The second finds it taken and waits. | `test_download_cut_off_by_a_restart_*` |
+| NCBI's taxonomy does not answer while a genome is fetched | The lineage is read from NCBI's Datasets service, with the older E-utilities as second source (asked up to three times: it answers "HTTP 400" now and then for a request that works a second later). A genome that still got none is kept, listed last, and gets its lineage later (after the next fetch, and by the worker every ten minutes). `library status` marks it. | `tests/test_inputs.py`: `test_taxonomy_lookup_*`; `test_genome_stored_without_its_taxonomy_*` |
+| No genome was ever registered by hand (`library add`) | Not a fault: the server runs on the genomes its store fetches. A library file that was there and is gone is a fault, and the last good library stays in use. Without a library and with the store switched off, the check and the worker say that there is nothing to search. | `test_server_can_run_on_the_genome_store_alone`, `test_server_without_any_source_of_genomes_*`, `test_no_library_file_*` |
 | The store's folder holds files that are in no record (the database was lost or replaced; files were copied in by hand) | They count against the store's size, so the folder as a whole stays within the space that was set. The store never deletes them by itself and never takes one for a genome: a genome is fetched and checked even when a file of its name lies there. `library status` and `check` name them; `library sweep --yes` deletes them. Files of genomes registered with `library add` are never among them. | `test_files_in_no_record_*`, `test_file_the_store_did_not_fetch_*`, `test_genomes_the_operator_registered_*` |
 | Too many or too large requests | Limits per visitor (running searches, searches per day, look-ups per hour), on the queue, on genome number and size, on the request size. | `tests/test_api.py` |
 | Someone asks for a file that is not theirs to have | Only files listed in a result are served; nothing outside `site/` is; search ids are 128 random bits and are not logged in full. | `tests/test_api.py` |
@@ -304,7 +333,9 @@ SYNVOY_WEB_E2E_HOME=saccharomyces_cerevisiae \
   real browser through the paths a visitor takes: search by accession to the result,
   the same search again, paste a sequence and cancel it, what the form refuses, broken
   links, the service going away and coming back, a species that has to be fetched
-  from (a stand-in for) NCBI, a small screen, and the pages without a service.
+  from (a stand-in for) NCBI, a starting genome from NCBI that is chosen and taken
+  back in each of the three ways the form offers, a small screen, and the pages
+  without a service.
   `SYNVOY_WEB_SHOTS=<folder>` also saves pictures of the pages.
 - NCBI is a stand-in in all of these (`conftest.FakeNcbi`): it can be down, drop a
   connection part-way, ignore the request to resume, or send a damaged file.
@@ -344,27 +375,33 @@ or `run_job.sh`, run `tests/test_end_to_end.py`.
 
 **On the present code** (with the genome store, the new result page and the archive):
 
-- One search with the real pipeline through the site: yeast SYP1 against three yeasts.
-  All three genomes are in every figure and in the table, also the one without a call.
-- One genome fetched from the real NCBI by `library fetch`: the *S. cerevisiae*
-  reference with its annotation, 12 MB + 12 MB, checksums compared, 9 seconds.
-- The suite on Python 3.10 and 3.12; `tests/check_safeguards.py` (50 safeguards
-  removed one at a time, each noticed by a test); the browser run-through (63 checks)
+- A fresh installation with no genome registered by hand, as in "Try it on this
+  machine": four yeasts fetched from the real NCBI by species name (44 s), then yeast
+  STE2 searched with the real pipeline: 5 min 21 s, found in all three other yeasts
+  with the same identities (48, 42 and 66 %) as on the demo genomes.
+- During that fill NCBI's taxonomy service answered "HTTP 400" for two of the four
+  genomes and worked a moment later. That is why the lineage now has a second source
+  and is asked for again (table above).
+- One search with the real pipeline on registered genomes: yeast SYP1 against three
+  yeasts. All three genomes are in every figure and in the table, also the one without
+  a call.
+- `tests/test_end_to_end.py` with the real pipeline (2 passed, 6 min 34 s): a running
+  search was cancelled (its 14 processes ended), and a search whose 16 processes were
+  killed after 13 finished steps was taken up again by the worker, reused all 13 and
+  found the gene in 3 of 3 genomes.
+- The suite on Python 3.10 and 3.12; `tests/check_safeguards.py` (53 safeguards
+  removed one at a time, each noticed by a test); the browser run-through (72 checks)
   in Chrome; all of these also in a copy that holds only the files under version
   control.
 
-**Not repeated on the present code:** cancelling a running search and killing one
-outright, with the real pipeline (`tests/test_end_to_end.py`). Both pass with the
-stand-in pipeline. The worker has changed since the runs above (it settles the genomes
-of a search before it starts, and fetches genomes in a thread of its own), so run that
-test once on a machine where no other pipeline runs and nobody edits the pipeline,
-before the service goes public.
-
 Not checked:
 
-- **A search on a genome that the store fetched, with the real pipeline.** The two
-  halves are checked (the fetch against NCBI; the search on stored genomes with the
-  stand-in pipeline), not the two together.
+- **A search that waits for a genome a visitor named, with the real pipeline.** Checked
+  with the real pipeline: a search on genomes the operator had fetched before. Checked
+  with the stand-in pipeline: the wait itself.
+- **Reaching the service from a second computer.** With `"host": "0.0.0.0"` it answers on
+  the machine's network address (asked from the same machine); whether a network lets
+  another device through, and the SSH tunnel, were not tried.
 - **Genomes larger than yeast.** The limits (`max_genome_mb`, `max_total_mb`), the
   disk estimate (`disk_factor`), the space a fetched genome is counted with and
   `deploy/server.config` are starting values. A download of a 1 Gb genome, or the
