@@ -93,14 +93,25 @@ def translate_best_orf(dna: str) -> str:
     return best
 
 
+def short_query_warning(query_id, length):
+    """What a user has to know about a query between the minimum and ~40 residues."""
+    return (f"WARNING: query '{query_id}' is {length} aa. A query this short is located "
+            f"in the home genome, but in a target only a nearly identical ortholog can be "
+            f"told from a chance match, so calls rest on the neighbourhood. If it is the "
+            f"mature part of a longer precursor, the precursor is the better query.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Normalize query FASTA to protein")
     parser.add_argument("--input", required=True, help="Input FASTA (DNA or protein)")
     parser.add_argument("--output", required=True, help="Output protein FASTA")
-    parser.add_argument("--min_length", type=int, default=30,
-                        help="Minimum protein length (aa). Queries below this "
-                             "are rejected — searches on very short queries "
-                             "return noise. Set to 0 to disable.")
+    parser.add_argument("--min_length", type=int, default=20,
+                        help="Minimum protein length (aa). Queries below this are "
+                             "rejected: under about 18 residues a peptide is no longer "
+                             "found reliably even in its own genome. Set to 0 to disable.")
+    parser.add_argument("--warn_below", type=int, default=40,
+                        help="Queries shorter than this (aa) run, with a warning that only "
+                             "near-identical orthologs can be told from chance (default 40)")
     args = parser.parse_args()
 
     records = list(parse_fasta(args.input))
@@ -177,12 +188,15 @@ def main():
     if args.min_length > 0 and len(final_seq) < args.min_length:
         print(
             f"ERROR: Query '{clean_id}' is {len(final_seq)} aa, below the "
-            f"minimum of {args.min_length} aa. Short queries produce noisy "
-            f"MMseqs2 / tblastn hits. Override with --min_length 0 if you "
-            f"really want to search with a fragment this short.",
+            f"minimum of {args.min_length} aa. A peptide this short is often not "
+            f"found again even at its own position in the home genome. If it is the "
+            f"mature part of a longer precursor, search with the precursor. Override "
+            f"with --min_query_length 0 if you really want to search with it.",
             file=sys.stderr,
         )
         sys.exit(2)
+    if len(final_seq) < args.warn_below:
+        print(short_query_warning(clean_id, len(final_seq)), file=sys.stderr)
 
     write_fasta([(clean_id, final_seq)], args.output)
 

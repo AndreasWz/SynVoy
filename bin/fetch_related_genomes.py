@@ -597,7 +597,17 @@ def ask_keep_bad_quality(entry, reasons, timeout_seconds):
     return False
 
 
-def apply_bad_quality_policy(assemblies, args):
+def effective_bad_quality_policy(policy, user_named):
+    """``auto`` drops a low-quality assembly the pipeline picked on its own and keeps one
+    the user asked for by species name: for a named species there is nothing to fall back
+    to, and silently leaving it out reads as "no gene found there"."""
+    if policy != "auto":
+        return policy
+    return "keep" if user_named else "drop"
+
+
+def apply_bad_quality_policy(assemblies, args, user_named=False):
+    policy = effective_bad_quality_policy(args.bad_quality_policy, user_named)
     kept = []
     dropped = []
     for asm in assemblies:
@@ -608,14 +618,24 @@ def apply_bad_quality_policy(assemblies, args):
             kept.append(asm)
             continue
 
-        if args.bad_quality_policy == "keep":
+        if policy == "keep" and user_named and args.bad_quality_policy == "auto":
+            print(
+                f"  WARNING: {asm['species']} ({asm['accession']}) is a LOW-QUALITY assembly "
+                f"({'; '.join(reasons)}). It is used because the species was named in "
+                f"--target_species. A gene that is not found in it may be missing from the "
+                f"assembly, not from the species. --bad_quality_policy drop leaves it out.",
+                file=sys.stderr,
+            )
+            kept.append(asm)
+            continue
+        if policy == "keep":
             print(
                 f"  [keep] Retaining low-quality assembly {asm['accession']} for {asm['species']}: "
                 + "; ".join(reasons)
             )
             kept.append(asm)
             continue
-        if args.bad_quality_policy == "drop":
+        if policy == "drop":
             print(
                 f"  [drop] Excluding low-quality assembly {asm['accession']} for {asm['species']}: "
                 + "; ".join(reasons)
@@ -629,7 +649,7 @@ def apply_bad_quality_policy(assemblies, args):
             dropped.append(asm)
 
     if dropped:
-        print(f"  Excluded {len(dropped)} low-quality assembly(ies) by policy '{args.bad_quality_policy}'.")
+        print(f"  Excluded {len(dropped)} low-quality assembly(ies) by policy '{policy}'.")
     return kept
 
 
@@ -1075,9 +1095,11 @@ def main():
     )
     parser.add_argument(
         "--bad-quality-policy",
-        choices=["ask", "drop", "keep"],
+        choices=["auto", "ask", "drop", "keep"],
         default="ask",
-        help="What to do when only low-quality assembly is available for a species (default: ask)",
+        help="What to do when only a low-quality assembly is available for a species. "
+             "auto: drop it in the automatic search, keep it (with a warning) for a "
+             "species named in --target-species (default: ask)",
     )
     parser.add_argument(
         "--bad-quality-timeout",
@@ -1162,7 +1184,7 @@ def main():
             else:
                 print(f"  WARNING: No assemblies found for '{sp_name}'")
 
-        assemblies = apply_bad_quality_policy(assemblies, args)
+        assemblies = apply_bad_quality_policy(assemblies, args, user_named=True)
 
         if not assemblies:
             print(

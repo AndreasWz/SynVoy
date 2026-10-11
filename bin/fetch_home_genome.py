@@ -757,7 +757,7 @@ def main():
     )
     parser.add_argument(
         "--bad-quality-policy",
-        choices=["ask", "drop", "keep"],
+        choices=["auto", "ask", "drop", "keep"],
         default="ask",
         help="What to do if only low-quality home assembly is available (default: ask)",
     )
@@ -844,7 +844,18 @@ def main():
         bad, reasons = is_bad_quality(selected_entry, args)
         if bad:
             action = args.bad_quality_policy
-            if action == "keep":
+            if action == "auto":
+                # The home species follows from the query: there is no other genome to
+                # take, so the assembly is used and the run says so.
+                print(
+                    "WARNING: the home assembly is LOW QUALITY ("
+                    + "; ".join(reasons)
+                    + "). It is used because the home species is given by the query. "
+                    "Flanking genes may be missing or split across contigs. "
+                    "--bad_quality_policy drop stops the run here instead.",
+                    file=sys.stderr,
+                )
+            elif action == "keep":
                 print(
                     "  [keep] Using low-quality home assembly by policy: "
                     + "; ".join(reasons)

@@ -17,7 +17,6 @@ Inputs
   --home_gff        NCBI GFF for the home genome (product-name lookup)
   --query_bed       BED file with query-gene location (GOI identification)
   --target_gffs     Target-genome GFFs (SynVoy exon_annotation format)
-  --target_names    Display names (optional – derived from GFF filename if absent)
   --candidate_beds  Cluster-region BED files (used to filter target genes to candidate loci)
   --homology_tsvs   Homology TSV files (target -> home mapping, fallback)
   --tree            Newick tree for GOI clade colouring + target ordering
@@ -341,6 +340,44 @@ def _track_goi_status(track):
     if any(_is_goi_target_gene(g) for g in track.get("genes", [])):
         return "ambiguous"
     return "absent"
+
+
+def _absent_tracks_last(target_tracks):
+    """The same order, with the genomes that hold no GOI call moved to the end.
+
+    They are drawn: a searched genome without the gene is a result. The ribbon plot
+    links each track to the next one, so a nearly empty track between two others would
+    cut the ribbons that join them."""
+    return ([t for t in target_tracks if t.get("goi_status") != "absent"]
+            + [t for t in target_tracks if t.get("goi_status") == "absent"])
+
+
+def _scale_bar_arg(value):
+    """`--scale_bar_len`: 'auto' or a length in bp."""
+    text = str(value).strip().lower()
+    if text in ("auto", "", "0"):
+        return "auto"
+    try:
+        number = int(float(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'auto' or a length in bp, not {value!r}")
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"'auto' or a length in bp, not {value!r}")
+    return number
+
+
+def auto_scale_bar_bp(px_per_bp, target_px=120.0):
+    """A round length (1, 2 or 5 x 10^k bp) whose bar is closest to `target_px` on screen.
+
+    A fixed 10 kb bar is 34 px wide in a yeast plot and 3 px in a human one (measured on
+    the STE2 and decorin runs), so the length follows the scale of the drawing."""
+    if not px_per_bp or px_per_bp <= 0:
+        return 10000
+    raw = target_px / px_per_bp
+    k = math.floor(math.log10(raw))
+    candidates = [m * 10 ** e for e in (k - 1, k, k + 1) for m in (1, 2, 5)]
+    best = min(candidates, key=lambda v: abs(math.log(v / raw)))
+    return max(1, int(round(best)))
 
 
 def _format_bp_label(length_bp):
@@ -1867,6 +1904,56 @@ def _export_html_inline_svg(html_path, svg_path):
         fh.write('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + body)
 
 
+# A target genome that failed the assembly quality check but was searched because the
+# user chose it (see qc_fail_policy) is marked in every figure: a dagger after the
+# species name and one line in the legend. Without the mark an empty row reads as
+# "the gene is absent", when the assembly may simply not contain it.
+LOW_QUALITY_MARK = "\u2020"
+LOW_QUALITY_LEGEND = ("low-quality assembly (failed the N50 / sequence-count check): a gene "
+                      "not drawn here may be missing from the assembly, not from the species")
+_LOW_QUALITY_GENOMES = set()
+
+
+def _genome_key(name):
+    """A genome's name without directory and sequence/annotation extensions."""
+    key = os.path.basename(str(name or "").strip())
+    changed = True
+    while changed:
+        changed = False
+        for ext in (".gz", ".gff3", ".gff", ".fasta", ".fna", ".fa"):
+            if key.lower().endswith(ext):
+                key = key[:-len(ext)]
+                changed = True
+    return key
+
+
+def load_low_quality_genomes(path):
+    """Genomes with status FAIL in the quality summary (genome_qc_summary.json)."""
+    if not path or not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            records = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(records, list):
+        return set()
+    return {_genome_key(r.get("genome")) for r in records
+            if isinstance(r, dict) and str(r.get("status", "")).upper() == "FAIL"
+            and r.get("genome")}
+
+
+def _is_low_quality(track):
+    if not _LOW_QUALITY_GENOMES or not track or track.get("is_home"):
+        return False
+    return _genome_key(track.get("genome_id")) in _LOW_QUALITY_GENOMES
+
+
+def _low_quality_mark(track):
+    """The suffix of a row label: a dagger for a flagged genome, else nothing."""
+    return " " + LOW_QUALITY_MARK if _is_low_quality(track) else ""
+
+
 def _format_species_label(name):
     """Apply --common_names mode to a raw species string.
 
@@ -2238,7 +2325,7 @@ def _gene_names_table(rows, x, y, avail_w, args):
                                    lookup_note=_GENE_NAMES_NOTE[0], goi_stroke=GOI_BORDER)
 
 
-def _ribbon_legend_groups(goi_label):
+def _ribbon_legend_groups(goi_label, low_quality=False):
     """Legend of the ribbon plot (interactive HTML, its static SVG and the publication SVG)."""
     base = GENE_PALETTE[0]
     stroke = _darken_hex(base, 0.65)
@@ -2270,7 +2357,8 @@ def _ribbon_legend_groups(goi_label):
             (ribbon(), "ribbon: joins a home gene to its ortholog"),
             ("//", "compressed gap, labelled with its true length"),
             ("Lanes", "overlapping genes are stacked on up to three lanes; a gene that does "
-                      "not fit is drawn translucent")]),
+                      "not fit is drawn translucent")]
+            + ([(LOW_QUALITY_MARK, LOW_QUALITY_LEGEND)] if low_quality else [])),
         ("Genes", [
             (_lg_arrow(base, stroke), "gene; colour = the home gene it is the ortholog of"),
             (exons(base, stroke), "exon blocks joined by intron lines"),
@@ -2434,7 +2522,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     _content_bottom = total_h
     # Legend below the plot, then the caption block, then the gene-names table.
     _legend_svg, _legend_h = _legend_block(
-        _ribbon_legend_groups(_goi_display_label(all_tracks)), 24, total_h + 6, plot_w - 48)
+        _ribbon_legend_groups(_goi_display_label(all_tracks),
+                              low_quality=any(_is_low_quality(tr) for tr in all_tracks)),
+        24, total_h + 6, plot_w - 48)
     total_h += (_legend_h + 22) if _legend_h else 0
     _caption_y0 = total_h
     total_h += (len(_caption_lines) * 15 + 26) if _caption_lines else 0
@@ -2987,7 +3077,9 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
     # ---- Scale bar ----
     # Wrapped in a group so the JS reflow can keep it pinned to the (shrinking)
     # canvas bottom when genomes are removed.
-    scale_len_bp = args.scale_bar_len
+    scale_len_bp = getattr(args, "scale_bar_len", "auto")
+    if not isinstance(scale_len_bp, (int, float)) or scale_len_bp <= 0:
+        scale_len_bp = auto_scale_bar_bp(scale)
     sb_x1_px = bp2px(x_max_bp - pad_bp * 0.5)
     sb_x0_px = sb_x1_px - scale_len_bp * scale
     sb_y = _content_bottom - BOTTOM_MARGIN + 20
@@ -3053,7 +3145,7 @@ def render_synteny_html(all_tracks, gene_colours, goi_genome_colours,
         # data-track-idx on EVERY per-track label so hide/reflow toggles them
         # all (the species name, accession and status used to be left behind
         # when a track was collapsed because they carried no track index).
-        species_label = _format_species_label(species)
+        species_label = _format_species_label(species) + _low_quality_mark(track)
         svg_parts.append(
             f'<text x="{TEXT_RIGHT_X}" y="{yb:.1f}" data-track-idx="{ti}" '
             f'text-anchor="end" class="track-label track-item" font-style="italic">'
@@ -4847,7 +4939,7 @@ def _figure_row_labels(row_tracks, size):
     The accession sits in the location column; sized from Arial advance widths so
     that no label can run into the cells."""
     raw = [(t.get("species") or re.sub(r"<[^>]+>", "", t.get("label") or "")).strip()
-           for t in row_tracks]
+           + _low_quality_mark(t) for t in row_tracks]
     width = int(max([text_width(l, size, bold=(ri == 0)) for ri, l in enumerate(raw)] + [120]) + 30)
     return raw, width
 
@@ -5071,7 +5163,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             ("Row", "one genome: its genes at their true positions on the scaffold, each row "
                     "scaled to its own neighbourhood"),
             ("Right", "scaffold and position of the neighbourhood; (+N) = genes on N other "
-                      "scaffolds, not drawn")]),
+                      "scaffolds, not drawn")]
+            + ([(LOW_QUALITY_MARK, LOW_QUALITY_LEGEND)]
+               if any(_is_low_quality(tr) for tr in row_tracks) else [])),
         ("Flanking genes", [
             (_lg_dot(_shade_by_identity(_base, 95), _dot_stroke), "ortholog; colour = home gene"),
             (_lg_ramp(_base), "paler = lower identity or confidence"),
@@ -5388,7 +5482,9 @@ def render_anchor_grid_threaded(all_tracks, gene_colours, goi_genome_colours,
                      "neighbourhood; the leader drops to the gene's column"),
             ("Arrow", "ortholog placed in this neighbourhood; points in its coding direction"),
             ("Empty cell", NOT_PLACED_TEXT),
-            ("Right", "scaffold and position of the neighbourhood")]),
+            ("Right", "scaffold and position of the neighbourhood")]
+            + ([(LOW_QUALITY_MARK, LOW_QUALITY_LEGEND)]
+               if any(_is_low_quality(tr) for tr in row_tracks) else [])),
         ("Flanking genes", _lg_confidence() + [
             (_lg_ramp(GENE_PALETTE[0]), "paler = lower identity to the home gene"),
             ("×N", "N copies at the locus")]),
@@ -5705,7 +5801,6 @@ def main():
                          "track (e.g. 'Homo sapiens') instead of 'Home genome'.")
     ap.add_argument("--query_bed",      default=None)
     ap.add_argument("--target_gffs",    nargs="*", default=[])
-    ap.add_argument("--target_names",   nargs="*", default=[])
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
@@ -5720,13 +5815,17 @@ def main():
     ap.add_argument("--gap_threshold",  type=int, default=50000, help="Min gap size to compress (bp)")
     ap.add_argument("--gap_visual_size",type=int, default=20000, help="Visual size of compressed gaps (bp)")
     ap.add_argument("--flank_fallback_bp",type=int, default=1000000, help="Fallback window if candidate genes miss GOI")
-    ap.add_argument("--scale_bar_len",  type=int, default=10000, help="Length of the scale bar (bp)")
+    ap.add_argument("--scale_bar_len",  type=_scale_bar_arg, default="auto",
+                    help="Length of the scale bar: 'auto' (a round length about 120 px wide) or bp")
     ap.add_argument("--plot_width",     type=int, default=0, help="Total width of the output HTML plot (0=auto)")
     ap.add_argument("--plot_height",    type=int, default=0, help="Total height of the output HTML plot (0=auto)")
     ap.add_argument("--goi_min_px",     type=int, default=0,
                     help="Minimum on-screen width (px) for GOI/toxin genes so their exon "
                          "structure is visible at locus scale (0=off; ~30 shows notches). "
                          "Exons scale to the enlarged box; lengths become schematic for GOIs.")
+    ap.add_argument("--genome_qc",      default=None,
+                    help="Genome quality summary of the run (genome_qc_summary.json). A target "
+                         "genome that failed the check is marked with a dagger in every figure.")
     ap.add_argument("--caption_file",   default=None,
                     help="Path to a UTF-8 text file whose lines are rendered as a caption "
                          "block at the bottom of the figure (e.g. conserved-locus/no-toxin notes).")
@@ -5749,10 +5848,10 @@ def main():
     ap.add_argument("--no_orient_to_home", dest="orient_to_home", action="store_false",
                     help="Keep every target track in its native assembly orientation.")
     ap.set_defaults(orient_to_home=True)
-    ap.add_argument("--max_legend_entries", type=int, default=25, help="Maximum number of flanking genes to show in legend")
-    ap.add_argument("--ribbon_alpha_dense", type=float, default=0.20, help="Alpha for flanking ribbons")
     ap.add_argument("--hide_goi_absent", action="store_true",
-                    help="Hide target tracks with no GOI-like annotation when informative tracks exist")
+                    help="Leave genomes without any GOI call out of the figures. By default "
+                         "every searched genome is drawn: its row shows the flanking genes "
+                         "that were placed and says that no GOI model was.")
     ap.add_argument("--pub_svg", action="store_true",
                     help="Also write a publication SVG: same as the interactive "
                          "HTML view, with every home-genome gene labelled.")
@@ -5781,11 +5880,6 @@ def main():
                     help="Do not write the '*_with_fragments' ribbon plot / anchor grid "
                          "that also draw ModelStatus=fragment GOI models (hidden by default).")
     ap.set_defaults(fragment_variant=True)
-    # Legacy flags from the previous narrow-layout publication renderer.
-    # Accepted but ignored so existing Nextflow invocations keep working.
-    ap.add_argument("--pub_width", type=int, default=183, help=argparse.SUPPRESS)
-    ap.add_argument("--pub_palette", default="okabe_ito",
-                    choices=["okabe_ito", "tableau"], help=argparse.SUPPRESS)
     ap.add_argument("--output",         required=True)
     ap.add_argument("--common_names", choices=("both", "common", "scientific", "off"),
                     default="both",
@@ -5834,6 +5928,10 @@ def main():
             print(f"[plot] Common-name lookup unavailable: {exc}", file=sys.stderr)
             globals()["_synvoy_taxa"] = None
     globals()["_common_name_mode"] = args.common_names
+    globals()["_LOW_QUALITY_GENOMES"] = load_low_quality_genomes(args.genome_qc)
+    if _LOW_QUALITY_GENOMES:
+        print(f"WARNING: low-quality assembly, marked {LOW_QUALITY_MARK} in the figures: "
+              + ", ".join(sorted(_LOW_QUALITY_GENOMES)), file=sys.stderr)
 
     _run_figures(args)
     # Fragment GOI models are hidden in the default figures; when any were hidden,
@@ -6197,6 +6295,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
 
     for tt in target_tracks:
         tt["goi_status"] = _track_goi_status({"genes": tt.get("genes", [])})
+    target_tracks = _absent_tracks_last(target_tracks)
 
     hidden_absent_tracks = 0
     informative_tracks = [t for t in target_tracks if t.get("goi_status") != "absent"]

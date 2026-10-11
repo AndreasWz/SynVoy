@@ -582,6 +582,31 @@ def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
     return diagnostics
 
 
+LOW_QUALITY_CAVEAT = ("A gene that is not found in such a genome may be missing from the "
+                      "assembly, not from the species.")
+
+
+def low_quality_warnings(failed_genomes, searched):
+    """One sentence per target genome that failed the assembly quality check and was
+    searched anyway (a genome the user chose is kept; see ``qc_fail_policy``).
+
+    ``failed_genomes`` are the ``failed_genomes`` of ``summarize_qc``; ``searched`` the
+    genomes with results downstream. Returns ``(genome_ids, sentences)``."""
+    searched = set(searched)
+    ids, sentences = [], []
+    for rec in sorted(failed_genomes, key=lambda r: r.get("genome", "")):
+        genome = rec.get("genome", "")
+        if not genome or genome not in searched or genome in ids:
+            continue
+        ids.append(genome)
+        reason = (rec.get("msg") or "").strip()
+        sentences.append(
+            f"LOW-QUALITY ASSEMBLY: {genome} failed the quality check"
+            + (f" ({reason})" if reason else "")
+            + f" and was searched anyway. {LOW_QUALITY_CAVEAT}")
+    return ids, sentences
+
+
 def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0):
     """One-line, unambiguous summary of the GOI ortholog yield, for the summary block.
 
@@ -1621,7 +1646,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         n_home_loci=len(flanking_per_locus or {}),
     )
 
+    # A genome that failed the quality check and was searched anyway (the user chose it):
+    # every call in it carries the flag, and the report says so at the top.
+    low_quality_ids, warnings = low_quality_warnings(
+        qc_summary["failed_genomes"], failed_downstream)
+    for rec in goi_dedup.get("records", []):
+        if rec.get("genome") in low_quality_ids:
+            rec["low_quality_assembly"] = True
+
     report = {
+        # Things a reader must know before reading any number below. Empty on a clean run.
+        "warnings": warnings,
         "genome_qc": qc_records,
         "qc_summary": {
             **qc_summary,
@@ -1699,6 +1734,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
+            "low_quality_genomes_searched": low_quality_ids,
             "staging_empty": staging_diagnostics["empty"],
             # --- Low-level diagnostic (NOT the result count) ---
             # Raw MMseqs/BLAST .m8 hits staged under hits/; often 0 even when annotations
@@ -1797,6 +1833,8 @@ def main():
     # Surface the GOI headline so the run's terminal/log shows the real result rather
     # than only the (often-zero) raw-hit diagnostic. See docs/TODO.md §1k.
     print(f"  {report['summary']['headline']}")
+    for warning in report.get("warnings", []):
+        print(f"  [!] {warning}")
 
     # §1.1 honesty: loudly caveat a gene-family query so a user doesn't read paralog
     # calls as confident orthologs.

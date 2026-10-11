@@ -6,15 +6,21 @@ configurations so a user who doesn't know which preset to choose still gets sens
 parameters. Decision policy (first match wins):
 
   query_len < short_peptide_max          -> preset_short_peptide
-  n_hits > paralog_hits  OR  n_strong_loci > tandem_max_strong
-                                          -> preset_paralog_discrimination  (+WARN)
   n_strong_loci >= 2  and  bit_ratio < single_copy_min_ratio
-                                          -> preset_tandem_family
+                                          -> preset_paralog_discrimination
+                                             (relatives at other places of the genome)
+  primary_copies >= tandem_min_copies    -> preset_tandem_family
+                                             (several copies next to each other)
   otherwise                               -> preset_single_copy
 
-Xaver's luciferase run (185 hits, 50 loci, bit_ratio 1.17) lands on
-preset_paralog_discrimination + WARN — which with the §1d locus cap would have cut
-the 55 h run to a few hours and surfaced the real ortholog calls.
+A WARNING is added when the query aligns at many places (more than `many_loci`, or
+more than `tandem_max_strong` strong loci): a large family.
+
+The decision counts places (loci, copies), not alignment rows. A row is one exon in one
+search program; until 2026-10-08 more than 15 rows meant "large paralog family", which
+was true of every single-copy gene with eight exons or more, and a tandem array was
+never recognised because all its copies fall into one locus. Xaver's luciferase run
+(50 loci, four of them strong) still lands on preset_paralog_discrimination + WARN.
 
 Prints the chosen preset + reasoning; the workflow can echo this and let the user
 override with --preset_override <profile>.
@@ -32,14 +38,15 @@ VALID_PRESETS = {
 }
 
 
-def select_preset(profile, *, short_peptide_max=100, paralog_hits=15,
-                  tandem_max_strong=5, single_copy_min_ratio=2.0):
+def select_preset(profile, *, short_peptide_max=100, tandem_max_strong=5,
+                  single_copy_min_ratio=2.0, tandem_min_copies=1.5, many_loci=10):
     """Return (preset_name, warn: bool, reasons: list[str])."""
     n_hits = profile.get("n_hits") or 0
     query_len = profile.get("query_len")
     n_strong = profile.get("n_strong_loci") or 0
     n_loci = profile.get("n_independent_loci") or 0
     ratio = profile.get("bit_ratio")
+    copies = profile.get("primary_copies")
     reasons = []
 
     if n_hits == 0:
@@ -53,25 +60,26 @@ def select_preset(profile, *, short_peptide_max=100, paralog_hits=15,
         )
         return "preset_short_peptide", False, reasons
 
-    if n_hits > paralog_hits or n_strong > tandem_max_strong:
-        reasons.append(
-            f"{n_hits} hits across {n_loci} independent loci ({n_strong} strong); "
-            f"bit_ratio={ratio} (primary barely beats the next locus) — large paralog "
-            f"family. Capping loci and tightening family discrimination avoids a runaway "
-            f"multi-locus search."
-        )
-        return "preset_paralog_discrimination", True, reasons
+    large_family = n_strong > tandem_max_strong or n_loci > many_loci
 
     if n_strong >= 2 and (ratio is None or ratio < single_copy_min_ratio):
         reasons.append(
-            f"{n_strong} strong loci with bit_ratio={ratio} (plateau, no single dominant "
-            f"hit) — tandem / multi-copy family"
+            f"{n_strong} strong loci among {n_loci} (bit_ratio={ratio}: the next locus scores "
+            f"more than half of the primary) — relatives of the query at other places of "
+            f"the genome, which have to be told apart from it"
         )
-        return "preset_tandem_family", False, reasons
+        return "preset_paralog_discrimination", large_family, reasons
+
+    if copies is not None and copies >= tandem_min_copies:
+        reasons.append(
+            f"the query is covered {copies} times at its strongest locus — several copies "
+            f"next to each other (tandem array)"
+        )
+        return "preset_tandem_family", large_family, reasons
 
     reasons.append(
-        f"{n_strong} strong locus/loci, bit_ratio={ratio} (a single dominant primary) "
-        f"over {n_hits} hit(s) — single-copy / conserved"
+        f"{n_strong} strong locus/loci among {n_loci}, bit_ratio={ratio}, query covered "
+        f"{copies} time(s) at the strongest — single-copy / conserved"
     )
     return "preset_single_copy", False, reasons
 
@@ -84,9 +92,11 @@ def main():
                     help="Force a preset (one of preset_short_peptide/tandem_family/single_copy/"
                          "paralog_discrimination); bypasses auto-selection but still records the profile")
     ap.add_argument("--short_peptide_max", type=int, default=100)
-    ap.add_argument("--paralog_hits", type=int, default=15)
     ap.add_argument("--tandem_max_strong", type=int, default=5)
     ap.add_argument("--single_copy_min_ratio", type=float, default=2.0)
+    ap.add_argument("--tandem_min_copies", type=float, default=1.5,
+                    help="Query coverage depth at the strongest locus from which it counts "
+                         "as a tandem array (default 1.5)")
     args = ap.parse_args()
 
     with open(args.hit_profile) as fh:
@@ -102,9 +112,9 @@ def main():
         preset, warn, reasons = select_preset(
             profile,
             short_peptide_max=args.short_peptide_max,
-            paralog_hits=args.paralog_hits,
             tandem_max_strong=args.tandem_max_strong,
             single_copy_min_ratio=args.single_copy_min_ratio,
+            tandem_min_copies=args.tandem_min_copies,
         )
 
     print(f"AUTO-PRESET: {preset}")

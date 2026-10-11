@@ -5,7 +5,6 @@ nextflow.enable.dsl=2
 // Import Modules
 include { LOCATE_GENE } from './modules/locate_gene.nf'
 include { SPLIT_LOCI } from './modules/split_loci.nf'
-include { RESOLVE_HOME_LOCUS } from './modules/resolve_home_locus.nf'  // §1n
 include { EXTRACT_FLANKING } from './modules/extract_flanking.nf'
 include { PREPARE_INITIAL_DB } from './modules/prepare_initial_db.nf'
 include { ITERATIVE_SEARCH } from './modules/iterative_search.nf'
@@ -188,6 +187,71 @@ def paramBool(value) {
     return text in ['true', '1', 'yes', 'y', 'on']
 }
 
+// What happens to a target genome that fails the quality check. 'auto' keeps a genome
+// the user chose (pro mode, or easy mode with --target_species) and drops one the
+// pipeline picked itself; a kept one is flagged in the console, the report and the figures.
+def qcFailPolicy() {
+    def policy = (params.qc_fail_policy ?: 'auto').toString()
+    if (policy != 'auto') {
+        return policy
+    }
+    return (params.mode == 'pro' || params.target_species) ? 'keep' : 'drop'
+}
+
+// A query between the minimum length and 40 residues runs, with a warning in the console.
+def shortQueryNote(fasta) {
+    def length = fasta.readLines().findAll { line -> !line.startsWith('>') }.join('').trim().size()
+    if (length > 0 && length < 40) {
+        log.warn "Query is ${length} aa. A query this short is located in the home genome, but in a target only a nearly identical ortholog can be told from a chance match, so calls rest on the neighbourhood. If it is the mature part of a longer precursor, the precursor is the better query."
+    }
+}
+
+// Which home loci are searched (see nextflow.config). Naming the home gene means
+// "this gene and nothing else".
+def homeLocusMode() {
+    if ((params.home_goi_gene ?: '').toString().trim()) {
+        return 'gene_only'
+    }
+    return (params.home_locus_mode ?: 'auto').toString()
+}
+
+// Parameters of earlier versions. A value that is accepted and then ignored is worse
+// than a message, so a run that still sets one is told what to do instead:
+//   replaced   the run stops, because the old value says something the pipeline can no
+//              longer do in that form;
+//   no effect  the run goes on with a warning: the parameter changed nothing when it was removed.
+def removedParams() {
+    return [
+        replaced: [
+            max_flanking_goi_similarity: "use --goi_relative_evalue (an alignment E-value, default 1e-5; 0 switches the test off)",
+            enable_name_locus          : "the annotated home gene is the primary locus by default now; use --home_locus_mode gene_only to search that locus alone",
+            name_locus_min_identity    : "the name lookup it belonged to was replaced by --home_locus_mode",
+            name_locus_pad             : "the name lookup it belonged to was replaced by --home_locus_mode",
+        ],
+        noEffect: [
+            'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
+            'max_consecutive_empty_blocks', 'gap_min_size', 'gap_evalue', 'gap_min_alnlen',
+            'keep_intermediate', 'max_retries', 'multi_profile', 'multi_profile_max_jobs',
+            'locus_ownership_synteny_window', 'pub_width_mm', 'pub_palette', 'min_exon_query_cov',
+        ],
+    ]
+}
+
+// A distance that is derived unless a number fixes it: 'auto' or a number >= 0.
+def checkAutoDistance(String name, validationErrors) {
+    def text = (params[name] == null ? 'auto' : params[name]).toString().trim().toLowerCase()
+    if (text == 'auto') {
+        return
+    }
+    try {
+        if (new BigDecimal(text) < 0) {
+            validationErrors << "Invalid --${name} (${params[name]}). Must be 'auto' or a number of base pairs >= 0."
+        }
+    } catch (NumberFormatException e) {
+        validationErrors << "Invalid --${name} '${params[name]}'. Must be 'auto' or a number of base pairs."
+    }
+}
+
 // --- Numeric parameter validation (docs/TODO.md §1s) -------------------------
 // Nextflow types a value from `nextflow.config` by its literal (9.5 -> Double)
 // but types EVERY `--param value` from the command line as a **String**. Groovy
@@ -230,8 +294,39 @@ def validateNumericParams(validationErrors, validationWarnings) {
         }
     }
 
-    if (!(params.qc_fail_policy in ['drop', 'keep'])) {
-        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'drop' or 'keep'."
+    if (!(params.qc_fail_policy in ['auto', 'drop', 'keep'])) {
+        validationErrors << "Invalid --qc_fail_policy '${params.qc_fail_policy}'. Must be 'auto', 'drop' or 'keep'."
+    }
+    def removed = removedParams()
+    removed.replaced.each { name, hint ->
+        if (params.containsKey(name)) {
+            validationErrors << "--${name} no longer exists: ${hint}."
+        }
+    }
+    removed.noEffect.each { name ->
+        if (params.containsKey(name)) {
+            validationWarnings << "--${name} no longer exists. It had no effect; remove it from the command line or config."
+        }
+    }
+    if (!(params.home_locus_mode in ['auto', 'gene_only', 'alignment'])) {
+        validationErrors << "Invalid --home_locus_mode '${params.home_locus_mode}'. Must be 'auto', 'gene_only' or 'alignment'."
+    }
+    ['cluster_distance', 'region_padding', 'goi_margin', 'synteny_bridge_max_gap',
+     'dispersed_envelope_margin', 'locus_gap', 'goi_hull_cluster_max_gap',
+     'goi_hull_window_pad', 'goi_hull_max_window'].each { name -> checkAutoDistance(name, validationErrors) }
+    ['block_gap_genes', 'window_margin_genes', 'goi_margin_genes', 'synteny_bridge_max_gap_genes',
+     'dispersed_envelope_margin_genes', 'locus_gap_genes'].each { name ->
+        if (num.call(name, params[name], 1) < 0) {
+            validationErrors << "Invalid --${name} (${params[name]}). Must be >= 0."
+        }
+    }
+    def relativeEvalue = num.call('goi_relative_evalue', params.goi_relative_evalue, 0)
+    if (relativeEvalue < 0) {
+        validationErrors << "Invalid --goi_relative_evalue (${params.goi_relative_evalue}). Must be >= 0 (0 switches the test off)."
+    }
+    def minQueryLength = num.call('min_query_length', params.min_query_length, 0)
+    if (minQueryLength < 0) {
+        validationErrors << "Invalid --min_query_length (${params.min_query_length}). Must be >= 0."
     }
 
     def nFlanking = num.call('n_flanking_genes', params.n_flanking_genes, 1)
@@ -258,10 +353,6 @@ def validateNumericParams(validationErrors, validationWarnings) {
     if (maxIntron < 0) {
         validationErrors << "Invalid --max_intron (${params.max_intron}). Must be >= 0."
     }
-    def clusterDistance = num.call('cluster_distance', params.cluster_distance, 0)
-    if (clusterDistance < 0 && clusterDistance != -1) {
-        validationErrors << "Invalid --cluster_distance (${params.cluster_distance}). Must be >= 0 or -1 (auto)."
-    }
     def mmseqsSensitivity = num.call('mmseqs_sensitivity', params.mmseqs_sensitivity, 7)
     if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
         validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
@@ -277,11 +368,10 @@ def validateNumericParams(validationErrors, validationWarnings) {
     if (swMinIdentity < 0 || swMinIdentity > 100) {
         validationErrors << "Invalid --sw_min_identity (${params.sw_min_identity}). Must be between 0 and 100."
     }
-    def regionPadding = num.call('region_padding', params.region_padding, 0)
     def paddingMin = num.call('padding_min', params.padding_min, 0)
     def paddingMax = num.call('padding_max', params.padding_max, 0)
-    if (regionPadding < 0 || paddingMin < 0 || paddingMax < 0) {
-        validationErrors << "Padding values (--region_padding, --padding_min, --padding_max) must be >= 0."
+    if (paddingMin < 0 || paddingMax < 0) {
+        validationErrors << "Padding values (--padding_min, --padding_max) must be >= 0."
     }
     if (paddingMax < paddingMin) {
         validationErrors << "Invalid padding: --padding_max (${params.padding_max}) must be >= --padding_min (${params.padding_min})."
@@ -293,10 +383,6 @@ def validateNumericParams(validationErrors, validationWarnings) {
     def minBlockGenes = num.call('min_block_genes', params.min_block_genes, 1)
     if (minBlockGenes < 1) {
         validationErrors << "Invalid --min_block_genes (${params.min_block_genes}). Must be >= 1."
-    }
-    def maxFlankSim = num.call('max_flanking_goi_similarity', params.max_flanking_goi_similarity, 0)
-    if (maxFlankSim < 0 || maxFlankSim > 100) {
-        validationErrors << "Invalid --max_flanking_goi_similarity (${params.max_flanking_goi_similarity}). Must be between 0 and 100."
     }
     def minFlankSize = num.call('min_flanking_size', params.min_flanking_size, 0)
     if (minFlankSize < 0) {
@@ -639,8 +725,8 @@ workflow {
         if (!(params.assembly_ranking in ['hybrid', 'counts', 'nstats'])) {
             validationErrors << "Invalid --assembly_ranking '${params.assembly_ranking}'. Must be: hybrid, counts, or nstats."
         }
-        if (!(params.bad_quality_policy in ['ask', 'drop', 'keep'])) {
-            validationErrors << "Invalid --bad_quality_policy '${params.bad_quality_policy}'. Must be: ask, drop, or keep."
+        if (!(params.bad_quality_policy in ['auto', 'ask', 'drop', 'keep'])) {
+            validationErrors << "Invalid --bad_quality_policy '${params.bad_quality_policy}'. Must be: auto, ask, drop, or keep."
         }
 
     } else if (params.mode == 'pro') {
@@ -764,11 +850,6 @@ workflow {
         // Get resolved species (auto-detected from ID, or user-provided)
         resolved_species_ch = RESOLVE_GENE_INPUT.out.species.map { species_file -> species_file.text.trim() }
 
-        // §1n: GOI gene symbol — user override wins, else the resolved UniProt symbol.
-        gene_symbol_ch = params.home_goi_gene \
-            ? channel.value(params.home_goi_gene.toString()) \
-            : RESOLVE_GENE_INPUT.out.gene_symbol.map { f -> f.text.trim() }.first()
-        
         // Determine home species: user-provided takes priority, else auto-detected
         home_species_ch = resolved_species_ch.map { resolved ->
             def species = params.home_species ?: resolved
@@ -813,9 +894,6 @@ workflow {
         // 1. Query Setup
         raw_gene_ch = channel.fromPath(params.query)
 
-        // §1n: no UniProt lookup in Pro mode — symbol comes only from --home_goi_gene.
-        gene_symbol_ch = channel.value((params.home_goi_gene ?: '').toString())
-        
         // 2. Home Genome Setup
         home_genome_ch = channel.fromPath(params.home_genome)
         
@@ -858,6 +936,7 @@ workflow {
     // to keep downstream search/annotation behavior consistent.
     NORMALIZE_QUERY(raw_gene_ch)
     normalized_gene_ch = NORMALIZE_QUERY.out.fasta
+    normalized_gene_ch.subscribe { f -> shortQueryNote(f) }
 
     // ========== LLM PARAMETER ESTIMATION (Phase 0.5) ==========
     // When auto_params is enabled, analyze the query/species context and
@@ -910,17 +989,14 @@ workflow {
 
                 // Apply overrides to params
                 // Only allow known Tier 1+2 parameters to be overridden
+                // The distances of the search are not in this list: they are derived
+                // from the run itself (gene pitches), which an estimate by kingdom and
+                // genome size cannot improve on.
                 def allowed = [
-                    'max_intron', 'cluster_distance', 'n_flanking_genes', 'min_synteny_score',
-                    'region_padding', 'padding_min', 'padding_max', 'search_evalue',
-                    'min_hit_identity', 'min_hit_length', 'mmseqs_sensitivity',
-                    'max_flanking_goi_similarity', 'max_flanking_distance',
-                    'expand_goi_similar', 'expand_goi_similar_distance',
-                    'min_gene_identity', 'enable_smith_waterman', 'sw_min_score',
-                    'sw_min_identity', 'enable_plm_search', 'enable_structural_search',
-                    'max_blocks_per_genome', 'min_block_genes', 'max_consecutive_empty_blocks',
-                    'aug_relaxed_evalue_mult', 'gap_search_window',
-                    'prefer_large_genes', 'min_flanking_size', 'exon_level_search'
+                    'n_flanking_genes', 'search_evalue', 'mmseqs_sensitivity',
+                    'enable_smith_waterman', 'enable_plm_search', 'enable_structural_search',
+                    'max_blocks_per_genome', 'min_block_genes',
+                    'min_flanking_size', 'exon_level_search'
                 ] as Set
 
                 // Safety lock: prevent LLM from auto-enabling advanced ML structural/PLM searches
@@ -975,7 +1051,7 @@ workflow {
     uiPhase(1, 'Gene Localization in Home Genome')
     
     uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
-    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch)
+    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch, home_gff_ch)
 
     LOCATE_GENE.out.bed.view { bed ->
         def lines = bed.readLines().findAll { it.trim() && !it.startsWith('#') }
@@ -994,14 +1070,13 @@ workflow {
     // pipeline restart. Defaults flow through unchanged when auto_apply_preset=false.
     def preset_default_keys = [
         'sw_min_score','sw_min_identity',
-        'min_hit_identity','min_hit_length','min_query_length',
+        'min_hit_identity','min_hit_length',
         'classify_high_min_identity','classify_medium_min_identity','classify_tandem_min_identity',
         'classify_fragment_max_qcov','classify_complete_min_qcov',
         'expand_goi_similar','strict_goi_family','goi_family_tokens',
-        'max_flanking_goi_similarity',
+        'goi_relative_evalue',
         'adaptive_score_floor_frac','adaptive_score_floor_abs',
         'adaptive_max_regions','adaptive_unique_gene_floor',
-        'auto_params','multi_profile',
     ]
     def preset_defaults_map = preset_default_keys.collectEntries { k -> [(k): params[k]] }
     def preset_defaults_json = groovy.json.JsonOutput.toJson(preset_defaults_map)
@@ -1041,15 +1116,25 @@ workflow {
         home_gff_ch,
         LOCATE_GENE.out.blast_hits,
         LOCATE_GENE.out.mmseqs_hits,
-        effective_query_id
+        effective_query_id,
+        (params.home_goi_gene ?: '').toString().trim()
     )
     
     ANNOTATE_GOI.out.info.view { info ->
         "${c.green}[OK  ]${c.reset} ${c.white}${'ANNOTATE_GOI'.padRight(24)}${c.reset} GOI exon annotation complete"
     }
     
-    // 5. SPLIT LOCI
-    SPLIT_LOCI(LOCATE_GENE.out.bed)
+    // 5. SPLIT LOCI. The annotated home gene that matches the query is the primary
+    // locus (home_locus_mode); further loci are other places where the query aligns well.
+    SPLIT_LOCI(
+        LOCATE_GENE.out.bed,
+        home_gff_ch,
+        ANNOTATE_GOI.out.bed,
+        ANNOTATE_GOI.out.info,
+        LOCATE_GENE.out.blast_hits,
+        LOCATE_GENE.out.mmseqs_hits,
+        homeLocusMode()
+    )
     
     SPLIT_LOCI.out.beds.flatten().count().view { count ->
         "${c.green}[OK  ]${c.reset} ${c.white}${'SPLIT_LOCI'.padRight(24)}${c.reset} identified ${count} locus/loci"
@@ -1106,41 +1191,8 @@ workflow {
         effective_home_gff_ch = home_gff_ch
     }
 
-    // 5b. §1n — two-path home-locus establishment.
-    // When enabled and the GOI is a named gene in the home GFF, RESOLVE_HOME_LOCUS
-    // emits a single annotated locus BED (with a query↔gene consistency check) and we
-    // feed ONLY that to EXTRACT_FLANKING — bypassing split_loci's noisy fan-out (which
-    // for gene families keeps paralog loci and anchors the search on the wrong
-    // neighbourhood). On any miss it emits an empty BED and we fall back to split_loci.
-    // LOCATE_GENE/SPLIT_LOCI still run (they feed ANNOTATE_GOI/PREPARE_HOME_PROTEOME and
-    // the fallback), but the expensive per-locus ITERATIVE_SEARCH only sees the 1 locus.
-    def use_name_locus = paramBool(params.enable_name_locus) ||
-        (params.home_goi_gene && params.home_goi_gene.toString().trim())
-    if (use_name_locus) {
-        RESOLVE_HOME_LOCUS(
-            normalized_gene_ready_ch.first(),
-            gene_symbol_ch,
-            effective_home_gff_ch,
-            home_genome_ch.first()
-        )
-        distinct_loci_ch = RESOLVE_HOME_LOCUS.out.bed
-            .combine( SPLIT_LOCI.out.beds.flatten().collect().ifEmpty([]) )
-            .flatMap { items ->
-                def name_bed = items[0]
-                def split_list = (items.size() > 1 && items[1] instanceof List) ? items[1]
-                    : (items.size() > 1 ? items[1..-1] : [])
-                if (name_bed.size() > 0) {
-                    log.info "${c.green}[§1n]${c.reset} name-lookup home locus matched — searching 1 annotated locus, bypassing split_loci (${split_list.size()} alignment-locate loci suppressed)"
-                    return [ name_bed ]
-                }
-                log.info "${c.yellow}[§1n]${c.reset} name-lookup did not anchor a locus (no symbol / not in GFF / failed consistency) — falling back to ${split_list.size()} alignment-locate loci"
-                return split_list
-            }
-            .map { file -> tuple(file.baseName, file) }
-    } else {
-        distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
-            .map { file -> tuple(file.baseName, file) }
-    }
+    distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
+        .map { file -> tuple(file.baseName, file) }
 
     // 6. Extract Flanking Genes
     uiStatus('RUN ', 'EXTRACT_FLANKING', "Extracting flanking genes (n=${params.n_flanking_genes})")
@@ -1151,8 +1203,7 @@ workflow {
         home_genome_ch.first(),
         params.n_flanking_genes,
         params.min_flanking_size,
-        params.prefer_large_genes,
-        normalized_gene_ready_ch.first(),  // GOI protein for similarity-based flanking filter
+        normalized_gene_ready_ch.first(),  // GOI protein: its relatives are not used as anchors
         effective_settings_ch              // §1f: resolved preset-affected params
     )
     
@@ -1192,7 +1243,8 @@ workflow {
         }
         
         // QC
-        uiStatus('RUN ', 'GENOME_QC', "Assessing target genome quality (policy: ${params.qc_fail_policy})")
+        def qc_policy = qcFailPolicy()
+        uiStatus('RUN ', 'GENOME_QC', "Assessing target genome quality (policy: ${qc_policy})")
 
         ASSESS_GENOME_QUALITY(genomes_dir_ch)
         qc_summary_ch = ASSESS_GENOME_QUALITY.out.json
@@ -1211,7 +1263,8 @@ workflow {
                     def failed_names = qc.findAll { genome_qc -> genome_qc.status == 'FAIL' }.collect { genome_qc -> genome_qc.genome_id ?: genome_qc.genome ?: 'unknown' }.take(3).join(', ')
                     def suffix = fail_count > 3 ? " (+${fail_count - 3} more)" : ""
                     msg += ", ${fail_count} failed [${failed_names}${suffix}]"
-                    if (params.qc_fail_policy == 'drop') msg += " (will be dropped)"
+                    if (qc_policy == 'drop') msg += " (will be dropped)"
+                    else return "${c.yellow}[WARN]${c.reset} ${c.white}${'GENOME_QC'.padRight(24)}${c.reset} ${msg}. LOW-QUALITY assemblies are searched anyway: a gene not found in them may be missing from the assembly, not from the species."
                 }
                 return "${c.green}[OK  ]${c.reset} ${c.white}${'GENOME_QC'.padRight(24)}${c.reset} ${msg}"
             } catch (Exception e) {
@@ -1222,7 +1275,7 @@ workflow {
         FILTER_SORTED_GENOMES(
             PHYLO_SORT.out.sorted_list,
             qc_summary_ch,
-            params.qc_fail_policy
+            qc_policy
         )
 
         FILTER_SORTED_GENOMES.out.sorted_list.view { locus, sorted ->
@@ -1260,8 +1313,6 @@ workflow {
             iterative_search_final_inputs.map { rec -> rec[2] }, // sorted_list
             iterative_search_final_inputs.map { rec -> rec[3] }, // genomes_dir
             iterative_search_final_inputs.map { rec -> rec[4] }, // home_db
-            params.n_flanking_genes,
-            params.min_synteny_score,
             params.mmseqs_sensitivity,
             effective_settings_ch,  // §1f: resolved preset-affected params
             ANNOTATE_GOI.out.info.first()  // home GOI structure → data-driven fallback max-intron
@@ -1427,7 +1478,8 @@ workflow {
             plot_inputs_split.homology_tsvs,  // homology_tsvs
             plot_inputs_split.tree,           // tree
             species_map_ch,                   // species_mapping.tsv (already a value channel)
-            home_species_for_sort_ch          // home species label for the matrix-view home row
+            home_species_for_sort_ch,         // home species label for the matrix-view home row
+            qc_summary_ch                     // genome quality summary (value channel)
         )
         
         PLOT_SYNTENY.out.plot.view { plot ->
@@ -1518,6 +1570,10 @@ workflow {
                         }
                         if (unplaced > 0) {
                             log.info "${done_c.yellow}    → ${unplaced} genome(s) hold a strong GOI hit that no synteny gate accepted (report: rejected_candidates)${done_c.reset}"
+                        }
+                        def low_quality = summary.low_quality_genomes_searched ?: []
+                        if (low_quality) {
+                            log.info "${done_c.yellow}    → LOW-QUALITY assembly searched: ${low_quality.join(', ')} (a gene not found there may be missing from the assembly, not from the species)${done_c.reset}"
                         }
                     }
                 } catch (Exception ignored) {}

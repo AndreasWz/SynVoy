@@ -39,6 +39,9 @@ def _args(**overrides):
         distance_autotune_far_pct=40.0,
         distance_autotune_max_relax=10.0,
         distance_autotune_min_flanking=3,
+        # no floors here: the classes below that do not name them pin the plain arithmetic
+        distance_autotune_high_floor=0.0,
+        distance_autotune_medium_floor=0.0,
     )
     base.update(overrides)
     return types.SimpleNamespace(**base)
@@ -134,6 +137,85 @@ class TestApplyDistanceAdaptiveThresholds(unittest.TestCase):
         info = _apply_distance_adaptive_thresholds(args, far, "Far")
         self.assertEqual(info["high_min_identity"], 30.0)   # 40 - 10
         self.assertEqual(info["medium_min_identity"], 15.0)  # 25 - 10
+
+
+class TestRelaxationFloors(unittest.TestCase):
+    """The relaxation never takes a threshold below its floor (HIGH 45, MEDIUM 30 by default),
+    and a baseline at or below the floor is not relaxed at all."""
+
+    FAR = _hits([("A", 30.0), ("B", 32.0), ("C", 31.0)])            # full relaxation, 10 points
+    MID = _hits([("A", 49.0), ("B", 49.0), ("C", 49.0)])            # 7 points
+
+    def setUp(self):
+        CLASSIFY_THRESHOLDS["high_min_identity"] = 50.0
+        CLASSIFY_THRESHOLDS["medium_min_identity"] = 40.0
+
+    def _floors(self, **overrides):
+        base = dict(classify_medium_min_identity=40.0,
+                    distance_autotune_high_floor=45.0, distance_autotune_medium_floor=30.0)
+        base.update(overrides)
+        return _args(**base)
+
+    def test_high_stops_at_its_floor(self):
+        # the case that prompted the floor: flanking genes at 49 % -> 7 points -> HIGH 43
+        info = _apply_distance_adaptive_thresholds(self._floors(), self.MID, "Distant")
+        self.assertAlmostEqual(info["relax"], 7.0, places=6)
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 45.0)
+        self.assertAlmostEqual(CLASSIFY_THRESHOLDS["medium_min_identity"], 33.0, places=6)
+
+    def test_medium_stops_at_its_floor(self):
+        _apply_distance_adaptive_thresholds(self._floors(classify_medium_min_identity=35.0), self.FAR, "Far")
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 45.0)
+        self.assertEqual(CLASSIFY_THRESHOLDS["medium_min_identity"], 30.0)   # 35 - 10 = 25 without it
+
+    def test_a_small_relaxation_is_not_touched(self):
+        hits = _hits([("A", 55.0), ("B", 55.0), ("C", 55.0)])                # 5 points
+        _apply_distance_adaptive_thresholds(self._floors(), hits, "Mid")
+        self.assertAlmostEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 45.0, places=6)
+        self.assertAlmostEqual(CLASSIFY_THRESHOLDS["medium_min_identity"], 35.0, places=6)
+        hits = _hits([("A", 61.0), ("B", 61.0), ("C", 61.0)])                # 3 points
+        _apply_distance_adaptive_thresholds(self._floors(), hits, "Mid")
+        self.assertAlmostEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 47.0, places=6)
+
+    def test_short_peptide_baselines_are_not_relaxed(self):
+        # preset for queries under 100 aa: HIGH 40, MEDIUM 30, both at or below the floors
+        args = self._floors(classify_high_min_identity=40.0, classify_medium_min_identity=30.0)
+        info = _apply_distance_adaptive_thresholds(args, self.FAR, "Far")
+        self.assertEqual(info["high_min_identity"], 40.0)                    # 30 without the floor
+        self.assertEqual(info["medium_min_identity"], 30.0)                  # 20 without the floor
+        self.assertEqual(info["tier"], "far")                                # the tier is still reported
+
+    def test_a_floor_never_raises_a_threshold(self):
+        args = self._floors(classify_high_min_identity=42.0, distance_autotune_high_floor=60.0)
+        close = _hits([("A", 90.0), ("B", 90.0), ("C", 90.0)])
+        _apply_distance_adaptive_thresholds(args, close, "Close")
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 42.0)
+        _apply_distance_adaptive_thresholds(args, self.FAR, "Far")
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 42.0)
+
+    def test_zero_switches_the_floors_off(self):
+        _apply_distance_adaptive_thresholds(_args(classify_medium_min_identity=40.0), self.FAR, "Far")
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 40.0)
+        self.assertEqual(CLASSIFY_THRESHOLDS["medium_min_identity"], 30.0)
+
+    def test_defaults_when_the_options_are_absent(self):
+        # an args object from before the floors existed gets 45 / 30
+        args = types.SimpleNamespace(classify_high_min_identity=50.0, classify_medium_min_identity=35.0,
+                                     disable_distance_autotune=False)
+        _apply_distance_adaptive_thresholds(args, self.FAR, "Far")
+        self.assertEqual(CLASSIFY_THRESHOLDS["high_min_identity"], 45.0)
+        self.assertEqual(CLASSIFY_THRESHOLDS["medium_min_identity"], 30.0)
+
+    def test_the_command_line_defaults_are_45_and_30(self):
+        import re
+        src = open(os.path.join(REPO_ROOT, "bin", "iterative_search_runner.py")).read()
+        for name, value in (("distance_autotune_high_floor", "45.0"), ("distance_autotune_medium_floor", "30.0")):
+            m = re.search(r'add_argument\("--%s", type=float, default=([0-9.]+)' % name, src)
+            self.assertIsNotNone(m, name)
+            self.assertEqual(m.group(1), value)
+        cfg = open(os.path.join(REPO_ROOT, "nextflow.config")).read()
+        self.assertRegex(cfg, r"distance_autotune_high_floor\s*=\s*45\.0")
+        self.assertRegex(cfg, r"distance_autotune_medium_floor\s*=\s*30\.0")
 
 
 if __name__ == "__main__":

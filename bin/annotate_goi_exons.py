@@ -33,14 +33,14 @@ import urllib.error
 try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate, parse_gff, get_feature_id,
+        load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate, parse_gff, get_feature_id,
+        load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes
     )
 
@@ -99,7 +99,7 @@ def fetch_uniprot_names(query_id):
 # =============================================================================
 
 def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mmseqs_hits,
-                     gff_search_window):
+                     gff_search_window, gene_name=''):
     """
     Try to match the GOI to an annotated gene in the GFF.
 
@@ -120,6 +120,9 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
 
     # Collect candidate gene names
     candidate_names = []
+    if gene_name:
+        # Given by the user (--home_goi_gene): tried first.
+        candidate_names.append(gene_name)
 
     # Try UniProt lookup
     uniprot_names = fetch_uniprot_names(query_id)
@@ -147,7 +150,8 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
     print(f"[GFF Match] Searching GFF for names: {candidate_names[:10]}...")
 
     # --- Strategy 1: Name-based search in GFF ---
-    match = _search_gff_by_name(gff_file, candidate_names)
+    match = _search_gff_by_name(gff_file, candidate_names,
+                                query_seq=query_seq, genome_file=genome_file)
     if match:
         print(f"[GFF Match] Found by name: {match['gene_id']}")
         return match
@@ -168,7 +172,104 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
     return None
 
 
-def _search_gff_by_name(gff_file, candidate_names):
+# A name match only POINTS at a gene; it does not show that the gene is the query.
+# Every gene taken from the annotation, by name or by position, is therefore compared
+# with the query protein, and the transcript that matches the query best is used.
+# Without that check a query whose only UniProt name is a description ("Putative
+# uncharacterized protein FLJ37218") matched 12,484 human genes on the word
+# "uncharacterized", and the first one in the file -- a non-coding gene on another
+# chromosome -- became the home gene: the run then searched every target genome for an
+# 11-residue translation of that gene's span. Without the transcript choice, TP53 was
+# read from the first transcript in the file, the 354-residue isoform.
+HOME_GENE_MIN_IDENTITY = 60.0      # percent identity of the local alignment
+HOME_GENE_MIN_SCORE_FRAC = 0.5     # alignment score / self-score of the QUERY: the gene explains half of the query
+HOME_GENE_MAX_NAME_CANDIDATES = 50  # name matches compared with the query, best name score first
+
+
+def _cds_protein(cds_parts, chrom_seq, strand):
+    """Protein of one transcript: its CDS rows joined in coding order, read in the
+    frame given by the phase of the first coding row, up to the first stop codon."""
+    parts = sorted(cds_parts, key=lambda x: x['start'])
+    if not parts:
+        return ''
+    first = parts[0] if strand == '+' else parts[-1]
+    try:
+        phase = int(first.get('phase', 0) or 0)
+    except (TypeError, ValueError):
+        phase = 0
+    dna = ''.join(chrom_seq[part['start']:part['end']] for part in parts)
+    if strand == '-':
+        dna = reverse_complement(dna)
+    if phase > 0:
+        dna = dna[phase:]
+    dna = dna[:len(dna) - len(dna) % 3]
+    if len(dna) < 9:
+        return ''
+    return translate(dna).split('*')[0]
+
+
+def _query_match(query_seq, protein):
+    """How well an annotated protein agrees with the query.
+
+    Returns ``(score_fraction, identity_percent)``: the Smith-Waterman score divided by
+    the self-score of the QUERY, and the identity of the aligned columns. The fraction is
+    taken of the query, not of the shorter sequence: a six-residue translation of a
+    non-coding gene aligns perfectly to some six residues of any query. Without parasail
+    both values come from the shared-3-mer measure, so the step still runs."""
+    if not query_seq or not protein:
+        return 0.0, 0.0
+    try:
+        from sequence_utils import sw_align
+        score, ident = sw_align(query_seq, protein)
+        self_q, _ = sw_align(query_seq, query_seq)
+        return (score / self_q if self_q > 0 else 0.0), ident
+    except (ImportError, RuntimeError):
+        approx = _quick_protein_identity(query_seq, protein)
+        return approx / 100.0, approx
+
+
+def _gene_transcripts(gene_id, transcript_to_gene, cds_by_parent):
+    """``[(transcript_id, cds_parts)]`` of a gene, in a fixed order: CDS rows attached
+    to the gene itself first, then its transcripts sorted by id."""
+    found = []
+    if cds_by_parent.get(gene_id):
+        found.append((gene_id, cds_by_parent[gene_id]))
+    for tid in sorted(t for t, g in transcript_to_gene.items() if g == gene_id):
+        if cds_by_parent.get(tid):
+            found.append((tid, cds_by_parent[tid]))
+    return found
+
+
+def _best_transcript(gene_id, strand, chrom_seq, transcript_to_gene, cds_by_parent,
+                     query_seq, measure=None):
+    """The transcript of ``gene_id`` whose protein agrees best with the query.
+
+    ``measure(query, protein)`` returns a tuple that is compared as a whole; by default
+    it is ``_query_match``. Ties go to the protein whose length is closest to the
+    query's (a query that is itself a short isoform is contained in the long transcript
+    just as well), then to the first transcript in the fixed order of
+    ``_gene_transcripts``. Returns
+    ``(cds_parts, protein, measure_value)`` or ``None`` when the gene has no CDS."""
+    measure = measure or _query_match
+    best = None
+    for tid, parts in _gene_transcripts(gene_id, transcript_to_gene, cds_by_parent):
+        protein = _cds_protein(parts, chrom_seq, strand)
+        if not protein:
+            continue
+        value = measure(query_seq, protein)
+        key = (value, -abs(len(protein) - len(query_seq or '')))
+        if best is None or key > best[0]:
+            best = (key, parts, protein, value)
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
+
+
+def _is_home_gene(score_frac, identity):
+    return identity >= HOME_GENE_MIN_IDENTITY and score_frac >= HOME_GENE_MIN_SCORE_FRAC
+
+
+def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=None):
     """
     Search GFF for genes matching any of the candidate names.
     
@@ -178,7 +279,11 @@ def _search_gff_by_name(gff_file, candidate_names):
     - Name/description contains full candidate name (>4 chars): 50 points
     - Partial word match (>5 chars): 20 points
     
-    Collects ALL matches, returns the highest-scoring one.
+    Collects ALL matches. With ``query_seq`` and ``genome_file`` (the pipeline always
+    passes them) the matches are tried from the best name score down, and the first gene
+    whose protein agrees with the query is returned, with the transcript that agrees
+    best (see ``_is_home_gene``); a gene without CDS can only pass when the translation
+    of its span does. Without them the highest-scoring gene is returned unchecked.
     """
     # Build a set of lowercased names for fast lookup
     name_set = set(n.lower() for n in candidate_names)
@@ -271,49 +376,74 @@ def _search_gff_by_name(gff_file, candidate_names):
     if not matched_genes:
         return None
 
-    # Pick the highest-scoring gene
-    best_gene = max(matched_genes, key=matched_genes.get)
-    best_score = matched_genes[best_gene]
-    print(f"[GFF Match] Best match: {best_gene} (score={best_score})")
+    def _result(gene_id, cds_parts):
+        info = gene_features[gene_id]
+        return {
+            'gene_id': gene_id,
+            'gene_name': info.get('gene_name', gene_id),
+            'chrom': info['chrom'],
+            'start': info['start'],
+            'end': info['end'],
+            'strand': info['strand'],
+            'cds_parts': sorted(cds_parts, key=lambda x: x['start'])
+        }
 
-    if best_gene not in gene_features:
-        return None
-
-    # Find CDS for the best matching gene
-    gene_info = gene_features[best_gene]
-    cds_parts = []
-
-    # Check direct CDS children of the gene
-    if best_gene in cds_by_parent:
-        cds_parts = cds_by_parent[best_gene]
-
-    # Check via transcript
-    if not cds_parts:
-        for tid, gid in transcript_to_gene.items():
-            if gid == best_gene and tid in cds_by_parent:
-                cds_parts = cds_by_parent[tid]
-                break  # Use first transcript (TODO: pick longest)
-
-    if not cds_parts:
-        print(f"[GFF Match] Gene {best_gene} found but no CDS features. Using gene span.")
-        # Fall back to gene span
-        cds_parts = [{
-            'chrom': gene_info['chrom'],
-            'start': gene_info['start'] - 1,
-            'end': gene_info['end'],
-            'strand': gene_info['strand'],
+    def _span_as_cds(gene_id):
+        info = gene_features[gene_id]
+        return [{
+            'chrom': info['chrom'],
+            'start': info['start'] - 1,
+            'end': info['end'],
+            'strand': info['strand'],
             'phase': 0
         }]
 
-    return {
-        'gene_id': best_gene,
-        'gene_name': gene_info.get('gene_name', best_gene),
-        'chrom': gene_info['chrom'],
-        'start': gene_info['start'],
-        'end': gene_info['end'],
-        'strand': gene_info['strand'],
-        'cds_parts': sorted(cds_parts, key=lambda x: x['start'])
-    }
+    # Best name score first; equal scores in the order of the file.
+    file_order = {gid: n for n, gid in enumerate(matched_genes)}
+    ranked = sorted(matched_genes, key=lambda g: (-matched_genes[g], file_order[g]))
+
+    if not query_seq or not genome_file:
+        # No query to compare with: the highest-scoring gene, as given by its name.
+        best_gene = ranked[0]
+        print(f"[GFF Match] Best match: {best_gene} (score={matched_genes[best_gene]}), "
+              f"not compared with the query")
+        transcripts = _gene_transcripts(best_gene, transcript_to_gene, cds_by_parent)
+        if transcripts:
+            return _result(best_gene, transcripts[0][1])
+        print(f"[GFF Match] Gene {best_gene} found but no CDS features. Using gene span.")
+        return _result(best_gene, _span_as_cds(best_gene))
+
+    genome_seqs = load_genome_subset(
+        genome_file,
+        {gene_features[g]['chrom'] for g in ranked[:HOME_GENE_MAX_NAME_CANDIDATES]})
+    if len(ranked) > HOME_GENE_MAX_NAME_CANDIDATES:
+        print(f"[GFF Match] {len(ranked)} genes match a name; comparing the "
+              f"{HOME_GENE_MAX_NAME_CANDIDATES} with the best name score with the query.")
+    for gene_id in ranked[:HOME_GENE_MAX_NAME_CANDIDATES]:
+        info = gene_features[gene_id]
+        chrom_seq = genome_seqs.get(info['chrom'])
+        if not chrom_seq:
+            continue
+        chosen = _best_transcript(gene_id, info['strand'], chrom_seq,
+                                  transcript_to_gene, cds_by_parent, query_seq)
+        if chosen is None:
+            # A gene row without CDS rows: its span is the coding sequence only if the
+            # translation of the span is the query.
+            span = _span_as_cds(gene_id)
+            protein = _cds_protein(span, chrom_seq, info['strand'])
+            chosen = (span, protein, _query_match(query_seq, protein))
+        cds_parts, protein, (score_frac, identity) = chosen
+        if _is_home_gene(score_frac, identity):
+            print(f"[GFF Match] Best match: {gene_id} (score={matched_genes[gene_id]}); "
+                  f"its protein ({len(protein)} aa) agrees with the query: "
+                  f"{identity:.1f}% identity, score fraction {score_frac:.2f}")
+            return _result(gene_id, cds_parts)
+        print(f"[GFF Match]   Rejected {gene_id} (name score={matched_genes[gene_id]}): "
+              f"its protein does not agree with the query "
+              f"({identity:.1f}% identity, score fraction {score_frac:.2f})")
+
+    print("[GFF Match] No gene found by name agrees with the query sequence.")
+    return None
 
 
 def _parse_hit_regions(blast_hits_file, mmseqs_hits_file):
@@ -447,45 +577,20 @@ def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_reg
     best_identity = 0
 
     for gene_id, gene_info in candidate_genes.items():
-        cds_parts = []
-
-        # Direct CDS
-        if gene_id in cds_by_parent:
-            cds_parts = cds_by_parent[gene_id]
-
-        # Via transcript
-        if not cds_parts:
-            for tid, gid in transcript_to_gene.items():
-                if gid == gene_id and tid in cds_by_parent:
-                    cds_parts = cds_by_parent[tid]
-                    break
-
-        if not cds_parts:
-            continue
-
-        # Extract and translate protein
         chrom = gene_info['chrom']
         if chrom not in genome_seqs:
             continue
 
-        cds_parts_sorted = sorted(cds_parts, key=lambda x: x['start'])
-        dna_seq = ""
-        for part in cds_parts_sorted:
-            dna_seq += genome_seqs[chrom][part['start']:part['end']]
-
-        if gene_info['strand'] == '-':
-            dna_seq = reverse_complement(dna_seq)
-
-        # Trim to codon boundary
-        dna_seq = dna_seq[:len(dna_seq) - len(dna_seq) % 3]
-        if len(dna_seq) < 9:
+        # Every transcript of the gene is compared with the query and the best one is
+        # kept: the first transcript in the file can be a short isoform.
+        chosen = _best_transcript(
+            gene_id, gene_info['strand'], genome_seqs[chrom],
+            transcript_to_gene, cds_by_parent, query_seq,
+            measure=lambda q, p: (_quick_protein_identity(q, p),))
+        if chosen is None:
             continue
-
-        protein = translate(dna_seq).split('*')[0]  # Stop at first stop
-
-        # Compare to GOI (simple identity calculation)
-        identity = _quick_protein_identity(query_seq, protein)
-
+        cds_parts, protein, (identity,) = chosen
+        cds_parts_sorted = sorted(cds_parts, key=lambda x: x['start'])
         if identity > best_identity and identity > 30:
             best_identity = identity
             best_match = {
@@ -990,34 +1095,6 @@ def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
 # HIT-BASED EXON ANNOTATION (Scenario A - No GFF)
 # =============================================================================
 
-def _filter_exon_hits(hits, query_len, min_query_cov, min_alnlen):
-    """Filter exon hits by query coverage and alignment length."""
-    if not hits:
-        return hits
-    if query_len <= 0:
-        return hits
-    kept = []
-    for h in hits:
-        qstart = h.get('qstart')
-        qend = h.get('qend')
-        if not qstart or not qend:
-            continue
-        qspan = abs(qend - qstart) + 1
-        alnlen = h.get('alnlen', qspan)
-        qcov = qspan / query_len if query_len > 0 else 0
-        if min_alnlen and alnlen < min_alnlen:
-            continue
-        if min_query_cov and qcov < min_query_cov:
-            continue
-        kept.append(h)
-    return kept
-
-
-
-# =============================================================================
-# MINIPROT-BASED GENE MODELING
-# =============================================================================
-
 def _check_miniprot():
     """Check if miniprot is available."""
     try:
@@ -1253,37 +1330,17 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
     return prefix, suffix
 
 
-def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
-                             strand=None, max_intron=200000,
-                             sensitive=False, region_offset=0):
+def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive=False):
+    """Align a protein to a stretch of DNA with miniprot; the parsed models, best first.
+
+    An empty list when miniprot is missing, fails, times out or finds nothing.
     """
-    Use miniprot to align query protein to genomic region.
-    
-    Args:
-        query_seq: Query protein sequence (string)
-        chrom_seq: Target genomic DNA sequence (string)
-        chrom_name: Chromosome/scaffold name
-        strand: Unused (miniprot searches both strands)
-        max_intron: Max intron size (-G flag)
-        sensitive: If True, use ultra-sensitive params (for GOI)
-        region_offset: Offset to add to coordinates (if chrom_seq is a sub-region)
-    
-    Returns:
-        (exon_list, full_protein) matching the old function signature.
-        exon_list: list of dicts with keys:
-            id, seq, exon_num, qstart, qend, gstart, gend, strand,
-            chrom, pident, has_start_codon, has_stop_codon,
-            splice_donor, splice_acceptor
-        full_protein: concatenated translated CDS
-    """
-    if not query_seq or not chrom_seq:
-        return [], query_seq or ''
-    
-    if not MINIPROT_AVAILABLE:
-        print("[annotate_goi_exons] WARNING: miniprot not available, returning raw query",
-              file=sys.stderr)
-        return [], query_seq
-    
+    if not query_seq or not chrom_seq or not MINIPROT_AVAILABLE:
+        if query_seq and chrom_seq:
+            print("[annotate_goi_exons] WARNING: miniprot not available, returning raw query",
+                  file=sys.stderr)
+        return []
+
     # mkstemp, not a pid-derived name: pids repeat across containers/PID namespaces
     # that share /tmp, and a collision would silently swap one task's model for another's.
     _qfd, query_file = tempfile.mkstemp(prefix="synvoy_mp_query_", suffix=".faa")
@@ -1292,11 +1349,9 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
     os.close(_tfd)
 
     try:
-        # Write temp files
         write_fasta([("query", query_seq)], query_file)
         write_fasta([(chrom_name, chrom_seq)], target_file)
-        
-        # Build miniprot command
+
         cmd = [
             "miniprot",
             "--gff",                    # GFF3 output
@@ -1305,9 +1360,9 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
             "-t", "1",                  # Single thread (called per gene)
             "--outc=0.01",               # Min 1% query coverage for output
         ]
-        
+
         query_len = len(query_seq)
-        
+
         if sensitive:
             # Ultra-sensitive for GOI and divergent sequences
             cmd.extend([
@@ -1316,7 +1371,7 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                 "-N", "50",             # More secondary alignments
                 "--outs=0.3",           # Output if >= 30% of best score
             ])
-        
+
         if query_len < 60:
             # Short peptide mode (e.g., toxins)
             cmd.extend([
@@ -1327,215 +1382,338 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
                     "-S",               # No splicing for very short peptides
                     "-G", "2000",       # Override max intron to small value
                 ])
-        
+
         cmd.extend([target_file, query_file])
-        
-        # Run miniprot
+
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        
+
         if result.returncode != 0:
             print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
                   f"{result.stderr[:200]}", file=sys.stderr)
-            return [], query_seq
-        
-        # Parse GFF output
-        gff_output = result.stdout
-        if not gff_output.strip():
+            return []
+        if not result.stdout.strip():
             print("[miniprot] No alignments found", file=sys.stderr)
-            return [], query_seq
-        
-        models = _parse_miniprot_gff(gff_output)
-        
+            return []
+
+        models = _parse_miniprot_gff(result.stdout)
         if not models:
             print("[miniprot] No gene models parsed from GFF", file=sys.stderr)
-            return [], query_seq
-        
-        # Take the best model (rank 1)
-        best = models[0]
-        
-        if not best['cds_list']:
-            return [], query_seq
-        
-        # Extract CDS DNA and build exon list
-        exons = []
-        model_strand = best['strand']
+        return models
 
-        cds_ordered = best['cds_list']
-        if model_strand == '-':
-            cds_ordered = list(reversed(cds_ordered))
-
-        # miniprot reports only the aligned span: recover the model's own start and stop
-        # codon where the sequence supports them (see refine_model_termini). The codon count
-        # BEFORE the walk is what miniprot's own translation covers.
-        cds_codons_before = sum(int(c['gend']) - int(c['gstart'])
-                                for c in cds_ordered) // 3
-        term_prefix, term_suffix = refine_model_termini(
-            cds_ordered, chrom_seq, model_strand,
-            max_start_codons=_terminus_bound(
-                max(0, int(cds_ordered[0].get('qstart', 0) or 0) - 1),
-                TERMINUS_MAX_START_CODONS),
-            max_stop_codons=_terminus_bound(
-                max(0, len(query_seq) - int(cds_ordered[-1].get('qend', 0) or 0)),
-                TERMINUS_MAX_STOP_CODONS),
-        )
-        if term_prefix or term_suffix:
-            print(f"[miniprot] Terminal refinement: +{len(term_prefix)} aa at the N "
-                  f"terminus, +{len(term_suffix)} aa + stop at the C terminus",
-                  file=sys.stderr)
-
-        for i, cds in enumerate(cds_ordered, 1):
-            gs = cds['gstart']
-            ge = cds['gend']
-
-            # Extract DNA
-            exon_dna = chrom_seq[gs:ge]
-            if model_strand == '-':
-                exon_dna = reverse_complement(exon_dna)
-
-            # Every CDS is read in ITS OWN frame: GFF3 phase = bases to skip at the
-            # coding-direction 5' end to reach the first complete codon (after the
-            # reverse-complement above, that end is on the left). Trimming only the
-            # first CDS read every exon behind a phase-1/2 intron in the wrong frame:
-            # a 64 %-identity Harpegnathos hyaluronidase model came out at 47.6 %, and
-            # every multi-exon GOI model of the 2026-09-11 family benchmark was affected.
-            # The residue of a codon split by an intron is dropped here; the model
-            # protein below comes from miniprot's own translation, which keeps it.
-            phase = cds['phase']
-            coding_dna = exon_dna[phase:] if phase > 0 else exon_dna
-
-            # Check splice sites
-            splice_donor = None
-            splice_acceptor = None
-            if gs >= 2:
-                if model_strand == '+':
-                    splice_acceptor = chrom_seq[gs-2:gs].upper()
-                else:
-                    splice_donor = reverse_complement(chrom_seq[gs-2:gs]).upper()
-            if ge + 2 <= len(chrom_seq):
-                if model_strand == '+':
-                    splice_donor = chrom_seq[ge:ge+2].upper()
-                else:
-                    splice_acceptor = reverse_complement(chrom_seq[ge:ge+2]).upper()
-            
-            exon_prot = translate(coding_dna)
-
-            exons.append({
-                'id': f'exon_{i}',
-                # Remove all stop codons; internal stops can appear in noisy models
-                # and degrade downstream protein->DNA searches.
-                'seq': exon_prot.replace('*', ''),
-                'exon_num': i,
-                'qstart': cds['qstart'],
-                'qend': cds['qend'],
-                'gstart': gs + region_offset,
-                'gend': ge + region_offset,
-                'strand': model_strand,
-                'phase': phase,
-                'chrom': chrom_name,
-                'pident': best['identity'] * 100,  # miniprot reports 0-1
-                'has_start_codon': (i == 1 and exon_prot.startswith('M')),
-                'has_stop_codon': (i == len(cds_ordered) and
-                                   exon_dna[-3:].upper() in ('TAA', 'TAG', 'TGA')),
-                'splice_donor': splice_donor,
-                'splice_acceptor': splice_acceptor,
-                'method': 'miniprot'
-            })
-
-        # Model protein: miniprot's own translation (--trans, the ##STA record). It is
-        # the only construction that stays in frame across a frameshift miniprot has
-        # modelled (Frameshift=1) and keeps intron-split codons; concatenating the CDS
-        # DNA runs out of frame from the first frameshift to the end of the model.
-        # Fallback, without --trans output: the per-exon in-frame translations.
-        full_protein = (best.get('protein') or '').replace('*', '')
-        if full_protein:
-            # miniprot's translation covers the aligned span only; the terminal refinement
-            # above widened the terminal CDS, so those residues are added here. The per-exon
-            # fallback below translates the widened CDS and already contains them.
-            # An alignment that ends mid-codon leaves miniprot's translation one residue
-            # longer than its own CDS, and that residue is the first one the C-terminal walk
-            # re-translates — drop the overlap instead of duplicating it.
-            overlap = max(0, len(full_protein) - cds_codons_before)
-            full_protein = term_prefix + full_protein + term_suffix[overlap:]
-        else:
-            full_protein = ''.join(e['seq'] for e in exons)
-        if not full_protein:
-            full_protein = query_seq
-
-        print(f"[miniprot] Best model: {len(exons)} exon(s), "
-              f"{len(full_protein)} aa, identity={best['identity']:.2f}, "
-              f"score={best['score']:.0f}", file=sys.stderr)
-        
-        return exons, full_protein
-        
     except subprocess.TimeoutExpired:
         print("[miniprot] Timed out after 120s", file=sys.stderr)
-        return [], query_seq
+        return []
     except Exception as e:
         print(f"[miniprot] Error: {e}", file=sys.stderr)
-        return [], query_seq
+        return []
     finally:
         for f in [query_file, target_file]:
             if os.path.exists(f):
                 os.remove(f)
 
 
-def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
-                                  search_missing=True,
-                                  gap_min_size=10,
-                                  gap_search_window=50000,
-                                  gap_evalue=10.0,
-                                  gap_min_identity=25.0,
-                                  gap_min_alnlen=10,
-                                  gap_max_hits=5,
-                                  exon_query_mode=False,
-                                  min_exon_query_cov=0.25,
-                                  min_exon_alnlen=30,
-                                  sensitive=False):
+def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
+    """Exon list and protein of ONE parsed miniprot model: ``(exons, full_protein)``.
+
+    ``exons`` are dicts with id, seq, exon_num, qstart, qend, gstart, gend, strand, chrom,
+    pident, has_start_codon, has_stop_codon, splice_donor, splice_acceptor; coordinates
+    are those of ``chrom_seq`` plus ``region_offset``. A model without CDS gives ([], '').
     """
-    Entry point for exon annotation - uses miniprot for gene modeling.
+    if not best['cds_list']:
+        return [], ''
     
-    Kept for backward compatibility with iterative_search_runner.py.
-    The 'hits' parameter is used to determine the region and strand,
-    then miniprot does the actual gene modeling.
+    # Extract CDS DNA and build exon list
+    exons = []
+    model_strand = best['strand']
+
+    cds_ordered = best['cds_list']
+    if model_strand == '-':
+        cds_ordered = list(reversed(cds_ordered))
+
+    # miniprot reports only the aligned span: recover the model's own start and stop
+    # codon where the sequence supports them (see refine_model_termini). The codon count
+    # BEFORE the walk is what miniprot's own translation covers.
+    cds_codons_before = sum(int(c['gend']) - int(c['gstart'])
+                            for c in cds_ordered) // 3
+    term_prefix, term_suffix = refine_model_termini(
+        cds_ordered, chrom_seq, model_strand,
+        max_start_codons=_terminus_bound(
+            max(0, int(cds_ordered[0].get('qstart', 0) or 0) - 1),
+            TERMINUS_MAX_START_CODONS),
+        max_stop_codons=_terminus_bound(
+            max(0, len(query_seq) - int(cds_ordered[-1].get('qend', 0) or 0)),
+            TERMINUS_MAX_STOP_CODONS),
+    )
+    if term_prefix or term_suffix:
+        print(f"[miniprot] Terminal refinement: +{len(term_prefix)} aa at the N "
+              f"terminus, +{len(term_suffix)} aa + stop at the C terminus",
+              file=sys.stderr)
+
+    for i, cds in enumerate(cds_ordered, 1):
+        gs = cds['gstart']
+        ge = cds['gend']
+
+        # Extract DNA
+        exon_dna = chrom_seq[gs:ge]
+        if model_strand == '-':
+            exon_dna = reverse_complement(exon_dna)
+
+        # Every CDS is read in ITS OWN frame: GFF3 phase = bases to skip at the
+        # coding-direction 5' end to reach the first complete codon (after the
+        # reverse-complement above, that end is on the left). Trimming only the
+        # first CDS read every exon behind a phase-1/2 intron in the wrong frame:
+        # a 64 %-identity Harpegnathos hyaluronidase model came out at 47.6 %, and
+        # every multi-exon GOI model of the 2026-09-11 family benchmark was affected.
+        # The residue of a codon split by an intron is dropped here; the model
+        # protein below comes from miniprot's own translation, which keeps it.
+        phase = cds['phase']
+        coding_dna = exon_dna[phase:] if phase > 0 else exon_dna
+
+        # Check splice sites
+        splice_donor = None
+        splice_acceptor = None
+        if gs >= 2:
+            if model_strand == '+':
+                splice_acceptor = chrom_seq[gs-2:gs].upper()
+            else:
+                splice_donor = reverse_complement(chrom_seq[gs-2:gs]).upper()
+        if ge + 2 <= len(chrom_seq):
+            if model_strand == '+':
+                splice_donor = chrom_seq[ge:ge+2].upper()
+            else:
+                splice_acceptor = reverse_complement(chrom_seq[ge:ge+2]).upper()
+        
+        exon_prot = translate(coding_dna)
+
+        exons.append({
+            'id': f'exon_{i}',
+            # Remove all stop codons; internal stops can appear in noisy models
+            # and degrade downstream protein->DNA searches.
+            'seq': exon_prot.replace('*', ''),
+            'exon_num': i,
+            'qstart': cds['qstart'],
+            'qend': cds['qend'],
+            'gstart': gs + region_offset,
+            'gend': ge + region_offset,
+            'strand': model_strand,
+            'phase': phase,
+            'chrom': chrom_name,
+            'pident': best['identity'] * 100,  # miniprot reports 0-1
+            'has_start_codon': (i == 1 and exon_prot.startswith('M')),
+            'has_stop_codon': (i == len(cds_ordered) and
+                               exon_dna[-3:].upper() in ('TAA', 'TAG', 'TGA')),
+            'splice_donor': splice_donor,
+            'splice_acceptor': splice_acceptor,
+            'method': 'miniprot'
+        })
+
+    # Model protein: miniprot's own translation (--trans, the ##STA record). It is
+    # the only construction that stays in frame across a frameshift miniprot has
+    # modelled (Frameshift=1) and keeps intron-split codons; concatenating the CDS
+    # DNA runs out of frame from the first frameshift to the end of the model.
+    # Fallback, without --trans output: the per-exon in-frame translations.
+    full_protein = (best.get('protein') or '').replace('*', '')
+    if full_protein:
+        # miniprot's translation covers the aligned span only; the terminal refinement
+        # above widened the terminal CDS, so those residues are added here. The per-exon
+        # fallback below translates the widened CDS and already contains them.
+        # An alignment that ends mid-codon leaves miniprot's translation one residue
+        # longer than its own CDS, and that residue is the first one the C-terminal walk
+        # re-translates — drop the overlap instead of duplicating it.
+        overlap = max(0, len(full_protein) - cds_codons_before)
+        full_protein = term_prefix + full_protein + term_suffix[overlap:]
+    else:
+        full_protein = ''.join(e['seq'] for e in exons)
+    print(f"[miniprot] Model rank {best.get('rank', 1)}: {len(exons)} exon(s), "
+          f"{len(full_protein)} aa, identity={best['identity']:.2f}, "
+          f"score={best['score']:.0f}", file=sys.stderr)
+    
+    return exons, full_protein
+
+
+def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
+                             strand=None, max_intron=200000,
+                             sensitive=False, region_offset=0):
+    """
+    Use miniprot to align query protein to genomic region: the BEST gene model.
+
+    Args:
+        query_seq: Query protein sequence (string)
+        chrom_seq: Target genomic DNA sequence (string)
+        chrom_name: Chromosome/scaffold name
+        strand: Unused (miniprot searches both strands)
+        max_intron: Max intron size (-G flag)
+        sensitive: If True, use ultra-sensitive params (for GOI)
+        region_offset: Offset to add to coordinates (if chrom_seq is a sub-region)
+
+    Returns:
+        (exon_list, full_protein); ([], query_seq) when there is no model.
+    """
+    if not query_seq or not chrom_seq:
+        return [], query_seq or ''
+    models = _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron, sensitive)
+    if not models:
+        return [], query_seq
+    try:
+        exons, full_protein = _build_model(models[0], query_seq, chrom_seq, chrom_name, region_offset)
+    except Exception as e:
+        print(f"[miniprot] Error: {e}", file=sys.stderr)
+        return [], query_seq
+    if not exons:
+        return [], query_seq
+    return exons, full_protein or query_seq
+
+
+# A further alignment is a model of its own when it scores at least this share of the best
+# one. It is the limit miniprot applies itself (--outs: 0.3 in the sensitive call used
+# for the gene of interest, 0.99 otherwise) and is applied again to the masked rounds
+# of miniprot_gene_models.
+MINIPROT_OUTS_SENSITIVE = 0.3
+MINIPROT_OUTS_DEFAULT = 0.99
+
+
+def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
+                         sensitive=False, region_offset=0, max_models=10, evidence=None):
+    """Every gene model miniprot finds in the region that does not lie on a better one.
+
+    miniprot chains the query to each place it aligns and reports the alignments in order
+    of score. In a tandem array these are the copies of the gene. A model is kept when
+    less than half of its coding sequence overlaps the coding sequence of a model kept
+    before it, on either strand, so a second alignment to the same gene is dropped and a
+    neighbouring copy is not.
+
+    One run does not report every copy: with a long maximum intron (here the length of
+    the region) miniprot leaves out a neighbouring copy that is more diverged than the
+    best one (measured: of two copies 2 kb apart, the one at 80 % identity is reported
+    with a maximum intron up to 6 kb and not from 10 kb on). ``evidence`` closes that
+    gap: intervals ``(start, end)`` in the coordinates of ``chrom_seq`` where the query
+    is known to align (the hits of the window search). As long as one of them lies on no
+    coding exon of a kept model, the coding exons of the kept models are masked and
+    miniprot runs again on what is left. A locus whose hits are all explained by the
+    first model costs one run, as before.
+
+    Returns ``[(exons, full_protein), ...]``, best first, at most ``max_models``.
+    """
+    if not query_seq or not chrom_seq:
+        return []
+    limit = max(1, int(max_models))
+    min_ratio = MINIPROT_OUTS_SENSITIVE if sensitive else MINIPROT_OUTS_DEFAULT
+    kept, kept_cds = [], []
+    best_score = None
+    target = chrom_seq
+
+    def unexplained():
+        for start, end in evidence or ():
+            if not any(min(end, ke) - max(start, kb) > 0 for cds in kept_cds for kb, ke in cds):
+                return True
+        return False
+
+    for _round in range(limit):
+        added = 0
+        for model in _run_miniprot(query_seq, target, chrom_name, max_intron, sensitive):
+            if len(kept) >= limit:
+                break
+            score = float(model.get('score', 0) or 0)
+            if best_score is None:
+                best_score = score
+            elif score < min_ratio * best_score:
+                continue
+            cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
+            coding = sum(e - b for b, e in cds)
+            if coding <= 0:
+                continue
+            shared = sum(max(0, min(e, ke) - max(b, kb))
+                         for b, e in cds for other in kept_cds for kb, ke in other)
+            if shared > 0.5 * coding:
+                continue
+            try:
+                # Always built on the unmasked sequence: the ends of a model are refined
+                # on the DNA next to it.
+                exons, protein = _build_model(model, query_seq, chrom_seq, chrom_name, region_offset)
+            except Exception as e:
+                print(f"[miniprot] Error: {e}", file=sys.stderr)
+                continue
+            if not exons:
+                continue
+            kept.append((exons, protein or ''))
+            kept_cds.append(cds)
+            added += 1
+        if not added or len(kept) >= limit or not unexplained():
+            break
+        masked = list(chrom_seq)
+        for cds in kept_cds:
+            for b, e in cds:
+                masked[b:e] = 'N' * (e - b)
+        target = ''.join(masked)
+    return kept
+
+
+def _hit_region(hits, chrom_seq, gap_search_window):
+    """The stretch of DNA a model may use: the hits plus ``gap_search_window`` on each
+    side. Returns ``(start, end)`` or None without usable hits."""
+    hit_starts = [h.get('gstart', h.get('start', 0)) for h in hits]
+    hit_ends = [h.get('gend', h.get('end', 0)) for h in hits]
+    if not hit_starts or not hit_ends:
+        return None
+    return (max(0, min(hit_starts) - gap_search_window),
+            min(len(chrom_seq), max(hit_ends) + gap_search_window))
+
+
+def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
+                                  gap_search_window=50000, sensitive=False):
+    """
+    The best gene model for a set of hits: one miniprot run over the hits plus
+    ``gap_search_window`` on each side. The hits only say where to look.
+
+    Returns ``(exons, full_protein)``; ``([], query_seq)`` when there is no model.
     """
     if not hits or not query_seq or not chrom_seq:
         return [], query_seq or ''
-
-    # Determine strand consensus from hits (informational only)
-    strand_votes = {'+': 0, '-': 0}
-    for h in hits:
-        strand_votes[h.get('strand', '+')] += 1
-    consensus_strand = '+' if strand_votes['+'] >= strand_votes['-'] else '-'
-    
-    # Determine search region from hits
-    hit_starts = [h.get('gstart', h.get('start', 0)) for h in hits]
-    hit_ends = [h.get('gend', h.get('end', 0)) for h in hits]
-    
-    if not hit_starts or not hit_ends:
+    region = _hit_region(hits, chrom_seq, gap_search_window)
+    if region is None:
         return [], query_seq
-    
-    region_start = max(0, min(hit_starts) - gap_search_window)
-    region_end = min(len(chrom_seq), max(hit_ends) + gap_search_window)
-    
-    # Extract sub-region for miniprot
-    sub_seq = chrom_seq[region_start:region_end]
-    
-    # Detect if this is likely a GOI query (use sensitive mode)
+    region_start, region_end = region
     is_goi = sensitive or any('GOI' in str(h.get('query', '')) for h in hits)
-    
-    # Calculate max intron from hit spread
-    max_intron = max(20000, region_end - region_start)
-    
-    # Run miniprot
-    exons, full_protein = annotate_using_miniprot(
-        query_seq, sub_seq, chrom_name,
-        strand=consensus_strand,
-        max_intron=max_intron,
+    return annotate_using_miniprot(
+        query_seq, chrom_seq[region_start:region_end], chrom_name,
+        max_intron=max(20000, region_end - region_start),
         sensitive=is_goi,
         region_offset=region_start
     )
-    
-    return exons, full_protein
+
+
+def annotate_models_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
+                                   gap_search_window=50000, sensitive=False, max_models=10):
+    """
+    Every gene model for a set of hits (see miniprot_gene_models), best first:
+    ``[(exons, full_protein), ...]``, empty when there is none. The hits are also the
+    evidence for further copies: while one of them lies on no model, miniprot is run
+    again on the region with the models found so far masked.
+    """
+    if not hits or not query_seq or not chrom_seq:
+        return []
+    region = _hit_region(hits, chrom_seq, gap_search_window)
+    if region is None:
+        return []
+    region_start, region_end = region
+    is_goi = sensitive or any('GOI' in str(h.get('query', '')) for h in hits)
+    evidence = []
+    for h in hits:
+        h_start = h.get('gstart', h.get('start'))
+        h_end = h.get('gend', h.get('end'))
+        if h_start is None or h_end is None:
+            continue
+        lo, hi = min(h_start, h_end) - region_start, max(h_start, h_end) - region_start
+        if hi > 0 and lo < region_end - region_start:
+            evidence.append((max(0, lo), hi))
+    return miniprot_gene_models(
+        query_seq, chrom_seq[region_start:region_end], chrom_name,
+        max_intron=max(20000, region_end - region_start),
+        sensitive=is_goi,
+        region_offset=region_start,
+        max_models=max_models,
+        evidence=evidence if int(max_models) > 1 else None,
+    )
 
 
 # =============================================================================
@@ -1560,22 +1738,13 @@ def main():
                         help="Query ID (UniProt accession or gene name)")
     parser.add_argument("--gff_search_window", type=int, default=100000,
                         help="Window around hits for GFF-based search")
+    parser.add_argument("--gene_name", default="",
+                        help="Name of the home gene as it stands in the annotation, for a "
+                             "query whose own name is not found there. It is tried first; "
+                             "like every name match it must agree with the query sequence")
     parser.add_argument("--gap_search_window", type=int, default=50000,
-                        help="Window around existing exons for gap search")
-    parser.add_argument("--gap_min_size", type=int, default=10,
-                        help="Minimum gap size (aa) to search")
-    parser.add_argument("--gap_evalue", type=float, default=10.0,
-                        help="E-value threshold for gap search")
-    parser.add_argument("--gap_min_identity", type=float, default=25.0,
-                        help="Minimum identity for gap hits")
-    parser.add_argument("--gap_min_alnlen", type=int, default=10,
-                        help="Minimum alignment length for gap hits")
-    parser.add_argument("--gap_max_hits", type=int, default=5,
-                        help="Maximum hits to consider per gap search")
-    parser.add_argument("--min_exon_query_cov", type=float, default=0.25,
-                        help="Minimum query coverage for exon hits")
-    parser.add_argument("--min_exon_alnlen", type=int, default=30,
-                        help="Minimum alignment length for exon hits")
+                        help="DNA added on each side of the hits before miniprot builds the "
+                             "home gene model (only when no annotated gene matches)")
     parser.add_argument("--output_exons", required=True,
                         help="Output: exon protein FASTA")
     parser.add_argument("--output_bed", required=True,
@@ -1615,7 +1784,8 @@ def main():
             args.genome,
             args.blast_hits,
             args.mmseqs_hits,
-            args.gff_search_window
+            args.gff_search_window,
+            gene_name=args.gene_name.strip(),
         )
 
         if match:

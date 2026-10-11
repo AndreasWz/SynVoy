@@ -104,8 +104,11 @@ try:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
+        sw_align, sw_align_span,
     )
-    from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
+    from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
+                                    MINIPROT_AVAILABLE)
+    import synvoy_scale
 except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -115,8 +118,11 @@ except ImportError:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
+        sw_align, sw_align_span,
     )
-    from annotate_goi_exons import annotate_exons_from_hit_list, MINIPROT_AVAILABLE
+    from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
+                                    MINIPROT_AVAILABLE)
+    import synvoy_scale
 
 # Import fragment utilities if available
 try:
@@ -212,7 +218,7 @@ CLASSIFY_THRESHOLDS = {
     # flanking (can't judge order) or when collinearity is unavailable (no home_rank).
     "high_min_collinear": 3,
     # exon_annotation -> MEDIUM
-    "medium_min_identity": 35.0,
+    "medium_min_identity": 40.0,
     "medium_min_flanking": 1,
     "medium_min_qcov": 0.65,
     # fallback_hit_span -> MEDIUM (flanking-supported)
@@ -237,8 +243,8 @@ CLASSIFY_THRESHOLDS = {
     # 21-27 %. A floor of 30 keeps the former and rejects the latter with margin on
     # both sides. Set 0 to restore the old un-floored behaviour.
     "fallback_strong_min_identity_floor": 30.0,
-    # tandem_copy -> MEDIUM vs LOW
-    "tandem_min_identity": 40.0,
+    # tandem_copy -> MEDIUM vs LOW (50 since 2026-10-09; the short-peptide preset: 40)
+    "tandem_min_identity": 50.0,
     # A2 (TODO_JUN): a tandem copy needs real query coverage too, not just a
     # high local-window identity (QW2 surfaces the true coverage).
     "tandem_min_qcov": 0.35,
@@ -356,8 +362,12 @@ def _apply_distance_adaptive_thresholds(
         relax = max_relax * (close_p - median) / max(close_p - far_p, 1e-6)
         tier = "mid"
 
-    high_adj = max(base_high - relax, 1.0)
-    med_adj = max(base_med - relax, 1.0)
+    # Floors: the relaxation never takes a threshold below its floor, and a baseline that is
+    # already at or below the floor (short peptides: 40 / 30) is not relaxed at all.
+    high_floor = float(getattr(args, "distance_autotune_high_floor", 45.0))
+    med_floor = float(getattr(args, "distance_autotune_medium_floor", 30.0))
+    high_adj = max(base_high - relax, min(base_high, high_floor), 1.0)
+    med_adj = max(base_med - relax, min(base_med, med_floor), 1.0)
     CLASSIFY_THRESHOLDS["high_min_identity"] = high_adj
     CLASSIFY_THRESHOLDS["medium_min_identity"] = med_adj
     info.update(
@@ -366,10 +376,13 @@ def _apply_distance_adaptive_thresholds(
     )
 
     if relax > 0:
+        _held = [name for name, base, adj in (("HIGH", base_high, high_adj), ("MEDIUM", base_med, med_adj))
+                 if adj > base - relax + 1e-9]
         logger.info(
             f"[{genome_name}] §1g distance auto-tune: median flanking identity "
             f"{median:.1f}% over {n} genes -> tier={tier}, relax={relax:.1f} pts "
             f"(HIGH {base_high:.0f}->{high_adj:.0f}, MEDIUM {base_med:.0f}->{med_adj:.0f})"
+            + (f"  [{' and '.join(_held)} held at the floor]" if _held else "")
             + ("  [manual_review]" if tier == "far" else "")
         )
     else:
@@ -426,35 +439,6 @@ def _normalize_family_token(value: Any) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
 
 
-def _auto_derive_family_tokens(fasta_path: Optional[str]) -> set:
-    """Extract likely gene-name tokens from a UniProt/NCBI FASTA header.
-
-    Looks for ``GN=XYZ`` (UniProt) or falls back to the accession's gene suffix.
-    Returns a set of normalized tokens. Empty set if nothing derivable.
-    """
-    tokens: set = set()
-    if not fasta_path or not os.path.exists(fasta_path):
-        return tokens
-    try:
-        with open(fasta_path, "r") as fh:
-            for line in fh:
-                if not line.startswith(">"):
-                    continue
-                header = line[1:].strip()
-                m = re.search(r"GN=([A-Za-z0-9_\-]+)", header)
-                if m:
-                    tokens.add(_normalize_family_token(m.group(1)))
-                # UniProt sp|ACC|NAME_SPECIES pattern
-                m2 = re.match(r"sp\|[^|]+\|([A-Za-z0-9]+)_", header)
-                if m2:
-                    tokens.add(_normalize_family_token(m2.group(1)))
-                break
-    except Exception:
-        return tokens
-    tokens.discard("")
-    return tokens
-
-
 def _check_family_consistency(target_gene: str, target_product: str) -> Tuple[bool, str]:
     tokens = FAMILY_CONFIG.get("tokens") or set()
     if not tokens:
@@ -489,29 +473,18 @@ def maybe_quiet_streams(quiet: bool):
 def normalize_coordinates(start: int, end: int) -> Tuple[int, int]:
     return min(start, end), max(start, end)
 
-def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int,
-                     min_query_cov: float, min_alnlen: int) -> List[Dict[str, Any]]:
-    """Filter exon hits by query coverage and alignment length."""
+def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int) -> List[Dict[str, Any]]:
+    """Hits of an exon-level query that carry query coordinates.
+
+    A coverage and a length limit were applied here until March 2026. They removed the
+    short exon hits that miniprot and the hit chain need, so they were switched off;
+    the two settings that fed them are gone (`min_exon_query_cov`) or documented for
+    what they still do (`min_exon_alnlen`: last-resort rows only).
+    """
     if not hits or query_len <= 0:
         return hits
-    kept = []
-    for h in hits:
-        qstart = h.get('qstart')
-        qend = h.get('qend')
-        if qstart is None or qend is None:
-            continue
-        qspan = abs(qend - qstart) + 1
-        alnlen = h.get('alnlen', qspan)
-        qcov = qspan / query_len if query_len > 0 else 0
-        
-        # We comment out the strict constraints here because they destroy fragmented exon hits
-        # before the more robust miniprot/fallback logic can assemble them.
-        # if min_alnlen and alnlen < min_alnlen:
-        #    continue
-        # if min_query_cov and qcov < min_query_cov:
-        #    continue
-        kept.append(h)
-    return kept
+    return [h for h in hits if h.get('qstart') is not None and h.get('qend') is not None]
+
 
 def parse_hits(
     hits_file: str,
@@ -668,6 +641,224 @@ def collapse_goi_queries_by_parent(goi_queries: List[Dict[str, Any]]) -> Dict[st
         if parent not in by_parent or _rank(q) > _rank(by_parent[parent]):
             by_parent[parent] = q
     return by_parent
+
+
+# The second GOI query of a window (the model of a relative searched earlier) is searched
+# and modelled under its own parent id, the home parent plus this tag, so that its hits
+# are never mixed with those of the home protein: the two sequences have different
+# coordinates. The tag is removed again before a model is written.
+RELATIVE_QUERY_TAG = '~rel'
+_MODEL_GENOME_RE = re.compile(r'^(?P<genome>.+)_b\d+_[lr]\d+')
+_RELATIVE_SCORE_CACHE: Dict[Tuple[str, str], float] = {}
+
+
+def build_home_goi_ids(initial_db_path) -> set:
+    """Ids of the GOI entries of the pristine query set: the home protein and its exons.
+
+    Everything else that later carries a GOI id in the expanding query set is a gene model
+    of a genome searched earlier. Returns an empty set on failure, which switches the
+    query rule back to "the longest sequence of each GOI"."""
+    ids = set()
+    try:
+        for _header, clean_id, _seq in parse_fasta(initial_db_path):
+            if is_goi_query_id(clean_id):
+                ids.add(clean_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"build_home_goi_ids failed ({exc}); GOI queries fall back to the longest sequence.")
+        return set()
+    return ids
+
+
+def _model_genome_tag(model_id: str) -> str:
+    """The genome a wave model came from, read from its id
+    (``GOI_X|<genome>_b<block>_l<locus>_<kind>``); '' for anything else."""
+    suffix = model_id.split('|', 1)[1] if '|' in model_id else ''
+    m = _MODEL_GENOME_RE.match(suffix)
+    return m.group('genome') if m else ''
+
+
+def _relative_score(home: Dict[str, Any], model: Dict[str, Any]) -> float:
+    key = (home.get('id', ''), model.get('id', ''))
+    if key not in _RELATIVE_SCORE_CACHE:
+        try:
+            _RELATIVE_SCORE_CACHE[key] = sw_align(home.get('seq', ''), model.get('seq', ''))[0]
+        except RuntimeError:
+            _RELATIVE_SCORE_CACHE[key] = float(len(model.get('seq', '')))
+    return _RELATIVE_SCORE_CACHE[key]
+
+
+def select_goi_queries(db_sequences: Dict[str, Dict[str, Any]], home_goi_ids,
+                       use_relative: bool = True):
+    """The GOI queries of one search window.
+
+    For every GOI the HOME protein is always a query, and what is reported about a gene
+    model (identity, query coverage, confidence) always refers to it. In addition the
+    gene model of the relative searched most recently is a second query: it can find a
+    gene the home protein no longer reaches. Until 2026-10-08 a window was searched with
+    ONE sequence per GOI, the longest of the home protein and all earlier models, so a
+    model three residues longer than the home protein replaced it for the rest of the run
+    and the identity of every later call referred to that model.
+
+    The relative: of the models in the query set, those of the genome that was added
+    last (the genome closest in search order to the current one); among them the model
+    that aligns best to the home protein. A model identical to the home protein is not
+    added.
+
+    Returns ``(queries, by_parent, alias_of)``. ``queries`` are ``{'id', 'seq'}`` records;
+    a relative's record carries the id ``<parent>~rel``. ``by_parent`` maps each of these
+    ids to its record. ``alias_of`` maps the relative's own id in the query set to its
+    alias. Without ``home_goi_ids`` the old rule applies and ``alias_of`` is empty.
+    """
+    records: Dict[str, Dict[str, Any]] = {}
+    for rec in db_sequences.values():
+        rid = rec.get('id', '')
+        if rid and rid not in records and is_full_length_goi_query_id(rid):
+            records[rid] = rec
+
+    if not home_goi_ids:
+        by_parent = collapse_goi_queries_by_parent(list(records.values()))
+        return list(by_parent.values()), by_parent, {}
+
+    order = {rid: i for i, rid in enumerate(records)}
+    by_parent: Dict[str, Dict[str, Any]] = {}
+    models_by_parent: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for rid in sorted(records):
+        rec = records[rid]
+        parent = extract_base_gene_id(rid)
+        if rid in home_goi_ids:
+            best = by_parent.get(parent)
+            rank = (rid == parent, len(rec.get('seq', '')))
+            if best is None or rank > (best['id'] == parent, len(best.get('seq', ''))):
+                by_parent[parent] = rec
+        else:
+            models_by_parent[parent].append(rec)
+
+    # A GOI known only from models (no home entry) keeps the old rule.
+    for parent, models in models_by_parent.items():
+        if parent not in by_parent:
+            by_parent.update(collapse_goi_queries_by_parent(models))
+
+    alias_of: Dict[str, str] = {}
+    queries = [by_parent[p] for p in sorted(by_parent)]
+    if use_relative:
+        for parent in sorted(models_by_parent):
+            home = by_parent.get(parent)
+            if home is None or home.get('id') not in home_goi_ids:
+                continue
+            models = [m for m in models_by_parent[parent]
+                      if m.get('seq') and m.get('seq') != home.get('seq')]
+            if not models:
+                continue
+            last = max(models, key=lambda m: order[m['id']])
+            tag = _model_genome_tag(last['id'])
+            pool = [m for m in models if _model_genome_tag(m['id']) == tag]
+            best = max(sorted(pool, key=lambda m: m['id'], reverse=True),
+                       key=lambda m: _relative_score(home, m))
+            alias = parent + RELATIVE_QUERY_TAG
+            alias_rec = {'id': alias, 'seq': best['seq'],
+                         'header': best.get('header', ''), 'model_id': best['id']}
+            by_parent[alias] = alias_rec
+            queries.append(alias_rec)
+            alias_of[best['id']] = alias
+    return queries, by_parent, alias_of
+
+
+def _parse_gff_attr_string(text: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for pair in text.split(';'):
+        if '=' in pair:
+            k, v = pair.split('=', 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def rebase_relative_candidates(raw_candidates, cand_parents, by_parent):
+    """Report every gene model found with a relative's model against the HOME protein.
+
+    ``cand_parents[i]`` is the parent id (home parent, or its ``~rel`` alias) under which
+    ``raw_candidates[i]`` was built. A model built with the relative is dropped where the
+    home protein produced a model of its own on the same DNA; otherwise its identity and
+    query coverage are measured again by aligning its protein to the home protein, it is
+    classified with those numbers, and it gets the home parent's id. The relative that
+    found it and the identity to that relative stay on the record as ``SearchQuery`` and
+    ``SearchQueryIdentity``.
+    """
+    real_models = {'exon_annotation', 'tandem_copy', 'fallback_hit_span'}
+    home_spans = defaultdict(list)
+    for cand, parent in zip(raw_candidates, cand_parents):
+        if parent.endswith(RELATIVE_QUERY_TAG) or not cand.get('gff'):
+            continue
+        ev = _parse_gff_attr_string(cand['gff'][0].split('\t')[-1]).get('EvidenceType', '')
+        if ev in real_models:
+            home_spans[parent].append((cand['start'], cand['end']))
+
+    kept = []
+    for cand, parent in zip(raw_candidates, cand_parents):
+        if not parent.endswith(RELATIVE_QUERY_TAG):
+            kept.append(cand)
+            continue
+        home_parent = parent[:-len(RELATIVE_QUERY_TAG)]
+        home = by_parent.get(home_parent)
+        relative = by_parent.get(parent, {})
+        if home is None or not cand.get('gff'):
+            continue
+        c_len = max(1, cand['end'] - cand['start'])
+        if any(max(0, min(cand['end'], e) - max(cand['start'], b)) > 0.5 * min(c_len, max(1, e - b))
+               for b, e in home_spans.get(home_parent, [])):
+            continue                      # the home protein has its own model here
+
+        protein = cand['record'].get('seq', '')
+        try:
+            aln = sw_align_span(home.get('seq', ''), protein)
+        except RuntimeError:
+            continue                      # nothing to report against without an aligner
+        cols = cand['gff'][0].split('\t')
+        if len(cols) < 9:
+            continue
+        old = _parse_gff_attr_string(cols[8])
+        evidence = old.get('EvidenceType', '')
+
+        def _rename(text):
+            text = text.replace(parent, home_parent)
+            return re.sub(r'(_b\d+)_l(\d+)', r'\1_r\2', text)
+
+        base = {k: _rename(old[k]) for k in ('ID', 'Name', 'SynVoy_Parent') if k in old}
+        for k in ('Type', 'Exons', 'StartCodon', 'StopCodon'):
+            if k in old:
+                base[k] = old[k]
+        collinear = old.get('BlockCollinearSupport')
+        attrs = _goi_feature_attrs(
+            base,
+            evidence_type=evidence,
+            identity=aln['identity'],
+            exon_count=int(float(old.get('Exons', 1) or 1)),
+            query_cov=aln['query_cov'],
+            flanking_support=int(float(old.get('BlockFlankingSupport', 0) or 0)),
+            collinear_support=int(float(collinear)) if collinear not in (None, '') else None,
+        )
+        attrs['SearchQuery'] = relative.get('model_id', parent)
+        attrs['SearchQueryIdentity'] = old.get('Identity', '')
+        native = {'label': old.get('TargetGene', ''), 'product': old.get('TargetProduct', ''),
+                  'feature_id': old.get('TargetID', '')}
+        cols[5] = f"{aln['identity']:.1f}"
+        cols[8] = _compose_gff_attrs(attrs, native if any(native.values()) else None)
+        new_gff = ['\t'.join(cols)]
+        for line in cand['gff'][1:]:
+            lc = line.split('\t')
+            if len(lc) >= 9:
+                lc[8] = _rename(lc[8])
+                line = '\t'.join(lc)
+            new_gff.append(line)
+        cand = dict(cand)
+        cand['gff'] = new_gff
+        cand['score'] = aln['identity']
+        record = dict(cand['record'])
+        record['id'] = _rename(record.get('id', ''))
+        record['description'] = (_rename(record.get('description', ''))
+                                 + f" search_query:{relative.get('model_id', parent)}")
+        cand['record'] = record
+        kept.append(cand)
+    return kept
 
 
 def is_goi_query_id(query_id: str) -> bool:
@@ -1048,10 +1239,17 @@ def _classify_goi_evidence(
         return "LOW", "tandem_goi_copy", "goi_tandem_copy_weak_context"
 
     if evidence_type == "exon_annotation":
+        # A model of one exon can be HIGH only where the home gene itself has one exon
+        # (high_min_exons is then 1), and then it has to cover the query like a complete
+        # gene: one exon is also what a single chance alignment looks like.
+        one_exon_ok = exon_count >= 2 or qcov >= ct.get("high_single_exon_min_qcov", 0.0)
         if (exon_count >= ct["high_min_exons"]
+                and one_exon_ok
                 and identity >= ct["high_min_identity"]
                 and flanking_support >= ct["high_min_flanking"]):
             if collinear_ok:
+                if exon_count < 2:
+                    return "HIGH", "confident_goi", "single_exon_model_as_at_home_with_flanking_support"
                 return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
             # §1: HIGH-quality model + enough flanking, but the flanking are NOT in conserved
             # home order → likely a paralog neighbourhood, not the true ortholog locus. Demote
@@ -2033,10 +2231,116 @@ def derive_goi_fallback_max_gap(goi_info_path, margin, floor, default_max_gap):
     )
 
 
+def resolve_anchor_hits(hits, min_overlap=0.5):
+    """One anchor per place: where hits of DIFFERENT flanking genes cover the same target
+    DNA, only the best-scoring one stays.
+
+    A target gene is the ortholog of at most one home gene. Two flanking genes that are
+    relatives of each other (two kinases, two members of a tandem pair) both hit every
+    member of their family, so one target gene used to count as two anchors: a place
+    with a single gene passed the "at least two flanking genes" test for a block, and
+    the number of flanking genes around a GOI call was inflated the same way. After this
+    step a tandem pair A, B is counted as A on its own ortholog and B on its own.
+
+    Two hits compete when they overlap by at least ``min_overlap`` of the shorter one,
+    on either strand. The higher bit score wins; ties go to the lower E-value, then to
+    the smaller query id. GOI hits are returned untouched.
+    """
+    import bisect
+
+    keep = []
+    by_chrom = defaultdict(list)
+    for h in hits:
+        if is_goi_query_id(h.get('query', '')):
+            keep.append(h)
+        else:
+            by_chrom[h.get('chrom')].append(h)
+
+    for chrom in sorted(by_chrom, key=str):
+        # Strongest first; a hit stays unless a stronger hit of another gene already
+        # holds the same place. (Greedy by strength, so a hit that lost cannot push out
+        # a third one.)
+        ranked = sorted(by_chrom[chrom],
+                        key=lambda h: (-float(h.get('bits', 0) or 0), float(h.get('evalue', 0) or 0),
+                                       h['query'], h['start'], h['end']))
+        starts = []          # starts of the accepted hits, sorted
+        accepted = []        # the accepted hits in the same order
+        longest = 0
+        for h in ranked:
+            gene = extract_base_gene_id(h['query'])
+            length = h['end'] - h['start']
+            lost = False
+            i = bisect.bisect_left(starts, h['end']) - 1
+            while i >= 0 and starts[i] > h['start'] - longest:
+                o = accepted[i]
+                overlap = min(h['end'], o['end']) - max(h['start'], o['start'])
+                shorter = min(length, o['end'] - o['start'])
+                if (overlap > 0 and shorter > 0 and overlap >= min_overlap * shorter
+                        and extract_base_gene_id(o['query']) != gene):
+                    lost = True
+                    break
+                i -= 1
+            if lost:
+                continue
+            pos = bisect.bisect_left(starts, h['start'])
+            starts.insert(pos, h['start'])
+            accepted.insert(pos, h)
+            longest = max(longest, length)
+        keep.extend(accepted)
+    return keep
+
+
+def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000):
+    """Flanking hits restricted to the ``max_places`` best places of each flanking gene.
+
+    A place is a run of hits of one flanking gene on one target sequence whose neighbours
+    are at most that gene's gap limit apart (``gap_limit(gene)``, the limit that separates
+    two occurrences of the gene); its weight is the sum of its bit scores. The ortholog
+    of a flanking gene is one place; its further places are relatives and shared domains.
+    They are what makes two anchors lie near each other by chance: on the saved hits of 19
+    genome searches (yeast, fly, bee) the blocks with two or more anchors fell from 258 to
+    53 with five places per gene, and every block that held a HIGH, MEDIUM or ambiguous
+    call was still there. Off by default (``max_places`` <= 0 returns the hits unchanged):
+    not yet run on the family benchmark.
+
+    Only the seeding of blocks uses the result. The other hits still count inside a
+    window (flanking support, flanking gene models).
+    """
+    if not max_places or int(max_places) <= 0:
+        return list(hits)
+    by_gene_seq = defaultdict(list)
+    for h in hits:
+        by_gene_seq[(extract_base_gene_id(h.get('query', '')), h.get('chrom'))].append(h)
+    places = defaultdict(list)
+    for (gene, _seq), gene_hits in by_gene_seq.items():
+        limit = gap_limit(gene) if gap_limit else default_gap
+        gene_hits = sorted(gene_hits, key=lambda h: (min(h['start'], h['end']), max(h['start'], h['end'])))
+        current = [gene_hits[0]]
+        current_end = max(gene_hits[0]['start'], gene_hits[0]['end'])
+        for h in gene_hits[1:]:
+            start, end = min(h['start'], h['end']), max(h['start'], h['end'])
+            if start - current_end <= limit:
+                current.append(h)
+                current_end = max(current_end, end)
+            else:
+                places[gene].append(current)
+                current, current_end = [h], end
+        places[gene].append(current)
+    keep = set()
+    for gene, gene_places in places.items():
+        ranked = sorted(gene_places, key=lambda pl: (
+            -sum(float(x.get('bits', 0) or 0) for x in pl),
+            str(pl[0].get('chrom')), min(pl[0]['start'], pl[0]['end'])))
+        for place in ranked[:int(max_places)]:
+            keep.update(id(x) for x in place)
+    return [h for h in hits if id(h) in keep]
+
+
 def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
                             home_rank=None, bridge_max_gap=0,
                             bridge_max_rank_gap=5, bridge_min_anchors=3,
-                            bridge_two_sided=False, bridge_max_per_block=2):
+                            bridge_two_sided=False, bridge_max_per_block=2,
+                            gene_gap_limit=None):
     """
     Identify all synteny blocks from hits.
     
@@ -2070,6 +2374,9 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
         bridge_max_per_block: max bridges one block may chain (0 = unlimited). Bounds a
             runaway block: each bridge can span bridge_max_gap, so without a cap a chain
             of them could swallow a chromosome.
+        gene_gap_limit: optional ``f(gene_id) -> bp``, the largest gap between two hits of
+            that gene that are still one occurrence of it (its own span at home, scaled).
+            Without it ``max_intron`` applies to every gene.
 
     Returns:
         List of dictionaries (blocks), sorted by score (descending). Each block
@@ -2095,7 +2402,8 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
     for query_id, q_hits in hits_by_query.items():
         # Sort hits by genomic position
         q_hits.sort(key=lambda x: (x['chrom'], x['start']))
-        
+        gene_limit = gene_gap_limit(query_id) if gene_gap_limit else max_intron
+
         current_locus_hits = []
         for h in q_hits:
             if not current_locus_hits:
@@ -2106,7 +2414,7 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
             
             # Same chromosome and close enough = same locus (exons)
             if (h['chrom'] == last_hit['chrom'] and 
-                h['start'] - last_hit['end'] < max_intron):
+                h['start'] - last_hit['end'] < gene_limit):
                 current_locus_hits.append(h)
             else:
                 # Start new locus
@@ -2271,75 +2579,115 @@ def calculate_adaptive_padding(hits: List[Dict[str, Any]], best_region: Dict[str
     return final_padding
 
 
-def estimate_cluster_distance(genome_file: str, gff_file: Optional[str] = None, default_dist: int = 50000) -> int:
+def bp_or_auto(value):
+    """argparse type of a distance that is either derived ('auto') or fixed in bp."""
+    text = str(value).strip().lower()
+    if text in ('auto', ''):
+        return None
+    return int(float(text))
+
+
+def _expansion_note(source, run_anchors):
+    """How the expansion of one genome came about, for the log line."""
+    if source == 'anchors':
+        return f"measured over {run_anchors} anchors in a row"
+    longest = f"longest run of anchors in home order: {run_anchors}"
+    if source == 'genome size':
+        return f"from the genome sizes; {longest}"
+    return f"not measured; {longest}"
+
+
+def genome_scale_args(args, flanking_hits, genome_path, genome_name=''):
+    """A copy of ``args`` whose distances are in base pairs for THIS target genome.
+
+    Distances that describe a neighbourhood are given in gene pitches and converted with
+    the pitch of the home neighbourhood and the expansion measured in this genome
+    (synvoy_scale). A distance the user set in bp is used as it is. Without home
+    coordinates in the query set, every distance keeps its former fixed value.
+
+    The copy also carries ``distances`` (what was used and where each value came from,
+    written into the result GFF) and ``expansion``.
     """
-    Estimate gene density to adjust cluster_distance intelligently.
-    
-    Strategy:
-    1. If GFF provided: Calculate actual inter-gene distances
-    2. Else: Use genome size heuristic (improved)
-    3. Return 2-3x median inter-gene distance as cluster threshold
-    """
-    
-    # Method 1: Use GFF if available (most accurate)
-    if gff_file and os.path.exists(gff_file) and gff_file != "NO_GFF":
+    import copy as _copy
+    geometry = getattr(args, 'home_geometry', None)
+    size_ratio = None
+    home_bp = (geometry or {}).get('home_genome_bp')
+    if home_bp:
         try:
-            # parse_gff returns a generator; consume it into a list and
-            # filter to gene-level features only for density estimation.
-            genes = [f for f in parse_gff(gff_file, feature_types=['gene'])]
-            if len(genes) > 10:  # Need reasonable sample size
-                # Sort by chromosome and position
-                by_chrom = defaultdict(list)
-                for gene in genes:
-                    by_chrom[gene['seqid']].append(gene['start'])
-                
-                # Calculate inter-gene distances per chromosome
-                all_distances = []
-                for chrom, positions in by_chrom.items():
-                    sorted_pos = sorted(positions)
-                    for i in range(len(sorted_pos) - 1):
-                        dist = sorted_pos[i+1] - sorted_pos[i]
-                        if dist > 0:  # Skip overlapping genes
-                            all_distances.append(dist)
-                
-                if all_distances:
-                    # Use median distance * 2.5 as clustering threshold
-                    all_distances.sort()
-                    median_dist = all_distances[len(all_distances) // 2]
-                    cluster_distance = int(median_dist * 2.5)
-                    # Clamp to reasonable range
-                    cluster_distance = max(10000, min(200000, cluster_distance))
-                    print(f"Estimated cluster distance from GFF: {cluster_distance} bp "
-                          f"(median inter-gene: {median_dist} bp)", file=sys.stderr)
-                    return cluster_distance
-        except Exception as e:
-            print(f"Warning: Could not parse GFF for gene density: {e}", file=sys.stderr)
-    
-    # Method 2: Improved genome size heuristic
-    try:
-        size = os.path.getsize(genome_file)
+            target_bp = os.path.getsize(genome_path) * (4 if str(genome_path).endswith(('.gz', '.gzip')) else 1)
+            size_ratio = target_bp / float(home_bp)
+        except OSError:
+            size_ratio = None
+    expansion, run_anchors, source = synvoy_scale.target_expansion(geometry, flanking_hits, size_ratio=size_ratio)
+    distances = synvoy_scale.derive_distances(
+        geometry, expansion,
+        genes={
+            'block_gap_genes': getattr(args, 'block_gap_genes', None),
+            'window_margin_genes': getattr(args, 'window_margin_genes', None),
+            'goi_margin_genes': getattr(args, 'goi_margin_genes', None),
+            'bridge_max_gap_genes': getattr(args, 'synteny_bridge_max_gap_genes', None),
+            'envelope_margin_genes': getattr(args, 'dispersed_envelope_margin_genes', None),
+        },
+        fixed_bp={
+            'cluster_distance': getattr(args, 'cluster_distance', None),
+            'region_padding': getattr(args, 'region_padding', None),
+            'gap_search_window': getattr(args, 'goi_margin', None),
+            'synteny_bridge_max_gap': getattr(args, 'synteny_bridge_max_gap', None),
+            'dispersed_envelope_margin': getattr(args, 'dispersed_envelope_margin', None),
+        },
+    )
+    distances['expansion_source'] = source
+    distances['expansion_anchors'] = run_anchors
+    out = _copy.copy(args)
+    out.cluster_distance = distances['cluster_distance']
+    # A window margin given in bp keeps the old behaviour (adapted to the spacing of the
+    # hits, between padding_min and padding_max); a derived one is used as it is.
+    out.adaptive_padding = getattr(args, 'region_padding', None) is not None
+    out.region_padding = distances['region_padding']
+    out.goi_margin = distances['goi_margin']
+    # DNA cut out around a block. Only hits that touch the core (block +- GOI margin) are
+    # used, and a gene model may use the DNA up to the model margin beyond its hits, so
+    # anything further out would be searched for nothing. The window margin stays the
+    # extent of the neighbourhood (which blocks merge, which anchors count as support);
+    # the DNA searched is the smaller of the two. With a window margin given in bp the
+    # whole margin is searched, as before. (At a human locus the difference is megabases:
+    # 7 pitches of 335 kb on each side against 2 pitches plus the room for one gene.)
+    out.search_margin = None
+    if not out.adaptive_padding and geometry:
+        model_margin = max(int(getattr(args, 'gap_search_window', 0) or 0),
+                           int(float(getattr(args, 'goi_home_span', 0) or 0) * float(expansion or 1.0)))
+        out.search_margin = int(min(distances['region_padding'], distances['goi_margin'] + model_margin))
+        distances['search_margin'] = out.search_margin
+    # 0 switches bridging off, in either unit.
+    bridge_off = (getattr(args, 'synteny_bridge_max_gap', None) == 0
+                  or (getattr(args, 'synteny_bridge_max_gap', None) is None
+                      and float(getattr(args, 'synteny_bridge_max_gap_genes', 1) or 0) <= 0))
+    out.synteny_bridge_max_gap = 0 if bridge_off else distances['synteny_bridge_max_gap']
+    distances['synteny_bridge_max_gap'] = out.synteny_bridge_max_gap
+    out.dispersed_envelope_margin = distances['dispersed_envelope_margin']
+    out.expansion = expansion
+    out.distances = distances
+    if geometry:
+        logger.info(
+            f"[{genome_name}] distances: home pitch {geometry['pitch'] / 1000:.1f} kb x expansion "
+            f"{expansion:.2f} ({_expansion_note(source, run_anchors)}) -> block gap "
+            f"{distances['cluster_distance'] / 1000:.0f} kb, window margin "
+            f"{distances['region_padding'] / 1000:.0f} kb"
+            + (f" (DNA searched: {out.search_margin / 1000:.0f} kb per side)" if out.search_margin else "")
+            + f", GOI margin {distances['goi_margin'] / 1000:.0f} kb, "
+            f"bridge up to {out.synteny_bridge_max_gap / 1000:.0f} kb.")
+    else:
+        logger.info(f"[{genome_name}] distances: no home coordinates in the query set; fixed values "
+                    f"(block gap {distances['cluster_distance'] / 1000:.0f} kb).")
+    return out
 
-        # Gzipped FASTA is ~25% of real genome size → scale up to avoid wrong bin
-        if genome_file.endswith('.gz') or genome_file.endswith('.gzip'):
-            size = size * 4
-        
-        # More refined heuristics based on typical genomes
-        if size < 5_000_000:  # < 5MB: Bacteria/Archaea
-            return 15000  # Dense gene packing
-        elif size < 20_000_000:  # 5-20MB: Large bacteria, fungi
-            return 25000
-        elif size < 100_000_000:  # 20-100MB: Small eukaryotes
-            return 40000
-        elif size < 500_000_000:  # 100-500MB: Insects, small vertebrates
-            return 70000
-        elif size < 2_000_000_000:  # 0.5-2GB: Mammals, birds
-            return 100000
-        else:  # > 2GB: Plants, large genomes
-            return 150000
-    except Exception as e:
-        logger.warning(f"Could not auto-detect cluster distance from genome size ({genome_file}): {e}. Using default {default_dist} bp.")
 
-    return default_dist
+def _gene_limit(args, gene_id, floor_bp):
+    """Largest gap inside one occurrence of a flanking gene in this target (bp)."""
+    return synvoy_scale.gene_gap_limit(getattr(args, 'home_geometry', None),
+                                       extract_base_gene_id(gene_id),
+                                       float(getattr(args, 'expansion', 1.0) or 1.0), floor_bp)
+
 
 def run_augmented_mmseqs_with_retries(
     variants_fasta: str,
@@ -3239,32 +3587,49 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         return [], []
 
     slen = len(genome_seqs[chrom])
-    padding = calculate_adaptive_padding(
-        hits,
-        block,
-        default=args.region_padding,
-        min_pad=args.padding_min,
-        max_pad=args.padding_max
-    )
+    if getattr(args, 'adaptive_padding', True):
+        padding = calculate_adaptive_padding(
+            hits,
+            block,
+            default=args.region_padding,
+            min_pad=args.padding_min,
+            max_pad=args.padding_max
+        )
+    else:
+        padding = args.region_padding
 
-    w_start = max(0, block['start'] - padding)
-    w_end = min(slen, block['end'] + padding)
+    # The neighbourhood of the block (anchors counted as support) and the DNA that is cut
+    # out and searched; the second is the smaller one when distances are derived
+    # (genome_scale_args: search_margin).
+    hood_start = max(0, block['start'] - padding)
+    hood_end = min(slen, block['end'] + padding)
+    search_pad = padding
+    if not getattr(args, 'adaptive_padding', True) and getattr(args, 'search_margin', None):
+        search_pad = min(padding, int(args.search_margin))
+    w_start = max(0, block['start'] - search_pad)
+    w_end = min(slen, block['end'] + search_pad)
     subseq = genome_seqs[chrom][w_start:w_end]
     # Keep final GOI calls anchored near the flanking-defined block.
-    core_start = max(0, block['start'] - args.gap_search_window)
-    core_end = min(slen, block['end'] + args.gap_search_window)
+    core_margin = getattr(args, 'goi_margin', None) or args.gap_search_window
+    core_start = max(0, block['start'] - core_margin)
+    core_end = min(slen, block['end'] + core_margin)
+    # DNA around a candidate's hits that the gene model may use: never less than the
+    # gene's own span at home.
+    goi_model_margin = max(args.gap_search_window,
+                           int(getattr(args, 'goi_home_span', 0) * float(getattr(args, 'expansion', 1.0) or 1.0)))
 
     temp_fa = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_block{block_idx}.fasta"
     query_mini_fa = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_block{block_idx}_query.faa"
     write_fasta([("region_seq", subseq)], temp_fa)
 
-    relevant_hits = [
+    neighbourhood_hits = [
         h for h in hits
-        if h['chrom'] == chrom and h['end'] > w_start and h['start'] < w_end
+        if h['chrom'] == chrom and h['end'] > hood_start and h['start'] < hood_end
     ]
+    relevant_hits = [h for h in neighbourhood_hits if h['end'] > w_start and h['start'] < w_end]
     block_flanking_support = len({
         extract_base_gene_id(h.get('query', ''))
-        for h in relevant_hits
+        for h in neighbourhood_hits
         if h.get('query') and not is_goi_query_id(h.get('query', ''))
     })
     # §1 synteny ORDER: longest collinear run of the block's flanking genes in home order
@@ -3275,7 +3640,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     home_rank = getattr(args, 'home_rank', None)
     if home_rank:
         flank_first_pos: Dict[str, int] = {}
-        for h in relevant_hits:
+        for h in neighbourhood_hits:
             q = h.get('query', '')
             if q and not is_goi_query_id(q):
                 gid = extract_base_gene_id(q)
@@ -3327,9 +3692,18 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             os.remove(temp_fa)
         return [], []
 
-    # Collapse duplicated GOI entries by parent ID and keep the longest representative.
-    goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
-    goi_queries = list(goi_query_by_parent.values())
+    # One query per GOI is the home protein; the model of the relative searched most
+    # recently is a second one, kept apart under its own parent id (select_goi_queries).
+    home_goi_ids = getattr(args, 'home_goi_ids', None)
+    relative_alias: Dict[str, str] = {}
+    cand_marks: List[Tuple[int, str]] = []
+    if home_goi_ids:
+        goi_queries, goi_query_by_parent, relative_alias = select_goi_queries(
+            db_sequences, home_goi_ids,
+            use_relative=not getattr(args, 'disable_relative_query', False))
+    else:
+        goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
+        goi_queries = list(goi_query_by_parent.values())
 
     write_fasta([(q['id'], q['seq']) for q in goi_queries], query_mini_fa)
 
@@ -3349,6 +3723,104 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         )
         return _compose_gff_attrs(base_attrs, native)
 
+    def _emit_exon_model(parent_id, parent_query_seq, exons, model_protein, tag):
+        """One miniprot gene model as a GOI candidate. ``tag`` names it inside the block
+        (``l1`` for the first model of locus 1, ``l1m2`` for a second gene found in the
+        same locus). Returns the model's exon intervals in window coordinates."""
+        exons.sort(key=lambda e: e.get('qstart', 0))
+        # miniprot's own translation of the model (in frame across
+        # every intron phase and modelled frameshift); see
+        # annotate_using_miniprot. Per-exon concatenation is the fallback.
+        exon_protein = model_protein or ''.join(e['seq'] for e in exons)
+        strand = exons[0].get('strand', '+')
+        avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
+        model_qcov = None
+        if parent_query_seq:
+            qmin_model = min(e.get('qstart', 1) for e in exons)
+            qmax_model = max(e.get('qend', 1) for e in exons)
+            model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
+
+        global_start = w_start + min(e['gstart'] for e in exons) + 1
+        global_end = w_start + max(e['gend'] for e in exons)
+        new_id = f"{parent_id}|{clean_gname}_b{block_idx}_{tag}_exon_ann"
+
+        cand_gff = [
+            (
+                f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
+                f"{avg_pident:.1f}\t{strand}\t.\t"
+                f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons), global_start, global_end, strand)}"
+            )
+        ]
+        for eidx, exon in enumerate(exons, 1):
+            exon_gs = w_start + exon['gstart'] + 1
+            exon_ge = w_start + exon['gend']
+            exon_phase = int(exon.get('phase', 0) or 0)
+            attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
+            if exon.get('splice_acceptor'):
+                attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
+            if exon.get('splice_donor'):
+                attrs += f";SpliceDonor={exon['splice_donor']}"
+            if exon.get('has_start_codon'):
+                attrs += ";StartCodon=ATG"
+            if exon.get('has_stop_codon'):
+                attrs += ";StopCodon=yes"
+            cand_gff.append(
+                f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\t{attrs}"
+            )
+
+        raw_candidates.append({
+            'start': global_start,
+            'end': global_end,
+            'score': avg_pident,
+            'record': {
+                'id': new_id,
+                'seq': exon_protein,
+                'description': (
+                    f"coords:{global_start}-{global_end} "
+                    f"parent:{parent_id} exons:{len(exons)} "
+                    f"identity:{avg_pident:.1f}"
+                )
+            },
+            'gff': cand_gff
+        })
+        return [(e['gstart'], e['gend']) for e in exons]
+
+    def _emit_tandem_copy(parent_id, parent_query_seq, copy, locus_idx):
+        """One single-segment copy (see detect_tandem_duplications) as a GOI candidate."""
+        global_start = w_start + copy['gstart'] + 1
+        global_end = w_start + copy['gend']
+        strand = copy.get('strand', '+')
+        copy_id = f"{copy['id']}|{clean_gname}_b{block_idx}_l{locus_idx}"
+        # QW2 (docs/TODO_JUN.md): record the copy's TRUE query
+        # coverage so a short high-identity local window (e.g. a
+        # 23-aa hit on a 70-aa query) can't masquerade as a full
+        # tandem copy.
+        _qlen = len(parent_query_seq) if parent_query_seq else 0
+        _qs, _qe = copy.get('qstart'), copy.get('qend')
+        copy_qcov = None
+        if _qlen and _qs is not None and _qe is not None:
+            copy_qcov = max(0.0, min(1.0, (int(_qe) - int(_qs) + 1) / _qlen))
+        raw_candidates.append({
+            'start': global_start,
+            'end': global_end,
+            'score': copy.get('pident', 0),
+            'record': {
+                'id': copy_id,
+                'seq': copy['seq'],
+                'description': (
+                    f"coords:{global_start}-{global_end} "
+                    f"parent:{parent_id} tandem_copy "
+                    f"identity:{copy.get('pident', 0):.1f}"
+                )
+            },
+            'gff': [
+                f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
+                f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
+                f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=copy_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
+            ]
+        })
+        return [(copy['gstart'], copy['gend'])]
+
     try:
         augmented_hits_mmseqs = run_augmented_search(
             temp_fa,
@@ -3366,6 +3838,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             if not is_goi_query_id(hit.get('query', '')):
                 continue
             region_hit = dict(hit)
+            if home_goi_ids:
+                hit_query = hit.get('query', '')
+                if hit_query in relative_alias:
+                    region_hit['query'] = relative_alias[hit_query]
+                elif hit_query not in home_goi_ids:
+                    # A model of another genome: its positions are not positions in the
+                    # home protein, and it is not a query of this window.
+                    continue
             local_start = max(0, hit['start'] - w_start)
             local_end = min(w_end - w_start, hit['end'] - w_start)
             if local_end <= local_start:
@@ -3455,12 +3935,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 if '|exon_' in qid:
                     exon_parents.add(extract_base_gene_id(qid))
 
-            locus_gap = max(5000, min(100000, args.max_intron * 2))
+            locus_gap = max(5000, min(100000, args.max_intron * 2),
+                            int(getattr(args, 'goi_fallback_max_gap', 0) or 0))
 
             for parent_id, parent_hits in hits_by_gene.items():
                 is_goi_parent = is_goi_query_id(parent_id)
                 if not is_goi_parent:
                     continue
+                cand_marks.append((len(raw_candidates), parent_id))
 
                 parent_query = goi_query_by_parent.get(parent_id)
                 if not parent_query:
@@ -3489,12 +3971,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     work_hits = gene_hits
                     if parent_id in exon_parents:
                         logger.debug(f"[EXON] {parent_id} starting with {len(work_hits)} hits")
-                        work_hits = filter_exon_hits(
-                            work_hits,
-                            len(parent_query_seq),
-                            args.min_exon_query_cov,
-                            args.min_exon_alnlen
-                        )
+                        work_hits = filter_exon_hits(work_hits, len(parent_query_seq))
                         logger.debug(f"[EXON] {parent_id} after filter: {len(work_hits)} hits")
                         if not work_hits:
                             logger.debug(f"[EXON] {parent_id} dropped entirely by filter_exon_hits!")
@@ -3502,6 +3979,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                     exons = []
                     model_protein = None
+                    extra_models = []       # further genes miniprot found in this locus
+                    extra_copies = []       # single-segment copies where miniprot has no model
                     try:
                         is_tandem = False
                         tandem_copies = []
@@ -3511,32 +3990,41 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 work_hits, parent_query_seq, subseq, chrom
                             )
 
-                        if is_tandem and tandem_copies:
+                        # Every gene model of the locus, not only the best: in a tandem
+                        # array miniprot aligns the query to each copy it can reach, and the
+                        # copies score within a per cent of each other, so keeping the first
+                        # alone reported one copy picked almost at random. Single-segment
+                        # copies from the hit pattern are kept where no model lies.
+                        with maybe_quiet_streams(args.quiet_subtools):
+                            models = annotate_models_from_hit_list(
+                                work_hits,
+                                parent_query_seq,
+                                subseq,
+                                chrom,
+                                gap_search_window=goi_model_margin,
+                                sensitive=is_goi_parent,
+                                max_models=(1 if getattr(args, 'disable_multi_model', False)
+                                            else int(getattr(args, 'goi_max_models_per_locus', 10) or 1)),
+                            )
+                        if models:
+                            exons, model_protein = models[0]
+                            extra_models = models[1:]
+                            if is_tandem and tandem_copies:
+                                spans = [(min(e['gstart'] for e in m_ex), max(e['gend'] for e in m_ex))
+                                         for m_ex, _prot in models]
+                                extra_copies = [
+                                    c for c in tandem_copies
+                                    if not any(min(c['gend'], e) - max(c['gstart'], b) > 0 for b, e in spans)
+                                ]
+                        elif is_tandem and tandem_copies:
                             exons = tandem_copies
-                        else:
-                            with maybe_quiet_streams(args.quiet_subtools):
-                                exons, model_protein = annotate_exons_from_hit_list(
-                                    work_hits,
-                                    parent_query_seq,
-                                    subseq,
-                                    chrom,
-                                    search_missing=True,
-                                    gap_min_size=args.gap_min_size,
-                                    gap_search_window=args.gap_search_window,
-                                    gap_evalue=args.gap_evalue,
-                                    gap_min_identity=args.gap_min_identity,
-                                    gap_min_alnlen=args.gap_min_alnlen,
-                                    gap_max_hits=args.gap_max_hits,
-                                    exon_query_mode=(parent_id in exon_parents),
-                                    min_exon_query_cov=args.min_exon_query_cov,
-                                    min_exon_alnlen=args.min_exon_alnlen,
-                                    sensitive=is_goi_parent
-                                )
                     except Exception as e:
                         import traceback
                         print(f"[ERROR] miniprot annotation failed for {parent_id} at {chrom}:{w_start}-{w_end}: {e}")
                         traceback.print_exc()
                         exons = []
+                        extra_models = []
+                        extra_copies = []
 
                     if not exons:
                         if work_hits:
@@ -3677,101 +4165,20 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         is_tandem_result = any(e.get('id', '').startswith('GOI_copy_') for e in exons)
                         if is_tandem_result:
                             for copy in exons:
-                                global_start = w_start + copy['gstart'] + 1
-                                global_end = w_start + copy['gend']
-                                strand = copy.get('strand', '+')
-                                copy_id = f"{copy['id']}|{clean_gname}_b{block_idx}_l{locus_idx}"
-                                # QW2 (docs/TODO_JUN.md): record the copy's TRUE query
-                                # coverage so a short high-identity local window (e.g. a
-                                # 23-aa hit on a 70-aa query) can't masquerade as a full
-                                # tandem copy. Confidence is unchanged — the tandem_copy
-                                # branch of _classify_goi_evidence keys only on identity;
-                                # this only surfaces QueryCoverage/ModelStatus honestly.
-                                _qlen = len(parent_query_seq) if parent_query_seq else 0
-                                _qs, _qe = copy.get('qstart'), copy.get('qend')
-                                copy_qcov = None
-                                if _qlen and _qs is not None and _qe is not None:
-                                    copy_qcov = max(0.0, min(1.0, (int(_qe) - int(_qs) + 1) / _qlen))
-                                raw_candidates.append({
-                                    'start': global_start,
-                                    'end': global_end,
-                                    'score': copy.get('pident', 0),
-                                    'record': {
-                                        'id': copy_id,
-                                        'seq': copy['seq'],
-                                        'description': (
-                                            f"coords:{global_start}-{global_end} "
-                                            f"parent:{parent_id} tandem_copy "
-                                            f"identity:{copy.get('pident', 0):.1f}"
-                                        )
-                                    },
-                                    'gff': [
-                                        f"{chrom}\ttandem_copy\tgene\t{global_start}\t{global_end}\t"
-                                        f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
-                                        f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=1, query_cov=copy_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
-                                    ]
-                                })
+                                _emit_tandem_copy(parent_id, parent_query_seq, copy, locus_idx)
                         else:
-                            exons.sort(key=lambda e: e.get('qstart', 0))
-                            # miniprot's own translation of the model (in frame across
-                            # every intron phase and modelled frameshift); see
-                            # annotate_using_miniprot. Per-exon concatenation is the fallback.
-                            exon_protein = model_protein or ''.join(e['seq'] for e in exons)
-                            strand = exons[0].get('strand', '+')
-                            avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
-                            model_qcov = None
-                            if parent_query_seq:
-                                qmin_model = min(e.get('qstart', 1) for e in exons)
-                                qmax_model = max(e.get('qend', 1) for e in exons)
-                                model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
-
-                            global_start = w_start + min(e['gstart'] for e in exons) + 1
-                            global_end = w_start + max(e['gend'] for e in exons)
-                            new_id = f"{parent_id}|{clean_gname}_b{block_idx}_l{locus_idx}_exon_ann"
-
-                            cand_gff = [
-                                (
-                                    f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
-                                    f"{avg_pident:.1f}\t{strand}\t.\t"
-                                    f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons), global_start, global_end, strand)}"
-                                )
-                            ]
-                            for eidx, exon in enumerate(exons, 1):
-                                exon_gs = w_start + exon['gstart'] + 1
-                                exon_ge = w_start + exon['gend']
-                                exon_phase = int(exon.get('phase', 0) or 0)
-                                attrs = f"ID={new_id}_CDS{eidx};Parent={new_id}"
-                                if exon.get('splice_acceptor'):
-                                    attrs += f";SpliceAcceptor={exon['splice_acceptor']}"
-                                if exon.get('splice_donor'):
-                                    attrs += f";SpliceDonor={exon['splice_donor']}"
-                                if exon.get('has_start_codon'):
-                                    attrs += ";StartCodon=ATG"
-                                if exon.get('has_stop_codon'):
-                                    attrs += ";StopCodon=yes"
-                                cand_gff.append(
-                                    f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\t{attrs}"
-                                )
-
-                            raw_candidates.append({
-                                'start': global_start,
-                                'end': global_end,
-                                'score': avg_pident,
-                                'record': {
-                                    'id': new_id,
-                                    'seq': exon_protein,
-                                    'description': (
-                                        f"coords:{global_start}-{global_end} "
-                                        f"parent:{parent_id} exons:{len(exons)} "
-                                        f"identity:{avg_pident:.1f}"
-                                    )
-                                },
-                                'gff': cand_gff
-                            })
+                            covered_intervals = _emit_exon_model(
+                                parent_id, parent_query_seq, exons, model_protein, f"l{locus_idx}")
+                            for model_no, (m_exons, m_protein) in enumerate(extra_models, start=2):
+                                covered_intervals += _emit_exon_model(
+                                    parent_id, parent_query_seq, m_exons, m_protein,
+                                    f"l{locus_idx}m{model_no}")
+                            for copy in extra_copies:
+                                covered_intervals += _emit_tandem_copy(
+                                    parent_id, parent_query_seq, copy, locus_idx)
 
                             # Rescue only for GOI-derived parents to prevent fallback explosions.
                             if is_goi_parent:
-                                covered_intervals = [(e['gstart'], e['gend']) for e in exons]
                                 sorted_raw = sorted(work_hits, key=lambda h: h.get('gstart', h.get('start', 0)))
                                 extra_count = 0
                                 for hit in sorted_raw:
@@ -3888,6 +4295,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             if accepted_fallback >= 1:
                                 break
 
+        if relative_alias and raw_candidates:
+            cand_parents = []
+            mark_idx = 0
+            for cand_idx in range(len(raw_candidates)):
+                while mark_idx + 1 < len(cand_marks) and cand_marks[mark_idx + 1][0] <= cand_idx:
+                    mark_idx += 1
+                cand_parents.append(cand_marks[mark_idx][1] if cand_marks else '')
+            raw_candidates[:] = rebase_relative_candidates(
+                raw_candidates, cand_parents, goi_query_by_parent)
+
         # Flanking gene annotation pass (kept separate from GOI logic).
         flanking_parent_ids = {
             extract_base_gene_id(h.get('query', ''))
@@ -3964,7 +4381,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             if not parent_query_seq:
                 continue
 
-            parent_loci = split_hits_into_loci(parent_hits, max_gap=flanking_locus_gap)
+            parent_loci = split_hits_into_loci(
+                parent_hits, max_gap=_gene_limit(args, parent_id, flanking_locus_gap))
             if not parent_loci:
                 continue
 
@@ -3984,16 +4402,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             parent_query_seq,
                             subseq,
                             chrom,
-                            search_missing=True,
-                            gap_min_size=args.gap_min_size,
-                            gap_search_window=args.gap_search_window,
-                            gap_evalue=args.gap_evalue,
-                            gap_min_identity=args.gap_min_identity,
-                            gap_min_alnlen=args.gap_min_alnlen,
-                            gap_max_hits=args.gap_max_hits,
-                            exon_query_mode=False,
-                            min_exon_query_cov=args.min_exon_query_cov,
-                            min_exon_alnlen=args.min_exon_alnlen,
+                            gap_search_window=max(args.gap_search_window,
+                                                  _gene_limit(args, parent_id, 0)),
                             sensitive=False
                         )
                 except Exception as e:
@@ -4018,7 +4428,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         continue
 
                     # Keep only the longest chain consistent with query-order direction.
-                    ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=args.max_intron)
+                    ordered_hits = _longest_monotonic_query_chain(
+                        ordered_hits, strand, max_gap=_gene_limit(args, parent_id, args.max_intron))
                     if not ordered_hits:
                         continue
 
@@ -5040,17 +5451,12 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 f"{sorted(goi_proxy_flanking_parents)}"
             )
 
-        c_dist = args.cluster_distance
-        if c_dist <= 0:
-            c_dist = estimate_cluster_distance(genome_path)
-
         # §1m collinearity-aware seed placement. home_rank is built once in main()
         # from the pristine initial_db and rides on `args`; disable_synteny_collinearity
         # falls fully back to the legacy gene-count clustering/scoring.
         _collinearity_on = not getattr(args, 'disable_synteny_collinearity', False)
         home_rank = getattr(args, 'home_rank', None) if _collinearity_on else None
         home_rank = home_rank or None  # treat empty dict as "off"
-        _bridge_max_gap = getattr(args, 'synteny_bridge_max_gap', 0)
         _bridge_max_rank_gap = getattr(args, 'synteny_bridge_max_rank_gap', 5)
         _bridge_min_anchors = getattr(args, 'synteny_bridge_min_anchors', 3)
         _bridge_two_sided = bool(getattr(args, 'synteny_bridge_two_sided', False))
@@ -5089,6 +5495,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
+        if not getattr(args, 'disable_anchor_resolution', False):
+            _n_before = len(hits)
+            hits = resolve_anchor_hits(hits)
+            if len(hits) < _n_before:
+                logger.info(
+                    f"[{genome_name}] One anchor per place: {_n_before - len(hits)} flanking hit(s) "
+                    f"removed where a stronger hit of another flanking gene covers the same DNA.")
 
         # 2. Identify Synteny (Multiple Blocks)
         # Anchor blocks with non-GOI (flanking) hits first, then search GOI inside them.
@@ -5099,6 +5512,18 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             logger.info(f"[{genome_name}] Using {len(flanking_seed_hits)} flanking-anchor hits for block seeding.")
         else:
             logger.info(f"[{genome_name}] No flanking anchors found; falling back to GOI/mixed hits for block seeding.")
+
+        # From here on `args` holds this genome's distances in base pairs.
+        args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name)
+        c_dist = args.cluster_distance
+        _bridge_max_gap = args.synteny_bridge_max_gap
+        _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
+        _max_places = int(getattr(args, 'anchor_max_places', 0) or 0)
+        if _max_places > 0 and flanking_seed_hits:
+            seed_hits = limit_anchor_places(flanking_seed_hits, _max_places, _gene_gap)
+            logger.info(
+                f"[{genome_name}] Anchor places: blocks are seeded from {len(seed_hits)} of "
+                f"{len(flanking_seed_hits)} flanking hits (the {_max_places} best places of each gene).")
 
         # §1o: rescue a strong GOI hit that dispersed away from its flanking
         # anchors (same-chromosome macro-synteny) by adding it as a block seed, so
@@ -5146,6 +5571,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             bridge_min_anchors=_bridge_min_anchors,
             bridge_two_sided=_bridge_two_sided,
             bridge_max_per_block=_bridge_max_per_block,
+            gene_gap_limit=_gene_gap,
         )
         if home_rank:
             _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
@@ -5210,6 +5636,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 bridge_min_anchors=_bridge_min_anchors,
                 bridge_two_sided=_bridge_two_sided,
                 bridge_max_per_block=_bridge_max_per_block,
+                gene_gap_limit=_gene_gap,
             )
             synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
 
@@ -5270,10 +5697,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             )
             return _compose_gff_attrs(base_attrs, native)
 
-        empty_block_streak = 0
         for i, block in enumerate(synteny_blocks):
-            # Limit number of blocks to process? (e.g. top 50?)
-            # For now process all valid blocks.
             block_genes, block_gff = process_region_block(
                 i,
                 block,
@@ -5289,26 +5713,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             all_genes.extend(block_genes)
             all_gff_lines.extend(block_gff)
 
-            block_goi = sum(1 for g in block_genes if is_goi_query_id(g.get('id', '')))
-            if block_goi > 0:
-                empty_block_streak = 0
-            else:
-                empty_block_streak += 1
-
             if (i + 1) % 10 == 0:
-                logger.info(
-                    f"[{genome_name}] Block progress: {i + 1}/{len(synteny_blocks)} "
-                    f"(empty_streak={empty_block_streak})."
-                )
-
-            if (
-                args.max_consecutive_empty_blocks > 0 and
-                empty_block_streak >= args.max_consecutive_empty_blocks
-            ):
-                logger.info(
-                    f"[{genome_name}] Early stop logic disabled to ensure complete block evaluation (streak={empty_block_streak})."
-                )
-                # break
+                logger.info(f"[{genome_name}] Block progress: {i + 1}/{len(synteny_blocks)}.")
 
         # Flanking-only post-pass: keep one best chain per flanking parent per locus across blocks.
         all_genes, all_gff_lines = deduplicate_flanking_models(
@@ -5383,7 +5789,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                     h['qstart'] = h.get('qstart', 1) + offset
                                     h['qend'] = h.get('qend', 1) + offset
 
-                    parent_loci = split_hits_into_loci(parent_hits, max_gap=flanking_locus_gap)
+                    parent_loci = split_hits_into_loci(
+                        parent_hits, max_gap=_gene_limit(args, parent_id, flanking_locus_gap))
                     if not parent_loci:
                         continue
 
@@ -5479,16 +5886,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                 parent_query_seq,
                                 off_subseq,
                                 off_chrom,
-                                search_missing=True,
-                                gap_min_size=args.gap_min_size,
-                                gap_search_window=args.gap_search_window,
-                                gap_evalue=args.gap_evalue,
-                                gap_min_identity=args.gap_min_identity,
-                                gap_min_alnlen=args.gap_min_alnlen,
-                                gap_max_hits=args.gap_max_hits,
-                                exon_query_mode=False,
-                                min_exon_query_cov=args.min_exon_query_cov,
-                                min_exon_alnlen=args.min_exon_alnlen,
+                                gap_search_window=max(args.gap_search_window,
+                                                      _gene_limit(args, parent_id, 0)),
                                 sensitive=False
                             )
                     except Exception as e:
@@ -5551,7 +5950,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                             [h for h in local_hits if h.get('strand', '+') == strand],
                             key=lambda h: h.get('gstart', 0)
                         )
-                        ordered_hits = _longest_monotonic_query_chain(ordered_hits, strand, max_gap=args.max_intron) if ordered_hits else []
+                        ordered_hits = _longest_monotonic_query_chain(
+                            ordered_hits, strand,
+                            max_gap=_gene_limit(args, parent_id, args.max_intron)) if ordered_hits else []
 
                         if ordered_hits:
                             coding_frags = []
@@ -5640,7 +6041,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 ]
                 if not _proxy_on_block:
                     continue
-                _proxy_loci = split_hits_into_loci(_proxy_on_block, max_gap=_proxy_gap)
+                _proxy_loci = split_hits_into_loci(
+                    _proxy_on_block, max_gap=_gene_limit(args, _proxy_id, _proxy_gap))
                 for _lh in _proxy_loci:
                     _lbits = max(h.get('bits', 0) for h in _lh)
                     if _lbits < 40:
@@ -5729,6 +6131,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
              
              with open(gff_out, 'w') as gf:
                  gf.write("##gff-version 3\n")
+                 if getattr(args, 'distances', None):
+                     gf.write(synvoy_scale.format_gff_header(args.distances) + "\n")
                  for gl in all_gff_lines:
                      gf.write(gl + "\n")
 
@@ -6277,7 +6681,41 @@ def main():
                         help="Minimum GOI fallback hit-chain max-gap (bp); covers compact "
                              "or single-exon home genes whose largest intron is ~0.")
     parser.add_argument("--threads", type=int, default=4, help="Total threads available for parallel processing")
-    parser.add_argument("--cluster_distance", type=int, default=-1, help="Auto-detect if -1")
+    # Distances that describe a neighbourhood are given in gene pitches (the mean step
+    # between two anchors at home, times the expansion measured in each target genome;
+    # see synvoy_scale.py). Each has a base-pair option that fixes it: 'auto' = derive.
+    parser.add_argument("--block_gap_genes", type=float, default=7.0,
+                        help="Two flanking genes further apart than this many gene pitches "
+                             "start a new block (default: 7)")
+    parser.add_argument("--cluster_distance", type=bp_or_auto, default=None,
+                        help="The same limit in bp, for every genome. 'auto' (default) = "
+                             "derive it from --block_gap_genes")
+    parser.add_argument("--window_margin_genes", type=float, default=7.0,
+                        help="DNA searched on each side of a block, in gene pitches (default: 7)")
+    parser.add_argument("--goi_margin_genes", type=float, default=2.0,
+                        help="A GOI hit must lie in the block or at most this many gene "
+                             "pitches outside it (default: 2)")
+    parser.add_argument("--goi_margin", type=bp_or_auto, default=None,
+                        help="The same limit in bp. 'auto' (default) = derive it")
+    parser.add_argument("--synteny_bridge_max_gap_genes", type=float, default=20.0,
+                        help="Largest gap a collinear block may bridge, in gene pitches; "
+                             "0 switches bridging off (default: 20)")
+    parser.add_argument("--dispersed_envelope_margin_genes", type=float, default=9.0,
+                        help="Margin of the flanking envelope for a GOI hit away from its "
+                             "anchors, in gene pitches (default: 9)")
+    parser.add_argument("--disable_relative_query", type=str2bool, default=False,
+                        help="Search each window with the home protein only; do not add the "
+                             "gene model of the relative searched most recently")
+    parser.add_argument("--disable_anchor_resolution", type=str2bool, default=False,
+                        help="Count every flanking gene with a hit, also where several "
+                             "flanking genes hit the same target DNA (behaviour before 2026-10-08)")
+    parser.add_argument("--anchor_max_places", type=int, default=0,
+                        help="Each flanking gene seeds blocks only at its N best places in a "
+                             "target genome (by summed bit score); 0 = at every place (default)")
+    parser.add_argument("--goi_max_models_per_locus", type=int, default=10,
+                        help="Gene models kept per GOI locus of a window: every miniprot model "
+                             "that does not lie on a better one, up to this number; 1 = the "
+                             "best model only (default: 10)")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
@@ -6288,10 +6726,15 @@ def main():
              "(tblastn is already single-threaded; regions are tiny so the speed cost "
              "is small). Set false to restore the multithreaded (non-deterministic) path."
     )
-    parser.add_argument("--min_gene_identity", type=float, default=25.0, help="Minimum identity for RBH validation")
-    parser.add_argument("--region_padding", type=int, default=100000, help="Default padding around synteny block")
-    parser.add_argument("--padding_min", type=int, default=50000, help="Minimum adaptive padding")
-    parser.add_argument("--padding_max", type=int, default=200000, help="Maximum adaptive padding")
+    parser.add_argument("--region_padding", type=bp_or_auto, default=None,
+                        help="Window margin in bp. 'auto' (default) = derive it from "
+                             "--window_margin_genes. With a number the margin of each block is "
+                             "adapted to the spacing of its hits between --padding_min and "
+                             "--padding_max, as before 2026-10-08")
+    parser.add_argument("--padding_min", type=int, default=50000,
+                        help="Smallest margin, only with a fixed --region_padding")
+    parser.add_argument("--padding_max", type=int, default=200000,
+                        help="Largest margin, only with a fixed --region_padding")
     parser.add_argument("--enable_smith_waterman", type=str2bool, default=True, help="Enable Smith-Waterman search")
     parser.add_argument("--sw_method", type=str, default="auto", help="Smith-Waterman backend (auto, parasail, ssearch36)")
     parser.add_argument("--allow_missing_smith_waterman", type=str2bool, default=False,
@@ -6308,17 +6751,14 @@ def main():
     parser.add_argument("--aug_relaxed_identity_min", type=float, default=25.0)
     parser.add_argument("--aug_relaxed_length_div", type=float, default=2.0)
     parser.add_argument("--aug_relaxed_length_min", type=int, default=15)
-    parser.add_argument("--aug_dedup_bin_bp", type=int, default=100)
-    parser.add_argument("--gap_search_window", type=int, default=50000)
-    parser.add_argument("--gap_min_size", type=int, default=10)
-    parser.add_argument("--gap_evalue", type=float, default=10.0)
+    parser.add_argument("--gap_search_window", type=int, default=50000,
+                        help="DNA added around a candidate's hits before the gene model is "
+                             "built; never less than the gene's own span at home (bp)")
     parser.add_argument("--gap_min_identity", type=float, default=25.0)
-    parser.add_argument("--gap_min_alnlen", type=int, default=10)
     parser.add_argument("--gap_max_hits", type=int, default=5)
-    parser.add_argument("--min_exon_query_cov", type=float, default=0.25,
-                        help="Minimum query coverage for exon hits")
     parser.add_argument("--min_exon_alnlen", type=int, default=30,
-                        help="Minimum alignment length for exon hits")
+                        help="Shortest alignment (aa) accepted for a last-resort raw_hit row "
+                             "of the GOI; never less than 60 %% of the query")
     parser.add_argument(
         "--max_blocks_per_genome",
         type=int,
@@ -6337,9 +6777,9 @@ def main():
         help="Disable collinearity-aware block scoring + gap-bridging (legacy gene-count clustering)."
     )
     parser.add_argument(
-        "--synteny_bridge_max_gap", type=int, default=6000000,
-        help="Max bp gap between two same-chromosome clusters to bridge into one "
-             "block when the flanking continue the home-order run (0 disables bridging)."
+        "--synteny_bridge_max_gap", type=bp_or_auto, default=None,
+        help="Largest gap a collinear block may bridge, in bp, for every genome. 'auto' "
+             "(default) = derive it from --synteny_bridge_max_gap_genes; 0 disables bridging."
     )
     parser.add_argument(
         "--synteny_bridge_max_rank_gap", type=int, default=5,
@@ -6381,12 +6821,6 @@ def main():
              "lets a high-bitscore divergent hit pass where coverage would have vetoed it)."
     )
     parser.add_argument(
-        "--max_consecutive_empty_blocks",
-        type=int,
-        default=25,
-        help="Stop processing more blocks after this many GOI-empty blocks in a row (0 = disable)"
-    )
-    parser.add_argument(
         "--quiet_subtools",
         type=str2bool,
         default=True,
@@ -6399,10 +6833,11 @@ def main():
     parser.add_argument("--classify_high_min_identity", type=float, default=50.0,
                         help="Min identity for HIGH confidence exon_annotation "
                              "(lowered from 60 to accommodate cross-vertebrate orthologs)")
-    parser.add_argument("--classify_medium_min_identity", type=float, default=35.0,
-                        help="Min identity for MEDIUM confidence exon_annotation "
-                             "(lowered from 45 to accommodate divergent orthologs)")
-    parser.add_argument("--classify_tandem_min_identity", type=float, default=40.0,
+    parser.add_argument("--classify_medium_min_identity", type=float, default=40.0,
+                        help="Min identity for MEDIUM confidence exon_annotation (40: in five "
+                             "benchmark families no gene model below 40 %% identity lay on a "
+                             "curated gene)")
+    parser.add_argument("--classify_tandem_min_identity", type=float, default=50.0,
                         help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
     parser.add_argument("--classify_high_min_collinear", type=int, default=3,
                         help="§1: HIGH also requires the longest collinear run of home-ordered "
@@ -6480,8 +6915,8 @@ def main():
                         help="Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated "
                              "TargetGene/TargetProduct does not match the family tokens")
     parser.add_argument("--goi_family_tokens", type=str, default="",
-                        help="Comma-separated family name tokens for strict mode "
-                             "(default: auto-derive from query FASTA header GN=...)")
+                        help="Comma-separated family name tokens for strict mode; "
+                             "without them the family-name check is off")
 
     # PLM (Protein Language Model) embedding search
     parser.add_argument("--enable_plm_search", type=str2bool, default=False,
@@ -6582,8 +7017,9 @@ def main():
     parser.add_argument("--dispersed_min_chrom_anchors", type=int, default=3,
                         help="§1o: a chromosome must carry >= this many distinct flanking "
                              "genes to define a rescue envelope (macro-synteny evidence)")
-    parser.add_argument("--dispersed_envelope_margin", type=int, default=200000,
-                        help="§1o: pad the flanking envelope by this many bp on each side")
+    parser.add_argument("--dispersed_envelope_margin", type=bp_or_auto, default=None,
+                        help="§1o: pad the flanking envelope by this many bp on each side. "
+                             "'auto' (default) = derive it from --dispersed_envelope_margin_genes")
 
     # §1g: per-target phylogenetic-distance auto-tune of the GOI classify bars.
     parser.add_argument("--disable_distance_autotune", type=str2bool, default=False,
@@ -6596,11 +7032,28 @@ def main():
                         help="§1g: max identity-points subtracted from the HIGH/MEDIUM bars for distant targets")
     parser.add_argument("--distance_autotune_min_flanking", type=int, default=3,
                         help="§1g: minimum flanking genes needed to trust the distance estimate")
+    parser.add_argument("--distance_autotune_high_floor", type=float, default=45.0,
+                        help="§1g: the relaxation never takes the HIGH identity threshold below this "
+                             "(a baseline at or below it is not relaxed); 0 = no floor")
+    parser.add_argument("--distance_autotune_medium_floor", type=float, default=30.0,
+                        help="§1g: the same for the MEDIUM identity threshold; 0 = no floor")
 
     args = parser.parse_args()
 
     # Populate classification thresholds from CLI args
     CLASSIFY_THRESHOLDS["ambiguous_tier_enabled"] = not args.disable_ambiguous_tier
+    # "At least two exons" for HIGH follows the home gene: a gene without introns at home
+    # is expected without introns in the target, and could otherwise never be HIGH.
+    args.goi_home_exons = None
+    if getattr(args, "goi_info", None):
+        try:
+            with open(args.goi_info) as _fh:
+                args.goi_home_exons = int(json.load(_fh).get("num_exons") or 0) or None
+        except (OSError, TypeError, ValueError):
+            args.goi_home_exons = None
+    if args.goi_home_exons == 1:
+        CLASSIFY_THRESHOLDS["high_min_exons"] = 1
+        CLASSIFY_THRESHOLDS["high_single_exon_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["high_min_identity"] = args.classify_high_min_identity
     CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
     CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
@@ -6624,15 +7077,13 @@ def main():
         _normalize_family_token(t) for t in (args.goi_family_tokens or "").split(",")
     }
     override_tokens.discard("")
-    if override_tokens:
-        FAMILY_CONFIG["tokens"] = override_tokens
-    else:
-        FAMILY_CONFIG["tokens"] = _auto_derive_family_tokens(args.initial_db)
+    # The names come from --goi_family_tokens only. (Until 2026-10-09 they were also
+    # "derived" from the first header of the query set, which is a flanking exon record
+    # written by the pipeline itself, so nothing was ever derived.) Three presets set
+    # strict_goi_family; without names that is a plain no-op, not a problem to warn about.
+    FAMILY_CONFIG["tokens"] = override_tokens
     if FAMILY_CONFIG["strict"] and not FAMILY_CONFIG["tokens"]:
-        logger.warning(
-            "strict_goi_family=true but no family tokens derived from query FASTA; "
-            "strict downgrade will be disabled. Provide --goi_family_tokens explicitly."
-        )
+        logger.info("Family-name check: off (no --goi_family_tokens given).")
         FAMILY_CONFIG["strict"] = False
     if FAMILY_CONFIG["tokens"]:
         logger.info(
@@ -6689,9 +7140,31 @@ def main():
         args.home_rank = build_home_rank(args.initial_db)
         logger.info(
             f"§1m collinearity-aware seed placement: ENABLED "
-            f"({len(args.home_rank)} flanking anchors ranked; "
-            f"bridge_max_gap={args.synteny_bridge_max_gap} bp)."
+            f"({len(args.home_rank)} flanking anchors ranked)."
         )
+
+    # The GOI entries of the pristine query set are the home protein; everything that
+    # joins them later is a gene model of a genome searched earlier (select_goi_queries).
+    args.home_goi_ids = build_home_goi_ids(args.initial_db)
+
+    # Home neighbourhood geometry for the distances in gene pitches (synvoy_scale).
+    args.home_geometry = synvoy_scale.home_geometry(args.initial_db)
+    if args.home_geometry:
+        logger.info(
+            f"Home neighbourhood: {args.home_geometry['n']} anchors over "
+            f"{args.home_geometry['span'] / 1000:.0f} kb, pitch "
+            f"{args.home_geometry['pitch'] / 1000:.1f} kb, largest gap "
+            f"{args.home_geometry['max_gap'] / 1000:.0f} kb.")
+    else:
+        logger.info("Home neighbourhood: no anchor coordinates in the query set; "
+                    "distances fall back to fixed base pairs.")
+    args.goi_home_span = 0
+    if getattr(args, "goi_info", None):
+        try:
+            with open(args.goi_info) as _fh:
+                args.goi_home_span = int(json.load(_fh).get("genomic_span_bp") or 0)
+        except (OSError, TypeError, ValueError):
+            pass
 
     # GOI fallback hit-chain max-gap: derived from the home GOI's own largest
     # intron (goi_info.json) x margin, not a hand-set --max_intron. Attached to
@@ -6726,7 +7199,7 @@ def main():
     if args.mmseqs_verbosity < 0 or args.mmseqs_verbosity > 3:
         logger.error("mmseqs_verbosity must be between 0 and 3")
         sys.exit(1)
-    if args.padding_min < 0 or args.padding_max < 0 or args.region_padding < 0:
+    if args.padding_min < 0 or args.padding_max < 0 or (args.region_padding or 0) < 0:
         logger.error("Padding values must be non-negative")
         sys.exit(1)
     if args.padding_max < args.padding_min:
@@ -6735,14 +7208,8 @@ def main():
     if args.max_intron < 0:
         logger.error("max_intron must be >= 0")
         sys.exit(1)
-    if args.gap_min_size < 1:
-        logger.error("gap_min_size must be >= 1")
-        sys.exit(1)
     if args.gap_max_hits < 1:
         logger.error("gap_max_hits must be >= 1")
-        sys.exit(1)
-    if args.min_exon_query_cov < 0 or args.min_exon_query_cov > 1:
-        logger.error("min_exon_query_cov must be between 0 and 1")
         sys.exit(1)
     if args.min_exon_alnlen < 1:
         logger.error("min_exon_alnlen must be >= 1")
@@ -6750,11 +7217,11 @@ def main():
     if args.max_blocks_per_genome < 0:
         logger.error("max_blocks_per_genome must be >= 0")
         sys.exit(1)
+    if args.anchor_max_places < 0:
+        logger.error("anchor_max_places must be >= 0 (0 = every place)")
+        sys.exit(1)
     if args.min_block_genes < 1:
         logger.error("min_block_genes must be >= 1")
-        sys.exit(1)
-    if args.max_consecutive_empty_blocks < 0:
-        logger.error("max_consecutive_empty_blocks must be >= 0")
         sys.exit(1)
     if args.aug_relaxed_length_div <= 0:
         logger.error("aug_relaxed_length_div must be > 0")

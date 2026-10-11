@@ -55,6 +55,8 @@ CELL_GAP = 2.2       # white space between two arrows of a row
 MINI_W, MINI_H = 8.6, 5.4     # small arrow standing for one copy (room for its number)
 MARK_W = 3.2         # small mark standing for one weak call
 ITEM_GAP = 2.2       # between two glyphs of a GOI cell
+NO_CALL_MARK = "–"   # in the GOI cell of a searched genome without any GOI call
+NOTHING_PLACED = "no flanking gene placed"    # where the row's location would stand
 LINE_UNITS = 6.0     # a line of a GOI cell holds six small arrows (a mark counts half)
 SCALE_STEPS = (30, 60, 90, 150, 300, 600, 900, 1500, 3000, 6000, 9000, 15000)
 NUMBER_MIN_IDENTITY = 25.0   # no number is written into a paler arrow than this
@@ -418,6 +420,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
     tmaps = [None] + [ps._grid_target_map(t, keys, GOI_KEY, span_bp) for t in rows[1:]]
     cov = {a["key"]: sum(1 for m in tmaps[1:] if a["key"] in m) for a in anchors}
     n_home_genes = sum(1 for a in anchors if not a["is_goi"])
+    flank_keys = [a["key"] for a in anchors if not a["is_goi"]]
     anchors = [a for a in anchors if a["is_goi"] or cov[a["key"]] > 0]
     n_unplaced_cols = n_home_genes - sum(1 for a in anchors if not a["is_goi"])
     capped = []
@@ -471,6 +474,9 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         cells.append({"grid": wrap_items(items), "panel": panel, "index": index,
                       "more": 0 if in_column else n_copies[ri] - len(panel)})
     has_goi_col = any(a["is_goi"] for a in anchors)
+    # A searched genome in which no GOI call was made is a result too: its row is drawn,
+    # its GOI cell carries a dash, and the legend text names it with what was placed.
+    no_goi = [ri for ri in range(1, n_rows) if not calls[ri]]
     full_drawn = [g for ri in range(n_rows) for g, _, c in calls[ri] if c
                   and (in_column or any(g is p for p, _ in cells[ri]["panel"]))]
     has_panel = (not in_column) and bool(full_drawn) and has_goi_col
@@ -514,10 +520,17 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
             items.append((ch, (entry["best"]["start"] + entry["best"]["end"]) / 2.0))
             if a["is_goi"] and ch:
                 goi_chrom = ch
+        if not items:               # searched, and nothing of the neighbourhood was placed
+            return NOTHING_PLACED
         return ps._span_gutter_label(*ps._dominant_chrom_span(items, goi_chrom))
     spans = [span_text(ri) for ri in range(n_rows)] if st.full else []
 
-    labels = [row_label(t) or ("Home" if ri == 0 else "") for ri, t in enumerate(rows)]
+    # A dagger marks a genome that failed the assembly quality check (see plot_synteny).
+    labels = [(row_label(t) or ("Home" if ri == 0 else "")) + ps._low_quality_mark(t)
+              for ri, t in enumerate(rows)]
+    low_quality = any(ps._is_low_quality(t) for t in rows)
+    # the source table keeps the species name as it is
+    plain_labels = [row_label(t) or ("Home" if ri == 0 else "") for ri, t in enumerate(rows)]
     tree_w = st.tree_w if tree_root is not None else 0.0
     cos_a, sin_a = math.cos(math.radians(st.angle)), math.sin(math.radians(st.angle))
     W = st.width_mm * PT_PER_MM if st.width_mm else float("inf")
@@ -618,6 +631,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                                  and short_coverage(tmaps[ri][a["key"]]["best"], st.numbers) is not None
                                  for a in cols) for ri in range(n_rows)]
     kinds = {it[0] for c in cells for ln in c["grid"] for it in ln}
+    if no_goi and has_goi_col:
+        kinds.add("none")
     tiers = {(g.get("confidence") or "").upper() for rc in calls[1:] for g, _, _ in rc}
     tiers |= {(tmaps[ri][a["key"]]["best"].get("confidence") or "").upper()
               for ri in range(1, n_rows) for a in cols if not a["is_goi"] and a["key"] in tmaps[ri]}
@@ -626,7 +641,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         groups = build_legend(st, goi_label, kinds, full_drawn, in_column, any(numbered),
                               any(c["more"] for c in cells), any_copies, cov_mode,
                               tree_root is not None, is_species_tree, bool(spans),
-                              has_axis_for(cols), tiers)
+                              has_axis_for(cols), tiers, low_quality=low_quality)
         legend_w = _legend.natural_width(groups, tw, st.fs_small)
         # A narrow grid is widened for its legend, but not beyond one journal column
         # (89 mm); past that the legend groups continue on a second band.
@@ -709,7 +724,10 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                           INK, bold=True, extra=' class="grid-title"'))
         P.append(text_svg(left, PAD + st.fs_title + st.fs_small + 2.5, st.fs_small,
                           f"{n_flank_cols} flanking genes x {n_rows} genomes | orthologs aligned "
-                          f"into the columns of the home genes", MUTED, extra=' class="grid-subtitle"'))
+                          f"into the columns of the home genes"
+                          + (f" | no {goi_label} model in {len(no_goi)} "
+                             f"genome{'' if len(no_goi) == 1 else 's'}" if no_goi else ""),
+                          MUTED, extra=' class="grid-subtitle"'))
 
     # ---- row bands, GOI column band -------------------------------------------------
     band_x0 = PAD + tree_w + (1.5 if tree_w else 0.0)
@@ -772,6 +790,12 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         """The GOI cell of one row: small arrows or the model, weak marks, '//'."""
         is_home = ri == 0
         lines, index = cells[ri]["grid"], cells[ri]["index"]
+        if not lines:
+            if not is_home:        # searched, no GOI call: say so, do not leave a blank
+                P.append(titled(f"No {goi_label} model was placed in {labels[ri]}",
+                                text_svg(x0 + 0.6, ym + st.fs_small * 0.35, st.fs_small,
+                                         NO_CALL_MARK, MUTED), tips))
+            return
         n = len(lines)
         ys = [ym + (j - (n - 1) / 2) * lane_h for j in range(n)]
         at_locus = [ys[j] for j, ln in enumerate(lines)
@@ -899,15 +923,15 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 for g, away, copy in calls[ri]:
                     drawn = (("model" if (in_column or id(g) in in_panel) else "arrow") if copy
                              else "mark" if id(g) in marked else "counted")
-                    source.append(source_row(ri, track, labels[ri], a, g, n_copies[ri], is_home, True,
+                    source.append(source_row(ri, track, plain_labels[ri], a, g, n_copies[ri], is_home, True,
                                              drawn, "elsewhere" if away else "locus",
                                              cells[ri]["index"].get(id(g), "")))
                 if not calls[ri]:
-                    source.append(source_row(ri, track, labels[ri], a, None, 0, False, True, "", "", ""))
+                    source.append(source_row(ri, track, plain_labels[ri], a, None, 0, False, True, "", "", ""))
                 continue
             entry = None if is_home else tmap.get(a["key"])
             if not is_home and not entry:
-                source.append(source_row(ri, track, labels[ri], a, None, 0, False, False, "", "", ""))
+                source.append(source_row(ri, track, plain_labels[ri], a, None, 0, False, False, "", "", ""))
                 continue
             g = None if is_home else entry["best"]
             ident = 0.0 if is_home else (g.get("identity") or 0.0)
@@ -949,7 +973,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                        + (f', {copies} copies at the locus' if copies > 1 else '')
                        + (f' ({own})' if own else ''))
             P.append(titled(tip, body, tips))
-            source.append(source_row(ri, track, labels[ri], a, g, copies, is_home, False,
+            source.append(source_row(ri, track, plain_labels[ri], a, g, copies, is_home, False,
                                      "arrow", "locus", ""))
 
     # ---- column labels -------------------------------------------------------------
@@ -1009,6 +1033,13 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         "home_copies": n_copies[0], "most_copies_in_a_target": max(n_copies[1:] + [0]),
         "genomes_with_several_copies": sum(1 for n in n_copies if n > 1),
         "copies_not_drawn": sum(c["more"] for c in cells),
+        # rows whose assembly failed the quality check (marked with a dagger)
+        "low_quality_rows": [row_label(t) for t in rows if ps._is_low_quality(t)],
+        # target rows without any GOI call, with the flanking genes placed there
+        "home_flanking_genes": n_home_genes,
+        "rows_without_goi": [{"species": plain_labels[ri], "genome_id": rows[ri].get("genome_id", ""),
+                              "flanking_placed": sum(1 for k in flank_keys if k in tmaps[ri])}
+                             for ri in no_goi],
     }
     legend_text = build_legend_text(st, info, cols, anchors, is_species_tree, tree_root is not None,
                                     any_copies, full_drawn, kinds, in_column, cov_mode)
@@ -1116,7 +1147,8 @@ def draw_tree(root, order, x0, x1, y_mid):
 # ----------------------------------------------------------------- legend ----
 
 def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_more, any_copies,
-                 low_cov, has_tree, is_species_tree, has_location, has_axis, tiers):
+                 low_cov, has_tree, is_species_tree, has_location, has_axis, tiers,
+                 low_quality=False):
     """The legend as titled groups (see synvoy_legend)."""
     ps = _PS
     fs = st.fs_small
@@ -1186,6 +1218,8 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
             layout.append(("Top axis", "where the home genes lie on the home chromosome"))
         if has_location:
             layout.append(("Right", "scaffold and position of each row's neighbourhood"))
+        if low_quality:
+            layout.append((ps.LOW_QUALITY_MARK, ps.LOW_QUALITY_LEGEND))
         groups.append(("Layout", layout))
 
     flank = [(arrow(fill_hi, stroke), "high confidence"),
@@ -1207,7 +1241,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
         flank.append((arrow(fill_hi, stroke, stacked=True), "more than one copy at the locus"))
     groups.append(("Flanking genes", flank))
 
-    if full_drawn or "mini" in kinds or "mark" in kinds:
+    if full_drawn or "mini" in kinds or "mark" in kinds or "none" in kinds:
         key = {"start": 1, "end": 1400, "strand": "+", "evidence_type": "exon_annotation",
                "exon_coords": [(1, 180), (420, 520), (900, 1400)]}
         goi = []
@@ -1229,6 +1263,8 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
             goi.append(("//", "what follows is elsewhere in the genome"))
         if "count" in kinds:
             goi.append(("+N", "further weak calls, not drawn"))
+        if "none" in kinds:
+            goi.append((NO_CALL_MARK, "searched, no model placed (not evidence of absence)"))
         if any_more:
             goi.append(("+N more", f"copies beyond the {st.max_models} drawn"))
         if tiers - {"HIGH", ""}:
@@ -1315,9 +1351,23 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                      "aligned hit segments without a gene model (drawn no longer than the longest "
                      "model). The numbers are the protein identities to the query in %, with the "
                      "query coverage in brackets when it is below 80 %.")
+    missing = info.get("rows_without_goi") or []
+    if missing:
+        total = info.get("home_flanking_genes", 0)
+        named = [f"{m['species']} ({m['flanking_placed']} of {total} flanking genes placed)"
+                 for m in missing[:12]]
+        if len(missing) > 12:
+            named.append(f"and {len(missing) - 12} more (source data)")
+        s.append(f"No {goi} model was placed in {len(missing)} of the {info['rows'] - 1} "
+                 f"searched genomes ({NO_CALL_MARK} in the {goi} column): " + "; ".join(named)
+                 + ". These genomes were searched; a missing model is not evidence that the "
+                   "gene is absent.")
     if any(a["label"].endswith("*") for a in cols):
         s.append("Labels ending in * are abbreviations of the annotated product name, not "
                  "official gene symbols (gene-names table).")
+    if info.get("low_quality_rows"):
+        s.append(f"{_PS.LOW_QUALITY_MARK} {_PS.LOW_QUALITY_LEGEND} "
+                 f"({', '.join(info['low_quality_rows'])}).")
     s.append("Values of every cell and the genomic location of every gene: source data.")
     return " ".join(s) + "\n"
 

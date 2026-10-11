@@ -1100,7 +1100,7 @@ def main():
                          "Iteratively splits the largest clade of the "
                          "midpoint-rooted tree (topology-driven; "
                          "singleton-producing splits deprioritised). "
-                         "Replaces the legacy --clade_depth_frac.")
+                         "Replaced the earlier --clade_depth_frac.")
     ap.add_argument("--tree_source", choices=("taxonomy", "goi"),
                     default="taxonomy",
                     help="Which tree to render alongside the matrix. "
@@ -1109,9 +1109,6 @@ def main():
                          "species gets a leaf — even ones with only weak "
                          "GOI hits. 'goi' uses the IQ-TREE locus tree at "
                          "--tree (legacy).")
-    # Legacy flag kept so existing Nextflow invocations don't crash.
-    ap.add_argument("--clade_depth_frac", type=float, default=None,
-                    help=argparse.SUPPRESS)
     ap.add_argument("--common_names", choices=("both", "common", "scientific", "off"),
                     default="both",
                     help="Species label style. 'both' shows 'Scientific (common)'.")

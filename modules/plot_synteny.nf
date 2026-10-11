@@ -12,6 +12,7 @@ process PLOT_SYNTENY {
     path tree
     path species_map
     val home_species
+    path genome_qc   // genome_qc_summary.json: a target that failed the check is marked in the figures
 
     output:
     path "*_synteny_plot.html", emit: plot
@@ -48,9 +49,10 @@ process PLOT_SYNTENY {
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
+    def qc_arg = genome_qc.name != 'NO_GENOME_QC' ? "--genome_qc ${genome_qc}" : ""
     def hide_absent_arg = params.hide_goi_absent_tracks.toString().toBoolean() ? "--hide_goi_absent" : ""
     def plot_extra_args = params.plot_extra_args ?: ''
-    def pub_svg_arg = params.pub_svg.toString().toBoolean() ? "--pub_svg --pub_width ${params.pub_width_mm} --pub_palette ${params.pub_palette}" : ""
+    def pub_svg_arg = params.pub_svg.toString().toBoolean() ? "--pub_svg" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -95,17 +97,20 @@ process PLOT_SYNTENY {
     if [ "$species_map" != "NO_SPECIES_MAP" ]; then
         cp $species_map "\$inputs_dir/" || true
     fi
+    if [ "$genome_qc" != "NO_GENOME_QC" ]; then
+        cp $genome_qc "\$inputs_dir/genome_qc_summary.json" || true
+    fi
 
     ${projectDir}/bin/plot_synteny.py \\
         --query_bed $query_bed \\
         --home_bed $home_bed \\
         --home_gff "\$FINAL_HOME_GFF" \\
         $gffs_arg \\
-        $names_arg \\
         $cands_arg \\
         $homo_arg \\
         --tree $tree \\
         $species_arg \\
+        $qc_arg \\
         --home_species "${home_species ?: ''}" \\
         $hide_absent_arg \\
         $pub_svg_arg \\

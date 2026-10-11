@@ -11,6 +11,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
 from sequence_utils import longest_collinear_run  # noqa: E402
+import synvoy_scale  # noqa: E402
 
 # No BioPython needed - we parse FASTA manually for genome length
 
@@ -40,7 +41,10 @@ def parse_args():
         help="Padding (bp) around GOI intervals when injecting fallback candidate regions",
     )
     parser.add_argument("--flanking_count", type=int, default=10, help="Expected number of flanking genes (fallback)")
-    parser.add_argument("--cluster_distance", type=int, default=50000, help="Max distance to cluster hits (bp)")
+    parser.add_argument("--cluster_distance", default="auto",
+                        help="Max distance to cluster hits (bp). 'auto' (default): the block gap "
+                             "the search used for this genome, read from the header of "
+                             "--target_gff; 150000 when that file carries none")
     parser.add_argument("--min_score", type=float, default=0.5, help="Score threshold for High Confidence")
     parser.add_argument("--weight_base", type=float, default=0.4, help="Base weight for coverage")
     parser.add_argument("--weight_consistency", type=float, default=0.3, help="Weight for order consistency")
@@ -550,7 +554,7 @@ def cluster_overlaps_goi(cluster, goi_intervals):
     return False
 
 
-def target_rearrangement_score(hits, gene_map):
+def target_rearrangement_score(hits, gene_map, near_bp=2_000_000):
     """How badly the home flanking ORDER is shattered in THIS target genome.
 
     0.0 = the recovered flanking are collinear on one scaffold (synteny conserved
@@ -592,7 +596,9 @@ def target_rearrangement_score(hits, gene_map):
     broken = 0
     for a, b in zip(placed, placed[1:]):
         pairs += 1
-        same_near = (a[1] == b[1]) and abs(b[2] - a[2]) < 2_000_000
+        # "still together": on one sequence and no further apart than a block may bridge
+        # in this genome (2 Mb when the search recorded no distances).
+        same_near = (a[1] == b[1]) and abs(b[2] - a[2]) < near_bp
         if not same_near:
             broken += 1
     adjacency_loss = (broken / pairs) if pairs else 0.0
@@ -1059,6 +1065,19 @@ def main():
             file=sys.stderr,
         )
 
+    # The search wrote the distances it used for this genome into its result GFF; the
+    # regions are built with the same block gap, so that region and block agree.
+    search_distances = synvoy_scale.parse_gff_header(args.target_gff) if args.target_gff else None
+    if str(args.cluster_distance).strip().lower() in ("auto", "", "0", "-1"):
+        args.cluster_distance = int((search_distances or {}).get(
+            "cluster_distance", synvoy_scale.LEGACY_BP["cluster_distance"]))
+        print(f"INFO: cluster distance {args.cluster_distance} bp "
+              f"({'from the search' if search_distances else 'fixed: no distances in the target GFF'}).",
+              file=sys.stderr)
+    else:
+        args.cluster_distance = int(float(args.cluster_distance))
+    near_bp = int((search_distances or {}).get("synteny_bridge_max_gap") or 2_000_000)
+
     # Cluster
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_distance)
     
@@ -1067,7 +1086,7 @@ def main():
     # Distant-macrosynteny rescue context (per genome). rearrangement measures how
     # shattered the home flanking order is in this target; flanking_chroms is the
     # set of chromosomes carrying any flanking anchor (the macrosynteny signal).
-    rearrangement = target_rearrangement_score(hits, gene_map)
+    rearrangement = target_rearrangement_score(hits, gene_map, near_bp=near_bp)
     flanking_chroms = {h.get("chrom") for h in hits
                        if h.get("chrom") and not _is_goi_query_name(h.get("query", ""))}
     if not args.disable_distant_synteny_rescue:

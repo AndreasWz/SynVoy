@@ -16,6 +16,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -554,6 +555,21 @@ def load_genome(filepath: str) -> Dict[str, str]:
     return {clean_id: seq for _, clean_id, seq in parse_fasta(filepath)}
 
 
+def load_genome_subset(filepath: str, names) -> Dict[str, str]:
+    """Like ``load_genome``, but keeps only the sequences named in ``names`` and stops
+    reading once all of them are found: one chromosome of a 3 Gb genome, not the genome."""
+    want = set(names)
+    found: Dict[str, str] = {}
+    if not want:
+        return found
+    for _, clean_id, seq in parse_fasta(filepath):
+        if clean_id in want:
+            found[clean_id] = seq
+            if len(found) == len(want):
+                break
+    return found
+
+
 def get_sequence_lengths(filepath: str) -> Dict[str, int]:
     """Get lengths of all sequences in FASTA."""
     return {clean_id: len(seq) for _, clean_id, seq in parse_fasta(filepath)}
@@ -862,6 +878,95 @@ def sw_align(query_seq: str, subject_seq: str,
     else:
         ident = 100.0 * matches / aligned
     return score, ident
+
+
+def one_copy_score(hits, max_query_overlap: int = 10) -> float:
+    """Best total bit score of hits that together cover the query at most once.
+
+    The score of ONE copy of the gene at a locus: the heaviest set of hits whose query
+    intervals do not overlap (by more than a few residues). ``hits`` are dicts with
+    ``qstart``, ``qend`` and ``bits``. Summing all hits instead
+    would add up the copies of a tandem array, or several weak relatives in a row, into
+    one strong locus.
+    """
+    ordered = sorted(hits, key=lambda h: (h['qend'], h['qstart']))
+    best = []
+    for i, h in enumerate(ordered):
+        prev = 0.0
+        for j in range(i - 1, -1, -1):
+            if ordered[j]['qend'] - max_query_overlap <= h['qstart']:
+                prev = best[j]
+                break
+        best.append(max(best[i - 1] if i else 0.0, prev + h['bits']))
+    return best[-1] if best else 0.0
+
+
+def sw_align_span(query_seq: str, subject_seq: str) -> Dict[str, float]:
+    """Local alignment of two proteins with the part of the QUERY it covers.
+
+    Returns ``{'score', 'identity', 'q_start', 'q_end', 'query_cov'}``: identity in
+    percent of the aligned columns, ``q_start``/``q_end`` 1-based inclusive positions in
+    the query, ``query_cov`` the share of the query between them (0-1). BLOSUM62 at BLAST
+    gap costs 11/1. Raises RuntimeError without parasail, like ``sw_align``.
+    """
+    empty = {'score': 0.0, 'identity': 0.0, 'q_start': 0, 'q_end': 0, 'query_cov': 0.0}
+    if not query_seq or not subject_seq:
+        return empty
+    try:
+        import parasail  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised only without parasail
+        raise RuntimeError("parasail-python is required for Smith-Waterman alignment") from exc
+    res = parasail.sw_trace_striped_32(query_seq, subject_seq, 12, 1, parasail.blosum62)
+    cigar = res.cigar
+    # parasail writes the unaligned head of either sequence as leading I/D operations, so
+    # the query position is tracked through the whole string and the aligned part is the
+    # stretch from the first to the last column that holds a residue of both sequences.
+    q_pos = int(cigar.beg_query)
+    matches = aligned = 0
+    q_first = q_last = None
+    for op in cigar.seq:
+        length, code = int(op >> 4), int(op & 0xF)
+        if code in (0, 7, 8):          # M, =, X: columns with a residue on both sides
+            if q_first is None:
+                q_first = q_pos
+            q_last = q_pos + length - 1
+            aligned += length
+            q_pos += length
+            if code == 7:
+                matches += length
+        elif code == 1:                # I: residues of the query only
+            q_pos += length
+    if not aligned:
+        return empty
+    return {
+        'score': float(res.score),
+        'identity': 100.0 * matches / aligned,
+        'q_start': q_first + 1,
+        'q_end': q_last + 1,
+        'query_cov': min(1.0, (q_last - q_first + 1) / len(query_seq)),
+    }
+
+
+# Karlin-Altschul parameters of gapped BLOSUM62 alignments at BLAST gap costs 11/1, the
+# pair smith_waterman_search.py uses for the window search.
+SW_LAMBDA_11_1 = 0.267
+SW_K_11_1 = 0.041
+
+
+def sw_pair_evalue(seq_a: str, seq_b: str) -> Tuple[float, float, float]:
+    """E-value of the best local alignment of two proteins: ``(evalue, score, identity)``.
+
+    The number of alignments with at least this score expected by chance between two
+    unrelated sequences of these lengths (search space = len(a) x len(b), no edge
+    correction). It answers "are these two proteins related" in a unit that does not
+    depend on their lengths, which a percent identity or a common-subsequence share does.
+    """
+    if not seq_a or not seq_b:
+        return float('inf'), 0.0, 0.0
+    # parasail charges `open` for the first gap residue: 12/1 there is BLAST 11/1.
+    score, ident = sw_align(seq_a, seq_b, gap_open=12, gap_extend=1)
+    evalue = SW_K_11_1 * len(seq_a) * len(seq_b) * math.exp(-SW_LAMBDA_11_1 * score)
+    return evalue, score, ident
 
 
 # =============================================================================

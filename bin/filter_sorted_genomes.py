@@ -53,6 +53,7 @@ def main():
 
     kept_lines = []
     dropped = []
+    kept_failed = []
     unknown = []
     original_lines = []
 
@@ -81,6 +82,13 @@ def main():
                 )
                 continue
 
+            if status == "FAIL":
+                kept_failed.append(
+                    {
+                        "genome": key,
+                        "msg": qc_rec.get("msg", "QC failure"),
+                    }
+                )
             kept_lines.append(line)
 
     # Avoid converting QC into a hard pipeline failure when every target fails.
@@ -105,6 +113,13 @@ def main():
     for rec in dropped:
         print(
             f"[qc-filter] dropped {rec['genome']}: {rec['msg']}",
+            file=sys.stderr,
+        )
+    for rec in kept_failed:
+        print(
+            f"[qc-filter] WARNING: {rec['genome']} FAILED the quality check "
+            f"({rec['msg']}) and is searched anyway. A gene that is not found in it may "
+            f"be missing from the assembly, not from the species.",
             file=sys.stderr,
         )
     if unknown:

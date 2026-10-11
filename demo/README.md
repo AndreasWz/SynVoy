@@ -82,6 +82,9 @@ Workstation: 12 cores, 15 GB RAM (~4 GB free), disk at 97 %.
 | cold, no cache | `low_mem` as shipped | **3m49s** (50 tasks, 2026-07) |
 | cold, no cache | `low_mem`, 2026-10-05 code | 3m56s (55 tasks incl. the parameter advisor) |
 | `-resume` | `low_mem` | 3m37s (10 tasks cached) |
+| cold, 2026-10-11 code (distances in gene units) | `low_mem`, test harness without the launcher | 3m59s; the code before the gene units in the same harness: 2m30s to 3m03s |
+
+The newest code is about a third slower on this demo: it searches 101 small windows where the code before searched 28 large ones (a tenth to a third of each 11 Mb genome instead of two thirds and more). With `--anchor_max_places 5` it searches 18 windows and takes 1m10s, with the same three calls.
 
 Comfortably inside a 10-minute slot, with room to spare. If you need to fill a
 longer slot, add a 4th target genome (~+1 min) rather than slowing anything down.
@@ -101,32 +104,42 @@ The override is in a config file to keep the command short. Passing it as a flag
 `--mmseqs_sensitivity 9.5` aborted the run with `Cannot compare java.lang.String …`;
 if you still see that, your checkout is old — `git pull`.)
 
-## What the result looks like (checked 2026-10-05)
+## What the result looks like (checked 2026-10-11)
 
 ```
-1 high-confidence + 2 medium-confidence GOI ortholog annotation(s) (+16 low-confidence) across 3 genome(s).
+2 high-confidence + 1 medium-confidence GOI ortholog annotation(s) (+17 low-confidence) across 3 genome(s).
 ```
 
 | Species | Call | Identity | Target's own gene name |
 |---|---|---|---|
-| *N. castellii* | HIGH | 66.0 % | — (found by the hull rescue) |
-| *K. lactis* | MEDIUM | 47.8 % | STE2 |
+| *N. castellii* | HIGH | 66.0 % | STE2 |
+| *K. lactis* | HIGH | 47.8 % | STE2 |
 | *L. thermotolerans* | MEDIUM | 41.9 % | STE2 |
 
-Three orthologs, one per species, each matching the home STE2 gene best in the paralog
-check. (Before 2026-07-26 the same run reported "1 high + 32 medium": weak hits at
-21–28 % identity were promoted by their neighbourhood alone. An identity floor ended
-that, and the figures now hide fragment hits by default.)
+Three orthologs, one per species, each on the gene that the target's own annotation calls
+STE2. Two things decide the labels. STE2 has one exon at home, so a one-exon model can be
+HIGH (until 2026-10-09 the main path asked for two exons, and *N. castellii* was HIGH only
+through the hull rescue). And the HIGH threshold of 50 % is lowered for a genome whose
+flanking genes are themselves diverged: in *K. lactis* they match at 55 % (median), which
+puts the threshold at 45 %.
+
+(Before 2026-07-26 the same run reported "1 high + 32 medium": weak hits at 21–28 %
+identity were promoted by their neighbourhood alone. An identity floor ended that, and the
+figures now hide fragment hits by default.)
 
 ## Things to know before presenting
 
-- **The report carries the final confidence, the figure the search-time one.** The
-  *N. castellii* call is HIGH in `synvoy_report.json` because the hull rescue built a
-  full-length model; the anchor grid draws the search's own models. Read the headline
-  from the report. The rescued gene model itself is in
-  `results/demo_ste2/rescue/locus_1/`.
-- **The 16 low-confidence items are hit fragments**, not candidates worth discussing.
-  They are in the `*_with_fragments` figures if someone asks.
-- **`--auto_params true` is advisory.** On yeast its heuristic suggests fungal-scale
-  values (`--max_intron 500 --cluster_distance 40000 …`) and prints them as flags to
-  re-run with; it cannot change the running pipeline's parameters.
+- **Report and figures agree here.** All three calls come from the search itself, so the
+  anchor grid shows the same confidence as `synvoy_report.json`. In general the figures
+  draw the search's own models and not those of the rescue passes; a call that exists only
+  as a rescue model is in the report and in `results/<run>/rescue/locus_N/`.
+- **The 17 low-confidence items are hit fragments and weak models elsewhere in the
+  genome**, not candidates worth discussing. They are in the `*_with_fragments` figures
+  if someone asks.
+- **The search visits more, smaller places than before.** Distances are counted in gene
+  spacings of the home locus (2.4 kb here), so a block is a neighbourhood of some tens of
+  kb (the largest: 130 to 630 kb) instead of one to two megabases. The log prints the
+  distances used, one line per genome.
+- **`--auto_params true` is advisory.** On yeast its built-in rules suggest
+  `--n_flanking_genes 8` and print it as a flag to re-run with; it cannot change the
+  running pipeline's parameters.

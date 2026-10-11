@@ -9,7 +9,6 @@ process EXTRACT_FLANKING {
     path genome
     val n_flank
     val min_size
-    val prefer_large
     path goi_faa
     // §1f: preset-affected params resolved at runtime (see RESOLVE_EFFECTIVE_PARAMS).
     val settings
@@ -19,18 +18,18 @@ process EXTRACT_FLANKING {
     tuple val(locus_id), path("flanking_proteins_${locus_id}.faa"), emit: faa
 
     script:
-    def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --max_goi_similarity ${settings.max_flanking_goi_similarity}" : ""
+    def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --goi_relative_evalue ${settings.goi_relative_evalue}" : ""
     def dist_arg = params.max_flanking_distance > 0 ? "--max_flanking_distance ${params.max_flanking_distance}" : ""
     def expand_arg = settings.expand_goi_similar.toString().toBoolean() ? "--expand_goi_similar true --expand_goi_similar_distance ${params.expand_goi_similar_distance}" : ""
     """
-    # v4: GOI-similarity filter + expanded window + distance cap + GOI-neighbor expansion
+    # Relatives of the GOI are skipped as anchors (alignment E-value); the proteins carry
+    # the anchors' home coordinates, from which the search derives its distances.
     extract_flanking_genes.py \\
         --bed $bed \\
         --gff $gff \\
         --genome $genome \\
         --n_flank $n_flank \\
         --min_size $min_size \\
-        --prefer_large $prefer_large \\
         --exon_mode ${params.exon_level_search} \\
         --pred_flank_window ${params.pred_flank_window} \\
         --pred_keep_pct ${params.pred_keep_pct} \\

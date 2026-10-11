@@ -50,50 +50,56 @@ import sys
 # ──────────────────────────────────────────────────────────────────────
 
 PRESET_OVERRIDES: dict[str, dict[str, object]] = {
+    # A preset holds only what differs from the defaults FOR A REASON. Revised 2026-10-08:
+    # the identity thresholds of the three presets for queries of 100 aa or more are gone.
+    # Two of them raised HIGH/MEDIUM to 55/40 for every such query whatever the chooser
+    # decided, and the third (never chosen) lowered MEDIUM to 30. Measured on five
+    # benchmark families: no gene model below 40 % identity lay on a curated gene, and
+    # models at 50-55 % were as often right as models at 55-60 %. MEDIUM 40 is therefore
+    # the default now and HIGH stays at its default of 50.
+    # Removed from the short-peptide preset on 2026-10-09: sw_min_score 10, sw_min_identity 8,
+    # min_hit_identity 8, min_hit_length 8. Lowering these floors changes nothing, because
+    # the E-value filters are stricter: Smith-Waterman hits must reach E <= 1, which needs a
+    # raw score of 31 even for a 20-aa query in a 2 kb window (floor: 20); inside a window
+    # the identity and length floors are max(15, ...) for either value; and no alignment of
+    # 8-9 residues or 8-10 % identity reaches E <= 0.01 in a genome-wide search.
     "preset_short_peptide": {
-        "sw_min_score": 10,
-        "sw_min_identity": 8.0,
-        "min_hit_identity": 8,
-        "min_hit_length": 8,
-        "min_query_length": 20,
         "classify_complete_min_qcov": 0.5,
         "classify_fragment_max_qcov": 0.3,
         "classify_high_min_identity": 40.0,
-        "classify_medium_min_identity": 25.0,
-        "expand_goi_similar": False,
-        "strict_goi_family": False,
+        # 30, not 25: the floor that kept the one known sub-35 % melittin relative and
+        # rejected the junk (classify_fallback_strong_min_identity_floor).
+        "classify_medium_min_identity": 30.0,
+        # Single-segment tandem copies keep the former 40 for short queries (the default is
+        # 50 since 2026-10-09; no short-peptide run on record has such a row at 40-50 %).
+        "classify_tandem_min_identity": 40.0,
+        # strict_goi_family is not listed: false is the default (the family-name check stays
+        # off for short peptides, whose names differ between taxa: melittin, bombolitin).
     },
     "preset_tandem_family": {
-        "expand_goi_similar": False,
-        "max_flanking_goi_similarity": 25.0,
+        # Several copies next to each other: also weaker relatives of the GOI are kept
+        # out of the anchors.
+        "goi_relative_evalue": 1e-3,
         "strict_goi_family": True,
-        "classify_tandem_min_identity": 35.0,
-        "classify_medium_min_identity": 30.0,
     },
     "preset_single_copy": {
         "strict_goi_family": True,
-        "expand_goi_similar": False,
-        "classify_high_min_identity": 55.0,
-        "classify_medium_min_identity": 40.0,
-        "classify_complete_min_qcov": 0.75,
     },
     # No goi_family_tokens here on purpose: this preset is auto-applied to ANY large
     # gene family, and a hard-coded TP53 list made the strict family gate demote
     # hit-chain calls of unrelated queries (Adh, luciferase) for not being named TP53.
     # Without tokens the gate disables itself; pass --goi_family_tokens to use it.
+    # classify_fragment_max_qcov 0.35 left this preset on 2026-10-09: in the three benchmark
+    # families run with it (2,651 GOI rows) no gene model lay between 0.35 and 0.40 coverage,
+    # so it decided nothing, and a LOWER fragment limit is the lenient direction.
+    # classify_tandem_min_identity 50 left it the same day because 50 became the default:
+    # in four benchmark families none of 92 single-segment "tandem copies" lay on a
+    # curated gene, 35 of them at 40-50 % identity.
     "preset_paralog_discrimination": {
         "strict_goi_family": True,
-        "classify_high_min_identity": 55.0,
-        "classify_medium_min_identity": 40.0,
-        "classify_tandem_min_identity": 50.0,
-        "classify_fragment_max_qcov": 0.35,
-        "classify_complete_min_qcov": 0.75,
         "adaptive_score_floor_frac": 0.45,
         "adaptive_score_floor_abs": 0.08,
         "adaptive_max_regions": 4,
-        "adaptive_unique_gene_floor": 3,
-        "auto_params": False,
-        "multi_profile": False,
     },
 }
 

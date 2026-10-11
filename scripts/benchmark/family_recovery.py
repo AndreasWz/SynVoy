@@ -540,7 +540,7 @@ def load_home_loci(run_dir):
     """{locus_id: (chrom, start, end)} of every home locus, 1-based inclusive.
 
     Read from the query's home-genome hits (`locus_N.bed`), published under
-    plot_inputs_*/ and, with --keep_intermediate, intermediate/split_loci/.
+    plot_inputs_*/ and intermediate/split_loci/.
     """
     loci = {}
     for pat in (os.path.join(run_dir, "plot_inputs_*", "locus_*.bed"),
@@ -1305,7 +1305,7 @@ def cmd_stage(args):
           f"--home_gff {out}/home/{args.home_species}.gff \\\n"
           f"    --home_species '{args.home_species.replace('_', ' ')}' "
           f"--target_genomes '{out}/targets/*' \\\n"
-          f"    --keep_intermediate true --outdir <RESULTS>")
+          f"    --outdir <RESULTS>")
     return 0
 
 

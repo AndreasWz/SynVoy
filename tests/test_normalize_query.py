@@ -119,9 +119,24 @@ def test_short_query_is_rejected_unless_overridden(tmp_path):
 
 
 def test_length_is_checked_after_cleaning(tmp_path):
-    # 25 residues padded with gaps to 45 characters must still be "too short".
-    proc, _ = run(tmp_path, ">q1\n" + MELITTIN[:25] + "-" * 20 + "\n")
+    # 15 residues padded with gaps to 45 characters must still be "too short".
+    proc, _ = run(tmp_path, ">q1\n" + MELITTIN[:15] + "-" * 30 + "\n")
     assert proc.returncode == 2
+
+
+def test_minimum_is_20_and_short_queries_get_a_warning(tmp_path):
+    """Measured 2026-10-08: a peptide of 18 residues or more is found again at its own
+    position in a 230 Mb genome in 98 % of cases, so 20 is what locating the gene needs
+    (it was 30). Up to 40 residues the query runs with a warning."""
+    proc, _ = run(tmp_path, ">q1\n" + MELITTIN[:19] + "\n")
+    assert proc.returncode == 2 and "precursor" in proc.stderr
+    proc, seq = run(tmp_path, ">q1\n" + MELITTIN[:20] + "\n")
+    assert proc.returncode == 0 and len(seq) == 20
+    assert "WARNING" in proc.stderr and "20 aa" in proc.stderr
+    proc, seq = run(tmp_path, ">q1\n" + MELITTIN[:39] + "\n")
+    assert proc.returncode == 0 and "WARNING" in proc.stderr
+    proc, seq = run(tmp_path, ">q1\n" + MELITTIN[:40] + "\n")
+    assert proc.returncode == 0 and "WARNING" not in proc.stderr
 
 
 # ───────────────────────── nucleotide input ─────────────────────────

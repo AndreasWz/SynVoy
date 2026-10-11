@@ -257,21 +257,35 @@ def test_llm_key_is_not_exported_as_an_empty_env_var():
         assert re.search(rf"^{scope}\.envWhitelist\s*=.*LLM_API_KEY", text, re.M), scope
 
 
-# ---- options a plot script accepts but never reads --------------------------------
+# ---- options a script accepts but never reads --------------------------------------
 # An option that is parsed and then ignored looks like a control and changes nothing.
-# The ones listed here are older than this test and are still passed by a module or
-# named in a test; the lists may only shrink.
+# Found twice by review (two grid options in 2026-10-07; `--min_gene_identity`,
+# `--aug_dedup_bin_bp`, `--prefer_large`, three `--gap_*` options, five plot options and
+# one matrix option on 2026-10-08, all removed). Every script a module calls is checked.
 PLOT_HELPERS = ("synvoy_grid.py", "synvoy_legend.py", "synvoy_gene_names.py")
-UNREAD_PLOT_OPTIONS = {
-    "plot_synteny.py": {"--target_names", "--max_legend_entries", "--ribbon_alpha_dense",
-                        "--pub_width", "--pub_palette"},
-    "plot_synteny_matrix.py": {"--clade_depth_frac"},
+SCRIPTS_WITH_OPTIONS = {
+    "plot_synteny.py": PLOT_HELPERS,
+    "plot_synteny_matrix.py": PLOT_HELPERS,
+    "iterative_search_runner.py": ("gpu_augment.py", "discover_regions.py", "synvoy_scale.py"),
+    "annotate_goi_exons.py": (),
+    "extract_flanking_genes.py": (),
+    "split_loci.py": (),
+    "merge_hits.py": (),
+    "profile_hits.py": (),
+    "auto_select_preset.py": (),
+    "normalize_query.py": (),
+    "cluster_grs.py": (),
+    "rescue_goi_hull.py": (),
+    "rescue_strong_synteny.py": (),
+    "build_home_paralog_panel.py": (),
+    "generate_report.py": (),
+    "resolve_effective_params.py": (),
 }
 
 
 def _unread_options(script: str) -> set[str]:
     text = (ROOT / "bin" / script).read_text()
-    pool = text + "".join((ROOT / "bin" / h).read_text() for h in PLOT_HELPERS)
+    pool = text + "".join((ROOT / "bin" / h).read_text() for h in SCRIPTS_WITH_OPTIONS[script])
     unread = set()
     for node in ast.walk(ast.parse(text)):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -284,15 +298,28 @@ def _unread_options(script: str) -> set[str]:
         dest = next((k.value.value for k in node.keywords if k.arg == "dest"),
                     flags[0].lstrip("-").replace("-", "_"))
         read = re.search(rf"\bargs\.{re.escape(dest)}\b", pool) or \
-            re.search(rf"getattr\(\s*args\s*,\s*[\"']{re.escape(dest)}[\"']", pool)
+            re.search(rf"getattr\(\s*_?args\s*,\s*[\"']{re.escape(dest)}[\"']", pool)
         if not read:
             unread.add(flags[0])
     return unread
 
 
-@pytest.mark.parametrize("script", sorted(UNREAD_PLOT_OPTIONS))
-def test_plot_scripts_read_every_option_they_accept(script):
-    assert _unread_options(script) == UNREAD_PLOT_OPTIONS[script]
+@pytest.mark.parametrize("script", sorted(SCRIPTS_WITH_OPTIONS))
+def test_scripts_read_every_option_they_accept(script):
+    assert _unread_options(script) == set()
+
+
+def test_removed_parameters_are_not_declared_any_more():
+    """A removed parameter is named in main.nf (the run stops or warns when one is
+    still set) and nowhere in the shipped config."""
+    main_nf = (ROOT / "main.nf").read_text()
+    config = (ROOT / "nextflow.config").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    names = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block, re.M)) | set(re.findall(r"'([a-z_]+)'", block))
+    assert {"max_flanking_goi_similarity", "enable_name_locus", "min_gene_identity",
+            "prefer_large_genes", "keep_intermediate", "multi_profile"} <= names
+    for name in names:
+        assert not re.search(rf"^\s*(params\.)?{name}\s*=", config, re.M), name
 
 
 @pytest.mark.parametrize("option", [["--grid_goi_style", "cds"], ["--grid_goi_max_models", "3"]])

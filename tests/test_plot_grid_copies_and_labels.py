@@ -217,3 +217,51 @@ def test_guide_tag_is_dropped_only_when_a_label_runs_through_it():
     assert not ps._rotated_label_crosses(320, 100, "★ Melt", 13, True, box)
     # Too short to reach the tag.
     assert not ps._rotated_label_crosses(200, 100, "★ M", 9, True, box)
+
+
+# ---------------------------------------------------------------- scale bar (2026-10-09)
+
+def _scale_bar(html):
+    i = html.index('<g class="scale-bar-group">')
+    seg = html[i:html.index("</g>", i)]
+    x1, x2 = re.search(r'<line x1="(-?[\d.]+)" y1="[\d.]+" x2="(-?[\d.]+)"', seg).groups()
+    label = re.search(r'class="scale-bar-text">([^<]+)<', seg).group(1)
+    return abs(float(x2) - float(x1)), label
+
+
+def test_scale_bar_length_follows_the_drawing_scale():
+    """A fixed 10 kb bar was 34 px wide in a yeast plot and 3 px in a human one."""
+    for px_per_bp, expected in ((0.00342, 50_000), (0.00157, 100_000), (0.00031, 500_000),
+                                (0.05, 2_000), (1.0, 100)):
+        length = ps.auto_scale_bar_bp(px_per_bp)
+        assert length == expected, (px_per_bp, length)
+        assert 60 <= length * px_per_bp <= 200          # always a bar one can read
+    assert ps.auto_scale_bar_bp(0) == 10_000            # no scale: the former fixed length
+
+
+def test_scale_bar_option_takes_auto_or_base_pairs():
+    assert ps._scale_bar_arg("auto") == "auto"
+    assert ps._scale_bar_arg("25000") == 25_000
+    try:
+        ps._scale_bar_arg("wide")
+    except Exception as exc:
+        assert "auto" in str(exc)
+    else:
+        raise AssertionError("a word that is not 'auto' must be rejected")
+
+
+def test_ribbon_plot_draws_an_automatic_or_a_fixed_scale_bar():
+    def render(value):
+        args = SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=value,
+                               pub_width=89, pub_palette="okabe_ito")
+        return ps.render_synteny_html(_synteny_tracks("GOI_x"), {"geneA": "#0072B2", "geneB": "#009E73"},
+                                      {"home": "#E64B35", "target1": "#0072B2"}, {}, args, ["test"], 0, 0, 1)
+    width_auto, label_auto = _scale_bar(render("auto"))
+    assert 60 <= width_auto <= 200
+    assert re.fullmatch(r"[125]0{0,2} (bp|kb|Mb)", label_auto), label_auto
+    width_fixed, label_fixed = _scale_bar(render(100))
+    assert label_fixed == "100 bp"
+    # both bars are drawn at the same scale (px per bp)
+    number, unit = label_auto.split()
+    bp_auto = int(number) * {"bp": 1, "kb": 1_000, "Mb": 1_000_000}[unit]
+    assert abs(width_fixed / 100 - width_auto / bp_auto) / (width_fixed / 100) < 0.05

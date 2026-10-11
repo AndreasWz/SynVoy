@@ -114,6 +114,35 @@ def translate_in_six_frames(dna_seq):
     return frames
 
 
+# An alignment with traceback needs memory in proportion to query length x target length:
+# measured 4.2 bytes per cell (550 aa against the frames of a 2 Mb window: 1.5 GB). One
+# window of 13.7 Mb once took 10 GB and the kernel ended the run. A translated frame
+# longer than this many cells per query is therefore aligned in overlapping pieces, each
+# about 0.8 GB at most. Up to that size (1.1 Mb of DNA for a 550-aa query, 8.6 Mb for
+# 70 aa) nothing changes.
+SW_MAX_CELLS = 200_000_000
+# A piece cannot be shorter than four times the query (two overlaps), so for a very long
+# query the cells per piece grow with the square of its length: 10,000 aa already need
+# 1.7 GB, a 34,000-aa titin 20 GB. Such a query is not searched with Smith-Waterman; the
+# other two search programs find a protein of that length without it.
+SW_MAX_QUERY_LEN = 10_000
+
+
+def protein_chunks(protein, query_len, max_cells=SW_MAX_CELLS):
+    """[(start, piece)] covering ``protein``. One piece (the whole sequence) while
+    query length x protein length stays within ``max_cells``; otherwise pieces of that
+    many cells that overlap by twice the query length, so that every local alignment of
+    the query lies entirely inside at least one piece."""
+    query_len = max(1, int(query_len))
+    if len(protein) * query_len <= max_cells:
+        return [(0, protein)]
+    overlap = 2 * query_len
+    size = max(2 * overlap, max_cells // query_len)
+    step = size - overlap
+    return [(start, protein[start:start + size])
+            for start in range(0, max(1, len(protein) - overlap), step)]
+
+
 def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
                             gap_open=11, gap_extend=1):
     """
@@ -564,60 +593,71 @@ def main():
                                for _f, prot, _o in frames)
 
         for q_header, q_id, q_seq in queries:
+            if len(q_seq) > SW_MAX_QUERY_LEN:
+                print(f"Warning: Smith-Waterman skipped for {q_id}: {len(q_seq)} aa is longer than "
+                      f"{SW_MAX_QUERY_LEN} aa (the traceback would need too much memory).", file=sys.stderr)
+                continue
             print(f"Searching with query: {q_id}", file=sys.stderr)
+            seen = set()        # an alignment in the overlap of two pieces is found twice
 
             for t_id, t_seq, frames in target_frames:
                 for frame_id, prot_seq, offset in frames:
-                    # Run Smith-Waterman
-                    try:
-                        result = smith_waterman_parasail(
-                            q_seq, prot_seq, 
-                            args.matrix, args.gap_open, args.gap_extend
-                        )
-                        
-                        # Filter by thresholds
-                        if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
-                            # Convert protein coordinates back to DNA coordinates
-                            start_ref = result['end_ref'] - result['ref_consumed'] + 1
-                            start_query = result['end_query'] - result['query_consumed'] + 1
-                            
-                            if frame_id.startswith('+'):
-                                # Forward frame: protein pos p -> DNA pos offset + p*3
-                                dna_start = offset + start_ref * 3 + 1  # 1-based
-                                dna_end = offset + (result['end_ref'] + 1) * 3  # 1-based inclusive
-                            else:
-                                # Reverse frame: positions are in reverse-complement space
-                                # Convert back to forward strand coordinates.
-                                # BLAST m8 convention: tstart > tend signals minus strand.
-                                L = len(t_seq)
-                                rc_start = offset + start_ref * 3
-                                rc_end = offset + (result['end_ref'] + 1) * 3 - 1
-                                dna_start = L - rc_start     # larger coord (1-based)
-                                dna_end = L - rc_end         # smaller coord (1-based)
-                            
-                            bits, evalue = karlin_altschul(
-                                result['score'], len(q_seq), search_space_len,
-                                args.gap_open, args.gap_extend, args.matrix)
-                            # BLAST m8 format output
-                            hits.append({
-                                'query': q_id,
-                                'target': t_id,
-                                'pident': result['identity'],
-                                'alnlen': result['length'],
-                                'mismatch': result['mismatch'],
-                                'gapopen': result['gapopen'],
-                                'qstart': start_query + 1,
-                                'qend': result['end_query'] + 1,
-                                'tstart': dna_start,
-                                'tend': dna_end,
-                                'evalue': evalue,
-                                'bits': bits,
-                            })
-                    except Exception as e:
-                        print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
-                              file=sys.stderr)
-                        continue
-        
+                    for piece_start, piece in protein_chunks(prot_seq, len(q_seq), SW_MAX_CELLS):
+                        # Run Smith-Waterman
+                        try:
+                            result = smith_waterman_parasail(
+                                q_seq, piece,
+                                args.matrix, args.gap_open, args.gap_extend
+                            )
+
+                            # Filter by thresholds
+                            if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
+                                # Convert protein coordinates back to DNA coordinates
+                                end_ref = result['end_ref'] + piece_start
+                                start_ref = end_ref - result['ref_consumed'] + 1
+                                start_query = result['end_query'] - result['query_consumed'] + 1
+
+                                if frame_id.startswith('+'):
+                                    # Forward frame: protein pos p -> DNA pos offset + p*3
+                                    dna_start = offset + start_ref * 3 + 1  # 1-based
+                                    dna_end = offset + (end_ref + 1) * 3  # 1-based inclusive
+                                else:
+                                    # Reverse frame: positions are in reverse-complement space
+                                    # Convert back to forward strand coordinates.
+                                    # BLAST m8 convention: tstart > tend signals minus strand.
+                                    L = len(t_seq)
+                                    rc_start = offset + start_ref * 3
+                                    rc_end = offset + (end_ref + 1) * 3 - 1
+                                    dna_start = L - rc_start     # larger coord (1-based)
+                                    dna_end = L - rc_end         # smaller coord (1-based)
+
+                                if (t_id, dna_start, dna_end) in seen:
+                                    continue
+                                seen.add((t_id, dna_start, dna_end))
+
+                                bits, evalue = karlin_altschul(
+                                    result['score'], len(q_seq), search_space_len,
+                                    args.gap_open, args.gap_extend, args.matrix)
+                                # BLAST m8 format output
+                                hits.append({
+                                    'query': q_id,
+                                    'target': t_id,
+                                    'pident': result['identity'],
+                                    'alnlen': result['length'],
+                                    'mismatch': result['mismatch'],
+                                    'gapopen': result['gapopen'],
+                                    'qstart': start_query + 1,
+                                    'qend': result['end_query'] + 1,
+                                    'tstart': dna_start,
+                                    'tend': dna_end,
+                                    'evalue': evalue,
+                                    'bits': bits,
+                                })
+                        except Exception as e:
+                            print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
+                                  file=sys.stderr)
+                            continue
+
         # Write output
         with open(args.output, 'w') as f:
             for hit in hits:

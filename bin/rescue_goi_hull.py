@@ -29,6 +29,7 @@ from typing import Dict, List, Tuple
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement  # noqa: E402
+import synvoy_scale  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
     _refine_rescue_termini,
     _read_query,
@@ -76,6 +77,38 @@ def collect_features(gff_path: str):
         elif role == "goi" and conf == "HIGH":
             high_goi[feat["seqid"]].append((s, e))
     return flanking, high_goi
+
+
+LEGACY_HULL_BP = {'cluster_max_gap': 3000000, 'window_pad': 100000, 'max_window': 20000000}
+
+
+def resolve_hull_distances(args) -> None:
+    """Turn 'auto' distances into bp for this genome.
+
+    The hull is the GOI's own neighbourhood, so its size follows the home neighbourhood:
+    flanking genes belong to one cluster up to the gap a block may bridge, and the hull
+    reaches at most one home-neighbourhood span to either side of the dominant cluster.
+    The values come from the distances the search recorded in the region GFF. The fixed
+    numbers used before (3 Mb, 100 kb, 20 Mb) were set on a mammalian chromosome and are
+    the size of a whole chromosome in an insect genome; they remain the fallback for a
+    GFF without the record.
+    """
+    recorded = synvoy_scale.parse_gff_header(args.region_gff) or {}
+    span = recorded.get('home_span_bp')
+    derived = {
+        'cluster_max_gap': recorded.get('synteny_bridge_max_gap') or None,
+        'window_pad': recorded.get('goi_margin'),
+        'max_window': (2 * span * float(recorded.get('expansion') or 1.0)) if span else None,
+    }
+    for key, fallback in LEGACY_HULL_BP.items():
+        value = getattr(args, key)
+        if str(value).strip().lower() == 'auto':
+            value = derived[key] if derived[key] else fallback
+        setattr(args, key, int(float(value)))
+    print(f"[hull] distances: cluster gap {args.cluster_max_gap} bp, pad {args.window_pad} bp, "
+          f"largest hull {args.max_window} bp "
+          f"({'from the search' if recorded else 'fixed: no distances in the region GFF'})",
+          file=sys.stderr)
 
 
 def dominant_cluster(intervals: List[Tuple[int, int]], max_gap: int) -> List[Tuple[int, int]]:
@@ -228,11 +261,18 @@ def main() -> int:
     ap.add_argument("--samtools_bin", default="samtools")
     ap.add_argument("--min_flanking", type=int, default=4,
                     help="Min HIGH flanking genes in the dominant cluster to attempt a hull rescue")
-    ap.add_argument("--cluster_max_gap", type=int, default=3000000,
-                    help="bp gap that splits flanking into clusters (the hull = densest cluster)")
-    ap.add_argument("--window_pad", type=int, default=100000, help="bp pad around the hull window")
-    ap.add_argument("--max_window", type=int, default=20000000,
-                    help="Skip hull windows larger than this (bp) — guards against runaway spans")
+    ap.add_argument("--cluster_max_gap", default="auto",
+                    help="bp gap that splits HIGH flanking genes into clusters. 'auto' (default): "
+                         "the largest gap a block may bridge in this genome, as the search "
+                         "recorded it in --region_gff; 3000000 without that record")
+    ap.add_argument("--window_pad", default="auto",
+                    help="bp added on each side of the hull. 'auto' (default): the GOI margin "
+                         "of the search; 100000 without that record")
+    ap.add_argument("--max_window", default="auto",
+                    help="Largest hull (bp); also how far from the centre of the dominant "
+                         "cluster a flanking gene may lie to count. 'auto' (default): twice "
+                         "the span of the home neighbourhood, scaled to this genome; "
+                         "20000000 without that record")
     ap.add_argument("--min_identity", type=float, default=40.0,
                     help="Min miniprot %%identity to emit a rescued model")
     ap.add_argument("--min_coverage", type=float, default=0.5,
@@ -244,6 +284,7 @@ def main() -> int:
     args = ap.parse_args()
 
     import re
+    resolve_hull_distances(args)
     flanking, high_goi = collect_features(args.region_gff)
     query_id, query_seq = _read_query(args.query)
     # Sanitise for GFF IDs (UniProt headers carry pipes, e.g. sp|P07585|PGS2_HUMAN).
@@ -272,14 +313,17 @@ def main() -> int:
             hull_s, hull_e, n_in_hull = compute_hull(ivs, args.cluster_max_gap, args.max_window)
             if n_in_hull < args.min_flanking:
                 continue
-            # Skip if a HIGH GOI model already sits inside the hull (already recovered).
-            if any(_interval_overlaps(hull_s, hull_e, gs, ge)
-                   for gs, ge in high_goi.get(chrom, [])):
-                continue
             ws = max(1, hull_s - args.window_pad)
             we = hull_e + args.window_pad
-            if we - ws > args.max_window:
-                print(f"[hull] {chrom}: window {(we-ws)/1e6:.1f} Mb > max_window — skipped",
+            # Skip if a HIGH GOI model already sits in the DNA that would be searched. The
+            # test used to look at the hull without its padding, so a gene just outside the
+            # outermost flanking gene was modelled a second time (28 of 33 genomes of one
+            # single-copy benchmark family, every one a duplicate of the main model).
+            if any(_interval_overlaps(ws, we, gs, ge)
+                   for gs, ge in high_goi.get(chrom, [])):
+                continue
+            if hull_e - hull_s > args.max_window:
+                print(f"[hull] {chrom}: hull {(hull_e-hull_s)/1e6:.1f} Mb > max_window — skipped",
                       file=sys.stderr)
                 continue
             window = _extract_window(args.target_genome, chrom, ws, we, args.samtools_bin)

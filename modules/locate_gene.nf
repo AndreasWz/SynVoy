@@ -6,6 +6,7 @@ process LOCATE_GENE {
     input:
     path gene
     path home_genome
+    path home_gff
 
     output:
     path "home_gene_location.bed", emit: bed
@@ -91,6 +92,10 @@ process LOCATE_GENE {
         --blast hits_blast.txt \\
         --mmseqs hits_mmseqs.m8 \\
         --query $gene \\
+        --max_evalue ${params.search_evalue} \\
+        --gff $home_gff \\
+        --locus_gap_genes ${params.locus_gap_genes} \\
+        --locus_gap ${params.locus_gap} \\
         --output hit_profile.json || echo "hit profiling skipped"
     if [ -s hit_profile.json ]; then
         auto_select_preset.py \\

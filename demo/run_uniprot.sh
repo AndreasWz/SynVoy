@@ -62,12 +62,11 @@ if ! grep -q "OX=7227" <<<"$HDR"; then
     exit 1
 fi
 
-# Guard 2: too short. NORMALIZE_QUERY enforces min_query_length BEFORE the preset
-# logic can adjust it, so a <30 aa query must be handled at launch (docs/TODO.md
-# §1f caveat). Lower the floor rather than aborting.
+# Guard 2: too short. The pipeline stops a query below min_query_length (20 aa) and
+# warns up to 39 aa. Lower the floor rather than aborting.
 EXTRA=()
-if [ "$LEN" -lt 30 ]; then
-    echo "    [note] ${LEN} aa is below the 30 aa default floor — passing --min_query_length ${LEN}"
+if [ "$LEN" -lt 20 ]; then
+    echo "    [note] ${LEN} aa is below the 20 aa default floor — passing --min_query_length ${LEN}"
     EXTRA+=(--min_query_length "$LEN")
 fi
 

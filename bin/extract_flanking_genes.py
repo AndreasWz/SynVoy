@@ -10,13 +10,15 @@ import re
 try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate, parse_gff as parse_gff_base
+        load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
+        sw_pair_evalue,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
-        load_genome, reverse_complement, translate, parse_gff as parse_gff_base
+        load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
+        sw_pair_evalue,
     )
 
 try:
@@ -230,11 +232,49 @@ def _preferred_gene_label(gene):
 # load_genome now imported from sequence_utils
 
 
+LCS_FALLBACK_THRESHOLD = 35.0   # only used when no aligner is available, see is_goi_relative
+
+
+# E-value at or below which the annotated gene at the GOI's own position counts as the
+# GOI itself, whatever --goi_relative_evalue says about the neighbours.
+GOI_SELF_EVALUE = 1e-5
+
+
+def is_goi_relative(protein: str, goi_seqs, max_evalue: float) -> bool:
+    """True when ``protein`` aligns to one of the GOI sequences with E <= ``max_evalue``.
+
+    A gene related to the GOI is not used as an anchor: its matches in a target genome
+    fall on the GOI's own relatives, so it would count the same sequence evidence a
+    second time as "neighbourhood".
+
+    The test is a local alignment judged by its E-value. Until 2026-10-08 it was the
+    longest common subsequence divided by the longer length, with a threshold of 35.
+    Two unrelated proteins of similar length score 35 on that measure by chance, so about
+    half of all genes of the GOI's size were removed, whatever their sequence (measured on
+    five benchmark loci: 22 of 33 removed genes had no significant alignment to the GOI),
+    and the nearest neighbours of the gene were lost as anchors.
+
+    ``max_evalue <= 0`` switches the test off. Without parasail the old measure is used,
+    with a warning, so that the step still runs in a degraded environment.
+    """
+    if not protein or not goi_seqs or max_evalue <= 0:
+        return False
+    try:
+        return any(sw_pair_evalue(protein, gs)[0] <= max_evalue for gs in goi_seqs)
+    except RuntimeError as exc:
+        if not getattr(is_goi_relative, '_warned', False):
+            print(f"WARNING: no Smith-Waterman aligner ({exc}). The GOI-relative test "
+                  f"falls back to the common-subsequence measure, which sits at chance level "
+                  f"for proteins of similar length.", file=sys.stderr)
+            is_goi_relative._warned = True
+        return any(_lcs_similarity(protein, gs) >= LCS_FALLBACK_THRESHOLD for gs in goi_seqs)
+
+
 def _lcs_similarity(seq_a: str, seq_b: str) -> float:
     """
     Longest Common Subsequence (LCS) similarity (0-100), normalized by the
-    longer sequence length.  More sensitive than k-mer Jaccard for detecting
-    distant protein family relationships (e.g. LY6/3FTx members vs LY6E).
+    longer sequence length. Kept only as the fallback of is_goi_relative: for two
+    unrelated proteins of similar length it is about 35 by chance.
     O(m*n) — fast enough for typical flanking gene protein lengths (<1 kb aa).
     """
     m, n = len(seq_a), len(seq_b)
@@ -306,7 +346,6 @@ def main():
     parser.add_argument("--genome", required=True, help="Genome FASTA file")
     parser.add_argument("--n_flank", type=int, default=10, help="Number of flanking genes")
     parser.add_argument("--min_size", type=int, default=500, help="Min gene size")
-    parser.add_argument("--prefer_large", type=str, default="true", help="Prefer large genes")
     parser.add_argument("--exon_mode", type=str, default="false", 
                         help="If true, output individual exon CDS sequences instead of full protein")
     parser.add_argument("--pred_flank_window", type=int, default=50000,
@@ -320,9 +359,11 @@ def main():
     parser.add_argument("--goi_faa", default=None,
                         help="GOI protein FASTA — flanking candidates too similar to the GOI "
                              "will be filtered out (avoids picking LY6/3FTx family members as anchors)")
-    parser.add_argument("--max_goi_similarity", type=float, default=35.0,
-                        help="Max allowed LCS similarity (0-100) to GOI; genes above this threshold "
-                             "are excluded from the flanking set (default: 35.0)")
+    parser.add_argument("--goi_relative_evalue", type=float, default=1e-5,
+                        help="A gene whose protein aligns to the GOI with an E-value at or below "
+                             "this (Smith-Waterman, BLOSUM62, pairwise) is a relative of the GOI "
+                             "and is not used as an anchor. 0 switches the test off "
+                             "(default: 1e-5)")
     parser.add_argument("--max_flanking_distance", type=int, default=0,
                         help="Max distance (bp) from GOI center to walk for flanking genes. "
                              "0 = unlimited (legacy). Prevents reaching into gene deserts when "
@@ -339,7 +380,6 @@ def main():
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
     args = parser.parse_args()
-    prefer_large = args.prefer_large.lower() == 'true'
     exon_mode = args.exon_mode.lower() == 'true'
     expand_goi_similar = args.expand_goi_similar.lower() == 'true'
 
@@ -350,8 +390,8 @@ def main():
     goi_seqs = []
     if args.goi_faa and args.goi_faa != 'NO_GOI' and os.path.exists(args.goi_faa):
         goi_seqs = _load_goi_sequences(args.goi_faa)
-        print(f"Loaded {len(goi_seqs)} GOI sequence(s) for flanking similarity filter "
-              f"(max_similarity={args.max_goi_similarity}%)")
+        print(f"Loaded {len(goi_seqs)} GOI sequence(s); genes related to them "
+              f"(alignment E <= {args.goi_relative_evalue:g}) are not used as anchors")
 
     # Load INPUT Genes
     target_regions = []
@@ -502,7 +542,8 @@ def main():
                         'end': goi_end,
                         'strand': '+',
                         'attrs': {'ID': goi_id},
-                        'seq': goi_prot
+                        'seq': goi_prot,
+                        'placeholder': True,
                     })
                     print(f"Injected GOI pseudo-gene at {region['chrom']}:{goi_start}-{goi_end}")
             # Re-sort by genomic position for proper flanking order
@@ -538,14 +579,23 @@ def main():
             # the flanking set being filled entirely with GOI-family members
             # (e.g. LY6/3FTx proteins) that are useless as synteny anchors.
             if goi_seqs:
+                _relative_cache = {}
+
                 def _is_goi_similar(g: dict) -> bool:
-                    seq = _gene_protein(g, genome_seqs)
-                    if not seq:
-                        return False
-                    return any(
-                        _lcs_similarity(seq, gs) >= args.max_goi_similarity
-                        for gs in goi_seqs
-                    )
+                    key = (g.get('chrom'), g.get('start'), g.get('end'), g.get('id'))
+                    if key not in _relative_cache:
+                        _relative_cache[key] = is_goi_relative(
+                            _gene_protein(g, genome_seqs), goi_seqs, args.goi_relative_evalue)
+                    return _relative_cache[key]
+
+                def _is_goi_itself(g: dict) -> bool:
+                    # At the GOI's own position the test cannot be switched off or made
+                    # stricter than its default: the gene there that aligns to the query IS
+                    # the gene of interest, and a gene is never its own neighbour. (With
+                    # --goi_relative_evalue 0 it came back as an anchor and raised the
+                    # flanking count of every true call by one.)
+                    return is_goi_relative(_gene_protein(g, genome_seqs), goi_seqs,
+                                           max(args.goi_relative_evalue, GOI_SELF_EVALUE))
 
                 # Walk outward from the GOI center collecting genes into the window.
                 # - GOI-similar genes are skipped as flanking anchors (useless for synteny).
@@ -654,7 +704,7 @@ def main():
             overlap_added_count = 0
             for g in overlap_genes:
                 if g not in extracted_genes:
-                    if goi_seqs and _is_goi_similar(g):
+                    if goi_seqs and _is_goi_itself(g):
                         name = _preferred_gene_label(g)
                         print(f"  [overlap-filter] NOT re-injecting GOI-similar overlap gene: {name}")
                         continue
@@ -683,13 +733,21 @@ def main():
                     'end': goi_end,
                     'strand': '+',
                     'attrs': {'ID': goi_id},
-                    'seq': goi_prot
+                    'seq': goi_prot,
+                    'placeholder': True,
                 })
                 print(f"Injected GOI pseudo-gene at {region['chrom']}:{goi_start}-{goi_end}")
 
     # Write Outputs
     all_fasta_records = []  # Collect all FASTA records
-    
+    # Home coordinates of every anchor and the length of the home genome travel with the
+    # proteins (FASTA header fields `home=` and `genome=`): the search derives its
+    # distances from them (bin/synvoy_scale.py).
+    genome_bp = sum(len(seq) for seq in genome_seqs.values())
+
+    def _home_fields(gene):
+        return f"home={gene['start']}-{gene['end']} genome={genome_bp}"
+
     with open(args.out_bed, 'w') as bed_out:
         seen = set()
         for gene in extracted_genes:
@@ -709,11 +767,18 @@ def main():
             )
             
             # Write FASTA - depends on exon_mode
-            if 'seq' in gene:
+            if gene.get('placeholder'):
+                # The marker of the GOI in the home BED, not a query: its "protein" is the
+                # translation of the hit interval on the plus strand up to the first stop.
+                # For a single-exon gene on the plus strand that is the gene once more; it
+                # then entered the search as a second GOI and collected most of the
+                # low-confidence rows (yeast STE2: 16 of 19). For any other gene it is noise.
+                pass
+            elif 'seq' in gene:
                 # From prediction - no exon info available, use whole sequence
                 prot_seq = str(gene['seq'])
                 if len(prot_seq) * 3 >= args.min_size:
-                    all_fasta_records.append((seq_header, prot_seq))
+                    all_fasta_records.append((f"{seq_header} {_home_fields(gene)}", prot_seq))
             else:
                 if gene['chrom'] not in genome_seqs:
                     continue
@@ -777,7 +842,8 @@ def main():
                         if '*' in full_prot:
                             full_prot = full_prot.split('*')[0]
                         if len(full_prot) >= 10:
-                            full_header = f"{gid} full_length_protein exons={len(cds_parts)} strand={gene['strand']}"
+                            full_header = (f"{gid} full_length_protein exons={len(cds_parts)} "
+                                           f"strand={gene['strand']} {_home_fields(gene)}")
                             all_fasta_records.append((full_header, full_prot))
                     else:
                         # WHOLE PROTEIN MODE: Concatenate all exons
@@ -810,7 +876,7 @@ def main():
                             prot_seq = prot_seq.split('*')[0]
                         
                         if len(prot_seq) * 3 >= args.min_size:
-                            all_fasta_records.append((seq_header, prot_seq))
+                            all_fasta_records.append((f"{seq_header} {_home_fields(gene)}", prot_seq))
                         
                 else:
                     # No CDS parts — non-coding gene (lncRNA, pseudogene, etc.).

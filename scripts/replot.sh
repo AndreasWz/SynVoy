@@ -71,6 +71,7 @@ args=(--home_bed "$home_bed" --target_gffs "${target_gffs[@]}")
 [ ${#regions[@]} -ge 1 ]    && args+=(--candidate_beds "${regions[@]}")
 [ ${#trees[@]} -ge 1 ]      && args+=(--tree "${trees[0]}")
 [ -f "$IN/species_mapping.tsv" ] && args+=(--species_map "$IN/species_mapping.tsv")
+[ -f "$IN/genome_qc_summary.json" ] && args+=(--genome_qc "$IN/genome_qc_summary.json")
 if [ -f "$IN/gene_names.tsv" ] && ! grep -qE '^# NCBI Gene lookup: (FAILED|skipped)' "$IN/gene_names.tsv"; then
     args+=(--gene_names_tsv "$IN/gene_names.tsv")
 else
@@ -82,9 +83,8 @@ fi
 # anything passed on the command line overrides these.
 PYTHONHASHSEED=0 python3 "$REPO/bin/plot_synteny.py" \
     "${args[@]}" \
-    --hide_goi_absent \
     --gap_threshold 50000 --gap_visual_size 20000 \
-    --flank_fallback_bp 1000000 --scale_bar_len 10000 --plot_width 1500 \
+    --flank_fallback_bp 1000000 --scale_bar_len auto --plot_width 1500 \
     --no_network \
     --output "$OUT/${name}_synteny_plot.html" \
     "$@"

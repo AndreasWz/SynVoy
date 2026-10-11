@@ -53,6 +53,8 @@ logger = setup_logging(name="phylo_placement_check")
 #     GOI_Melt|Colletes_gigas_fa_b0_l1_fallback      seeded block, fallback span
 #     GOI_Melt|Apis_florea_fna_b0_l1_exon_ann        seeded block, exon model
 #     GOI_copy_1|Apis_cerana_fna_b0_l1               tandem copy  <-- NO trailing token
+#     GOI_Melt|Apis_florea_fna_b0_l1m2_exon_ann      second model of the same locus
+#     GOI_Melt|Apis_florea_fna_b0_r1_fallback        found with the relative's model as query
 #     GOI_Melt|Colletes_gigas_WUUM01000001.1_hull_rescue   hull rescue (chrom, not block)
 #     GOI_rescue_<genome>_locus_<name>_<idx>         strong-synteny rescue (no pipe)
 #
@@ -64,7 +66,7 @@ logger = setup_logging(name="phylo_placement_check")
 # Parsing arbitrary suffixes is the wrong shape of solution: the genome stems are KNOWN
 # (they are the keys of sorted_genomes.txt), so resolve by longest known-stem prefix and
 # keep the regex only as a fallback for callers that pass no stem list.
-_ID_SUFFIX = re.compile(r"_b\d+_(?:l\d+|fl\d+)(?:_.*)?$")
+_ID_SUFFIX = re.compile(r"_b\d+_(?:[lr]\d+(?:m\d+)?|fl\d+)(?:_.*)?$")
 _EXT = re.compile(r"[._](?:fna|fa|fasta)$")
 _RESCUE_PREFIX = re.compile(r"^GOI_rescue_")
 

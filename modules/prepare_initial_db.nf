@@ -30,11 +30,15 @@ process PREPARE_INITIAL_DB {
     print("Loading flanking genes from ${flanking_faa}...")
     flanking_raw = list(parse_fasta("${flanking_faa}"))
     NON_AA = re.compile(r"[^A-Za-z]")
+    # Home coordinates of the anchors stay in the header (after the id): the search
+    # derives its distances from them, see bin/synvoy_scale.py.
+    HOME_FIELDS = re.compile(r"(?:^|\\s)((?:home|coords|genome)=[0-9-]+)")
     skipped = 0
     for raw_header, clean_id, seq in flanking_raw:
         cleaned = NON_AA.sub("", str(seq).upper()).replace("*", "")
         if cleaned and len(cleaned) >= 5:
-            all_records.append((clean_id, cleaned))
+            fields = " ".join(HOME_FIELDS.findall(raw_header))
+            all_records.append((f"{clean_id} {fields}".strip(), cleaned))
         else:
             skipped += 1
     flanking_count = len(all_records)

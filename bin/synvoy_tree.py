@@ -645,8 +645,9 @@ def species_from_leaf(leaf: str) -> Optional[str]:
         if tail.endswith(suf):
             tail = tail[: -len(suf)]
     # Strip optional _extraN tag (tandem-copy disambiguator), then block/locus
-    # IDs (_b0/_l1/_fl2 in any order), then the genome-extension stub.
+    # IDs (_b0/_l1/_fl2 in any order; _l1m2 = second model of a locus, _r1 = found
+    # with a relative's model as query), then the genome-extension stub.
     tail = re.sub(r"_extra\d+$", "", tail)
-    tail = re.sub(r"_(b|fl|l)\d+(_(b|fl|l)\d+)*$", "", tail)
+    tail = re.sub(r"(_(b|fl|l|r)\d+(m\d+)?)+$", "", tail)
     tail = re.sub(r"_(fa|fna|fasta)$", "", tail)
     return tail

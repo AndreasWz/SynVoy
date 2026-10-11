@@ -36,7 +36,7 @@ the first two are counted as orthologs.
 
 | Label | Meaning |
 |---|---|
-| `HIGH` | A gene model (normally multi-exon) at ≥ 50 % identity in a neighbourhood with conserved, collinear flanking genes. |
+| `HIGH` | A gene model at ≥ 50 % identity in a neighbourhood with conserved, collinear flanking genes. The model has at least two exons, or one exon when the home gene has one and the model covers the query like a complete gene. |
 | `MEDIUM` | A real but weaker case: lower identity, a single exon, or a hit chain with strong support. |
 | `AMBIGUOUS` | A candidate in a conserved neighbourhood whose **own** sequence evidence does not show it is the gene (`syntenic_candidate_unconfirmed`), or a call that matches a home *paralog* better than the query (`paralog_not_goi`). Named in the report, drawn in the plots, **not counted as an ortholog**. A gene lost from a conserved locus leaves the neighbourhood intact, so flanking support alone cannot tell "present" from "lost". |
 | `LOW` | A lead: a fragment, a weak hit, a chance alignment. Never cite without manual review. |
@@ -130,7 +130,8 @@ Attributes on a model's `mRNA` row:
 |---|---|
 | `SynVoyRole` | `goi` or `flanking` |
 | `Confidence`, `GOIClass`, `EvidenceType`, `ModelStatus` | As in the table above |
-| `Identity`, `QueryCoverage`, `Exons` | % identity, fraction of the query covered, exon count |
+| `Identity`, `QueryCoverage`, `Exons` | % identity, fraction of the query covered, exon count. Both always refer to the **home protein** |
+| `SearchQuery`, `SearchQueryIdentity` | Only on a model that the home protein did not find and the gene model of a previously searched genome did: that model's id, and the identity to it. `Identity` is still measured against the home protein |
 | `StartCodon`, `StopCodon` | `yes` / `no`: whether the model begins with ATG and ends at a stop codon. SynVoy extends a miniprot model's two ends to the nearest in-frame start / stop when it can do so without crossing a splice site. |
 | `SyntenyContext`, `BlockFlankingSupport`, `BlockCollinearSupport` | The neighbourhood: how many distinct flanking genes its block holds, and the longest run of them in home order |
 | `InferenceReason` | Why it got its confidence (e.g. `goi_tandem_copy_weak_context`, `fragment_model_with_flanking_only`) |
@@ -140,6 +141,33 @@ Attributes on a model's `mRNA` row:
 | `Rearranged_from` | Flanking models placed on another scaffold than their block |
 
 `CDS` rows add `SpliceDonor` / `SpliceAcceptor`.
+
+**Model ids.** `GOI_<name>|<genome>_b<block>_l<locus>_<kind>`: the block of flanking
+genes, the candidate locus inside its window (`l1` = the best), and how the model was
+built (`exon_ann` = miniprot model, `fallback` = hit chain). Two additions since
+2026-10-09: `l1m2`, `l1m3` … are further gene models of the same locus (the other
+copies of a tandem array; before, only the first was reported), and `r<n>` in place of
+`l<n>` marks a model found only with a relative's model as query (see `SearchQuery`).
+
+**The distances of the search.** The first lines of each `<species>.gff` hold a
+comment with the distances used for that genome, in base pairs, and how they were
+obtained:
+
+```
+##synvoy-distances {"cluster_distance":21897,"dispersed_envelope_margin":28153,"expansion":1.301,"expansion_anchors":15,"expansion_source":"anchors","goi_margin":6256,"home_anchors":20,"home_pitch_bp":2404,"home_span_bp":45681,"region_padding":21897,"search_margin":21897,"source":{…},"synteny_bridge_max_gap":62562}
+```
+
+`home_pitch_bp` is the mean step between neighbouring flanking genes at home,
+`expansion` how much larger the same neighbourhood is in this genome
+(`expansion_source`: `anchors` = measured over a run of flanking genes in home order,
+`genome size` = ratio of the genome lengths, `none` = 1; `expansion_anchors` is the
+number of flanking genes in the longest such run, at least 5 for a measurement), and
+`source` says for each
+distance whether it was `derived`, `set in bp` by the user, or `fixed (no home
+coordinates)`. `region_padding` is the extent of the neighbourhood on each side of a
+block and `search_margin` the DNA that was cut out and searched on each side (the same
+here; narrower where a wide neighbourhood holds DNA whose hits could not be used). See
+[PARAMETERS.md § 5](PARAMETERS.md#distances-in-gene-units).
 
 For a genome browser:
 ```
@@ -191,6 +219,7 @@ terms were redefined then.
 | `gene_family_advisory` | Set when the query looks like a member of a large family, where calls are candidates rather than orthologs |
 | `annotations` | Counts by role, confidence, class and evidence type; `per_genome` breakdown |
 | `regions`, `synteny_results` | Region statistics per genome |
+| `warnings` | Sentences to read before any number: a target genome that failed the assembly quality check and was searched anyway (a genome you chose is kept, see `qc_fail_policy`). Empty on a clean run. Such a genome is also in `summary.low_quality_genomes_searched`, its calls carry `low_quality_assembly: true`, and its row has a dagger (†) in the figures |
 | `genome_qc`, `qc_summary` | Assembly quality of each target |
 | `staging_diagnostics` | Plumbing diagnostics — useful when something looks wrong |
 
@@ -264,6 +293,13 @@ every other call is a **weak call**.
 - A genome with more than ten copies shows the first ten models and `+N more`
   (`--grid_max_models`); every copy keeps its small arrow and its row in the
   source table.
+- **`–`** stands in the cell of a genome that was searched and has no GOI call.
+  Its row is drawn all the same, with the flanking genes that were placed; a row
+  in which nothing was placed reads "no flanking gene placed". The legend text
+  (`*_print.legend.txt`) names these genomes and how many flanking genes each
+  holds. A missing model is not evidence that the gene is absent. Until
+  2026-10-09 such genomes were left out of every figure; `--hide_goi_absent_tracks
+  true` brings that back.
 
 The same rule counts copies elsewhere: `×N` in the ribbon plot's GOI label and in
 the gene-position map is the number of copies, `+N weak` the weak calls. Earlier
@@ -354,14 +390,13 @@ cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 |---|---|
 | `query/` | `normalized_query.faa` — the cleaned query (translated if the input was DNA; only the first record of a multi-sequence file) |
 | `locate_gene/` | The query's hits on the home genome, `hit_profile.json`, `auto_preset.json`, `effective_params.json` |
-| `split_loci/` | One BED per home locus |
+| `split_loci/` | One BED per home locus (the annotated home gene is the first one; `--home_locus_mode`) |
 | `flanking/` | The flanking genes of each home locus (`synteny_block_locus_<N>.bed`, proteins) |
 | `annotate_goi/` | The GOI's exon structure on the home genome (`goi_exons.faa`, `goi_annotation.bed`, `goi_info.json`) |
 | `phylo_sort/` | Target genomes ordered closest first, with distances |
 | `initial_db/` | The starting query set (flanking proteins + GOI) |
 | `qc/` | The targets that passed assembly QC |
 | `phylo_placement/` | Per-locus phylogenetic-placement table |
-| `resolve_home_locus/` | Only with `--enable_name_locus` / `--home_goi_gene` |
 | `estimate_params/` | Only with `--auto_params true`: `estimated_params.json` |
 
 Two files are worth knowing on a healthy run:

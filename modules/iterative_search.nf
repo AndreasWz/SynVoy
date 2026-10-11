@@ -7,8 +7,6 @@ process ITERATIVE_SEARCH {
     path sorted_genomes_file
     path genomes // List or Dir
     path home_db // MMseqs DB directory
-    val flanking_genes
-    val min_score
     val sensitivity
     // §1f: preset-affected params resolved at runtime (see RESOLVE_EFFECTIVE_PARAMS).
     // All other params still read directly from `params.X`.
@@ -45,9 +43,12 @@ process ITERATIVE_SEARCH {
         --goi_info $goi_info \\
         --goi_fallback_intron_margin ${params.goi_fallback_intron_margin} \\
         --goi_fallback_intron_floor ${params.goi_fallback_intron_floor} \\
+        --block_gap_genes ${params.block_gap_genes} \\
         --cluster_distance ${params.cluster_distance} \\
-        --min_gene_identity ${params.min_gene_identity} \\
+        --window_margin_genes ${params.window_margin_genes} \\
         --region_padding ${params.region_padding} \\
+        --goi_margin_genes ${params.goi_margin_genes} \\
+        --goi_margin ${params.goi_margin} \\
         --padding_min ${params.padding_min} \\
         --padding_max ${params.padding_max} \\
         --enable_smith_waterman ${params.enable_smith_waterman} \\
@@ -63,19 +64,19 @@ process ITERATIVE_SEARCH {
         --aug_relaxed_identity_min ${params.aug_relaxed_identity_min} \\
         --aug_relaxed_length_div ${params.aug_relaxed_length_div} \\
         --aug_relaxed_length_min ${params.aug_relaxed_length_min} \\
-        --aug_dedup_bin_bp ${params.aug_dedup_bin_bp} \\
         --gap_search_window ${params.gap_search_window} \\
-        --gap_min_size ${params.gap_min_size} \\
-        --gap_evalue ${params.gap_evalue} \\
         --gap_min_identity ${params.gap_min_identity} \\
-        --gap_min_alnlen ${params.gap_min_alnlen} \\
         --gap_max_hits ${params.gap_max_hits} \\
-        --min_exon_query_cov ${params.min_exon_query_cov} \\
         --min_exon_alnlen ${params.min_exon_alnlen} \\
         --max_blocks_per_genome ${params.max_blocks_per_genome} \\
         --min_block_genes ${params.min_block_genes} \\
         --disable_synteny_collinearity ${params.disable_synteny_collinearity} \\
+        --synteny_bridge_max_gap_genes ${params.synteny_bridge_max_gap_genes} \\
         --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
+        --disable_anchor_resolution ${params.disable_anchor_resolution} \\
+        --anchor_max_places ${params.anchor_max_places} \\
+        --disable_relative_query ${params.disable_relative_query} \\
+        --goi_max_models_per_locus ${params.goi_max_models_per_locus} \\
         --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
         --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\
@@ -84,7 +85,6 @@ process ITERATIVE_SEARCH {
         --fallback_short_query_len ${params.fallback_short_query_len} \\
         --fallback_short_min_aln_aa ${params.fallback_short_min_aln_aa} \\
         --fallback_short_min_bits ${params.fallback_short_min_bits} \\
-        --max_consecutive_empty_blocks ${params.max_consecutive_empty_blocks} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --classify_high_min_identity ${settings.classify_high_min_identity} \\
         --classify_medium_min_identity ${settings.classify_medium_min_identity} \\
@@ -103,6 +103,8 @@ process ITERATIVE_SEARCH {
         --distance_autotune_far_pct ${params.distance_autotune_far_pct} \\
         --distance_autotune_max_relax ${params.distance_autotune_max_relax} \\
         --distance_autotune_min_flanking ${params.distance_autotune_min_flanking} \\
+        --distance_autotune_high_floor ${params.distance_autotune_high_floor} \\
+        --distance_autotune_medium_floor ${params.distance_autotune_medium_floor} \\
         --classify_fragment_max_qcov ${settings.classify_fragment_max_qcov} \\
         --classify_complete_min_qcov ${settings.classify_complete_min_qcov} \\
         --strict_goi_family ${settings.strict_goi_family} \\
@@ -133,6 +135,7 @@ process ITERATIVE_SEARCH {
         --dispersed_goi_max_evalue ${params.dispersed_goi_max_evalue} \\
         --dispersed_goi_min_alnlen ${params.dispersed_goi_min_alnlen} \\
         --dispersed_min_chrom_anchors ${params.dispersed_min_chrom_anchors} \\
+        --dispersed_envelope_margin_genes ${params.dispersed_envelope_margin_genes} \\
         --dispersed_envelope_margin ${params.dispersed_envelope_margin} \\
         --prefix ${locus_id} \\
         --resume

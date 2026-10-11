@@ -35,22 +35,19 @@ DEFAULTS = {
     "sw_min_identity": 30.0,
     "min_hit_identity": 25,
     "min_hit_length": 20,
-    "min_query_length": 30,
     "classify_high_min_identity": 50.0,
-    "classify_medium_min_identity": 35.0,
+    "classify_medium_min_identity": 40.0,
     "classify_tandem_min_identity": 40.0,
     "classify_fragment_max_qcov": 0.4,
     "classify_complete_min_qcov": 0.7,
     "expand_goi_similar": True,
     "strict_goi_family": False,
     "goi_family_tokens": "",
-    "max_flanking_goi_similarity": 35.0,
+    "goi_relative_evalue": 1e-5,
     "adaptive_score_floor_frac": 0.3,
     "adaptive_score_floor_abs": 0.05,
     "adaptive_max_regions": 8,
     "adaptive_unique_gene_floor": 2,
-    "auto_params": True,
-    "multi_profile": True,
 }
 
 
@@ -68,16 +65,17 @@ def test_auto_preset_applies_overrides_and_traces_source():
     res = rep.resolve(DEFAULTS, auto_preset=auto)
     assert res["preset_applied"] == "preset_paralog_discrimination"
     # Spot-check the key overrides land.
-    assert res["settings"]["classify_high_min_identity"] == 55.0
+    assert res["settings"]["adaptive_score_floor_frac"] == 0.45
     assert res["settings"]["adaptive_max_regions"] == 4
     assert res["settings"]["strict_goi_family"] is True
-    # auto_params/multi_profile flipped off (§paralog_discrimination preset).
-    assert res["settings"]["auto_params"] is False
-    assert res["settings"]["multi_profile"] is False
-    # Unaffected keys keep defaults.
+    # Unaffected keys keep defaults. Since 2026-10-08 that includes the HIGH / MEDIUM
+    # identity thresholds, which this preset used to raise to 55 / 40.
     assert res["settings"]["sw_min_score"] == DEFAULTS["sw_min_score"]
+    assert res["settings"]["classify_high_min_identity"] == DEFAULTS["classify_high_min_identity"]
+    assert res["settings"]["classify_medium_min_identity"] == DEFAULTS["classify_medium_min_identity"]
     # Source trace marks the touched keys.
-    assert res["source"]["classify_high_min_identity"].startswith("preset:")
+    assert res["source"]["adaptive_max_regions"].startswith("preset:")
+    assert res["source"]["classify_tandem_min_identity"] == "default"
     assert res["source"]["sw_min_score"] == "default"
 
 
@@ -86,7 +84,8 @@ def test_explicit_override_beats_auto_preset():
     auto = {"preset": "preset_short_peptide"}
     res = rep.resolve(DEFAULTS, auto_preset=auto, preset_override="preset_single_copy")
     assert res["preset_applied"] == "preset_single_copy"
-    assert res["settings"]["classify_high_min_identity"] == 55.0
+    assert res["settings"]["strict_goi_family"] is True
+    assert res["settings"]["classify_high_min_identity"] == DEFAULTS["classify_high_min_identity"]
     # Short-peptide-only key remains at the default (single_copy doesn't touch it).
     assert res["settings"]["sw_min_score"] == DEFAULTS["sw_min_score"]
     assert "user pinned" in res["apply_reason"]
@@ -295,14 +294,15 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     """If nextflow.config changes shape and a key stops being parsed, user-set
     detection silently stops working for it. Fail here instead."""
     keys = _preset_default_keys_from_main_nf()
-    assert len(keys) >= 20
+    assert len(keys) >= 16
     shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
     assert sorted(shipped) == sorted(keys), sorted(set(keys) - set(shipped))
     # Spot-check literals and that trailing comments/quotes are stripped.
     assert rep._norm(shipped["classify_high_min_identity"]) == ("num", 50.0)
     assert rep._norm(shipped["strict_goi_family"]) == ("bool", False)
     assert shipped["goi_family_tokens"] == ""
-    assert rep._norm(shipped["min_query_length"]) == ("num", 30.0)
+    assert rep._norm(shipped["classify_medium_min_identity"]) == ("num", 40.0)
+    assert rep._norm(shipped["goi_relative_evalue"]) == ("num", 1e-5)
 
 
 def test_every_preset_key_is_fed_by_main_nf():
@@ -332,7 +332,7 @@ def test_user_set_value_beats_auto_preset_and_is_reported():
     assert res["source"]["classify_high_min_identity"] == "user_set"
     assert res["user_set_kept"] == ["classify_high_min_identity"]
     # Keys the user did not touch still take the preset's value.
-    assert res["settings"]["classify_medium_min_identity"] == 25.0
+    assert res["settings"]["classify_medium_min_identity"] == 30.0
     assert res["source"]["classify_medium_min_identity"] == "preset:preset_short_peptide"
 
 
@@ -388,7 +388,7 @@ def test_cli_without_shipped_config_keeps_the_old_behaviour(tmp_path: Path):
          "--defaults", str(tmp_path / "defaults.json"), "--output", str(out)],
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(out.read_text())["settings"]["classify_medium_min_identity"] == 25.0
+    assert json.loads(out.read_text())["settings"]["classify_medium_min_identity"] == 30.0
 
 
 def test_unreadable_shipped_config_warns_and_falls_back(tmp_path: Path):
@@ -420,3 +420,73 @@ def test_no_preset_carries_gene_specific_family_tokens():
         code = "\n".join(l for l in cfg.read_text().splitlines()
                          if not l.strip().startswith("//"))
         assert "goi_family_tokens" not in code, cfg.name
+
+
+def test_presets_no_longer_move_the_identity_thresholds_of_long_queries():
+    """Revised 2026-10-08. Two presets raised HIGH / MEDIUM to 55 / 40 for every query of
+    100 aa or more whatever the chooser decided; the third lowered MEDIUM to 30. On five
+    benchmark families no gene model below 40 % identity lay on a curated gene and models
+    at 50-55 % were right as often as models at 55-60 %: MEDIUM 40 is the default now,
+    HIGH stays at 50, and only the short-peptide preset has thresholds of its own."""
+    for name in ("preset_single_copy", "preset_tandem_family", "preset_paralog_discrimination"):
+        assert "classify_high_min_identity" not in rep.PRESET_OVERRIDES[name], name
+        assert "classify_medium_min_identity" not in rep.PRESET_OVERRIDES[name], name
+    short = rep.PRESET_OVERRIDES["preset_short_peptide"]
+    assert (short["classify_high_min_identity"], short["classify_medium_min_identity"]) == (40.0, 30.0)
+    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"),
+                                        ["classify_high_min_identity", "classify_medium_min_identity"])
+    assert rep._norm(shipped["classify_high_min_identity"]) == ("num", 50.0)
+    assert rep._norm(shipped["classify_medium_min_identity"]) == ("num", 40.0)
+
+
+def test_no_preset_sets_a_parameter_that_does_nothing():
+    """`min_query_length` is checked before a preset can be chosen, `auto_params` cannot
+    change after launch, `multi_profile` was never implemented."""
+    for name, overrides in rep.PRESET_OVERRIDES.items():
+        for dead in ("min_query_length", "auto_params", "multi_profile", "max_flanking_goi_similarity"):
+            assert dead not in overrides, (name, dead)
+
+
+def test_short_peptide_preset_no_longer_lowers_floors_that_do_not_bind():
+    """Until 2026-10-09 the short-peptide preset lowered `sw_min_score`, `sw_min_identity`,
+    `min_hit_identity` and `min_hit_length`. That changed nothing: the E-value filters are
+    stricter than these floors. The numbers behind the statement are pinned here, so the
+    entries come back only together with a reason."""
+    import smith_waterman_search as sw
+
+    short = rep.PRESET_OVERRIDES["preset_short_peptide"]
+    for key in ("sw_min_score", "sw_min_identity", "min_hit_identity", "min_hit_length"):
+        assert key not in short, key
+
+    shipped = rep.load_shipped_defaults(
+        str(ROOT / "nextflow.config"),
+        ["sw_min_score", "min_hit_identity", "min_hit_length", "aug_relaxed_identity_min",
+         "aug_relaxed_identity_factor", "aug_relaxed_length_min", "aug_relaxed_length_div",
+         "min_query_length"])
+    num = {k: rep._norm(v)[1] for k, v in shipped.items()}
+
+    # Smith-Waterman: the lowest raw score with E <= 1 for the shortest query the pipeline
+    # accepts, in a window of only 2 kb (six frames = 2 x the window in residues).
+    lowest = next(s for s in range(1, 300)
+                  if sw.karlin_altschul(s, int(num["min_query_length"]), 2 * 2000, 11, 1)[1] <= 1.0)
+    assert lowest == 31
+    assert num["sw_min_score"] < lowest
+
+    # Window hits: the floors in use are the same for the default and the former preset value.
+    for identity, length in ((num["min_hit_identity"], num["min_hit_length"]), (8, 8)):
+        assert max(num["aug_relaxed_identity_min"], identity * num["aug_relaxed_identity_factor"]) == 15
+        assert max(num["aug_relaxed_length_min"], length // num["aug_relaxed_length_div"]) == 15
+
+
+def test_tandem_copy_identity_is_50_by_default_and_40_for_short_peptides():
+    """2026-10-09. The preset chooser used to give half of all queries the paralog preset,
+    which set 50; counting places instead of rows moved most of them to presets without
+    that entry, so the value would have dropped to 40 for them. Measured on four benchmark
+    families: 92 single-segment tandem rows, none on a curated gene, 35 of them at
+    40-50 % identity. 50 is the default now; short peptides keep 40."""
+    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), ["classify_tandem_min_identity"])
+    assert rep._norm(shipped["classify_tandem_min_identity"]) == ("num", 50.0)
+    assert rep.PRESET_OVERRIDES["preset_short_peptide"]["classify_tandem_min_identity"] == 40.0
+    for name in ("preset_single_copy", "preset_tandem_family", "preset_paralog_discrimination"):
+        assert "classify_tandem_min_identity" not in rep.PRESET_OVERRIDES[name], name
+    assert "classify_fragment_max_qcov" not in rep.PRESET_OVERRIDES["preset_paralog_discrimination"]

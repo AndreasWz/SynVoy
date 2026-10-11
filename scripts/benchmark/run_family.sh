@@ -53,7 +53,7 @@ nextflow -log "$OUT/nextflow.log" run "$REPO/main.nf" \
     --mode pro --query "$IN/query.faa" \
     --home_genome "$IN/home/Apis_mellifera.fna" --home_gff "$IN/home/Apis_mellifera.gff" \
     --home_species 'Apis mellifera' --target_genomes "$IN/targets/*" \
-    --keep_intermediate true --outdir "$OUT" -w "$WORK" "$@"
+    --outdir "$OUT" -w "$WORK" "$@"
 
 "$PY" "$HARNESS" --data "$DATA" score \
     --run "$OUT" --family "$FAM" --out-prefix "$OUT/family_score" | tee "$OUT/family_score.txt"
