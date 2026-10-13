@@ -55,7 +55,6 @@ _LOCUS_FILES = (
     ("synteny_plot_view.svg", "ribbons"),
     ("synteny_plot.html", "ribbons_page"),
     ("gene_positions.svg", "positions"),
-    ("anchor_positions.svg", "anchors"),
     ("tree.html", "tree_page"),
     ("anchor_grid_print.svg", "print"),
     ("anchor_grid_print.legend.txt", "print_legend"),

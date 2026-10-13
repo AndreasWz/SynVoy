@@ -123,8 +123,7 @@ def write_outputs(out, stems, query_header):
     with open(os.path.join(out, "synvoy_report.json"), "w") as fh:
         json.dump(report, fh)
     svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
-    for name in ("anchor_grid.svg", "synteny_plot_view.svg", "gene_positions.svg",
-                 "anchor_positions.svg"):
+    for name in ("anchor_grid.svg", "synteny_plot_view.svg", "gene_positions.svg"):
         with open(os.path.join(out, "synteny_block_locus_1_" + name), "w") as fh:
             fh.write(svg)
     for name in ("anchor_grid.html", "synteny_plot.html", "tree.html"):

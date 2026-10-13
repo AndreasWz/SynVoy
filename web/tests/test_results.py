@@ -135,7 +135,7 @@ def test_bundle_holds_what_the_page_links_to(output, tmp_path):
     locus = result["loci"][0]
     assert (locus["n"], locus["chrom"], locus["start"], locus["neighbours"]) == (1, "chrH", 1000, 6)
     assert set(locus["files"]) >= {"grid", "grid_page", "ribbons", "ribbons_page", "positions",
-                                   "anchors", "tree_page", "tree_newick"}
+                                   "tree_page", "tree_newick"}
     listed = results.bundle_files(result)
     on_disk = {"files/" + p.name for p in (bundle / "files").iterdir()}
     assert listed == on_disk                                 # nothing unlisted, nothing missing

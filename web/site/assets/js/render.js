@@ -130,12 +130,12 @@ function viewer() {
 }
 
 function figures(result, fileUrl) {
-  const loci = (result.loci || []).filter((l) => l.files && (l.files.grid || l.files.ribbons || l.files.positions || l.files.anchors || l.files.tree_page));
+  const loci = (result.loci || []).filter((l) => l.files && (l.files.grid || l.files.ribbons || l.files.positions || l.files.tree_page));
   if (!loci.length) return null;
   const state = { locus: 0, tab: null };
   const tabsFor = (locus) => {
     const f = locus.files;
-    return [["grid", f.grid], ["ribbons", f.ribbons], ["positions", f.positions], ["anchors", f.anchors], ["tree", f.tree_page]]
+    return [["grid", f.grid], ["ribbons", f.ribbons], ["positions", f.positions], ["tree", f.tree_page]]
       .filter((pair) => pair[1]).map((pair) => pair[0]);
   };
   const tabBar = el("div", { class: "segmented", role: "group", "aria-label": "Figure" });

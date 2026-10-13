@@ -245,11 +245,6 @@ export const FIGURES = {
     alt: "Position figure: where each gene of the neighbourhood lies in each genome.",
     how: "Where each gene lies on its chromosome or scaffold, genome by genome.",
   },
-  anchors: {
-    tab: "Landmarks",
-    alt: "Landmark figure: the neighbouring genes found in each genome, at their positions.",
-    how: "The neighbouring genes that were found in each genome, at their positions. Copies of the query gene are drawn as notched arrows.",
-  },
   tree: {
     tab: "Gene tree",
     alt: "Tree of the recovered proteins.",
