@@ -13,7 +13,7 @@ which question**, in order of how often they're useful.
 │       + _print.legend.txt / _print.source.tsv          its legend text and cell values
 ├── synteny_block_locus_<N>_synteny_plot.html            ribbon plot (exploration)
 ├── synteny_block_locus_<N>_*_with_fragments.*           same figures, fragments drawn
-├── synteny_block_locus_<N>_gene_positions.* / _anchor_positions.*
+├── synteny_block_locus_<N>_gene_positions.html / .svg   gene-position map
 ├── synteny_block_locus_<N>_gene_names.tsv               gene labels used in the figures
 ├── locus_<N>_tree.nwk  (+ synteny_block_locus_<N>_tree.html with a real tree)
 ├── plot_inputs_synteny_block_locus_<N>/    per-genome GFF + homology table
@@ -255,14 +255,11 @@ print('self-consistency flags:', s.get('self_consistency_flag_count', 0))
 |---|---|
 | `<locus>_anchor_grid.html` / `.svg` | **The headline figure, full version.** Species × gene grid — rows are species (species tree at left), columns are home genes, the GOI column in red. An arrow is the ortholog placed in that neighbourhood: its colour is the home gene, the number its % identity, a number in brackets under the arrow its query coverage when that is below 80 % (`100` over `(7)` = 100 % identity over 7 % of the home protein), its outline the confidence (solid high, dashed medium, dotted low, most broken ambiguous), a second arrow behind it more than one copy at the locus. An empty cell means **no ortholog was placed in this neighbourhood**, not that the gene is absent. The axis above the grid shows where the home genes really lie; the right-hand column gives each row's scaffold and position. See [The GOI column](#the-goi-column-of-the-anchor-grid) below. |
 | `<locus>_anchor_grid_print.svg` | **The same grid at print size**: 183 mm wide, at most 170 mm tall, text of 7, 6 and 5 pt in Arial, as a journal asks for a two-column figure. No title, coordinates or names table: `_print.legend.txt` holds the sentences of a figure legend, `_print.source.tsv` one row per cell and GOI call (identity, coverage, confidence, scaffold, coordinates, exons). When a grid is too wide the spacing shrinks first; then the columns with the fewest orthologs are left out, and the log, the legend text and nothing else say which. Options: `--print_grid_numbers` (identity in every arrow, and low query coverage in brackets under it; where that extra line would break the height limit, the identity gets a `*` instead and the value stays in the source table), `--print_width_mm 89` (one column), `--print_height_mm`, `--no_print_grid`. |
-| `<locus>_synteny_plot.html` | Interactive ribbon plot: one track per genome (at most three lanes), ribbons between orthologous flanking genes. Scaffolds that read in the opposite direction to the home genome are flipped so ribbons run straight. For exploring one locus. |
-| `<locus>_synteny_plot_view.svg` | Static mirror of the ribbon plot (always written). |
+| `<locus>_synteny_plot.html` | Interactive ribbon plot: one track per genome (at most three lanes), every gene at its real size with its exons, one scale for all genomes, ribbons between orthologous flanking genes, GOI ribbons in red. Scaffolds that read in the opposite direction to the home genome are flipped so ribbons run straight. The GOI is named once, on the home track; another track carries only its copy count (`×2`, `+1 weak`) when it has one. For exploring one locus on screen. It has no print version: the figure for a paper is the anchor grid. |
+| `<locus>_synteny_plot_view.svg` | The ribbon plot as a picture (always written), for a preview or a README. Not laid out for print. |
 | `*_with_fragments.html` / `.svg` | The ribbon plot and the anchor grid again, **with** `ModelStatus=fragment` GOI models drawn. The main figures hide them: they are single-exon hits that otherwise fill the plot. Written only when a run has fragments. |
 | `<locus>_gene_positions.html` / `.svg` | **Gene-position map.** Each genome is a line with one dot per gene at its true position. The grid answers "is the ortholog there?"; this answers "where does it sit, and is the neighbourhood rearranged?" |
-| `<locus>_anchor_positions.html` / `.svg` | The two views combined: the aligned grid plus each row's real-position line. |
 | `<locus>_tree.html`, `locus_<N>_tree.nwk` | Tree of the GOI sequences (MAFFT + IQ-TREE). With the launcher's default `low_mem` profile the tree step is skipped and the `.nwk` is a placeholder; use `-profile standard` for the real tree. |
-| `<locus>_synteny_plot.svg` | Narrow publication SVG. Opt-in: `--pub_svg true`. |
-| `<locus>_synteny_matrix.svg` | Presence/absence matrix. Opt-in: `--enable_matrix_plot true`. |
 
 Flanking genes are drawn with their real exons. Runs made before 2026-09-17 stored
 a single block per flanking gene, and the plot then drew evenly spaced exons that do
@@ -311,8 +308,8 @@ count, which includes non-coding UTR exons of all transcripts.
 ### Gene names in the figures
 
 Every figure labels a home gene with a gene name, not with its annotation ID. The
-static figures (anchor grid, gene positions, anchor positions, tree, matrix,
-publication SVG) list the names in a **Gene names** table under the plot: label,
+static figures (anchor grid, gene positions, tree) list the names in a **Gene names**
+table under the plot: label,
 full name, gene ID and where the label comes from. The interactive ribbon plot
 (`*_synteny_plot.html` and its `_view.svg` copy) has no table: hover over a gene
 for its label, full name and gene ID. The table is also written to

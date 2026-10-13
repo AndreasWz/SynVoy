@@ -310,8 +310,7 @@ def test_partial_inversion_is_not_flipped():
 # ------------------------------------------- ribbon: no invented exons ----
 
 def _ribbon_args():
-    return SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=10000,
-                           pub_width=89, pub_palette="okabe_ito")
+    return SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=10000)
 
 
 def _ribbon_tracks(target_gene):
@@ -336,7 +335,7 @@ def _gene_groups(html, track):
 def test_ribbon_does_not_invent_exons_from_exon_count():
     fl = _g("gene-FL|t_flank_ann", 0, 6000, home_gene_id="gene-FL", identity=90.0,
             n_exons=6, evidence_type="flanking_miniprot")
-    html = ps.render_synteny_html(_ribbon_tracks(fl), {"gene-FL": "#4e79a7"}, {}, {},
+    html = ps.render_synteny_html(_ribbon_tracks(fl), {"gene-FL": "#4e79a7"}, {},
                                   _ribbon_args(), [], 0, 0, 1)
     flank = _gene_groups(html, 1)[0]
     # Exons=6 but no CDS rows: one arrow, no intron backbone.
@@ -348,12 +347,12 @@ def test_ribbon_draws_real_exons_and_thin_hit_chains():
     model = _g("gene-FL|t_flank_ann", 0, 6000, home_gene_id="gene-FL", identity=90.0,
                evidence_type="flanking_miniprot",
                exon_coords=[(0, 1000), (2500, 3500), (5000, 6000)])
-    html = ps.render_synteny_html(_ribbon_tracks(model), {"gene-FL": "#4e79a7"}, {}, {},
+    html = ps.render_synteny_html(_ribbon_tracks(model), {"gene-FL": "#4e79a7"}, {},
                                   _ribbon_args(), [], 0, 0, 1)
     assert _gene_groups(html, 1)[0].count('class="exon"') == 3
 
     hits = dict(model, evidence_type="flanking_hit_span")
-    html2 = ps.render_synteny_html(_ribbon_tracks(hits), {"gene-FL": "#4e79a7"}, {}, {},
+    html2 = ps.render_synteny_html(_ribbon_tracks(hits), {"gene-FL": "#4e79a7"}, {},
                                    _ribbon_args(), [], 0, 0, 1)
     chain = _gene_groups(html2, 1)[0]
     assert chain.count('class="exon"') == 3

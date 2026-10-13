@@ -23,7 +23,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bin"))
 
 import plot_synteny as ps  # noqa: E402
-import plot_synteny_matrix as pm  # noqa: E402
 import synvoy_gene_names as gn  # noqa: E402
 
 
@@ -421,9 +420,8 @@ def test_home_gene_label_accepts_every_spelling_of_the_id(names):
     assert ps.clean_gene_label("GOI_copy_2", keep_goi_prefix=True) == "GOI #2"
 
 
-@pytest.mark.parametrize("render", [ps.render_anchor_grid, ps.render_anchor_grid_threaded])
-def test_grid_columns_carry_names_not_ids(names, render):
-    html = render(_tracks(), COLOURS, {}, {}, SimpleNamespace())
+def test_grid_columns_carry_names_not_ids(names):
+    html = ps.render_anchor_grid(_tracks(), COLOURS, {}, {}, SimpleNamespace())
     # the figure itself, without the names table (which lists the IDs on purpose)
     texts = _texts(html.split('class="gene-names-table"')[0])
     for label in ("PTL*", "alc", "Melt", "LOC3"):
@@ -432,8 +430,7 @@ def test_grid_columns_carry_names_not_ids(names, render):
     assert any(t.endswith("GOI: Melt") for t in texts)
 
 
-@pytest.mark.parametrize("render", [ps.render_anchor_grid, ps.render_anchor_grid_positional,
-                                    ps.render_anchor_grid_threaded])
+@pytest.mark.parametrize("render", [ps.render_anchor_grid, ps.render_anchor_grid_positional])
 def test_every_grid_figure_has_the_names_table(names, render):
     html = render(_tracks(), COLOURS, {}, {}, SimpleNamespace())
     assert html.count('class="gene-names-table"') == 1
@@ -449,8 +446,7 @@ def test_every_grid_figure_has_the_names_table(names, render):
     assert max(float(y) for y in re.findall(r' y="([0-9.]+)"', table)) < height
 
 
-@pytest.mark.parametrize("render", [ps.render_anchor_grid, ps.render_anchor_grid_positional,
-                                    ps.render_anchor_grid_threaded])
+@pytest.mark.parametrize("render", [ps.render_anchor_grid, ps.render_anchor_grid_positional])
 def test_no_gene_legend_switch_removes_the_table(names, render):
     html = render(_tracks(), COLOURS, {}, {}, SimpleNamespace(gene_legend=False))
     assert "gene-names-table" not in html
@@ -503,8 +499,8 @@ def _ribbon_tracks():
 
 
 def test_interactive_ribbon_plot_has_no_table(names):
-    # Label, full name and gene ID are in the tooltip; the table is for print only.
-    html = ps.render_synteny_html(_ribbon_tracks(), COLOURS, {}, {}, _ribbon_args(), [], 0, 0, 1)
+    # Label, full name and gene ID are in the tooltip.
+    html = ps.render_synteny_html(_ribbon_tracks(), COLOURS, {}, _ribbon_args(), [], 0, 0, 1)
     assert 'class="gene-names-table"' not in html
     # The footer holds the legend only; it follows the canvas bottom on reflow.
     assert html.count('class="figure-legend"') == 1
@@ -512,26 +508,6 @@ def test_interactive_ribbon_plot_has_no_table(names):
     assert 0 < layout["footerH"] < 200
     tooltips = " ".join(re.findall(r"data-tooltip='([^']*)'", html))
     assert "pancreatic triacylglycerol lipase" in tooltips
-
-
-def test_publication_ribbon_plot_has_the_table_and_keeps_it_on_reflow(names):
-    html = ps.render_synteny_html(_ribbon_tracks(), COLOURS, {}, {}, _ribbon_args(), [], 0, 0, 1,
-                                  force_home_labels=True)
-    assert html.count('class="gene-names-table"') == 1
-    assert "pancreatic triacylglycerol lipase" in _texts(html)
-    layout = json.loads(re.search(r"__SYNVOY_LAYOUT__ = (\{.*?\});</script>", html).group(1))
-    assert layout["footerH"] > 0
-    assert ".plot-caption, .gene-names-table" in html      # the reflow script moves it
-    svg_h = float(re.search(r'<svg class="synteny-svg" width="\d+" height="([0-9.]+)"',
-                            html).group(1))
-    table = html[html.index('class="gene-names-table"'):html.index("window.__SYNVOY", 0)
-                 if html.index("window.__SYNVOY") > html.index('class="gene-names-table"')
-                 else len(html)]
-    assert max(float(y) for y in re.findall(r' y="([0-9.]+)"', table)) < svg_h
-
-    off = ps.render_synteny_html(_ribbon_tracks(), COLOURS, {}, {},
-                                 _ribbon_args(gene_legend=False), [], 0, 0, 1)
-    assert "gene-names-table" not in off.split("<script>")[0].split("</style>")[-1]
 
 
 def test_load_gene_names_end_to_end(tmp_path, gff, monkeypatch, capsys):
@@ -576,25 +552,3 @@ def test_long_column_labels_get_a_taller_header():
     short = [{"label": "alc", "is_goi": False}]
     long_ = [{"label": "lncRNA:CR44733-extra-long", "is_goi": False}]
     assert ps._rotated_header_height(long_, 17, 55) > 150 > ps._rotated_header_height(short, 17, 55)
-
-
-# ---- plot_synteny_matrix.py ------------------------------------------------
-
-def test_matrix_slots_and_table_use_the_names(gff):
-    home_bed = [{"chrom": "chr1", "start": 999, "end": 1900, "name": "gene-LOC726817",
-                 "strand": "+", "display_name": "XM_006567126.3"},
-                {"chrom": "chr1", "start": 2999, "end": 3900, "name": "gene-Dmel_CG4491",
-                 "strand": "+", "display_name": "noc"}]
-    query_bed = [{"chrom": "chr1", "start": 150, "end": 400, "name": "q", "strand": "+",
-                  "display_name": ""}]
-    args = SimpleNamespace(home_gff=gff, gene_names_tsv="", no_network=True)
-    index = pm.parse_home_gff_genes(gff)
-    table, note = pm.load_gene_names(args, home_bed, query_bed, index)
-    slots, goi_id = pm.build_home_slots(home_bed, query_bed, index, table)
-    assert [s["label"] for s in slots] == ["Melt", "PTL*", "noc"]
-    assert goi_id == "GOI_Melt"                        # the join key keeps the GFF symbol
-    rows = [("Apis mellifera", pm._home_summary(slots, goi_id), True, "Apis_mellifera", None)]
-    svg = pm.render_svg(slots, rows, "Apis mellifera", goi_id, names=table, lookup_note=note)
-    assert svg.count('class="gene-names-table"') == 1
-    assert "pancreatic triacylglycerol lipase" in svg and "NCBI Gene was not queried" in svg
-    assert "gene-names-table" not in pm.render_svg(slots, rows, "Apis mellifera", goi_id)

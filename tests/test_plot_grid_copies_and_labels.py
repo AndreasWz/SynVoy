@@ -129,10 +129,8 @@ def _synteny_tracks(home_goi_name):
 
 
 def _render(tracks, products=None):
-    args = SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=10000,
-                           pub_width=89, pub_palette="okabe_ito")
+    args = SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=10000)
     return ps.render_synteny_html(tracks, {"geneA": "#0072B2", "geneB": "#009E73"},
-                                  {"home": "#E64B35", "target1": "#0072B2"},
                                   products or {}, args, ["test"], 0, 0, 1)
 
 
@@ -153,21 +151,21 @@ def test_long_home_goi_label_stays_below_the_subtitle():
 
 
 def test_header_grows_only_as_far_as_the_label_needs():
-    short = ps._top_margin_for_labels(_synteny_tracks("GOI_Melt")[0], {}, False, 40)
+    short = ps._top_margin_for_labels(_synteny_tracks("GOI_Melt")[0], {}, 40)
     long_ = ps._top_margin_for_labels(
-        _synteny_tracks("GOI_4-coumarate--CoA_ligase_1-like")[0], {}, False, 40)
+        _synteny_tracks("GOI_4-coumarate--CoA_ligase_1-like")[0], {}, 40)
     assert short < 120 < long_
     # A track with no label at all asks for nothing: the default header stays.
     no_goi = {"is_home": True, "genes": [g for g in _synteny_tracks("GOI_Melt")[0]["genes"]
                                          if not g["name"].startswith("GOI_")]}
-    assert ps._top_margin_for_labels(no_goi, {}, False, 40) == 0
+    assert ps._top_margin_for_labels(no_goi, {}, 40) == 0
 
 
 def test_label_in_a_lower_lane_needs_less_header():
     track = _synteny_tracks("GOI_4-coumarate--CoA_ligase_1-like")[0]
-    lane0 = ps._top_margin_for_labels(track, {}, False, 40)
+    lane0 = ps._top_margin_for_labels(track, {}, 40)
     track["genes"][1]["_sub_track"] = 2
-    assert ps._top_margin_for_labels(track, {}, False, 40) == lane0 - 80
+    assert ps._top_margin_for_labels(track, {}, 40) == lane0 - 80
 
 
 def test_overlong_label_is_clipped_with_an_ellipsis():
@@ -181,13 +179,39 @@ def test_label_jobs_tag_the_best_goi_with_the_copy_count():
     track = _synteny_tracks("GOI_Melt")[1]
     track["genes"].append(dict(track["genes"][1], name="GOI_second", identity=40.0,
                                start=400, end=480, start_plot=400, end_plot=480))
-    jobs = ps._track_label_jobs(track, {}, False)
-    assert len(jobs) == 1 and jobs[0][2] is True
+    jobs = ps._track_label_jobs(track, {})
+    assert len(jobs) == 1
     # The second call has no confidence of at least medium: it is a weak call, not a copy.
-    assert jobs[0][0]["name"] == "GOI_match" and jobs[0][1].endswith("+1 weak")
-    assert "×" not in jobs[0][1]
+    # A target track carries the count only, not the GOI name.
+    assert jobs[0][0]["name"] == "GOI_match" and jobs[0][1] == "+1 weak"
     track["genes"][1]["confidence"], track["genes"][-1]["confidence"] = "HIGH", "MEDIUM"
-    assert ps._track_label_jobs(track, {}, False)[0][1].endswith("×2")
+    assert ps._track_label_jobs(track, {})[0][1] == "×2"
+
+
+def test_only_the_home_track_names_the_goi():
+    home, target = _synteny_tracks("GOI_Melt")[:2]
+    home_jobs = ps._track_label_jobs(home, {})
+    assert len(home_jobs) == 1 and home_jobs[0][1].startswith("★ ")
+    # A target track with a single copy and no weak call carries no label at all.
+    assert ps._track_label_jobs(target, {}) == []
+    html = _render(_synteny_tracks("GOI_Melt"))
+    assert html.count('class="gene-label goi') == 1
+    assert 'class="gene-label track-item"' not in html      # no flanking-gene labels
+
+
+def test_goi_genes_and_goi_ribbons_are_goi_red():
+    """A clade colour on the GOI ribbon read as a second gene beside the red GOI."""
+    html = _render(_synteny_tracks("GOI_Melt"))
+    ribbons = re.findall(r'<path d="[^"]+" fill="([^"]+)"[^>]*data-homology="GOI"', html)
+    assert ribbons and set(ribbons) == {ps.GOI_COLOUR}
+    goi_genes = re.findall(r'data-is-goi="true"[^>]*>\s*<path d="[^"]+" fill="([^"]+)"', html)
+    assert goi_genes and set(goi_genes) == {ps.GOI_COLOUR}
+    assert "linearGradient id=\"goiRib" not in html
+
+
+def test_the_ribbon_legend_explains_no_mark_that_no_label_carries():
+    texts = [text for _, rows in ps._ribbon_legend_groups("T") for _, text in rows]
+    assert not any("~" in t for t in texts)
 
 
 def test_home_row_prints_its_scaffold_once():
@@ -252,10 +276,9 @@ def test_scale_bar_option_takes_auto_or_base_pairs():
 
 def test_ribbon_plot_draws_an_automatic_or_a_fixed_scale_bar():
     def render(value):
-        args = SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=value,
-                               pub_width=89, pub_palette="okabe_ito")
+        args = SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=value)
         return ps.render_synteny_html(_synteny_tracks("GOI_x"), {"geneA": "#0072B2", "geneB": "#009E73"},
-                                      {"home": "#E64B35", "target1": "#0072B2"}, {}, args, ["test"], 0, 0, 1)
+                                      {}, args, ["test"], 0, 0, 1)
     width_auto, label_auto = _scale_bar(render("auto"))
     assert 60 <= width_auto <= 200
     assert re.fullmatch(r"[125]0{0,2} (bp|kb|Mb)", label_auto), label_auto

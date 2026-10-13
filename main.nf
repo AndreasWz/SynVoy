@@ -227,6 +227,8 @@ def removedParams() {
             enable_name_locus          : "the annotated home gene is the primary locus by default now; use --home_locus_mode gene_only to search that locus alone",
             name_locus_min_identity    : "the name lookup it belonged to was replaced by --home_locus_mode",
             name_locus_pad             : "the name lookup it belonged to was replaced by --home_locus_mode",
+            pub_svg                    : "the publication SVG was removed; the figure for print is *_anchor_grid_print.svg, and *_synteny_plot_view.svg is the ribbon plot as a picture",
+            enable_matrix_plot         : "the matrix figure was removed; the anchor grid (*_anchor_grid.svg) shows the same and more",
         ],
         noEffect: [
             'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
@@ -924,10 +926,10 @@ workflow {
             genomes_dir_ch = channel.empty()
             species_map_ch = channel.value(no_species_map_file)
         }
-        // Species name for phylogenetic sorting + matrix home-row label.
+        // Species name for phylogenetic sorting + the home-row label.
         // Pro mode default: take the home_genome filename and strip
         // FASTA suffixes. The full path used to leak through as the
-        // species name (so the matrix row label became the file path).
+        // species name (so the home row label became the file path).
         def _home_stem = homeSpeciesStem(params.home_genome)
         home_species_for_sort_ch = channel.value(params.home_species ?: _home_stem)
     }
@@ -1459,7 +1461,6 @@ workflow {
         plot_inputs.multiMap { item ->
             home_bed: item[0]
             query_bed: item[1]
-            target_names: item[2]
             candidate_beds: item[3]
             target_gffs: item[4]
             homology_tsvs: item[5]
@@ -1473,12 +1474,11 @@ workflow {
             plot_inputs_split.query_bed,      // query_bed (per-locus, was global)
             effective_home_gff_ch,            // home_gff (user-provided or Prodigal-predicted)
             plot_inputs_split.target_gffs,    // target_gffs
-            plot_inputs_split.target_names,   // target_names
             plot_inputs_split.candidate_beds, // candidate_beds
             plot_inputs_split.homology_tsvs,  // homology_tsvs
             plot_inputs_split.tree,           // tree
             species_map_ch,                   // species_mapping.tsv (already a value channel)
-            home_species_for_sort_ch,         // home species label for the matrix-view home row
+            home_species_for_sort_ch,         // home species label of the home row
             qc_summary_ch                     // genome quality summary (value channel)
         )
         

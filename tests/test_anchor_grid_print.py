@@ -5,6 +5,7 @@ put their text at 2-5 pt in a 183 mm figure. ``bin/synvoy_grid.py`` lays the gri
 out in points at final size; these tests pin what a journal checks (size in mm,
 text of 5-7 pt) and what the figure must not hide (dropped columns, copies).
 """
+import math
 import os
 import re
 import sys
@@ -59,6 +60,62 @@ def _mm(svg, attr):
     return float(re.search(rf'\b{attr}="([0-9.]+)mm"', svg).group(1))
 
 
+def text_outlines(svg):
+    """Outline (4 corners) and text of every text of *svg*, in canvas coordinates.
+
+    Arial metrics; a box runs from 0.72 em above the baseline to 0.21 em below it.
+    Groups shifted with translate() are followed; a text with rotate(a x y) is
+    turned about its anchor.
+    """
+    out = []
+
+    def walk(el, dx, dy):
+        tr = el.get("transform", "")
+        m = re.match(r"translate\(\s*([-0-9.]+)[ ,]+([-0-9.]+)\s*\)", tr)
+        if m:
+            dx, dy = dx + float(m.group(1)), dy + float(m.group(2))
+        if el.tag.endswith("text"):
+            text = "".join(el.itertext())
+            if text.strip():
+                fs = float(el.get("font-size"))
+                w = ps.text_width(text, fs, bold=el.get("font-weight") in ("600", "700", "bold"))
+                x0 = -{"end": w, "middle": w / 2}.get(el.get("text-anchor"), 0.0)
+                x, y = float(el.get("x")) + dx, float(el.get("y")) + dy
+                r = re.match(r"rotate\(\s*([-0-9.]+)", tr)
+                ang = math.radians(float(r.group(1))) if r else 0.0
+                c, s_ = math.cos(ang), math.sin(ang)
+                corners = [(x + c * px - s_ * py, y + s_ * px + c * py)
+                           for px, py in ((x0, -0.72 * fs), (x0 + w, -0.72 * fs),
+                                          (x0 + w, 0.21 * fs), (x0, 0.21 * fs))]
+                out.append((corners, text))
+            return
+        for child in el:
+            walk(child, dx, dy)
+
+    walk(ET.fromstring(svg.split("?>", 1)[-1]), 0.0, 0.0)
+    return out
+
+
+def _separated(a, b, tol):
+    for poly in (a, b):
+        for i in range(4):
+            (x0, y0), (x1, y1) = poly[i], poly[(i + 1) % 4]
+            ax, ay = y0 - y1, x1 - x0
+            n = math.hypot(ax, ay) or 1.0
+            pa = [(px * ax + py * ay) / n for px, py in a]
+            pb = [(px * ax + py * ay) / n for px, py in b]
+            if min(max(pa), max(pb)) - max(min(pa), min(pb)) <= tol:
+                return True
+    return False
+
+
+def overlapping_texts(svg, tol=0.3):
+    """Pairs of texts of *svg* (horizontal or rotated) whose boxes overlap by more than *tol*."""
+    boxes = text_outlines(svg)
+    return [(p[1], q[1]) for i, p in enumerate(boxes) for q in boxes[i + 1:]
+            if not _separated(p[0], q[0], tol)]
+
+
 # ------------------------------------------------------------ what a journal checks ----
 
 def test_print_svg_states_its_size_in_mm_and_parses():
@@ -76,6 +133,13 @@ def test_print_text_is_five_to_seven_points():
         sizes = {float(x) for x in re.findall(r'font-size="([0-9.]+)"', svg)}
         assert sizes <= {5.0, 6.0, 7.0}, sizes
         assert info["text_pt"] == sorted(sizes)
+
+
+@pytest.mark.parametrize("kw", [{}, {"print_grid_numbers": True}, {"print_width_mm": 89.0}])
+@pytest.mark.parametrize("n_flank,n_targets", [(6, 2), (30, 8), (12, 40)])
+def test_no_two_texts_of_the_print_grid_overlap(kw, n_flank, n_targets):
+    svg, _, _, _ = _print(*_tracks(n_flank=n_flank, n_targets=n_targets), **kw)
+    assert overlapping_texts(svg) == []
 
 
 def test_print_figure_carries_no_title_no_location_no_tooltip():
@@ -230,8 +294,7 @@ def test_every_screen_figure_has_a_grouped_legend():
     tracks, colours = _tracks()
     args = SimpleNamespace()
     for html in (ps.render_anchor_grid(tracks, colours, {}, {}, args),
-                 ps.render_anchor_grid_positional(tracks, colours, {}, {}, args),
-                 ps.render_anchor_grid_threaded(tracks, colours, {}, {}, args)):
+                 ps.render_anchor_grid_positional(tracks, colours, {}, {}, args)):
         texts = re.findall(r">([^<]+)</text>", html)
         assert "Layout" in texts and "Flanking genes" in texts and "GOI: T" in texts
         assert not any(" · " in t and len(t) > 60 for t in texts), "a dotted list is back"

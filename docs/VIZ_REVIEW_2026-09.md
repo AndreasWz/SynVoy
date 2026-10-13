@@ -44,6 +44,39 @@
 > truncate every figure; it now only steers the neighbourhood choice, and all models inside the
 > chosen view are restored. Renders: `tmp/plot_review/2026-09-17_round3_many_goi/` (SPIN, SP
 > locus 3). Tests 26; full suite 782 passed. Still open: 1.5, Phase 3 (print styling), Phase 4.
+>
+> **Round 4 (2026-10-07, commit 7ce0559): print anchor grid.** `bin/synvoy_grid.py` lays the
+> grid out in points at final size: `*_anchor_grid_print.svg` is 183 mm wide
+> (`--print_width_mm`), at most 170 mm tall, Arial at 7, 6 and 5 pt, with no title, coordinates
+> or tooltips. Its legend sentences go to `_print.legend.txt`, the value of every cell to
+> `_print.source.tsv`; a grid that is too wide loses spacing first, then the columns with the
+> fewest orthologs, and says which. The exon structure of GOI copies moved to a panel beside
+> the grid (2.3). This closes Phase 3 for the grid (3.1–3.3, 3.5 attributes) and 2.3.
+>
+> **Round 5 (2026-10-13): the ribbon plot and the set of figures.**
+>
+> - **1.5** The GOI is named once, on the home track; a target track carries only its copy
+>   count (`×2`, `+1 weak`). GOI genes and GOI ribbons are both GOI red (the genes took the
+>   tree's clade colour, the ribbons a clade gradient); the clade colours stay on the tree
+>   page. The legend lost its `~ = not resolved` entry with the target labels that carried
+>   the mark. The x range is the gene extent plus 5 % and at most 5 kb more (it was 5 % + 5 kb).
+> - **The ribbon plot gets no print version (Frank's decision).** One was built and reviewed
+>   (`--print_ribbon`). At 183 mm about 11 genomes fit, so it needs a choice of genomes, a
+>   height limit and thinned labels, and what is left is close to the anchor grid. The ribbon
+>   plot stays the figure for exploring; the figure for a paper is the anchor grid. This
+>   closes Phase 3 for the ribbon plot and Phase 4.
+> - **Three outputs removed,** after a check of every figure on 19 loci (what each shows that
+>   no other does, size of canvas and text, overlapping texts): the anchor-positions figure
+>   (the grid and the gene-position map again, drawn by a second code path), `--pub_svg` (the
+>   screen ribbon plot with a label on every home gene: overlapping texts in 19 of 19 loci)
+>   and the matrix (a subset of the grid; overlapping texts in 13 of 19). A run writes the
+>   anchor grid with its print version, the ribbon plot, the gene-position map and the tree.
+> - **Phase 5, in part:** a test that no two texts of the print grid overlap, rotated ones
+>   included (Arial metrics, separating-axis test).
+> - **Still open:** the gene-position map draws the home genome outside the species tree, so
+>   its rows can stand in another order than the grid's (2 of the 19 loci); the grid and the
+>   gene-position map are each written as `.html` and `.svg` with the same drawing; the
+>   fragment variants are also written when nothing differs (3 of 19 loci).
 
 All renders use headless Chrome (cairosvg ignores CSS, so it cannot be used to check figures).
 The screenshots live in `tmp/plot_review/2026-09-16/` (git-ignored, numbered `01`–`10`).
@@ -106,7 +139,7 @@ A "row" here is one greedy interval-scheduling lane per genome track (`_assign_s
   For a paper, drawing exons at made-up positions is not acceptable.
 - A rotated label (`★ GOI <gene> ×10`) is repeated on every track. The GOI ribbon is lime
   (a clade colour) while the GOI itself is red. There is a drop shadow, and 52 genes use the
-  `geneGloss` gradient. The sub-label repeats the species (`Tetramorium_bicarinatum • OV788322.1`).
+  `geneGloss` gradient. The sub-label repeats the species (`Tetramorium_bicarinatum • <scaffold>`).
 
 ## 2. Anchor grid: the "multiple exon" GOI column
 
@@ -146,7 +179,7 @@ every ant.
   (APYR) with the font that actually renders. Even measured with Arial it is still 3 and 23,
   so it is not only a font problem. The label repeats the genome id whenever the common-name
   lookup is offline (`Bombus impatiens (Bombus_impatiens)`), and the home row embeds the
-  accession (`(NC_037641.1)`), which already sits in the right-hand column.
+  scaffold accession in brackets, which already sits in the right-hand column.
 - **The requested font is missing.** The SVG asks for `"IBM Plex Sans"`, which is not
   installed. It falls back to DejaVu Sans, a wide face, and label widths are estimated from
   character counts.

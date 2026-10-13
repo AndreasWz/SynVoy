@@ -84,8 +84,8 @@ The Python `PRESET_OVERRIDES` table in `bin/resolve_effective_params.py` is the 
 > **Not everything is in this file.** Several newer parameter groups are documented as
 > tables in [USAGE.md § 4](USAGE.md#4-full-parameter-reference) rather than as long-form
 > entries here: the multi-locus cap (`--max_loci`), the rescue passes (strong-synteny, GOI hull, dispersed-GOI),
-> locus ownership and paralog discrimination, distance auto-tuning, structural
-> discovery, and the publication-figure switches (`--pub_svg`, `--enable_matrix_plot`).
+> locus ownership and paralog discrimination, distance auto-tuning and structural
+> discovery.
 > Between the two documents every parameter in `nextflow.config` is covered.
 
 ---
@@ -1033,7 +1033,7 @@ Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints 
 
 ## 20. Removed parameters
 
-Removed on 2026-10-09. Passing one of the first group stops the run at start with the replacement named; one of the second group prints a warning and is ignored.
+Removed on 2026-10-09 (the two figure switches on 2026-10-13). Passing one of the first group stops the run at start with the replacement named; one of the second group prints a warning and is ignored.
 
 **Replaced**
 
@@ -1041,6 +1041,8 @@ Removed on 2026-10-09. Passing one of the first group stops the run at start wit
 |---|---|
 | `max_flanking_goi_similarity` | `goi_relative_evalue` (an E-value, not a percentage) |
 | `enable_name_locus`, `name_locus_min_identity`, `name_locus_pad` | `home_locus_mode` (`auto` already makes the annotated home gene the primary locus; `gene_only` = that locus alone). `--home_goi_gene SYMBOL` still names the gene |
+| `pub_svg` | Nothing: the publication SVG of the ribbon plot was removed. The figure for print is `*_anchor_grid_print.svg`; `*_synteny_plot_view.svg` is the ribbon plot as a picture |
+| `enable_matrix_plot` | Nothing: the matrix figure was removed. The anchor grid (`*_anchor_grid.svg`) shows the same and more |
 
 **Had no effect** (declared and accepted, read by nothing)
 
@@ -1058,4 +1060,6 @@ Removed on 2026-10-09. Passing one of the first group stops the run at start wit
 | `min_exon_query_cov` | a coverage floor for exon hits; the line that applied it was commented out in March 2026 |
 | `pub_width_mm`, `pub_palette` | read by nothing (the print figure has a fixed size, see OUTPUT.md) |
 
-`plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette`, and `plot_synteny_matrix.py` no longer accepts `--clade_depth_frac`: all were parsed and never read. A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`.
+`plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette` (all were parsed and never read) and, since 2026-10-13, `--pub_svg` (its figure was removed). A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`. `plot_synteny_matrix.py` no longer exists.
+
+Figures removed on 2026-10-13: the anchor-positions figure (`*_anchor_positions.html` / `.svg`; it repeated the anchor grid and the gene-position map), the publication SVG of the ribbon plot (`*_synteny_plot.svg`) and the matrix (`*_synteny_matrix.svg`). The figures of a run are now the anchor grid with its print version, the ribbon plot, the gene-position map and the tree.

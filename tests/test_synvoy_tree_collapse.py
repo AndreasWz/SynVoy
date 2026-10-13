@@ -1,11 +1,11 @@
-"""Tests for collapse_to_one_leaf_per_species — the matrix-cladogram fix.
+"""Tests for collapse_to_one_leaf_per_species — the cladogram fix.
 
-The matrix view aligns one tree branch per species row. Multi-copy GOI trees
-(tandem paralogs, gene-family expansions) used to be drawn with every leaf
-mapped to its species' row y, producing a tangled mess of degenerate
-branches. The collapse helper prunes to one leaf per species and contracts
-single-child internals so the cladogram has the same shape but one tip per
-matrix row.
+The tree panel of the grid figures aligns one tree branch per species row.
+Multi-copy GOI trees (tandem paralogs, gene-family expansions) used to be drawn
+with every leaf mapped to its species' row y, producing a tangled mess of
+degenerate branches. The collapse helper prunes to one leaf per species and
+contracts single-child internals so the cladogram has the same shape but one tip
+per row.
 """
 
 import os

@@ -6,7 +6,6 @@ process PLOT_SYNTENY {
     path query_bed
     path home_gff
     path target_gffs
-    val target_names
     path candidate_beds
     path homology_tsvs
     path tree
@@ -16,9 +15,7 @@ process PLOT_SYNTENY {
 
     output:
     path "*_synteny_plot.html", emit: plot
-    path "*_synteny_plot.svg", emit: pub_plot, optional: true
     path "*_synteny_plot_view.svg", emit: view_plot, optional: true
-    path "*_synteny_matrix.svg", emit: matrix_plot, optional: true
     path "*_anchor_grid.html", emit: anchor_grid, optional: true
     path "*_anchor_grid.svg", emit: anchor_grid_svg, optional: true
     // The anchor grid at print size (183 mm wide, text 5-7 pt) with the sentences of
@@ -26,8 +23,6 @@ process PLOT_SYNTENY {
     path "*_anchor_grid_print.*", emit: anchor_grid_print, optional: true
     path "*_gene_positions.html", emit: gene_positions, optional: true
     path "*_gene_positions.svg", emit: gene_positions_svg, optional: true
-    path "*_anchor_positions.html", emit: anchor_positions, optional: true
-    path "*_anchor_positions.svg", emit: anchor_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true
     // Label, full name and source of every home gene, as drawn in the figures.
     path "*_gene_names.tsv", emit: gene_names, optional: true
@@ -39,20 +34,17 @@ process PLOT_SYNTENY {
     script:
     // Handle empty collections gracefully
     def gffs_str = target_gffs ? target_gffs.join(' ') : ''
-    def names_str = target_names ? target_names.join(' ') : ''
     def cands_str = candidate_beds ? candidate_beds.join(' ') : ''
     def homo_str = homology_tsvs ? homology_tsvs.join(' ') : ''
     
     // Only include arguments if they have values
     def gffs_arg = gffs_str ? "--target_gffs ${gffs_str}" : ""
-    def names_arg = names_str ? "--target_names ${names_str}" : ""
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     def qc_arg = genome_qc.name != 'NO_GENOME_QC' ? "--genome_qc ${genome_qc}" : ""
     def hide_absent_arg = params.hide_goi_absent_tracks.toString().toBoolean() ? "--hide_goi_absent" : ""
     def plot_extra_args = params.plot_extra_args ?: ''
-    def pub_svg_arg = params.pub_svg.toString().toBoolean() ? "--pub_svg" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -113,7 +105,6 @@ process PLOT_SYNTENY {
         $qc_arg \\
         --home_species "${home_species ?: ''}" \\
         $hide_absent_arg \\
-        $pub_svg_arg \\
         --gap_threshold ${params.gap_threshold} \\
         --gap_visual_size ${params.gap_visual_size} \\
         --flank_fallback_bp ${params.flank_fallback_bp} \\
@@ -125,27 +116,5 @@ process PLOT_SYNTENY {
     # The names table the figures were drawn with, kept beside the plot inputs: a
     # re-draw (scripts/replot.sh) then uses the same labels without asking NCBI again.
     cp ${home_bed.baseName}_gene_names.tsv "\$inputs_dir/gene_names.tsv" || true
-
-    # Phylogeny-anchored matrix view (paper-ready SVG). Opt-in: the anchor-grid
-    # (aligned columns + species tree) and the gene-position map cover the same
-    # ground more compactly, so this is off unless --enable_matrix_plot is set.
-    # Runs offline so it can't stall on NCBI common-name lookups in the task.
-    if [ "${params.enable_matrix_plot}" = "true" ]; then
-        ${projectDir}/bin/plot_synteny_matrix.py \\
-            --home_bed $home_bed \\
-            --query_bed $query_bed \\
-            --home_gff "\$FINAL_HOME_GFF" \\
-            $gffs_arg \\
-            $names_arg \\
-            $homo_arg \\
-            $cands_arg \\
-            --tree $tree \\
-            $species_arg \\
-            --home_species "${home_species ?: 'Home'}" \\
-            --common_names scientific \\
-            --no_network \\
-            --gene_names_tsv ${home_bed.baseName}_gene_names.tsv \\
-            --output ${home_bed.baseName}_synteny_matrix.svg
-    fi
     """
 }

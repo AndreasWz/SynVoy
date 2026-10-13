@@ -265,7 +265,6 @@ def test_llm_key_is_not_exported_as_an_empty_env_var():
 PLOT_HELPERS = ("synvoy_grid.py", "synvoy_legend.py", "synvoy_gene_names.py")
 SCRIPTS_WITH_OPTIONS = {
     "plot_synteny.py": PLOT_HELPERS,
-    "plot_synteny_matrix.py": PLOT_HELPERS,
     "iterative_search_runner.py": ("gpu_augment.py", "discover_regions.py", "synvoy_scale.py"),
     "annotate_goi_exons.py": (),
     "extract_flanking_genes.py": (),

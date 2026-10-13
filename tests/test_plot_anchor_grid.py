@@ -224,32 +224,6 @@ def test_tree_panel_attaches_unplaced_rows(tmp_path):
     assert html.count('class="tree-unplaced"') >= 3
 
 
-def test_anchor_threaded_valid_with_arrows_dots_and_leaders():
-    html = ps.render_anchor_grid_threaded(_tracks(), {}, {}, {}, _args())
-    low = html.lower()
-    assert "<!doctype html>" in low
-    assert html.count("<svg") == 1 and html.count("</svg>") == 1
-    assert "Anchor positions" in html
-    assert ">DCN<" in html                  # GOI column label
-    assert ps.GOI_COLOUR in html
-    m = __import__("re").search(r"(<svg.*?</svg>)", html, __import__("re").DOTALL)
-    root = ET.fromstring(m.group(1))        # parses as XML
-    assert root.tag.endswith("svg")
-    # aligned-column arrows AND the real-position dot-line + leaders are drawn
-    assert html.count("<circle") >= 3       # per-row true-position dots
-    assert html.count("<path") >= 5         # arrows + leaders
-
-
-def test_anchor_threaded_tree_panel_present_with_newick(tmp_path):
-    nwk = tmp_path / "t.nwk"
-    nwk.write_text("(GOI_DCN|cow_fna_b0_l1_exon_ann:0.1,"
-                   "GOI_DCN|mouse_fna_b0_l1_exon_ann:0.2);")
-    args = SimpleNamespace(tree=str(nwk))
-    html = ps.render_anchor_grid_threaded(_tracks(), {}, {}, {}, args)
-    assert 'class="grid-tree"' in html
-    assert "GOI phylogeny" in html
-
-
 def test_goi_display_label_prefers_alpha_symbol():
     # 'GOI_DCN' -> 'DCN'; coordinate-style 'GOI_NC_000012.12_91140483' rejected.
     tracks = [{"genes": [
