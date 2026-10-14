@@ -74,3 +74,6 @@ meeting_notes.txt
 *.pptx
 *_slide.png
 lrz_backup_*/
+
+# Input handed over from cloud Claude sessions (patches, reports, bug hunts); kept locally
+cloud_claude_input/
