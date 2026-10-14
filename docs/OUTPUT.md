@@ -10,6 +10,7 @@ which question**, in order of how often they're useful.
 ├── synvoy_report.json                      the adjudicated result (start here)
 ├── synteny_block_locus_<N>_anchor_grid.html / .svg      main figure (full version)
 ├── synteny_block_locus_<N>_anchor_grid_print.svg        the same at print size (183 mm)
+├── synteny_block_locus_<N>_anchor_grid_clades_print.svg GOI copies coloured by gene-tree clade (when informative)
 │       + _print.legend.txt / _print.source.tsv          its legend text and cell values
 ├── synteny_block_locus_<N>_synteny_plot.html            ribbon plot (exploration)
 ├── synteny_block_locus_<N>_*_with_fragments.*           same figures, fragments drawn
@@ -17,7 +18,7 @@ which question**, in order of how often they're useful.
 ├── synteny_block_locus_<N>_gene_names.tsv               gene labels used in the figures
 ├── locus_<N>_tree.nwk  (+ synteny_block_locus_<N>_tree.html with a real tree)
 ├── plot_inputs_synteny_block_locus_<N>/    per-genome GFF + homology table
-├── regions/                                per-genome region BED + scores
+├── regions/<locus>/                        per-genome region BED + scores, one folder per home locus
 ├── rescue/locus_<N>/                       gene models found by the rescue passes
 ├── qc/genome_qc_summary.json
 ├── intermediate/                           per-stage artifacts
@@ -73,6 +74,7 @@ Fields of a record in `goi_dedup.records`:
 | `owning_gene`, `owning_locus`, `owning_is_goi_gene`, `ownership_bit`, `ownership_gap` | Result of the paralog check: the home gene the call matches best, and by what margin. |
 | `phylo_verdict`, `phylo_z` | Advisory phylogenetic-placement verdict. |
 | `superseded_wide_model` | `true` when a compact model replaced a sprawling rescue model of the same gene. |
+| `context_promoted` | `LOW` or `AMBIGUOUS` (the label before) when the call is MEDIUM on conserved gene order alone, else empty. Counted in `summary.gene_order_only_goi`. |
 
 ### The per-genome table
 
@@ -120,7 +122,7 @@ awk -F'\t' 'NR==1 || ($3=="goi" && ($4=="HIGH"||$4=="MEDIUM") && $7=="exon_annot
   (+ `.faa`, the protein) and `<species>.rescue.gff`. A file is written only when a
   rescue produced a model. A `synteny_hull_rescue` record in the report has its
   exons here, not in `plot_inputs_*`.
-- **The syntenic region** (not the gene): `regions/<species>.regions.bed`, one row
+- **The syntenic region** (not the gene): `regions/<locus>/<species>.regions.bed`, one row
   per candidate region, named like `<species>|Reg1_G10_CHIGH_S0.70` (rank, flanking
   genes, confidence, score).
 
@@ -135,6 +137,7 @@ Attributes on a model's `mRNA` row:
 | `StartCodon`, `StopCodon` | `yes` / `no`: whether the model begins with ATG and ends at a stop codon. SynVoy extends a miniprot model's two ends to the nearest in-frame start / stop when it can do so without crossing a splice site. |
 | `SyntenyContext`, `BlockFlankingSupport`, `BlockCollinearSupport` | The neighbourhood: how many distinct flanking genes its block holds, and the longest run of them in home order |
 | `InferenceReason` | Why it got its confidence (e.g. `goi_tandem_copy_weak_context`, `fragment_model_with_flanking_only`) |
+| `ContextPromoted` | Only on a call raised to MEDIUM by gene order (`InferenceReason=low_identity_in_conserved_gene_order`; `--classify_context_min_collinear 0` switches the rule off): the label it had before, `LOW` or `AMBIGUOUS`. In `synvoy_report.json` the record field is `context_promoted` |
 | `SynVoy_Parent` | The query or home gene the model derives from |
 | `TargetGene`, `TargetProduct`, `TargetID` | The target genome's own annotation at that position (needs target GFFs) |
 | `GoiFamilyConsistent`, `GoiFamilyReason` | Family-name check, only when family tokens are set |
@@ -172,7 +175,7 @@ here; narrower where a wide neighbourhood holds DNA whose hits could not be used
 For a genome browser:
 ```
 Gene models   →  plot_inputs_*/<species>.gff  and  rescue/locus_*/<species>.*.gff
-Region spans  →  regions/<species>.regions.bed
+Region spans  →  regions/<locus>/<species>.regions.bed
 GOI on home   →  the home-genome GFF you supplied with --home_gff
 ```
 
@@ -180,7 +183,7 @@ GOI on home   →  the home-genome GFF you supplied with --home_gff
 
 ## "How good is the synteny in each species?"
 
-**`regions/<species>.scores.tsv`** — one row per candidate region.
+**`regions/<locus>/<species>.scores.tsv`** — one row per candidate region (until 2026-10-14 the files of all home loci shared one `regions/` folder and overwrote each other).
 
 | Column | Meaning |
 |---|---|
@@ -198,7 +201,7 @@ GOI on home   →  the home-genome GFF you supplied with --home_gff
 
 ```bash
 # Best region per species, by score:
-awk -F'\t' 'NR>1 && $1==1 {print $3, $4, $8, $9, $16}' OFS='\t' regions/*.scores.tsv | sort -k3,3nr
+awk -F'\t' 'NR>1 && $1==1 {print $3, $4, $8, $9, $16}' OFS='\t' regions/*/*.scores.tsv | sort -k3,3nr
 ```
 
 Scores from runs before 2026-07-26 are not comparable: the strand and order
@@ -229,6 +232,7 @@ The fields of `summary` worth reading:
 |---|---|
 | `headline` | One sentence, e.g. `3 high-confidence GOI ortholog annotation(s) (+13 low-confidence) across 3 genome(s).` |
 | `high_confidence_goi`, `medium_confidence_goi` | Counts after dedup and the paralog check — the numbers to quote |
+| `gene_order_only_goi` | How many of `medium_confidence_goi` were raised to MEDIUM by gene order with a weak sequence match (their records carry `context_promoted`); the headline names them |
 | `ambiguous_goi`, `low_confidence_goi` | Named separately, never part of the ortholog count |
 | `goi_absent_genomes` | Genomes in which no GOI call was **placed**. Not proof of absence. |
 | `goi_found_but_not_syntenic` | Genomes with a strong GOI hit that no synteny gate accepted (see `rejected_candidates`) |
@@ -255,6 +259,7 @@ print('self-consistency flags:', s.get('self_consistency_flag_count', 0))
 |---|---|
 | `<locus>_anchor_grid.html` / `.svg` | **The headline figure, full version.** Species × gene grid — rows are species (species tree at left), columns are home genes, the GOI column in red. An arrow is the ortholog placed in that neighbourhood: its colour is the home gene, the number its % identity, a number in brackets under the arrow its query coverage when that is below 80 % (`100` over `(7)` = 100 % identity over 7 % of the home protein), its outline the confidence (solid high, dashed medium, dotted low, most broken ambiguous), a second arrow behind it more than one copy at the locus. An empty cell means **no ortholog was placed in this neighbourhood**, not that the gene is absent. The axis above the grid shows where the home genes really lie; the right-hand column gives each row's scaffold and position. See [The GOI column](#the-goi-column-of-the-anchor-grid) below. |
 | `<locus>_anchor_grid_print.svg` | **The same grid at print size**: 183 mm wide, at most 170 mm tall, text of 7, 6 and 5 pt in Arial, as a journal asks for a two-column figure. No title, coordinates or names table: `_print.legend.txt` holds the sentences of a figure legend, `_print.source.tsv` one row per cell and GOI call (identity, coverage, confidence, scaffold, coordinates, exons). When a grid is too wide the spacing shrinks first; then the columns with the fewest orthologs are left out, and the log, the legend text and nothing else say which. Options: `--print_grid_numbers` (identity in every arrow, and low query coverage in brackets under it; where that extra line would break the height limit, the identity gets a `*` instead and the value stays in the source table), `--print_width_mm 89` (one column), `--print_height_mm`, `--no_print_grid`. |
+| `<locus>_anchor_grid_clades_print.svg` | **The print grid coloured by the GOI gene tree.** Flanking genes in one grey and in narrower columns (about two thirds of the width); every GOI copy is a small arrow filled with the colour of its clade in the GOI tree, cut and coloured as on the tree page (`--clade_count`, default 4). It shows which copies in different genomes group together and which are lineage-specific duplications or relatives. White = a copy that is not a leaf of the tree (a call without a protein model, or one the tree was not built from: the tree is built from the search's HIGH and MEDIUM models, before the rescue passes and the report's checks). Weak calls are pale boxes in their clade colour; the outline is the confidence. Written only when it shows something the species tree beside the rows does not: a genome with two or more copies in the tree, or a genome whose copies fall in no clade of the placed genomes above and below it while those two share one. With `_clades_print.legend.txt` and `_clades_print.source.tsv` (the print-grid table plus a `clade` column). `--no_print_grid` switches it off too. |
 | `<locus>_synteny_plot.html` | Interactive ribbon plot: one track per genome (at most three lanes), every gene at its real size with its exons, one scale for all genomes, ribbons between orthologous flanking genes, GOI ribbons in red. Scaffolds that read in the opposite direction to the home genome are flipped so ribbons run straight. The GOI is named once, on the home track; another track carries only its copy count (`×2`, `+1 weak`) when it has one. For exploring one locus on screen. It has no print version: the figure for a paper is the anchor grid. |
 | `<locus>_synteny_plot_view.svg` | The ribbon plot as a picture (always written), for a preview or a README. Not laid out for print. |
 | `*_with_fragments.html` / `.svg` | The ribbon plot and the anchor grid again, **with** `ModelStatus=fragment` GOI models drawn. The main figures hide them: they are single-exon hits that otherwise fill the plot. Written only when a run has fragments. |
@@ -416,7 +421,7 @@ for every task — the first place to look when a step failed.
 | "Which species have the ortholog?" | `synvoy_report.json` → `summary.headline`, `goi_dedup.records` |
 | "Where in the target genome, with exons?" | `plot_inputs_*/X.gff`; for a `synteny_hull_rescue` record, `rescue/locus_*/X.hull_rescue.gff` |
 | "What is the evidence behind a call / what else was found?" | `plot_inputs_*/X.homology.tsv` |
-| "How good is the synteny in species Y?" | `regions/Y.scores.tsv` |
+| "How good is the synteny in species Y?" | `regions/<locus>/Y.scores.tsv` |
 | "Overview of all species" | `<locus>_anchor_grid.html` |
 | "One locus in detail" | `<locus>_synteny_plot.html` |
 | "Ortholog phylogeny" | `<locus>_tree.html` / `locus_<N>_tree.nwk` (needs `-profile standard`) |

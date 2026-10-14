@@ -613,6 +613,7 @@ def parse_target_gff(gff_file, cap=True):
                 "synteny_context": attrs.get("SyntenyContext", ""),
                 "query_coverage": query_coverage,
                 "inference_reason": attrs.get("InferenceReason", ""),
+                "gff_id":       gene_id,
             })
 
     # Fragment GOI models go before dedup and the GOI cap: dedup always prefers a
@@ -5891,6 +5892,40 @@ def _run_figures(args, show_fragments=False, suffix=""):
                           "under the arrow would not fit --print_height_mm (see source data)")
             except Exception as exc:
                 print(f"  (anchor-grid print render failed: {exc})", file=sys.stderr)
+
+            # Clade version of the print grid: each GOI copy coloured by its clade in the GOI
+            # gene tree (cut and coloured as on the tree page), flanking genes grey and narrow.
+            # Written only when it shows something the species tree beside the rows does not:
+            # a genome with two or more copies placed in the tree, or a copy whose clade breaks
+            # the pattern of the rows around it. Otherwise it repeats the species tree.
+            try:
+                res = _grid.render(sys.modules[__name__], all_tracks, gene_colours, home_products,
+                                   args, _grid.clade_style(
+                                       width_mm=float(getattr(args, "print_width_mm", 183.0) or 183.0),
+                                       max_height_mm=float(getattr(args, "print_height_mm", 170.0) or 170.0)))
+                cl = res["info"].get("clades") or {}
+                stem = grid_output[:-len(".html")] + "_clades_print"
+                if not cl.get("n_clades"):
+                    print("Anchor-grid clade version not written: no GOI tree with three or more "
+                          "leaves")
+                elif not cl.get("informative"):
+                    print("Anchor-grid clade version not written: one copy per genome is placed "
+                          "in the tree and the clades follow the species tree")
+                else:
+                    with open(stem + ".svg", "w", encoding="utf-8") as f:
+                        f.write(_grid.svg_document(res))
+                    with open(stem + ".legend.txt", "w", encoding="utf-8") as f:
+                        f.write(res["legend_text"])
+                    with open(stem + ".source.tsv", "w", newline="", encoding="utf-8") as f:
+                        wr = csv.DictWriter(f, _grid.SOURCE_COLUMNS_CLADES, delimiter="\t")
+                        wr.writeheader()
+                        wr.writerows(res["source"])
+                    print(f"Anchor-grid clade SVG saved to {stem}.svg ({res['info']['width_mm']:g} x "
+                          f"{res['info']['height_mm']:g} mm): {cl['copies_matched']} of "
+                          f"{cl['copies']} copies in the tree, {cl['n_clades']} clades, "
+                          f"{cl['rows_with_two_placed']} genome(s) with two or more placed copies")
+            except Exception as exc:
+                print(f"  (anchor-grid clade render failed: {exc})", file=sys.stderr)
 
         # Companion real-position variant: same orthologs, true per-row
         # genomic positions (shows spacing / gaps / rearrangements the aligned

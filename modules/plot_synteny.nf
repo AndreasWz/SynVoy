@@ -21,6 +21,9 @@ process PLOT_SYNTENY {
     // The anchor grid at print size (183 mm wide, text 5-7 pt) with the sentences of
     // its figure legend (.legend.txt) and the values of every cell (.source.tsv).
     path "*_anchor_grid_print.*", emit: anchor_grid_print, optional: true
+    // The same print grid with each GOI copy coloured by its clade in the GOI gene tree
+    // (flanking genes grey); written only when that shows more than the species tree.
+    path "*_anchor_grid_clades_print.*", emit: anchor_grid_clades_print, optional: true
     path "*_gene_positions.html", emit: gene_positions, optional: true
     path "*_gene_positions.svg", emit: gene_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true

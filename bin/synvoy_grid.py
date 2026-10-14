@@ -93,6 +93,15 @@ class GridStyle:
     max_models: int = 10         # most exon models drawn for one genome
     max_marks: int = 8           # most weak-call marks in one GOI cell; the rest is "+N"
     max_cols: int = 50
+    clade: bool = False          # GOI copies as small arrows coloured by GOI-tree clade, flanks grey
+
+
+def clade_style(**kw):
+    """The clade version: narrow grey flanking columns, GOI copies coloured by tree clade."""
+    base = dict(clade=True, col_w=7.0, col_w_min=5.6, col_w_max=9.0, fs_col=5.0, angle=65.0,
+                arrow_h=4.6, row_h=9.0, row_h_min=7.6)
+    base.update(kw)
+    return GridStyle(**base)
 
 
 def style_for(numbers=False, full=False, **kw):
@@ -393,6 +402,94 @@ def titled(tooltip, body, on):
     return f'<g class="acell"><title>{esc(tooltip)}</title>{body}</g>'
 
 
+# ------------------------------------------------------------------ clades ----
+
+FLANK_GREY = "#9aa3b2"     # flanking genes in the clade version: one neutral colour
+UNPLACED = "#ffffff"       # a GOI call that is not a leaf of the GOI tree
+
+
+def _leaf_key(name):
+    """'GOI_X|Camponotus_floridanus_fna_b55_l1_exon_ann' -> 'goi_x_camponotus_floridanus_fna_b55_l1'.
+
+    The whole id, not only the part after '|': tandem copies of one model share that part
+    and differ before it (GOI_copy_1|..._b0_r2, GOI_copy_2|..._b0_r2), so keying on it gave
+    every copy of an array the clade of one of them. Tree leaves carry the model ids of the
+    search, so both sides normalise to the same key; a home leaf (no '|') has none.
+    """
+    key = name or ""
+    if "|" not in key:
+        return ""
+    for suf in ("_exon_ann", "_fallback", "_flank_ann", "_full"):
+        if key.endswith(suf):
+            key = key[: -len(suf)]
+            break
+    return re.sub(r"[^A-Za-z0-9]+", "_", key).strip("_").lower()
+
+
+def goi_clades(args, calls):
+    """Clade of every GOI call drawn, from the GOI gene tree.
+
+    The tree is midpoint-rooted and cut exactly as on the tree page
+    (synvoy_tree.partition_clades, --clade_count), so a colour means the same
+    clade in both figures. Returns ({id(gene): clade id}, info).
+
+    ``info["informative"]`` says whether the clade version shows anything the species tree
+    beside the rows does not: a genome with two or more copies placed in the tree, or a
+    genome whose copies fall in no clade of the nearest placed genomes above and below it
+    while those two share one.
+    """
+    info = {"n_clades": 0, "leaves": 0, "calls": 0, "matched": 0, "copies": 0,
+            "copies_matched": 0, "members": {}, "rows_with_two_placed": 0,
+            "rows_out_of_pattern": 0, "informative": False}
+    path = getattr(args, "tree", None)
+    try:
+        raw = _stree.parse_newick_tree(open(path).read()) if path else None
+    except OSError:
+        raw = None
+    t = _stree.midpoint_root(raw) if raw is not None else None
+    if t is None or len(list(t.leaves())) < 3:
+        return {}, info
+    leaf_clade = _stree.partition_clades(t, target_k=int(getattr(args, "clade_count", 4) or 4))
+    by_key, home = {}, []
+    for lf in t.leaves():
+        cid = leaf_clade.get(lf.name)
+        if cid is None:
+            continue
+        if "|" in lf.name:
+            by_key[_leaf_key(lf.name)] = cid
+        else:
+            home.append(cid)
+    info["leaves"] = len(list(t.leaves()))
+    info["n_clades"] = len(set(leaf_clade.values()))
+    out = {}
+    placed = {}     # target row -> clades of its copies that are leaves of the tree
+    for ri, rc in enumerate(calls):
+        for g, _away, copy in rc:
+            info["calls"] += 1
+            info["copies"] += bool(copy)
+            if ri == 0:
+                cid = home[0] if len(set(home)) == 1 else None
+            else:
+                cid = by_key.get(_leaf_key(g.get("gff_id") or ""))
+            if cid is None:
+                continue
+            out[id(g)] = cid
+            info["matched"] += 1
+            info["copies_matched"] += bool(copy)
+            if copy:
+                info["members"].setdefault(cid, set()).add(ri)
+                if ri:
+                    placed.setdefault(ri, []).append(cid)
+    info["rows_with_two_placed"] = sum(1 for c in placed.values() if len(c) >= 2)
+    rows = sorted(placed)
+    for k in range(1, len(rows) - 1):
+        here, above, below = (set(placed[rows[j]]) for j in (k, k - 1, k + 1))
+        if above & below and not (here & above) and not (here & below):
+            info["rows_out_of_pattern"] += 1
+    info["informative"] = bool(info["rows_with_two_placed"] or info["rows_out_of_pattern"])
+    return out, info
+
+
 # ----------------------------------------------------------------- render ----
 
 def render(ps, all_tracks, gene_colours, home_products, args, st):
@@ -443,6 +540,13 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         calls.append(row_calls)
     n_copies = [sum(1 for _, _, c in rc if c) for rc in calls]
     in_column = max(n_copies + [0]) <= 1     # no genome has two: the model goes in the column
+    clade_of, clade_info = goi_clades(args, calls) if st.clade else ({}, None)
+    if st.clade:            # small arrows only: the exon models stay in the main grid
+        in_column = False
+
+    def copy_colour(g):
+        cid = clade_of.get(id(g))
+        return UNPLACED if cid is None else _stree.color_for_clade(cid)
     numbered = [(not in_column) and n > 1 for n in n_copies]
 
     cells = []           # per row: grid lines, panel lines, copies beyond max_models
@@ -469,10 +573,10 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 items.append(("mark", g, away))
         if n_marks > st.max_marks:      # a family with many chance hits: the rest as a number
             items.append(("count", n_marks - st.max_marks, False))
-        panel = [] if in_column else [(g, away) for g, away, c in calls[ri]
-                                      if c and id(g) in shown_ids]
+        panel = [] if (in_column or st.clade) else [(g, away) for g, away, c in calls[ri]
+                                                    if c and id(g) in shown_ids]
         cells.append({"grid": wrap_items(items), "panel": panel, "index": index,
-                      "more": 0 if in_column else n_copies[ri] - len(panel)})
+                      "more": 0 if (in_column or st.clade) else n_copies[ri] - len(panel)})
     has_goi_col = any(a["is_goi"] for a in anchors)
     # A searched genome in which no GOI call was made is a result too: its row is drawn,
     # its GOI cell carries a dash, and the legend text names it with what was placed.
@@ -641,7 +745,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         groups = build_legend(st, goi_label, kinds, full_drawn, in_column, any(numbered),
                               any(c["more"] for c in cells), any_copies, cov_mode,
                               tree_root is not None, is_species_tree, bool(spans),
-                              has_axis_for(cols), tiers, low_quality=low_quality)
+                              has_axis_for(cols), tiers, low_quality=low_quality,
+                              clades=clade_info)
         legend_w = _legend.natural_width(groups, tw, st.fs_small)
         # A narrow grid is widened for its legend, but not beyond one journal column
         # (89 mm); past that the legend groups continue on a second band.
@@ -738,7 +843,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                      f'width="{band_x1 - band_x0:.2f}" height="{rh[ri]:.2f}" fill="{fill}"/>')
     if goi_i is not None:
         P.append(f'<rect x="{xs[goi_i]:.2f}" y="{grid_y0:.2f}" width="{ws[goi_i]:.2f}" '
-                 f'height="{grid_y1 - grid_y0:.2f}" fill="{goi_colour}" opacity="0.07"/>')
+                 f'height="{grid_y1 - grid_y0:.2f}" fill="{FLANK_GREY if st.clade else goi_colour}" '
+                 f'opacity="0.07"/>')
 
     # ---- home-coordinate axis: where the columns really lie (full version) ----------
     if has_axis:
@@ -826,8 +932,13 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                                     tips))
                     continue
                 fill, dash = goi_fill(g.get("identity"), g.get("confidence"), is_home, goi_colour)
+                if st.clade:        # the clade is the fill; confidence stays in the outline
+                    fill = copy_colour(g)
+                    dash = DASH.get((g.get("confidence") or "").upper(), "") if not is_home else ""
                 dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
                 where = "elsewhere in the genome" if away else ""
+                if st.clade and kind == "mark":
+                    kind = "clade_mark"
                 if kind == "full":
                     body, mw = draw_model(g, px, y, bp_pt, fill, goi_border, dash, model_h,
                                           max_cds, caret)
@@ -839,7 +950,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 elif kind == "mini":
                     strand = g.get("strand", "+")
                     d = ps._svg_arrow_path(px, px + pw, y - MINI_H / 2, MINI_H, strand, rx=0.5)
-                    body = (f'<path d="{d}" fill="{fill}" stroke="{goi_border}" '
+                    edge = (ps._darken_hex(fill, 0.6) if st.clade and fill != UNPLACED else goi_border)
+                    body = (f'<path d="{d}" fill="{fill}" stroke="{edge}" '
                             f'stroke-width="0.4"{dash_attr}/>')
                     if numbered[ri]:
                         body += text_svg(px + pw / 2 + (-0.7 if strand != "-" else 0.7),
@@ -847,6 +959,12 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                                          "#ffffff" if ps._is_dark_hex(fill) else "#000000",
                                          anchor="middle")
                     P.append(titled(goi_tooltip(g, labels[ri], is_home, where), body, tips))
+                elif kind == "clade_mark":      # weak call, in its clade colour but pale
+                    body = (f'<rect x="{px:.2f}" y="{y - 1.6:.2f}" width="{pw:.2f}" height="3.2" '
+                            f'rx="0.5" fill="{ps._lerp_hex(copy_colour(g), "#ffffff", 0.55)}" '
+                            f'stroke="{goi_border if id(g) not in clade_of else ps._darken_hex(copy_colour(g), 0.7)}" '
+                            f'stroke-width="0.35" stroke-dasharray="0.6,0.6"/>')
+                    P.append(titled(goi_tooltip(g, labels[ri], is_home, "weak call"), body, tips))
                 else:                  # weak call: a box for a gene model, a bar for hits
                     mh = 3.2 if ps._is_spliced_model(g) else 1.7
                     body = (f'<rect x="{px:.2f}" y="{y - mh / 2:.2f}" width="{pw:.2f}" '
@@ -923,9 +1041,13 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 for g, away, copy in calls[ri]:
                     drawn = (("model" if (in_column or id(g) in in_panel) else "arrow") if copy
                              else "mark" if id(g) in marked else "counted")
-                    source.append(source_row(ri, track, plain_labels[ri], a, g, n_copies[ri], is_home, True,
-                                             drawn, "elsewhere" if away else "locus",
-                                             cells[ri]["index"].get(id(g), "")))
+                    row = source_row(ri, track, plain_labels[ri], a, g, n_copies[ri], is_home, True,
+                                     drawn, "elsewhere" if away else "locus",
+                                     cells[ri]["index"].get(id(g), ""))
+                    if st.clade:
+                        cid = clade_of.get(id(g))
+                        row["clade"] = "not in the tree" if cid is None else cid + 1
+                    source.append(row)
                 if not calls[ri]:
                     source.append(source_row(ri, track, plain_labels[ri], a, None, 0, False, True, "", "", ""))
                 continue
@@ -939,7 +1061,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
             strand = a["strand"] if is_home else g.get("strand", "+")
             copies = 1 if is_home else entry["n"]
             cov_q = None if is_home else g.get("query_coverage")
-            fill, stroke, dash = cell_style(a["colour"], ident, conf, is_home, st.numbers)
+            fill, stroke, dash = cell_style(FLANK_GREY if st.clade else a["colour"], ident, conf,
+                                            is_home, st.numbers)
             x0, x1 = xs[i] + CELL_GAP / 2, xs[i] + ws[i] - CELL_GAP / 2
             yb = ym - arrow_h / 2
             dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
@@ -1028,6 +1151,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         # how low query coverage of a flanking ortholog is shown: "line" = the value in
         # brackets under the arrow, "star" = a * on the identity (no room for the line)
         "low_coverage_shown_as": cov_mode,
+        "clades": ({k: v for k, v in clade_info.items() if k != "members"}
+                   if clade_info else None),
         "goi_label": goi_label, "home": labels[0],
         "goi_calls": sum(len(rc) for rc in calls[1:]), "goi_copies": sum(n_copies[1:]),
         "home_copies": n_copies[0], "most_copies_in_a_target": max(n_copies[1:] + [0]),
@@ -1148,11 +1273,11 @@ def draw_tree(root, order, x0, x1, y_mid):
 
 def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_more, any_copies,
                  low_cov, has_tree, is_species_tree, has_location, has_axis, tiers,
-                 low_quality=False):
+                 low_quality=False, clades=None):
     """The legend as titled groups (see synvoy_legend)."""
     ps = _PS
     fs = st.fs_small
-    base = ps.GENE_PALETTE[0]
+    base = FLANK_GREY if st.clade else ps.GENE_PALETTE[0]
     goi_colour, goi_border = ps.GOI_COLOUR, ps.GOI_BORDER
 
     def arrow(fill, stroke, dash="", stacked=False, aw=9.0, h=4.6, label=""):
@@ -1245,7 +1370,20 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
         key = {"start": 1, "end": 1400, "strand": "+", "evidence_type": "exon_annotation",
                "exon_coords": [(1, 180), (420, 520), (900, 1400)]}
         goi = []
-        if "mini" in kinds:
+        if st.clade and clades is not None:
+            for cid in sorted(clades["members"]):
+                col = _stree.color_for_clade(cid)
+                n = len(clades["members"][cid])
+                goi.append((arrow(col, ps._darken_hex(col, 0.6), aw=MINI_W, h=MINI_H),
+                            f"clade {cid + 1} of the {goi_label} tree "
+                            f"({n} genome{'s' if n != 1 else ''})"))
+            if clades["copies_matched"] < clades["copies"]:
+                goi.append((arrow(UNPLACED, goi_border, aw=MINI_W, h=MINI_H),
+                            "copy not in the GOI tree"))
+            if "mark" in kinds:
+                goi.append((None, "pale box: weak call, in its clade colour"))
+            goi.append((None, "same colours as the tree page; outline: confidence"))
+        elif "mini" in kinds:
             goi.append((arrow(goi_colour, goi_border, aw=MINI_W, h=MINI_H,
                               label="1" if any_numbered else ""),
                         "one copy" + ("; numbered along the chromosome" if any_numbered else "")))
@@ -1257,7 +1395,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
                 hit = dict(key, evidence_type="fallback_hit_span", exon_coords=[(1, 300), (900, 1400)])
                 goi.append((model(hit, ps._lerp_hex(goi_colour, "#ffffff", 0.36)),
                             "aligned hits without a gene model"))
-        if "mark" in kinds:
+        if "mark" in kinds and not st.clade:
             goi.append((mark(), "weak call (low or ambiguous confidence)"))
         if "break" in kinds:
             goi.append(("//", "what follows is elsewhere in the genome"))
@@ -1267,7 +1405,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
             goi.append((NO_CALL_MARK, "searched, no model placed (not evidence of absence)"))
         if any_more:
             goi.append(("+N more", f"copies beyond the {st.max_models} drawn"))
-        if tiers - {"HIGH", ""}:
+        if tiers - {"HIGH", ""} and not st.clade:
             goi.append((None, "fill and outline: confidence, as for the flanking genes"))
         groups.append((f"GOI: {goi_label}", goi))
         if full_drawn:
@@ -1308,7 +1446,10 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
         s.append(text[0].upper() + text[1:] + ".")
     s.append("An arrow is the ortholog placed in that genome's neighbourhood and points in its "
              "coding direction, with each scaffold oriented like the home genome.")
-    if st.numbers:
+    if st.clade:
+        s.append("Flanking genes are drawn in one grey; paler fill = lower protein identity to "
+                 "the home gene.")
+    elif st.numbers:
         s.append("Colour: the home gene the ortholog belongs to. Number: protein identity to the "
                  "home gene in %" + (
                      "; a number in brackets under an arrow is the query coverage in %, given "
@@ -1327,7 +1468,15 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
     if full_drawn or "mini" in kinds:
         copies = ("A copy is the best GOI call of a genome and every further call of at least "
                   "medium confidence")
-        if in_column:
+        if st.clade:
+            cl = info.get("clades") or {}
+            s.append(f"{goi} column: one small arrow per copy, in genomic order and pointing in "
+                     "its coding direction, numbered along the chromosome where a genome has "
+                     f"several. Fill: the clade of the copy in the {goi} gene tree, cut into "
+                     f"{cl.get('n_clades', 0)} clades as on the tree page and in the same "
+                     "colours; white = a copy that is not a leaf of the tree (a call without a "
+                     "protein model, or one the tree was not built from). " + copies + ".")
+        elif in_column:
             s.append(f"{goi} column: the gene model found in each genome, in its coding "
                      "direction.")
         else:
@@ -1338,7 +1487,10 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
             if info["copies_not_drawn"]:
                 s.append(f"At most {st.max_models} gene models are drawn for one genome; "
                          f"{info['copies_not_drawn']} further copies are in the source data.")
-        if "mark" in kinds:
+        if "mark" in kinds and st.clade:
+            s.append("A small pale box is a weak call (low or ambiguous confidence), in the "
+                     "colour of its clade (white when it is not in the tree).")
+        elif "mark" in kinds:
             s.append("A small pale mark is a weak call (low or ambiguous confidence): a box for a "
                      "gene model, a bar for aligned hits."
                      + (f" At most {st.max_marks} are drawn in a cell; +N counts the rest."
@@ -1375,6 +1527,8 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
 SOURCE_COLUMNS = ("row", "species", "genome_id", "column", "home_gene_id", "state", "drawn_as",
                   "copy_number", "position", "identity_pct", "query_coverage_pct", "confidence",
                   "copies", "strand_drawn", "scaffold", "start", "end", "exons", "evidence")
+# The clade version adds the clade of every GOI call (1-based, as in its legend).
+SOURCE_COLUMNS_CLADES = SOURCE_COLUMNS + ("clade",)
 
 
 def source_row(ri, track, label, anchor, gene, n, is_home, is_goi_col, drawn_as, position, index):

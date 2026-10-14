@@ -100,6 +100,7 @@ Everything is written under `--outdir`. The files you will usually open:
 | `synvoy_report.json` | **The result.** `summary.headline` is the one-line answer; `goi_dedup.records` lists one record per gene found, with coordinates and a `confidence`: **`HIGH` / `MEDIUM` = orthologs, `AMBIGUOUS` = a candidate in the right neighbourhood that is not shown to be the gene, `LOW` (counted only) = leads.** |
 | `*_anchor_grid.html` | The full, interactive version of the figure above: the identity in every arrow, genome coordinates, hover for details. |
 | `*_anchor_grid_print.svg` | The figure above: the grid at print size (at most 183 mm wide, text of 5 to 7 pt), with its legend text and a table of every cell. |
+| `*_anchor_grid_clades_print.svg` | The same grid with every copy of the searched gene coloured by its clade in the gene tree and the neighbours in grey; written when a genome has several copies in the tree or a copy breaks the pattern of the species tree. |
 | `plot_inputs_*/*.gff`, `*.homology.tsv` | Per genome: the gene models with exon coordinates, and a table of every model with its evidence. |
 
 A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).
