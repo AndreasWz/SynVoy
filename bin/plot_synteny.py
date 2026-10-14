@@ -1199,6 +1199,25 @@ def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path):
     return sorted(names)
 
 
+def set_goi_names(home_genes, query_intervals, resolved):
+    """Fill _GOI_NAMES: the home genes drawn and named as the GOI.
+
+    When _resolve_home_goi_models found the annotated gene(s) whose CDS the query hits
+    fall on, those are the GOI, plus any per-hit placeholder left for a hit outside every
+    CDS. The span overlap of identify_goi_names is only the fallback without such a gene:
+    it also takes a gene that holds the GOI in an intron. Honeybee melittin (1.4 kb hit) lies
+    in an intron of MESR3 (17 kb, under the 27 kb size cap); both covered the hit completely,
+    tied, and MESR3 was drawn as a second home melittin copy with 5 exons.
+    """
+    if not resolved:
+        identify_goi_names(home_genes, query_intervals)
+        return
+    _GOI_NAMES.clear()
+    _GOI_NAMES.update(resolved)
+    _GOI_NAMES.update(g["name"] for g in home_genes if g["name"].startswith("GOI_"))
+    print(f"GOI genes identified: {_GOI_NAMES}")
+
+
 def identify_goi_names(home_genes, query_intervals):
     """
     Identify which home-gene names are GOI by overlapping with query_bed.
@@ -5436,9 +5455,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
     if not resolved_goi:
         _synthesize_home_goi_gene(home_genes, query_intervals, args.home_gff)
 
-    # Identify GOI gene names dynamically from query_bed overlap
-    identify_goi_names(home_genes, query_intervals)
-    _GOI_NAMES.update(resolved_goi)
+    set_goi_names(home_genes, query_intervals, resolved_goi)
 
     # Display names of the home genes (the fragment variant reuses them).
     if not is_variant:

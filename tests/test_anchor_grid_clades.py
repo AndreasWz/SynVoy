@@ -225,6 +225,25 @@ def test_gene_palette_is_large_distinct_and_free_of_the_goi_reds():
     assert min(mp.de2000(a, red) for a in labs) > 30
 
 
+def test_a_gene_holding_the_goi_in_an_intron_is_not_a_goi(monkeypatch):
+    """Melittin lies in an intron of MESR3: the span overlap tied the two and the figures
+    drew MESR3 as a second home melittin copy. The CDS owner of the hit decides."""
+    import plot_synteny as ps
+    monkeypatch.setattr(ps, "_GOI_NAMES", set())
+    home = [{"chrom": "c", "start": 20000, "end": 37000, "name": "gene-HOST"},    # 17 kb host
+            {"chrom": "c", "start": 22900, "end": 24400, "name": "gene-Melt"},    # in its intron
+            {"chrom": "c", "start": 17500, "end": 19300, "name": "gene-NEXT"}]
+    hit = [{"chrom": "c", "start": 23000, "end": 24350, "strand": "-"}]
+    ps.identify_goi_names(home, hit)               # the span rule alone: both
+    assert ps._GOI_NAMES == {"gene-Melt", "gene-HOST"}
+    ps.set_goi_names(home, hit, ["gene-Melt"])     # with the resolved CDS owner: only that
+    assert ps._GOI_NAMES == {"gene-Melt"}
+    ps.set_goi_names(home + [{"chrom": "c", "start": 1, "end": 9, "name": "GOI_c_1"}], hit, ["gene-Melt"])
+    assert ps._GOI_NAMES == {"gene-Melt", "GOI_c_1"}
+    ps.set_goi_names(home, hit, [])                # nothing resolved: the span rule
+    assert "gene-Melt" in ps._GOI_NAMES
+
+
 def test_grid_variants_option():
     import argparse
     import plot_synteny as ps
