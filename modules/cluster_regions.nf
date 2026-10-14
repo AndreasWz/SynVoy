@@ -2,7 +2,11 @@ process CLUSTER_REGIONS {
     tag "cluster_regions"
     label 'process_medium'
     errorStrategy 'terminate'
-    publishDir "${params.outdir}", mode: 'copy'
+    // One folder per home locus: the file names carry only the genome, so in a run with
+    // several home loci the loci overwrote each other in one flat regions/ folder (a 2-locus
+    // run published 33 of 66 files; bug hunt 2026-10-13).
+    publishDir path: { "${params.outdir}/regions/${locus_id}" }, mode: 'copy',
+               saveAs: { fn -> fn.replaceFirst(/^regions\//, '') }
 
     input:
     tuple val(genome_name), val(payload), path(hits_file), path(genomes_dir), path(target_gff)

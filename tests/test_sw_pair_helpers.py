@@ -103,12 +103,21 @@ def test_span_is_measured_on_the_query_not_on_the_subject():
 
 
 def test_span_with_a_gap_in_the_subject_counts_the_skipped_query_residues():
-    """A deletion in the subject does not shorten the stretch of the query that is covered."""
+    """A deletion in the subject does not shorten the stretch of the query that is covered,
+    and its 20 gap columns count in the identity (140 identical of 160 columns), as in BLAST."""
     q = _protein(160, 38)
     subject = q[:70] + q[90:]
     r = sw_align_span(q, subject)
     assert (r["q_start"], r["q_end"]) == (1, 160)
-    assert r["query_cov"] == 1.0 and r["identity"] == 100.0
+    assert r["query_cov"] == 1.0
+    assert r["identity"] == pytest.approx(100.0 * 140 / 160)
+
+
+def test_span_identity_ignores_unaligned_heads_and_tails():
+    """Leading and trailing unaligned residues are not alignment columns."""
+    q = _protein(100, 40)
+    subject = _protein(50, 41) + q + _protein(50, 42)
+    assert sw_align_span(q, subject)["identity"] == 100.0
 
 
 def test_span_of_empty_input():

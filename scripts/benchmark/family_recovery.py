@@ -719,8 +719,10 @@ def load_searched_species(run_dir):
     d = os.path.join(run_dir, "regions") if os.path.isdir(run_dir) else ""
     if not d or not os.path.isdir(d):
         return None
+    # regions/<locus>/<file> since 2026-10-14 (one folder per home locus); flat before.
     sp = {genome_of(re.sub(r"\.(?:regions\.bed|scores\.tsv)$", "", n))
-          for n in os.listdir(d) if n.endswith((".regions.bed", ".scores.tsv"))}
+          for _root, _dirs, files in os.walk(d) for n in files
+          if n.endswith((".regions.bed", ".scores.tsv"))}
     return sp or None
 
 

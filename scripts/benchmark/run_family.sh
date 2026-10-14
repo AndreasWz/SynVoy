@@ -58,6 +58,14 @@ nextflow -log "$OUT/nextflow.log" run "$REPO/main.nf" \
 "$PY" "$HARNESS" --data "$DATA" score \
     --run "$OUT" --family "$FAM" --out-prefix "$OUT/family_score" | tee "$OUT/family_score.txt"
 
+# Rescue tasks run with errorStrategy 'ignore': a failed one loses its models in silence.
+# The score must say so (bug hunt 2026-10-13, A9).
+n_ignored=$(grep -c "Error is ignored" "$OUT/nextflow.log" 2>/dev/null || true)
+if [ "${n_ignored:-0}" -gt 0 ]; then
+    echo "** WARNING: $n_ignored task(s) failed and were ignored; this run may lack models (see nextflow.log)" \
+        | tee -a "$OUT/family_score.txt"
+fi
+
 # Diagnostic only: a callcheck failure must not fail a scored run.
 "$PY" "$HARNESS" --data "$DATA" callcheck --run "$OUT" --targets "$IN/targets" \
     | tee "$OUT/family_score.callcheck.txt" || echo "** callcheck failed (run is scored)"

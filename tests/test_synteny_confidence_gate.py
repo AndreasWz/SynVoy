@@ -91,7 +91,12 @@ def test_unknown_coverage_is_not_a_fragment():
     assert conf == "MEDIUM"
 
 
-def test_fragment_high_path_untouched():
-    # HIGH never had a coverage arm; the fragment floor only gates the MEDIUM flanking arm.
-    conf, _, _ = classify(identity=80.0, exon_count=3, query_cov=0.1, flanking_support=6)
-    assert conf == "HIGH"
+def test_fragment_is_not_high_either():
+    # Bug hunt 2026-10-13 (A4): HIGH had no coverage arm, so a 3-exon model over 10 % of the
+    # query at 80 % was HIGH and seeded the next wave. The fragment floor now gates HIGH too.
+    conf, cls, reason = classify(identity=80.0, exon_count=3, query_cov=0.1, flanking_support=6)
+    assert (conf, cls, reason) == ("LOW", "ambiguous_goi_family_member",
+                                   "fragment_model_with_flanking_only")
+    fmq = isr.CLASSIFY_THRESHOLDS["fragment_max_qcov"]
+    assert classify(identity=80.0, exon_count=3, query_cov=fmq, flanking_support=6)[0] == "HIGH"
+    assert classify(identity=80.0, exon_count=3, query_cov=None, flanking_support=6)[0] == "HIGH"

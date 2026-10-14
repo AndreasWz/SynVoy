@@ -10,7 +10,10 @@
 // existing report machinery picks it up via canonical_genome_id() without changes.
 process RESCUE_STRONG_SYNTENY {
     tag "${locus_id}/${genome_name}"
-    errorStrategy 'ignore'  // never block the pipeline on a single failed rescue
+    // Never block the pipeline on a single failed rescue, but retry a task the scheduler
+    // killed for memory or time: 'ignore' alone overrode the config's retry for those.
+    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'ignore' }
+    maxRetries 2
     // Publish the rescued models. Until 2026-10-05 nothing did: a hull-rescued ortholog
     // appeared in synvoy_report.json as a span only, with its exon coordinates and
     // protein left behind in the work directory. One folder per home locus (the file
@@ -32,9 +35,11 @@ process RESCUE_STRONG_SYNTENY {
 
     script:
     """
-    target_genome=\$(find -L ${genomes_dir} -name "${genome_name}*" -type f \\
-        \\( -name "*.fa" -o -name "*.fna" -o -name "*.fasta" -o -name "*.fa.gz" -o -name "*.fna.gz" -o -name "*.fasta.gz" \\) \\
-        | head -n 1)
+    # The exact file of this genome: matching on the name as a prefix also found
+    # Apis_cerana_japonica.fna for Apis_cerana (bug hunt 2026-10-13, A11).
+    target_genome=\$(find -L ${genomes_dir} -type f \\( -name "${genome_name}" -o -name "${genome_name}.fa" \\
+        -o -name "${genome_name}.fna" -o -name "${genome_name}.fasta" -o -name "${genome_name}.fa.gz" \\
+        -o -name "${genome_name}.fna.gz" -o -name "${genome_name}.fasta.gz" \\) | sort | head -n 1)
     if [[ -z "\$target_genome" ]]; then
         echo "##gff-version 3" > ${genome_name}.rescue.gff
         echo "# RESCUE_STRONG_SYNTENY: target genome ${genome_name} not found in ${genomes_dir}" \\

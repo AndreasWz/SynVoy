@@ -60,42 +60,50 @@ def _iter_fasta(path: str) -> Iterator[tuple[str, str]]:
 
 
 def _find_goi_models(gff_path: str) -> list[dict]:
-    """Each GOI mRNA in the per-locus region GFF, keyed enough to look up its
-    protein sequence in the matching .faa later."""
+    """Each GOI model in the per-locus region GFF, keyed enough to look up its protein
+    sequence in the matching .faa later: an mRNA row, or a `gene` row that is no mRNA's
+    parent. Tandem copies are written as a lone `gene` row and used to skip this check, so
+    a MEDIUM tandem copy counted without being compared with the home paralogs (bug hunt
+    2026-10-13, A13)."""
     out = []
     try:
         with open(gff_path) as fh:
-            for line in fh:
-                line = line.rstrip("\n")
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 9 or parts[2] != "mRNA":
-                    continue
-                attrs = parse_gff_attributes(parts[8])
-                role = (attrs.get("SynVoyRole") or "").strip().lower()
-                # Treat ID-prefix as a fallback when SynVoyRole is missing, matching
-                # the upstream classifier in generate_report.summarize_annotations.
-                if role != "goi":
-                    model_id = attrs.get("ID", "")
-                    parent = attrs.get("SynVoy_Parent", "")
-                    if not (model_id.startswith("GOI_") or parent.startswith("GOI_")):
-                        continue
-                try:
-                    s, e = int(parts[3]), int(parts[4])
-                except ValueError:
-                    continue
-                if e < s:
-                    s, e = e, s
-                out.append({
-                    "mrna_id": attrs.get("ID", ""),
-                    "chrom": parts[0],
-                    "start": s,
-                    "end": e,
-                    "confidence": (attrs.get("Confidence") or "UNKNOWN").upper(),
-                })
+            rows = [line.rstrip("\n").split("\t") for line in fh
+                    if line.strip() and not line.startswith("#")]
     except OSError:
-        pass
+        return out
+    parents = set()
+    for parts in rows:
+        if len(parts) >= 9 and parts[2] == "mRNA":
+            parent = parse_gff_attributes(parts[8]).get("Parent", "")
+            parents.update(x for x in parent.split(",") if x)
+    for parts in rows:
+        if len(parts) < 9 or parts[2] not in ("mRNA", "gene"):
+            continue
+        attrs = parse_gff_attributes(parts[8])
+        if parts[2] == "gene" and attrs.get("ID", "") in parents:
+            continue
+        role = (attrs.get("SynVoyRole") or "").strip().lower()
+        # Treat ID-prefix as a fallback when SynVoyRole is missing, matching
+        # the upstream classifier in generate_report.summarize_annotations.
+        if role != "goi":
+            model_id = attrs.get("ID", "")
+            parent = attrs.get("SynVoy_Parent", "")
+            if not (model_id.startswith("GOI_") or parent.startswith("GOI_")):
+                continue
+        try:
+            s, e = int(parts[3]), int(parts[4])
+        except ValueError:
+            continue
+        if e < s:
+            s, e = e, s
+        out.append({
+            "mrna_id": attrs.get("ID", ""),
+            "chrom": parts[0],
+            "start": s,
+            "end": e,
+            "confidence": (attrs.get("Confidence") or "UNKNOWN").upper(),
+        })
     return out
 
 

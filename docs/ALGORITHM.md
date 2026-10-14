@@ -3,7 +3,7 @@
 This document describes what SynVoy computes, step by step, with the rule and the
 default value at every decision. It is written from the code, not from earlier
 descriptions: every statement was checked against the source of branch `dev` on
-2026-10-07 (commit `b5b4bcf`). Code locations are given as `file` → `function`,
+2026-10-07 (commit `f839bd8`). Code locations are given as `file` → `function`,
 because line numbers drift.
 
 It does not explain how to run the pipeline ([USAGE.md](USAGE.md)), what the output
@@ -485,12 +485,18 @@ Two queries are used per home GOI (`select_goi_queries`):
   earlier waves added, those of the genome added last, and among them the one that
   aligns best to the home protein. A model identical to the home protein adds nothing.
 
-Everything reported about a gene model refers to the home protein. A model that only
-the relative's query produced is aligned to the home protein again
-(`rebase_relative_candidates`): its identity, coverage and confidence come from that
-alignment, its id carries `_r<n>_` instead of `_l<n>_`, and `SearchQuery` /
-`SearchQueryIdentity` record the relative and the identity to it. Where the home
-protein produced a model on the same DNA, the relative's model is dropped.
+Both queries are searched, but the window's hits are then thinned by place: of hits
+that overlap by more than half, only the one with the higher bit score is kept,
+whichever query it came from. Where the relative's protein aligns better, the gene is
+therefore modelled from the relative alone. Everything reported about a gene model
+refers to the home protein. A model that only the relative's query produced is aligned
+to the home protein again (`rebase_relative_candidates`): its identity (over all
+alignment columns, gaps included, as BLAST counts it; until 2026-10-14 the gap columns
+were left out and the identity read several points higher), coverage and confidence
+come from that alignment, its id carries `_r<n>_` instead of `_l<n>_`, and
+`SearchQuery` / `SearchQueryIdentity` record the relative and the identity to it.
+Where the home protein produced a model on the same DNA, the relative's model is
+dropped.
 `--disable_relative_query` searches with the home protein only.
 
 Until 2026-10-08 one query was used: the longest protein among the home GOI and all
@@ -572,7 +578,7 @@ the flanking support `B`; identities are in percent and refer to the home protei
 
 | Evidence | Condition | Confidence, class |
 |---|---|---|
-| `exon_annotation` | enough exons (see below), identity ≥ 50, flank ≥ 2, order conserved | **HIGH**, `confident_goi` |
+| `exon_annotation` | enough exons (see below), not a fragment, identity ≥ 50, flank ≥ 2, order conserved | **HIGH**, `confident_goi` |
 | | the same, order not conserved | MEDIUM, `probable_goi` |
 | | identity ≥ 40 and (flank ≥ 1 and the model is not a fragment, or coverage ≥ 0.65) | MEDIUM, `probable_goi` |
 | | otherwise | LOW |
@@ -587,6 +593,9 @@ the flanking support `B`; identities are in percent and refer to the home protei
   one-exon model is enough if it covers the query like a complete gene (coverage ≥
   `classify_complete_min_qcov`, 0.7): one exon is also what a single chance alignment
   looks like.
+- **Not a fragment**: coverage of at least `classify_fragment_max_qcov` (0.4) when
+  coverage is known. HIGH had no such floor until 2026-10-14 (a two-exon model over
+  8 % of the query could be HIGH and seed the next wave).
 - **Order conserved** means: collinear support ≥ `classify_high_min_collinear` (3).
   The condition is waived when the block has fewer than 3 flanking genes or the home
   order is unknown.
@@ -594,14 +603,33 @@ the flanking support `B`; identities are in percent and refer to the home protei
   conserved neighbourhood looks the same whether the gene is there or was lost, so
   such a call is kept and drawn but not counted as an ortholog.
   `--disable_ambiguous_tier` labels it MEDIUM.
+- **Context promotion.** A genome that ends up with no HIGH or MEDIUM call for a
+  query, tandem copies included, gets one: its best LOW or AMBIGUOUS model becomes
+  MEDIUM (`low_identity_in_conserved_gene_order`, attribute `ContextPromoted`) if
+  it is an exon model or hit chain, covers at least `classify_context_min_qcov`
+  (0.5) of the query, is at least `classify_context_min_identity` (15 %)
+  identical, and its block keeps at least `classify_context_min_collinear` (4)
+  anchors in home order. Gene order, not identity, is the evidence here: fast
+  genes fall to 18-38 % in genomes whose neighbours are still 60-85 % identical.
+  Gene order cannot tell the gene from what sits in its place when the gene is
+  gone: a family relative in the same conserved neighbourhood passes the rule
+  too (the report's paralog-ownership check has to catch it), and so does a
+  chance match at a locus that lost the gene, which is what the AMBIGUOUS tier
+  is for. So the report counts such calls as MEDIUM and names them apart
+  (`gene_order_only_goi`). A promoted call goes into the tree but does not seed
+  the next search wave, so the search runs as it would without the promotion.
+  On by default since 2026-10-14; `0` switches it off. Measured precision:
+  `docs/PARAMETERS.md`.
 - A model also gets a status that does not depend on confidence: `fragment` below
   0.4 coverage, `complete` from 0.7 coverage with at least 2 exons, else `partial`.
 
 ### 7.9 Thresholds relaxed for distant targets
 
 Before classification, `_apply_distance_adaptive_thresholds` takes the best identity
-of each flanking gene in this genome and computes the median `m`. With at least 3
-flanking genes, the HIGH and MEDIUM identity thresholds are lowered by
+of each flanking gene in this genome and computes the median `m`. (Per gene: until
+2026-10-14 each exon record of the exon-level search counted as a gene, so long genes
+weighed by their exon count.) With at least 3 flanking genes, the HIGH and MEDIUM
+identity thresholds are lowered by
 
 ```
 relax = 0                               if m ≥ 70
@@ -724,7 +752,7 @@ flanking genes alone. Both apply the start/stop refinement of §7.7.
 | Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ 4 HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
 | Accepts | every miniprot model covering ≥ 5 % of the query | the most identical model with identity ≥ 40 % and coverage ≥ 0.5 |
-| Confidence | always LOW | by identity only: HIGH from 50 %, MEDIUM from 40 % (the shipped values; a preset's thresholds do not apply here) |
+| Confidence | always LOW | by identity only, at the thresholds of the main search (preset included since 2026-10-14; before, the shipped 50 / 40 % also under the short-peptide preset) |
 | Evidence type | `relaxed_miniprot_rescue` | `synteny_hull_rescue` |
 
 **The hull** (`compute_hull`). The HIGH flanking models of a scaffold are clustered
@@ -940,6 +968,7 @@ of 9 without.
 | `fallback_short_query_len` / `_min_aln_aa` / `_min_bits` | 150 / 15 / 30 | §7.7 |
 | `classify_high_min_identity` / `classify_medium_min_identity` | 50 / 40 | §7.8 |
 | `classify_high_min_collinear` | 3 | §7.8 |
+| `classify_context_min_collinear` / `_min_identity` / `_min_qcov` | 4 / 15 / 0.5 | §7.8 |
 | `classify_tandem_min_identity` / `_min_qcov` | 50 / 0.35 | §7.8 |
 | `classify_fallback_strong_min_identity_floor` | 30 | §7.8 |
 | `classify_fragment_max_qcov` / `classify_complete_min_qcov` | 0.4 / 0.7 | §7.8 |

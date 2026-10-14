@@ -905,7 +905,10 @@ def sw_align_span(query_seq: str, subject_seq: str) -> Dict[str, float]:
     """Local alignment of two proteins with the part of the QUERY it covers.
 
     Returns ``{'score', 'identity', 'q_start', 'q_end', 'query_cov'}``: identity in
-    percent of the aligned columns, ``q_start``/``q_end`` 1-based inclusive positions in
+    percent of the alignment columns between the first and the last aligned residue pair,
+    gap columns included (as BLAST, MMseqs2 and miniprot count it; counting only the
+    gap-free columns read several points higher on a gapped alignment and was compared
+    with the same thresholds), ``q_start``/``q_end`` 1-based inclusive positions in
     the query, ``query_cov`` the share of the query between them (0-1). BLOSUM62 at BLAST
     gap costs 11/1. Raises RuntimeError without parasail, like ``sw_align``.
     """
@@ -923,6 +926,7 @@ def sw_align_span(query_seq: str, subject_seq: str) -> Dict[str, float]:
     # stretch from the first to the last column that holds a residue of both sequences.
     q_pos = int(cigar.beg_query)
     matches = aligned = 0
+    columns = pending_gaps = 0         # gap columns count once a pair follows them
     q_first = q_last = None
     for op in cigar.seq:
         length, code = int(op >> 4), int(op & 0xF)
@@ -931,16 +935,21 @@ def sw_align_span(query_seq: str, subject_seq: str) -> Dict[str, float]:
                 q_first = q_pos
             q_last = q_pos + length - 1
             aligned += length
+            columns += pending_gaps + length
+            pending_gaps = 0
             q_pos += length
             if code == 7:
                 matches += length
-        elif code == 1:                # I: residues of the query only
-            q_pos += length
+        else:
+            if q_first is not None:    # an inner gap; leading and trailing ones are not columns
+                pending_gaps += length
+            if code == 1:              # I: residues of the query only
+                q_pos += length
     if not aligned:
         return empty
     return {
         'score': float(res.score),
-        'identity': 100.0 * matches / aligned,
+        'identity': 100.0 * matches / columns,
         'q_start': q_first + 1,
         'q_end': q_last + 1,
         'query_cov': min(1.0, (q_last - q_first + 1) / len(query_seq)),

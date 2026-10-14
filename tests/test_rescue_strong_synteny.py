@@ -18,6 +18,8 @@ import csv
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
@@ -136,5 +138,6 @@ def test_identity_parse_handles_bad_input() -> None:
     """Bad Identity attribute (or missing) shouldn't crash the row builder."""
     assert rss._identity_from_mrna_attrs("ID=foo;Identity=") == 0.0
     assert rss._identity_from_mrna_attrs("ID=foo;Identity=not_a_number") == 0.0
-    assert rss._identity_from_mrna_attrs("ID=foo;Identity=0.91") == 0.91
+    # miniprot writes a fraction; the rescue model carries percent like every other model
+    assert rss._identity_from_mrna_attrs("ID=foo;Identity=0.91") == pytest.approx(91.0)
     assert rss._identity_from_mrna_attrs("ID=foo") == 0.0

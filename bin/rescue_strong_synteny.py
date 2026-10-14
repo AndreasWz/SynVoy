@@ -74,7 +74,15 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
         "-L", "10",
         window_fa, query_fa,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # One slow window must not take the other windows of this genome with it: the task
+        # used to die here and errorStrategy 'ignore' hid it (bug hunt 2026-10-13, A9).
+        # A missing binary still raises: that is an installation fault, not a window.
+        print(f"[rescue] miniprot timed out after {timeout} s on {window_fa}; window skipped",
+              file=sys.stderr)
+        return ""
     if proc.returncode != 0:
         print(f"[rescue] miniprot non-zero exit ({proc.returncode}) on "
               f"{window_fa}: {proc.stderr[:200]}", file=sys.stderr)
@@ -150,11 +158,14 @@ def _get_attr(attr_str: str, key: str, default: str = "") -> str:
 
 
 def _identity_from_mrna_attrs(attrs: str) -> float:
+    """miniprot writes Identity as a fraction (0.962); every other SynVoy model carries
+    percent. Written as is, the rescue models read Identity=1.0 for 96 %."""
     raw = _get_attr(attrs, "Identity", "")
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return 0.0
+    return value * 100.0 if value <= 1.0 else value
 
 
 def _build_rescue_gff_rows(mrna, cds_rows, chrom: str, window_start: int,

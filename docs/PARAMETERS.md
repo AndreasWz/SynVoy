@@ -627,6 +627,19 @@ The minimum query coverage fraction for a gene model to be labeled as `complete`
 
 Identity floor for the "strong flanking support" route by which a hit-chain call (`fallback_hit_span`) reaches MEDIUM. A block with five or more flanking genes used to promote any hit inside it, at any identity, as long as it covered a quarter of the query — the mechanism behind 21–27 % "MEDIUM" calls on the yeast STE2 run. The floor was calibrated against two real populations: the genuine ant melittin rescue sits at 34.7 %, the yeast false positives at 21–27 %. `0` restores the old behaviour.
 
+### `classify_context_min_collinear` / `classify_context_min_identity` / `classify_context_min_qcov`
+**Type:** Integer / Float (%) / Float (fraction) | **Defaults:** `4` / `15.0` / `0.5`
+
+On by default since 2026-10-14 (`0` switches it off). A genome without any HIGH or MEDIUM call for the query (a tandem copy counts as a call) gets one call from gene order: its best exon model or hit chain labelled LOW or AMBIGUOUS, covering at least `classify_context_min_qcov` of the query (and never less than `classify_fragment_max_qcov`), at or above the identity floor, on a block whose longest run of anchors in home order reaches `classify_context_min_collinear`, is labelled MEDIUM (`InferenceReason=low_identity_in_conserved_gene_order`, `ContextPromoted=<old label>`). A promoted call goes into the tree but does not seed the next search wave. The report counts it among the MEDIUM calls, gives the number of such calls as `gene_order_only_goi` and names them in the headline.
+
+What is known about it (2026-10-14):
+
+- Family benchmark, 12 seeds of the families not used to choose 4 or 0.5 (SECP, PLA2, KAZA, SPIN, APH, VA, DPP4, HYAL; real runs with the rule on, scored as run and with the promotions taken back): it fires for 5 seeds. 44 models promoted, 2 of them demoted by the paralog-ownership check (one a DPP4 relative); of the 42 that reach the report, 29 lie on a curated family gene. Locus recall SECP 0 → 0.50 (precision 0.94; without the rule the run had no call at all), VA 0.42 → 0.55, SPIN 0.41 → 0.56; 9 of the 13 wrong calls come from one SPIN seed whose home locus is not where the curated genes are (recall 0 with and without the rule). Seven seeds unchanged.
+- Candida pilot (14 genes, 5 genomes), the data the value 4 was chosen on: found pairs 25 → 45 of 60, wrong first answers 0 → 3, answers where the curated truth has no ortholog 1 → 2 (real runs, scored from the report). Three of the eight hidden pairs found are held by gene order alone in the curated truth, so they cannot test a rule that calls on gene order. Nematode pilot: one more found, one more wrong.
+- Apyrase, DPP4, serine proteases, both melittin sets, yeast, fly, plant and luciferase cases of the current code: with the coverage floor of 0.5 nothing is promoted except the DPP4 relative (demoted by the ownership check). With 0.4 there were seven promotions there, none on a curated gene, two of them in the bumblebees that lost melittin: that is why the floor is 0.5.
+
+Gene order cannot tell the gene from a relative or a chance match in its place, so treat a promoted call as a candidate until the paralog-ownership check or other evidence confirms it.
+
 ### `disable_ambiguous_tier`
 **Type:** Boolean | **Default:** `false`
 

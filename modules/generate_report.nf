@@ -53,20 +53,14 @@ process GENERATE_REPORT {
         cp "\$f" staged_results/regions/ 2>/dev/null || true
     done
 
-    # Stage hits directories (containing .m8 files)
-    for d in \$(find -L hits -mindepth 1 -maxdepth 1 -type d 2>/dev/null); do
-        dname=\$(basename "\$d")
-        case "\$dname" in
-            NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_SPECIES_MAP|NO_SCORES) continue ;;
-        esac
-        if [ -d "\$d" ]; then
-            cp -r "\$d"/* staged_results/hits/ 2>/dev/null || true
-        fi
-    done
-    # Also pick up any plain .m8 files staged directly under hits/
-    for f in \$(find -L hits -maxdepth 2 -name '*.m8' -type f 2>/dev/null); do
-        cp "\$f" staged_results/hits/ 2>/dev/null || true
-    done
+    # Stage the per-genome tables the search writes into its hits/ folder: the §1x
+    # non-syntenic candidates and the genomes it could not search. Each hits/ folder
+    # arrives as hits/<n>/hits/<file>, one level deeper than the old loops looked, so none
+    # of them ever reached the report (bug hunt 2026-10-13). Their names carry the locus,
+    # so one flat folder is safe. The raw .m8 hits are not staged: they are large and the
+    # old copies of them were never read.
+    find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\) \\
+        -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
 
     # Stage structured region scores
     for f in \$(find -L scores -type f 2>/dev/null); do

@@ -63,6 +63,16 @@ class TestMedianBestFlankingIdentity(unittest.TestCase):
         self.assertEqual(n, 3)            # 3 distinct genes
         self.assertEqual(median, 80.0)    # median of [70, 80, 90]
 
+    def test_exon_records_count_as_one_gene(self):
+        """Exon-level search names each exon `gene|exon_N`. A 6-exon gene at 85 % and four
+        one-exon genes at 45 % are five genes with median 45, not ten records with median 85."""
+        hits = _hits([(f"gene-A|exon_{i}", 85.0) for i in range(1, 7)]
+                     + [(f"gene-{g}|exon_1", 45.0) for g in "BCDE"])
+        self.assertEqual(_median_best_flanking_identity(hits), (45.0, 5))
+        # one 3-exon gene is one gene: below the minimum of three
+        self.assertEqual(_median_best_flanking_identity(
+            _hits([(f"gene-A|exon_{i}", 70.0) for i in (1, 2, 3)]))[1], 1)
+
     def test_even_count_averages(self):
         median, n = _median_best_flanking_identity(_hits([("A", 40.0), ("B", 60.0)]))
         self.assertEqual(n, 2)

@@ -50,7 +50,9 @@ import os
 import re
 import sys
 
-CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+# AMBIGUOUS sits between LOW and MEDIUM, as in the pipeline; it was missing, so an
+# AMBIGUOUS call was dropped even with --min_confidence LOW (bug hunt 2026-10-13, A14).
+CONF_RANK = {"LOW": 0, "AMBIGUOUS": 1, "MEDIUM": 2, "HIGH": 3}
 
 
 # ---------------------------------------------------------------- loading ---
@@ -120,7 +122,9 @@ def load_searched_species(run_dir):
     if not regions or not os.path.isdir(regions):
         return None
     species = set()
-    for name in os.listdir(regions):
+    # regions/<locus>/<file> since 2026-10-14 (one folder per home locus); flat before.
+    names = [n for _root, _dirs, files in os.walk(regions) for n in files]
+    for name in names:
         m = re.match(r"^(.+?)\.(?:fna|fa|fasta)\.(?:regions\.bed|scores\.tsv)$", name)
         if m:
             species.add(m.group(1))
@@ -258,7 +262,11 @@ def score(truth, calls, min_confidence=None, searched_chroms=None, exclude_speci
                                       searched_chroms)
         if cands:
             ov, i, c = cands[0]
-            hit_call_ids.update(j for _, j, _ in cands)
+            # A call on a locus whose gene is lost is a false positive, counted in
+            # false_positive_calls_on_lost_loci; it used to count as "on a truth model"
+            # in locus_precision as well (bug hunt 2026-10-13, A14).
+            if m["truth_kind"] != "locus_gene_lost":
+                hit_call_ids.update(j for _, j, _ in cands)
             model_rows.append({
                 **{k: m[k] for k in ("species", "chrom", "start", "end", "model_id",
                                      "truth_kind", "confidence")},

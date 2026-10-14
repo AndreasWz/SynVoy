@@ -1507,7 +1507,8 @@ workflow {
             SPLIT_LOCI.out.beds,
             qc_summary_ch,
             ITERATIVE_SEARCH.out.goi_for_tree,
-            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first()
+            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first(),
+            effective_settings_ch
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

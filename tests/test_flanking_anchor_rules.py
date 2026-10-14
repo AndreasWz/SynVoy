@@ -169,6 +169,18 @@ def test_the_gene_of_interest_is_never_its_own_neighbour(tmp_path):
         assert [row[3] for row in bed if row[3].startswith("GOI_")] == [f"GOI_chr1_{genes[4][1]}"]
 
 
+def test_nearest_gene_is_an_anchor_when_the_locus_is_between_genes(tmp_path):
+    """A locus that overlaps no gene (an unannotated ORF seed) sits between G6 and G7; G6 is
+    the nearest gene. It used to be skipped like the gene of interest (bug hunt A7)."""
+    genes, _bp = _locus(tmp_path)
+    g6_end = genes[6][2]
+    (tmp_path / "locus.bed").write_text(f"chr1\t{g6_end + 1000}\t{g6_end + 1300}\torf_loc\t0\t+\t500\n")
+    headers, _bed, _out = _run(tmp_path)
+    ids = _ids(headers)
+    assert "gene-G6" in ids
+    assert ids == ["gene-G2", "gene-G5", "gene-G6", "gene-G7", "gene-G8"]
+
+
 def test_anchor_headers_carry_home_coordinates_and_genome_length(tmp_path):
     genes, genome_bp = _locus(tmp_path)
     headers, _bed, _out = _run(tmp_path)

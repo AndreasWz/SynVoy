@@ -251,6 +251,20 @@ CLASSIFY_THRESHOLDS = {
     # model_status thresholds
     "fragment_max_qcov": 0.4,
     "complete_min_qcov": 0.7,
+    # Context promotion (2026-10-13, _promote_context_supported_goi): a genome with no
+    # HIGH/MEDIUM call for a query gets its best weak model lifted to MEDIUM when its block
+    # keeps >= this many anchors in home order. 0 = off. On by default since 2026-10-14:
+    # on 12 family-benchmark seeds that played no part in choosing 4 or the coverage floor,
+    # 29 of the 42 promoted calls that reached the report lay on a curated family gene.
+    "context_min_collinear": 4,
+    # Sanity floor for that promotion; the search's E-value filter is the real homology test.
+    "context_min_identity": 15.0,
+    # Query coverage a promoted model needs (never below fragment_max_qcov). With the
+    # fragment bound of 0.4 the rule promoted seven models in the family and melittin
+    # benchmark runs, none on a curated gene, six of them hit chains at 0.42-0.47, two of
+    # those in bumblebees that lost melittin; 0.5 removes those six and one of 46 found
+    # pairs of the pilot.
+    "context_min_qcov": 0.5,
 }
 
 # Family-consistency config (Change A in TP53_IMPLEMENTATION_FIX_PLAN.md).
@@ -281,14 +295,19 @@ def _median_best_flanking_identity(flanking_hits: List[Dict[str, Any]]) -> Tuple
     """§1g distance proxy: median of the best %identity per flanking gene.
 
     `flanking_hits` are the non-GOI (flanking-anchor) MMseqs hits for one target
-    genome. We collapse to one value per flanking query (its strongest hit) so a
+    genome. We collapse to one value per flanking gene (its strongest hit) so a
     multi-HSP gene doesn't dominate, then take the median. High median => the
     target is a close relative (flanking genes align well); low median => distant.
     Returns (median_identity_or_None, n_flanking_genes).
+
+    Keyed on the base gene id: with exon-level search (the default) every exon is its own
+    query record (``gene|exon_N``), and keying on the record made this a median over exons,
+    weighting long genes by their exon count and letting one 3-exon gene pass the minimum of
+    three "genes" (logs said "over 103 genes" for about 20 flanking genes).
     """
     by_gene: Dict[str, float] = {}
     for h in flanking_hits:
-        q = h.get('query', '')
+        q = extract_base_gene_id(h.get('query', '') or '')
         if not q:
             continue
         pid = float(h.get('pident', 0.0) or 0.0)
@@ -1243,8 +1262,17 @@ def _classify_goi_evidence(
         # (high_min_exons is then 1), and then it has to cover the query like a complete
         # gene: one exon is also what a single chance alignment looks like.
         one_exon_ok = exon_count >= 2 or qcov >= ct.get("high_single_exon_min_qcov", 0.0)
+        # The flanking arm does not lift a model this pipeline itself calls a FRAGMENT
+        # (ModelStatus, qcov < fragment_max_qcov): family benchmark 2026-09-11, single-exon
+        # 6-9 %-coverage models in 2-flanking blocks were the MEDIUM calls left off-truth,
+        # while every on-truth call had qcov >= 0.5. Unknown coverage is not low coverage:
+        # the floor only applies when it was measured. The same holds for HIGH: a two-exon
+        # model over 8 % of the query at 60 % was HIGH and seeded the next wave while the
+        # same model at 45 % was LOW (bug hunt 2026-10-13, A4; once in about 380 HIGH rows).
+        fragment = query_cov is not None and qcov < ct["fragment_max_qcov"]
         if (exon_count >= ct["high_min_exons"]
                 and one_exon_ok
+                and not fragment
                 and identity >= ct["high_min_identity"]
                 and flanking_support >= ct["high_min_flanking"]):
             if collinear_ok:
@@ -1255,12 +1283,6 @@ def _classify_goi_evidence(
             # home order → likely a paralog neighbourhood, not the true ortholog locus. Demote
             # to MEDIUM (still a probable GOI) rather than assert HIGH on identity+count alone.
             return "MEDIUM", "probable_goi", "high_identity_but_flanking_not_collinear"
-        # The flanking arm does not lift a model this pipeline itself calls a FRAGMENT
-        # (ModelStatus, qcov < fragment_max_qcov): family benchmark 2026-09-11, single-exon
-        # 6-9 %-coverage models in 2-flanking blocks were the MEDIUM calls left off-truth,
-        # while every on-truth call had qcov >= 0.5. Unknown coverage is not low coverage:
-        # the floor only applies when it was measured.
-        fragment = query_cov is not None and qcov < ct["fragment_max_qcov"]
         if identity >= ct["medium_min_identity"] and (
                 (flanking_support >= ct["medium_min_flanking"] and not fragment)
                 or qcov >= ct["medium_min_qcov"]):
@@ -1440,6 +1462,104 @@ def _resolve_fallback_signals(
             structural_similarity = float(ss) if structural_similarity is None else max(structural_similarity, float(ss))
 
     return seq_identity, embedding_similarity, structural_similarity, (not seq_hits and bool(ml_hits))
+
+
+CONTEXT_PROMOTABLE_EVIDENCE = frozenset({"exon_annotation", "fallback_hit_span"})
+
+
+def _promote_context_supported_goi(gff_lines: List[str]) -> Tuple[List[str], int]:
+    """Lift one weak GOI model per query to MEDIUM when gene ORDER, not identity, carries it.
+
+    The identity bars (MEDIUM 40, relaxed to 30 at most by section 1g) assume the ortholog
+    keeps a share of its sequence that scales with the distance of its neighbours. Fast
+    genes do not: on the Candida pilot (2026-10-13) the curated orthologs that a protein
+    search misses were modelled on the right gene at 18-38 % identity, their neighbours at
+    58-85 %, and labelled LOW or AMBIGUOUS, so the report dropped 27 of 34 of them. Their
+    blocks kept 4-15 anchors in home order. The models beside them were fragments, or sat
+    in genomes that already had a confident call.
+
+    Rule, per query (SynVoy_Parent) and genome, applied after every block is written:
+      * no HIGH or MEDIUM call for this query in the genome, a tandem copy included
+        (tandem copies are `gene` rows, every other model an `mRNA` row);
+      * candidates: exon models and hit chains (not rescued exons, raw hits, tandem copies)
+        labelled LOW or AMBIGUOUS, coverage >= context_min_qcov (and never a fragment),
+        identity >= context_min_identity, BlockCollinearSupport >= context_min_collinear;
+      * the candidate with the longest collinear run wins (then identity x coverage) and
+        becomes MEDIUM / probable_goi with ContextPromoted=<old label>.
+    The promoted call does not seed the next wave (_classify_goi_for_seed_and_tree), and it
+    still goes through the report's paralog-ownership check, which has to catch a family
+    relative sitting in the same conserved neighbourhood.
+
+    On by default since 2026-10-14 (context_min_collinear 4). Gene order cannot tell "the
+    gene is here" from "the gene was lost and a relative or a chance match sits in its
+    place", which is why the AMBIGUOUS tier exists and why the report names these calls
+    apart (gene_order_only_goi). Measured: with a coverage floor of 0.4 the rule promoted
+    seven models in the apyrase/DPP4/serine-protease/melittin runs, none on a curated gene,
+    two of them the AMBIGUOUS calls in the bumblebees that lost melittin; 0.5 leaves one (a
+    relative, which the ownership check then demotes). On 12 family-benchmark seeds not
+    used to choose either value: 44 promoted, 2 demoted by the ownership check, 29 of the
+    other 42 on a curated family gene (9 of the 13 wrong in one seed whose home locus is
+    not where the curated genes are). SECP from no call at all to locus recall 0.50.
+    """
+    ct = CLASSIFY_THRESHOLDS
+    min_coll = int(ct.get("context_min_collinear", 0) or 0)
+    if min_coll <= 0 or not gff_lines:
+        return gff_lines, 0
+    min_ident = float(ct.get("context_min_identity", 0.0) or 0.0)
+    min_qcov = max(float(ct.get("context_min_qcov", 0.0) or 0.0),
+                   float(ct.get("fragment_max_qcov", 0.4)))
+
+    confident: set = set()
+    best: Dict[str, Tuple[Tuple[int, float], int]] = {}
+    for i, line in enumerate(gff_lines):
+        parts = line.split("\t")
+        if len(parts) < 9 or parts[2] not in ("mRNA", "gene"):
+            continue
+        attrs = _parse_gff_attributes(parts[8])
+        if attrs.get("SynVoyRole") != "goi":
+            continue
+        query = attrs.get("SynVoy_Parent") or attrs.get("Name", "")
+        conf = (attrs.get("Confidence") or "").upper()
+        if conf in ("HIGH", "MEDIUM"):
+            confident.add(query)
+            continue
+        if (parts[2] != "mRNA" or conf not in ("LOW", "AMBIGUOUS")
+                or attrs.get("EvidenceType") not in CONTEXT_PROMOTABLE_EVIDENCE):
+            continue
+        try:
+            ident = float(attrs.get("Identity", 0) or 0)
+            qcov = float(attrs.get("QueryCoverage", 0) or 0)
+            coll = int(attrs.get("BlockCollinearSupport", 0) or 0)
+        except ValueError:
+            continue
+        if qcov < min_qcov or ident < min_ident or coll < min_coll:
+            continue
+        key = (coll, ident * qcov)
+        if query not in best or key > best[query][0]:
+            best[query] = (key, i)
+
+    out = list(gff_lines)
+    n = 0
+    for query, (_key, i) in best.items():
+        if query in confident:
+            continue
+        parts = out[i].split("\t")
+        old = _parse_gff_attributes(parts[8]).get("Confidence", "")
+        new_attrs = []
+        for pair in parts[8].split(";"):
+            k = pair.split("=", 1)[0]
+            if k == "Confidence":
+                pair = "Confidence=MEDIUM"
+            elif k == "GOIClass":
+                pair = "GOIClass=probable_goi"
+            elif k == "InferenceReason":
+                pair = "InferenceReason=low_identity_in_conserved_gene_order"
+            new_attrs.append(pair)
+        new_attrs.append(f"ContextPromoted={old}")
+        parts[8] = ";".join(new_attrs)
+        out[i] = "\t".join(parts)
+        n += 1
+    return out, n
 
 
 def _classify_flanking_evidence(
@@ -5146,6 +5266,11 @@ def _classify_goi_for_seed_and_tree(
     identity, so it doesn't preferentially admit paralogs; §1m collinearity and
     §1m ownership remain the drift backstops.
 
+    A context-promoted call (``_promote_context_supported_goi``) rests on gene order,
+    not on sequence. It feeds the tree but never seeds the next wave, so the search
+    itself runs as without the promotion and a wrong promotion cannot carry into
+    later waves.
+
     Suppressed_count is the total of GOI-role genes that did NOT qualify for
     seeding (used for logging).
     """
@@ -5160,9 +5285,11 @@ def _classify_goi_for_seed_and_tree(
             continue
         confidence = meta.get("confidence", "")
         goi_class = meta.get("goi_class", "")
-        qualifies = (confidence in _TREE_QUALIFYING_CONFIDENCE
+        promoted = bool(meta.get("context_promoted"))
+        qualifies = (not promoted
+                     and confidence in _TREE_QUALIFYING_CONFIDENCE
                      and goi_class in _SEED_QUALIFYING_CLASSES)
-        if (not qualifies and seed_on_flanking_support
+        if (not qualifies and not promoted and seed_on_flanking_support
                 and confidence in _TREE_QUALIFYING_CONFIDENCE):
             fs = _safe_float(meta.get("block_flanking_support"))
             qc = _safe_float(meta.get("query_coverage"))
@@ -5254,6 +5381,25 @@ NONSYNTENIC_COLUMNS = [
     'rejected_by', 'nearest_anchor_gene', 'nearest_anchor_bp',
     'nearest_anchor_same_chrom',
 ]
+
+
+NOT_SEARCHED_COLUMNS = ['genome', 'reason', 'details']
+
+
+def _write_not_searched(args, prefix, genome_name, reason, details=''):
+    """Record a genome this search could not search, next to the raw hits (the report
+    stages hits/ like the §1x candidates). Without it the genome produced no result file
+    and vanished from the report: neither a call nor "absent" (bug hunt 2026-10-13, A10)."""
+    path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.not_searched.tsv")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=NOT_SEARCHED_COLUMNS, delimiter='\t')
+            w.writeheader()
+            w.writerow({'genome': genome_name, 'reason': reason,
+                        'details': ' '.join(str(details).split())[:500]})
+    except OSError as exc:
+        logger.warning(f"[{genome_name}] could not record the skipped search: {exc}")
 
 
 def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
@@ -5474,10 +5620,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         )
         if not mmseqs_ok:
             if resource_fail:
-                logger.warning(
-                    f"[{genome_name}] Skipping genome after MMseqs resource failures "
-                    "(prefilter/search crash persisted across retries)."
+                # Skipped, not failed: one fragmented genome must not end the whole search.
+                # But it is not "searched, nothing found" either: the report lists it.
+                logger.error(
+                    f"[{genome_name}] NOT SEARCHED: MMseqs resource failures persisted across "
+                    "retries (prefilter/search crash). The report lists this genome under "
+                    "genomes_not_searched."
                 )
+                _write_not_searched(args, prefix, genome_name, 'mmseqs_resource_failure',
+                                    mmseqs_details)
                 return genome_name, [], [], None
             raise RuntimeError(
                 f"MMseqs easy-search failed for {genome_name}: {mmseqs_details}"
@@ -6123,6 +6274,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         feature_meta = {}
 
+        all_gff_lines, n_promoted = _promote_context_supported_goi(all_gff_lines)
+        if n_promoted:
+            logger.info(
+                f"[{genome_name}] Context promotion: {n_promoted} GOI model(s) LOW/AMBIGUOUS -> "
+                f"MEDIUM on >= {CLASSIFY_THRESHOLDS['context_min_collinear']} anchors in home order."
+            )
+
         # Write aggregated GFF
         if all_gff_lines:
              gff_out = f"{args.output_dir}/regions/{genome_name}.gff"
@@ -6162,6 +6320,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "target_product": attrs.get("TargetProduct", ""),
                      "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
+                     "context_promoted": attrs.get("ContextPromoted", ""),
                  }
 
              with open(tsv_out, 'w') as tf:
@@ -6324,7 +6483,10 @@ def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_si
         updated += f";StructuralSimilarity={structural_similarity:.3f}"
 
     boosted = 0
-    if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM'):
+    # A context-promoted MEDIUM was not reached by this classifier; re-running it here
+    # without the block's gene order must not take it back down.
+    demotes_promoted = 'ContextPromoted' in attr_kv and new_conf != 'HIGH'
+    if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM') and not demotes_promoted:
         updated = updated.replace(f"Confidence={old_conf}", f"Confidence={new_conf}")
         old_reason = attr_kv.get('InferenceReason', '')
         if old_reason:
@@ -6844,6 +7006,17 @@ def main():
                              "flanking to reach this, once a block has >= this many flanking "
                              "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
                              "Set 0 to disable the order gate (count-only, legacy).")
+    parser.add_argument("--classify_context_min_collinear", type=lambda v: int(float(v)), default=4,
+                        help="A genome with no HIGH/MEDIUM call for a query gets its best "
+                             "LOW/AMBIGUOUS exon model or hit chain lifted to MEDIUM when its "
+                             "block keeps at least this many anchors in home order "
+                             "(InferenceReason low_identity_in_conserved_gene_order). "
+                             "0 = off; default 4.")
+    parser.add_argument("--classify_context_min_identity", type=float, default=15.0,
+                        help="Identity floor (%%) for that promotion.")
+    parser.add_argument("--classify_context_min_qcov", type=float, default=0.5,
+                        help="Query coverage a model needs for that promotion "
+                             "(never below --classify_fragment_max_qcov).")
     parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
                         help="§1x: record GOI hits that clear the quality bar but are "
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
@@ -7065,6 +7238,9 @@ def main():
     CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = (
         args.classify_fallback_strong_min_identity_floor)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
+    CLASSIFY_THRESHOLDS["context_min_collinear"] = max(0, args.classify_context_min_collinear)
+    CLASSIFY_THRESHOLDS["context_min_identity"] = args.classify_context_min_identity
+    CLASSIFY_THRESHOLDS["context_min_qcov"] = args.classify_context_min_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
     CLASSIFY_THRESHOLDS["plm_high_threshold"] = args.plm_high_threshold

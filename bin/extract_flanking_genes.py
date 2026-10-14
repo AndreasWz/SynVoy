@@ -612,10 +612,20 @@ def main():
                 #   1Mb+ away when the GOI neighbours a tandem array that eats one side).
                 goi_similar_neighbors = []  # genes to emit as GOI_NEIGHBOR_ queries
 
+                # The walk starts one gene out because the gene nearest the locus is
+                # normally the gene of interest itself. When the locus overlaps no gene
+                # (an unannotated seed such as an ORF, or a locus placed by alignment
+                # between genes) that nearest gene is a real neighbour and was lost; it now
+                # opens the walk on its own side (bug hunt 2026-10-13, A7).
+                centre = chrom_genes[center_idx]
+                centre_free = not (centre['start'] < region['end'] and centre['end'] > region['start'])
+                centre_up = centre_free and (centre['start'] + centre['end']) / 2 <= reg_center
+                centre_down = centre_free and not centre_up
+
                 upstream_all = []   # all non-GOI-similar genes visited (closest→farthest)
                 upstream_slots = 0  # count of protein-coding genes (toward n_flank limit)
                 max_expand = min(len(chrom_genes), args.n_flank * 5)
-                for offset in range(1, max_expand + 1):
+                for offset in range(0 if centre_up else 1, max_expand + 1):
                     if upstream_slots >= args.n_flank:
                         break
                     idx = center_idx - offset
@@ -647,7 +657,7 @@ def main():
 
                 downstream_all = []
                 downstream_slots = 0
-                for offset in range(1, max_expand + 1):
+                for offset in range(0 if centre_down else 1, max_expand + 1):
                     if downstream_slots >= args.n_flank:
                         break
                     idx = center_idx + offset

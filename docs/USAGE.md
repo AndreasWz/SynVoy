@@ -367,6 +367,7 @@ Controls the confidence labels (HIGH / MEDIUM / AMBIGUOUS / LOW) and model statu
 | `--classify_high_min_identity` | `50.0` | Min identity (%) for a HIGH gene model. HIGH also needs two exons, or one exon when the home gene has one. No preset raises it any more (two used 55). |
 | `--classify_medium_min_identity` | `40.0` | Min identity (%) for a MEDIUM gene model (35 before; of 60 benchmark models below 40 % none was on a curated gene). `preset_short_peptide`: 30. |
 | `--classify_high_min_collinear` | `3` | Once a block has ≥3 flanking genes, HIGH additionally requires a collinear run of home-ordered flanking at least this long — a scrambled paralog neighbourhood is capped at MEDIUM even at high identity. `0` restores the legacy count-only behaviour. |
+| `--classify_context_min_collinear` | `4` | A genome without a HIGH/MEDIUM call gets its best weak model labelled MEDIUM when its block keeps that many anchors in home order and the model covers `--classify_context_min_qcov` (`0.5`) of the query at `--classify_context_min_identity` (`15`) or more. The report names such calls apart (`gene_order_only_goi`); `0` switches it off. Measured precision in PARAMETERS.md. |
 | `--strict_goi_family` | `false` | Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated `TargetGene`/`TargetProduct` does not contain a family token. Useful for multi-paralog queries (e.g. TP53 family). |
 | `--goi_family_tokens` | _(empty)_ | Comma-separated family name tokens for `--strict_goi_family`. **Set it explicitly**: the automatic derivation from the query header does not work in practice, and with no tokens the gate disables itself (a warning in the `ITERATIVE_SEARCH` log). |
 | `--classify_tandem_min_identity` | `50.0` | Min identity (%) for a MEDIUM single-segment tandem copy (40 before; `preset_short_peptide`: 40). Below this the row is LOW. |
@@ -683,7 +684,7 @@ All output goes into `--outdir` (default: `results/`):
 | `*_synteny_plot.html` | Interactive HTML visualization. Open in a browser — shows syntenic blocks, gene arrows, homology links, and a phylogenetic tree. |
 | `*_gene_names.tsv` | The label every home gene carries in the figures, with its full name, gene ID and the source of the label (home GFF, NCBI Gene, or an abbreviation of the product name). Editable: pass it back with `--gene_names_tsv`. |
 | `*_tree.nwk` | Newick-format phylogenetic tree of all discovered GOI and GOI-similar sequences across genomes (multiple per genome when paralogs are found). |
-| `regions/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome. |
+| `regions/<locus>/*.regions.bed` | BED files with genomic coordinates of identified candidate syntenic blocks on each target genome, one folder per home locus. |
 | `synvoy_report.json` | Machine-readable JSON report: input parameters, genome QC metrics, per-target results, internal exit codes. |
 | `intermediate/` | Per-phase artifacts — flanking gene FASTAs, MMseqs2 hit tables, per-target GFFs, miniprot alignments, etc. **Always published** (each stage `publishDir`s into it unconditionally). |
 | `downloaded_genomes/` | (Easy Mode only) Downloaded genome assemblies and `assembly_quality.tsv` with contiguity stats. |
