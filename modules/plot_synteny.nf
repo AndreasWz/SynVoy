@@ -24,6 +24,11 @@ process PLOT_SYNTENY {
     // The same print grid with each GOI copy coloured by its clade in the GOI gene tree
     // (flanking genes grey); written only when that shows more than the species tree.
     path "*_anchor_grid_clades_print.*", emit: anchor_grid_clades_print, optional: true
+    // Try-out versions of the print grid (opt-in: --plot_extra_args "--grid_variants all"):
+    // flanking genes as one grey stack per side with the GOI copies inline or with the exon
+    // panel (compact, compact_panel), and the print grid in clade colours (clades_muted).
+    path "*_anchor_grid_compact*_print.*", emit: anchor_grid_compact_print, optional: true
+    path "*_anchor_grid_clades_muted_print.*", emit: anchor_grid_clades_muted_print, optional: true
     path "*_gene_positions.html", emit: gene_positions, optional: true
     path "*_gene_positions.svg", emit: gene_positions_svg, optional: true
     path "*_tree.html", emit: tree, optional: true

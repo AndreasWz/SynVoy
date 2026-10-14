@@ -162,11 +162,18 @@ def _parse_newick(newick_str):
 # (#f28e2b, #ffbe7d) are deliberately swapped out for distinct non-red/non-orange
 # colours (cyan / indigo / olive / slate / violet / chartreuse) so no flanking gene
 # is ever rendered red — or close to red — and confused with the GOI (GOI_COLOUR below).
+# Flanking-gene colours, in the order genes get them along the home locus: pale, so that the
+# GOI stands out. Made by scripts/make_gene_palette.py: Paul Tol's "light" scheme (made to fill
+# labelled cells; without its grey and its salmon, which is close to the GOI red) extended from
+# the same pale band, every next colour the one farthest (CIEDE2000) from all before it and from
+# the GOI reds and figure greys. Neighbouring genes differ by at least 11, any two by 9; the old
+# 20-colour list had two near-identical pairs (2.6 and 2.8).
 GENE_PALETTE = [
-    "#4e79a7", "#9467bd", "#59a14f", "#b07aa1", "#76b7b2",
-    "#edc948", "#17becf", "#9c755f", "#86bcb6", "#393b79",
-    "#8cd17d", "#499894", "#d4a6c8", "#a0cbe8", "#bcbd22",
-    "#637939", "#5254a3", "#b6992d", "#7b848f", "#f1ce63",
+    "#77aadd", "#aaaa00", "#44bb99", "#ffaabb", "#eedd88", "#99ddff",
+    "#bbcc33", "#f5b285", "#dbc1fb", "#9ba581", "#b5e3af", "#3cafba",
+    "#69ebe5", "#cd8bc1", "#bd9c5c", "#a498db", "#feccc2", "#c7d7fc",
+    "#dec9a7", "#99cbbb", "#f5cbe4", "#83b87e", "#d7dab4", "#b8ba73",
+    "#c294a4", "#c5a58a", "#3ab8e6", "#b7a4c6", "#86eac7", "#3fd2e9",
 ]
 
 GOI_PUB_COLOUR = "#E64B35"  # Nature-red for publication GOI
@@ -5272,6 +5279,13 @@ def main():
     ap.add_argument("--print_height_mm", type=float, default=170.0,
                     help="Largest height of the print anchor grid in mm; rows are packed "
                          "tighter before the figure exceeds it.")
+    ap.add_argument("--grid_variants", type=_grid_variant_list, default=[],
+                    help="Also write these try-out versions of the print grid, comma-separated "
+                         "(or 'all'): 'compact' = the flanking genes of each side as one grey "
+                         "stack with a count and every GOI copy's exon model in the GOI column; "
+                         "'compact_panel' = the same with the exon panel; 'clades_muted' = the "
+                         "print grid with the flanking genes in muted colours and the GOI copies "
+                         "in GOI-tree clade colours. Files '*_anchor_grid_<variant>_print.svg'.")
     ap.add_argument("--no_fragment_variant", dest="fragment_variant", action="store_false",
                     help="Do not write the '*_with_fragments' ribbon plot / anchor grid "
                          "that also draw ModelStatus=fragment GOI models (hidden by default).")
@@ -5344,6 +5358,21 @@ def _variant_path(path, suffix):
         return path
     root, ext = os.path.splitext(path)
     return f"{root}{suffix}{ext}"
+
+
+GRID_VARIANTS = ("compact", "compact_panel", "clades_muted")
+
+
+def _grid_variant_list(text):
+    """--grid_variants: a comma-separated list of GRID_VARIANTS, or 'all'."""
+    items = [t.strip() for t in (text or "").split(",") if t.strip()]
+    if items == ["all"]:
+        return list(GRID_VARIANTS)
+    bad = [t for t in items if t not in GRID_VARIANTS]
+    if bad:
+        raise argparse.ArgumentTypeError(f"unknown grid variant {', '.join(bad)}; choose from "
+                                         f"{', '.join(GRID_VARIANTS)} or all")
+    return items
 
 
 def _run_figures(args, show_fragments=False, suffix=""):
@@ -5893,8 +5922,9 @@ def _run_figures(args, show_fragments=False, suffix=""):
             except Exception as exc:
                 print(f"  (anchor-grid print render failed: {exc})", file=sys.stderr)
 
-            # Clade version of the print grid: each GOI copy coloured by its clade in the GOI
-            # gene tree (cut and coloured as on the tree page), flanking genes grey and narrow.
+            # Clade version of the print grid: each GOI copy, its arrow and its exon model in the
+            # panel, coloured by its clade in the GOI gene tree (cut and coloured as on the tree
+            # page), flanking genes grey and narrow. Kept next to the print grid, not instead.
             # Written only when it shows something the species tree beside the rows does not:
             # a genome with two or more copies placed in the tree, or a copy whose clade breaks
             # the pattern of the rows around it. Otherwise it repeats the species tree.
@@ -5924,8 +5954,55 @@ def _run_figures(args, show_fragments=False, suffix=""):
                           f"{res['info']['height_mm']:g} mm): {cl['copies_matched']} of "
                           f"{cl['copies']} copies in the tree, {cl['n_clades']} clades, "
                           f"{cl['rows_with_two_placed']} genome(s) with two or more placed copies")
+                    if res["info"]["dropped_columns"]:
+                        print(f"  columns left out to fit {res['info']['requested_width_mm']:g} mm: "
+                              f"{', '.join(res['info']['dropped_columns'])}")
+                    if not res["info"]["fits_height"]:
+                        print(f"  taller than --print_height_mm ({res['info']['height_mm']:g} mm)")
             except Exception as exc:
                 print(f"  (anchor-grid clade render failed: {exc})", file=sys.stderr)
+
+            # Try-out versions of the print grid (--grid_variants): 'compact' and
+            # 'compact_panel' draw the flanking genes of each side as one grey stack with a
+            # count and give the width to the GOI copies (exons inline, or in the panel);
+            # 'clades_muted' is the print grid with muted flanking colours and the GOI copies
+            # in clade colours. All colour the copies by GOI-tree clade when there is a tree.
+            for variant in getattr(args, "grid_variants", None) or []:
+                try:
+                    size = dict(width_mm=float(getattr(args, "print_width_mm", 183.0) or 183.0),
+                                max_height_mm=float(getattr(args, "print_height_mm", 170.0) or 170.0))
+                    me = sys.modules[__name__]
+                    if variant == "clades_muted":
+                        res = _grid.render(me, all_tracks, gene_colours, home_products, args,
+                                           _grid.clade_muted_style(**size))
+                        if not (res["info"].get("clades") or {}).get("n_clades"):
+                            print("Anchor-grid clades_muted version not written: no GOI tree "
+                                  "with three or more leaves")
+                            continue
+                    else:
+                        inline = variant == "compact"
+                        res = _grid.render(me, all_tracks, gene_colours, home_products, args,
+                                           _grid.compact_style(inline=inline, **size))
+                        if not (res["info"].get("clades") or {}).get("n_clades"):   # no GOI tree
+                            res = _grid.render(me, all_tracks, gene_colours, home_products, args,
+                                               _grid.compact_style(inline=inline, clade=False, **size))
+                    stem = grid_output[:-len(".html")] + f"_{variant}_print"
+                    with open(stem + ".svg", "w", encoding="utf-8") as f:
+                        f.write(_grid.svg_document(res))
+                    with open(stem + ".legend.txt", "w", encoding="utf-8") as f:
+                        f.write(res["legend_text"])
+                    with open(stem + ".source.tsv", "w", newline="", encoding="utf-8") as f:
+                        wr = csv.DictWriter(f, _grid.SOURCE_COLUMNS_CLADES if res["info"]["clades"]
+                                            else _grid.SOURCE_COLUMNS, delimiter="\t")
+                        wr.writeheader()
+                        wr.writerows(res["source"])
+                    print(f"Anchor-grid {variant} SVG saved to {stem}.svg "
+                          f"({res['info']['width_mm']:g} x {res['info']['height_mm']:g} mm"
+                          + (", GOI copies by clade)" if res["info"]["clades"] else ")"))
+                    if not res["info"]["fits_height"]:
+                        print(f"  taller than --print_height_mm ({res['info']['height_mm']:g} mm)")
+                except Exception as exc:
+                    print(f"  (anchor-grid {variant} render failed: {exc})", file=sys.stderr)
 
         # Companion real-position variant: same orthologs, true per-row
         # genomic positions (shows spacing / gaps / rearrangements the aligned

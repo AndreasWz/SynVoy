@@ -423,6 +423,7 @@ Figure controls available through `--plot_extra_args`, or after the run with `sc
 | `--print_width_mm` | `183` | Width of the print grid in mm (183 = two journal columns, 89 = one). Columns with the fewest orthologs are left out when the grid does not fit, and reported. |
 | `--print_height_mm` | `170` | Largest height of the print grid; rows are packed tighter before it is exceeded. |
 | `--no_print_grid` | off | Do not write the print grid. |
+| `--grid_variants` | _(none)_ | Also write try-out versions of the print grid, comma-separated or `all`: `compact` (the flanking genes of each side as one grey stack with how many were placed; every GOI copy's exon model in the GOI column), `compact_panel` (the same with the exon panel on the right), `clades_muted` (the print grid with the flanking genes in muted colours and the GOI copies in GOI-tree clade colours). See [OUTPUT.md](OUTPUT.md). |
 | `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid; a longer tandem array shows `+N more`. |
 | `--no_fragment_variant` | off | Do not write the `*_with_fragments` figures. By default `ModelStatus=fragment` GOI models are hidden in the main figures and drawn in these siblings. |
 | `--no_orient_to_home` | off | Do not flip scaffolds that read in the opposite direction to the home genome. |
