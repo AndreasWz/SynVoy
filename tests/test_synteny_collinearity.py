@@ -13,6 +13,7 @@ Covers the parts that were actually load-bearing in the design:
       * STRICT no-op when home_rank is absent (legacy behaviour for existing callers).
 """
 import os
+import re
 import sys
 
 BIN = os.path.join(os.path.dirname(__file__), "..", "bin")
@@ -331,11 +332,44 @@ def test_two_sided_needs_min_anchors_across_the_union():
 
 
 def test_two_sided_is_off_by_default():
-    # identify_synteny_blocks must keep the legacy rule unless asked.
+    # identify_synteny_blocks must keep the one-sided rule unless asked: an inverted
+    # second segment is refused by it and bridged only by the two-sided rule.
+    default = isr.identify_synteny_blocks(
+        _two_segments("DEF", "CBA"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert len(default) == 2
+
+
+def test_two_anchors_bridge_at_the_default_floor():
+    """`A B … D E F` is one block at the default floor of 2 (since 2026-10-14)."""
     default = isr.identify_synteny_blocks(
         _two_segments("AB", "DEF"), max_intron=20_000, cluster_distance=_CD,
         home_rank=_HOME_RANK, bridge_max_gap=_GAP)
-    assert len(default) == 2
+    assert len(default) == 1 and default[0]["bridged"] is True
+
+
+def test_two_anchors_do_not_bridge_at_the_old_floor_of_3():
+    blocks = isr.identify_synteny_blocks(
+        _two_segments("AB", "DEF"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP, bridge_min_anchors=3)
+    assert len(blocks) == 2
+
+
+def test_one_anchor_never_bridges():
+    blocks = isr.identify_synteny_blocks(
+        _two_segments("A", "BCD"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert len(blocks) == 2
+
+
+def test_shipped_floor_is_2_everywhere():
+    config = open(os.path.join(os.path.dirname(__file__), "..", "nextflow.config")).read()
+    assert re.search(r"^\s*synteny_bridge_min_anchors\s*=\s*2\b", config, re.M)
+    script = open(os.path.join(os.path.dirname(__file__), "..", "bin",
+                               "iterative_search_runner.py")).read()
+    assert '"--synteny_bridge_min_anchors", type=int, default=2,' in script
+    assert "getattr(args, 'synteny_bridge_min_anchors', 2)" in script
+    assert "bridge_max_rank_gap=5, bridge_min_anchors=2," in script
 
 
 def test_bridge_max_per_block_caps_a_chained_block():

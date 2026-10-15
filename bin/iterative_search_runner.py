@@ -2260,7 +2260,13 @@ def _can_bridge(block, candidate, home_rank, max_rank_gap, min_anchors):
         A B C … D E F  (forward, continues forward)   -> bridged
         F E D … C B A  (inverted, continues inverted) -> bridged
         D E F … C B A  (direction reverses at the gap)-> NOT bridged
-        A B   … D E F  (only 2 anchors < min_anchors) -> NOT bridged
+        A B   … D E F  (2 anchors: bridged at the default min_anchors 2 since
+                        2026-10-14, NOT bridged at 3, the default before)
+        A     … B C D  (1 anchor: never bridged)
+
+    With 2 anchors the direction rests on those two genes alone; the other limits
+    (same scaffold, rank step <= max_rank_gap, at most synteny_bridge_max_per_block
+    bridges) are unchanged.
     """
     cand_rank = home_rank.get(extract_base_gene_id(candidate.get('query', '')))
     if cand_rank is None:
@@ -2508,7 +2514,7 @@ def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000):
 
 def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
                             home_rank=None, bridge_max_gap=0,
-                            bridge_max_rank_gap=5, bridge_min_anchors=3,
+                            bridge_max_rank_gap=5, bridge_min_anchors=2,
                             bridge_two_sided=False, bridge_max_per_block=2,
                             gene_gap_limit=None):
     """
@@ -5659,7 +5665,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         home_rank = getattr(args, 'home_rank', None) if _collinearity_on else None
         home_rank = home_rank or None  # treat empty dict as "off"
         _bridge_max_rank_gap = getattr(args, 'synteny_bridge_max_rank_gap', 5)
-        _bridge_min_anchors = getattr(args, 'synteny_bridge_min_anchors', 3)
+        _bridge_min_anchors = getattr(args, 'synteny_bridge_min_anchors', 2)
         _bridge_two_sided = bool(getattr(args, 'synteny_bridge_two_sided', False))
         _bridge_max_per_block = getattr(args, 'synteny_bridge_max_per_block', 2)
 
@@ -7003,8 +7009,10 @@ def main():
         help="Max home-rank jump still treated as a collinear continuation when bridging."
     )
     parser.add_argument(
-        "--synteny_bridge_min_anchors", type=int, default=3,
-        help="Min distinct anchored flanking genes a block needs before it may bridge a gap."
+        "--synteny_bridge_min_anchors", type=int, default=2,
+        help="Min distinct anchored flanking genes a block needs before it may bridge a gap "
+             "(2 since 2026-10-14, was 3). Also the minimum collinear run of the two-sided "
+             "rule (--synteny_bridge_two_sided, off)."
     )
     parser.add_argument(
         "--synteny_bridge_two_sided", type=str2bool, nargs='?', const=True, default=False,

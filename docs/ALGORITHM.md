@@ -420,8 +420,8 @@ neighbourhood. A block continues across a gap when all of these hold (`_can_brid
 - same scaffold, and the gap is below the bridge limit ([Distances](#distances-in-gene-units): 20 pitches,
   the length of a home neighbourhood of 10 genes per side);
 - the block has bridged fewer than `synteny_bridge_max_per_block` (2) gaps so far;
-- the block already holds at least `synteny_bridge_min_anchors` (3) distinct flanking
-  genes;
+- the block already holds at least `synteny_bridge_min_anchors` (2; 3 until
+  2026-10-14) distinct flanking genes;
 - the first gene after the gap continues the block's home order: its home rank lies
   beyond the block's outermost rank, in the block's own direction, by at most
   `synteny_bridge_max_rank_gap` (5).
@@ -435,7 +435,12 @@ not.
 | `A B C` … `D E F` | one block |
 | `F E D` … `C B A` | one block |
 | `D E F` … `C B A` | two blocks |
-| `A B` … `D E F` | two blocks (2 anchors) |
+| `A B` … `D E F` | one block (two blocks with `synteny_bridge_min_anchors 3`) |
+| `A` … `B C D` | two blocks (1 anchor) |
+
+With two anchors the direction of the block rests on those two genes alone. The floor
+of 2 also is the minimum collinear run of the two-sided rule below, which is off; a
+run of 2 is a weak bar there and would need its own floor if that rule is switched on.
 
 `synteny_bridge_two_sided` (off) weighs the whole cluster behind the gap instead of
 its first gene. `--disable_synteny_collinearity` turns bridging and the collinear
@@ -972,7 +977,7 @@ of 9 without.
 | `max_intron` | 20,000 (floor of the per-gene limit) | §7.2 |
 | `block_gap_genes` / `cluster_distance` | 7 pitches / auto | §7.2, §8 |
 | `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap` | 20 pitches / auto | §7.3 |
-| `synteny_bridge_min_anchors` / `_max_rank_gap` / `_max_per_block` | 3 / 5 / 2 | §7.3 |
+| `synteny_bridge_min_anchors` / `_max_rank_gap` / `_max_per_block` | 2 / 5 / 2 | §7.3 |
 | `window_margin_genes` / `region_padding` | 7 pitches / auto | §7.4, §7.5 |
 | `goi_margin_genes` / `goi_margin` | 2 pitches / auto | §7.5 |
 | `min_block_genes` / `max_blocks_per_genome` | 2 / 80 | §7.4 |

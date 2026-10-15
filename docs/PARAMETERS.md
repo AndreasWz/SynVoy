@@ -341,6 +341,8 @@ A hit of the gene of interest is used for a gene model only when it lies in the 
 
 Two clusters of flanking genes on one sequence stay one block across a gap up to this size when the flanking genes continue the home order across it (a local rearrangement the gene may sit in). `0` in either parameter switches bridging off. The rules for *when* a gap is bridged are `synteny_bridge_max_rank_gap`, `synteny_bridge_min_anchors`, `synteny_bridge_two_sided` and `synteny_bridge_max_per_block`.
 
+`synteny_bridge_min_anchors` (default `2`, `3` until 2026-10-14): the number of distinct flanking genes a block must hold before it may bridge a gap. With 2, a block of two genes bridges when the first gene after the gap continues their home order within `synteny_bridge_max_rank_gap` ranks, so `A B … D E F` is one block (two at `3`). Its direction then rests on those two genes. The same value is the minimum collinear run of the two-sided rule (off by default), where 2 is a weak bar.
+
 ### `dispersed_envelope_margin_genes` / `dispersed_envelope_margin`
 **Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `9` / `auto`
 
