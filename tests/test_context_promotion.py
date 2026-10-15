@@ -46,13 +46,14 @@ def _thresholds(monkeypatch):
     monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "fragment_max_qcov", 0.4)
 
 
-def test_the_promotion_is_on_as_shipped():
-    """Config, script option and threshold table agree on 4 (on by default since 2026-10-14)."""
+def test_the_promotion_is_off_as_shipped():
+    """Config, script option and threshold table agree on 0: on for one day from 2026-10-14,
+    switched off again because decoys meet the rule."""
     config = open(os.path.join(REPO, "nextflow.config")).read()
-    assert re.search(r"^\s*classify_context_min_collinear\s*=\s*4\b", config, re.M)
+    assert re.search(r"^\s*classify_context_min_collinear\s*=\s*0\b", config, re.M)
     script = open(os.path.join(REPO, "bin", "iterative_search_runner.py")).read()
-    assert re.search(r'"--classify_context_min_collinear", type=lambda v: int\(float\(v\)\), default=4\b', script)
-    assert re.search(r'^\s*"context_min_collinear": 4,', script, re.M)
+    assert re.search(r'"--classify_context_min_collinear", type=lambda v: int\(float\(v\)\), default=0\b', script)
+    assert re.search(r'^\s*"context_min_collinear": 0,', script, re.M)
 
 
 def test_best_ordered_model_is_promoted_once():

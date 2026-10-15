@@ -608,8 +608,8 @@ the flanking support `B`; identities are in percent and refer to the home protei
   MEDIUM (`low_identity_in_conserved_gene_order`, attribute `ContextPromoted`) if
   it is an exon model or hit chain, covers at least `classify_context_min_qcov`
   (0.5) of the query, is at least `classify_context_min_identity` (15 %)
-  identical, and its block keeps at least `classify_context_min_collinear` (4)
-  anchors in home order. Gene order, not identity, is the evidence here: fast
+  identical, and its block keeps at least `classify_context_min_collinear`
+  anchors in home order (4 when switched on). Gene order, not identity, is the evidence here: fast
   genes fall to 18-38 % in genomes whose neighbours are still 60-85 % identical.
   Gene order cannot tell the gene from what sits in its place when the gene is
   gone: a family relative in the same conserved neighbourhood passes the rule
@@ -618,7 +618,9 @@ the flanking support `B`; identities are in percent and refer to the home protei
   is for. So the report counts such calls as MEDIUM and names them apart
   (`gene_order_only_goi`). A promoted call goes into the tree but does not seed
   the next search wave, so the search runs as it would without the promotion.
-  On by default since 2026-10-14; `0` switches it off. Measured precision:
+  Off by default (`classify_context_min_collinear 0`); it was on for one day from
+  2026-10-14 and was switched off because reversed and shuffled home proteins,
+  searched in the same windows, meet the rule too. Measurements:
   `docs/PARAMETERS.md`.
 - A model also gets a status that does not depend on confidence: `fragment` below
   0.4 coverage, `complete` from 0.7 coverage with at least 2 exons, else `partial`.

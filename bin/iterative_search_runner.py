@@ -253,10 +253,11 @@ CLASSIFY_THRESHOLDS = {
     "complete_min_qcov": 0.7,
     # Context promotion (2026-10-13, _promote_context_supported_goi): a genome with no
     # HIGH/MEDIUM call for a query gets its best weak model lifted to MEDIUM when its block
-    # keeps >= this many anchors in home order. 0 = off. On by default since 2026-10-14:
-    # on 12 family-benchmark seeds that played no part in choosing 4 or the coverage floor,
-    # 29 of the 42 promoted calls that reached the report lay on a curated family gene.
-    "context_min_collinear": 4,
+    # keeps >= this many anchors in home order. 0 = off (the default). It was on from
+    # 2026-10-14 for one day: reversed and shuffled home proteins searched in the same Candida
+    # windows meet the rule in 30 of 181 decoy cases with a kept alignment, so it calls chance
+    # alignments. 4 is the value the measurements in docs/PARAMETERS.md used.
+    "context_min_collinear": 0,
     # Sanity floor for that promotion; the search's E-value filter is the real homology test.
     "context_min_identity": 15.0,
     # Query coverage a promoted model needs (never below fragment_max_qcov). With the
@@ -1490,7 +1491,9 @@ def _promote_context_supported_goi(gff_lines: List[str]) -> Tuple[List[str], int
     still goes through the report's paralog-ownership check, which has to catch a family
     relative sitting in the same conserved neighbourhood.
 
-    On by default since 2026-10-14 (context_min_collinear 4). Gene order cannot tell "the
+    Off by default (context_min_collinear 0; it was on, at 4, for one day from 2026-10-14:
+    decoys -- reversed and shuffled home proteins searched in the same windows -- meet the
+    rule in 30 of 181 Candida decoy cases with a kept alignment). Gene order cannot tell "the
     gene is here" from "the gene was lost and a relative or a chance match sits in its
     place", which is why the AMBIGUOUS tier exists and why the report names these calls
     apart (gene_order_only_goi). Measured: with a coverage floor of 0.4 the rule promoted
@@ -7006,12 +7009,12 @@ def main():
                              "flanking to reach this, once a block has >= this many flanking "
                              "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
                              "Set 0 to disable the order gate (count-only, legacy).")
-    parser.add_argument("--classify_context_min_collinear", type=lambda v: int(float(v)), default=4,
+    parser.add_argument("--classify_context_min_collinear", type=lambda v: int(float(v)), default=0,
                         help="A genome with no HIGH/MEDIUM call for a query gets its best "
                              "LOW/AMBIGUOUS exon model or hit chain lifted to MEDIUM when its "
                              "block keeps at least this many anchors in home order "
                              "(InferenceReason low_identity_in_conserved_gene_order). "
-                             "0 = off; default 4.")
+                             "0 = off (default).")
     parser.add_argument("--classify_context_min_identity", type=float, default=15.0,
                         help="Identity floor (%%) for that promotion.")
     parser.add_argument("--classify_context_min_qcov", type=float, default=0.5,
