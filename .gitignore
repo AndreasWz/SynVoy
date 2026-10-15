@@ -77,3 +77,9 @@ lrz_backup_*/
 
 # Input handed over from cloud Claude sessions (patches, reports, bug hunts); kept locally
 cloud_claude_input/
+
+# Paper / manuscript drafts and reading notes; kept local, not part of the pipeline.
+manuscript/
+
+# LRZ scripts (local, not part of the pipeline)
+scripts/lrz/
