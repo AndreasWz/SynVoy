@@ -589,55 +589,44 @@ score too.
 
 ### 7.8 Confidence
 
-`_classify_goi_evidence` assigns each GOI model a confidence and a class. `flank` is
-the flanking support `B`; identities are in percent and refer to the home protein.
+Since 2026-10-14 (label rework, step 4) one function judges every GOI candidate, wherever
+one is judged: the choice among overlapping candidates in a window, the label, the
+report's dedup, the hull rescue, the figures (`bin/synvoy_label.py`, `judge`). Its inputs
+are the E-value of the home protein against the model in the place SynVoy expected the
+gene (§7.13), the model's specificity against the home proteome (§7.12) and its query
+coverage:
 
-| Evidence | Condition | Confidence, class |
+| Confidence | `Basis` | Rule |
 |---|---|---|
-| `exon_annotation` | enough exons (see below), not a fragment, identity ≥ 50, flank ≥ 2, order conserved | **HIGH**, `confident_goi` |
-| | the same, order not conserved | MEDIUM, `probable_goi` |
-| | identity ≥ 40 and (flank ≥ 1 and the model is not a fragment, or coverage ≥ 0.65) | MEDIUM, `probable_goi` |
-| | otherwise | LOW |
-| `fallback_hit_span` | flank ≥ 2, coverage ≥ 0.75, identity ≥ 60 | MEDIUM, `probable_goi` |
-| | flank ≥ 5, identity ≥ 30, and (coverage ≥ 0.25 or identity ≥ 35) | **AMBIGUOUS**, `syntenic_candidate_unconfirmed` |
-| | otherwise | LOW |
-| `tandem_copy` | identity ≥ 50, coverage ≥ 0.35, and (flank ≥ 5 or coverage ≥ 0.65) | MEDIUM, `tandem_goi_copy` |
-| | otherwise | LOW, `tandem_goi_copy` |
-| `rescued_exon`, `raw_hit` | always | LOW |
+| **HIGH** | `significant_specific` | Eeff ≤ 1e-6; margin ≥ 10 bits or no real competitor; coverage ≥ 0.7 |
+| MEDIUM | `significant_specific` | Eeff ≤ 1e-3 and specific |
+| AMBIGUOUS | `not_specific` | Eeff ≤ 1e-3, not specific: a relative where the gene should be |
+| AMBIGUOUS | `gene_order_only` | 1e-3 < Eeff ≤ 1, in the slot of a block with E_syn ≤ 0.1, and specific |
+| LOW | `not_significant` | everything else |
 
-- **Enough exons** means two or more. When the home gene itself has one exon, a
-  one-exon model is enough if it covers the query like a complete gene (coverage ≥
-  `classify_complete_min_qcov`, 0.7): one exon is also what a single chance alignment
-  looks like.
-- **Not a fragment**: coverage of at least `classify_fragment_max_qcov` (0.4) when
-  coverage is known. HIGH had no such floor until 2026-10-14 (a two-exon model over
-  8 % of the query could be HIGH and seed the next wave).
-- **Order conserved** means: collinear support ≥ `classify_high_min_collinear` (3).
-  The condition is waived when the block has fewer than 3 flanking genes or the home
-  order is unknown.
-- **AMBIGUOUS** marks a candidate that is supported by its neighbourhood only. A
-  conserved neighbourhood looks the same whether the gene is there or was lost, so
-  such a call is kept and drawn but not counted as an ortholog.
-  `--disable_ambiguous_tier` labels it MEDIUM.
-- **Context promotion.** A genome that ends up with no HIGH or MEDIUM call for a
-  query, tandem copies included, gets one: its best LOW or AMBIGUOUS model becomes
-  MEDIUM (`low_identity_in_conserved_gene_order`, attribute `ContextPromoted`) if
-  it is an exon model or hit chain, covers at least `classify_context_min_qcov`
-  (0.5) of the query, is at least `classify_context_min_identity` (15 %)
-  identical, and its block keeps at least `classify_context_min_collinear`
-  anchors in home order (4 when switched on). Gene order, not identity, is the evidence here: fast
-  genes fall to 18-38 % in genomes whose neighbours are still 60-85 % identical.
-  Gene order cannot tell the gene from what sits in its place when the gene is
-  gone: a family relative in the same conserved neighbourhood passes the rule
-  too (the report's paralog-ownership check has to catch it), and so does a
-  chance match at a locus that lost the gene, which is what the AMBIGUOUS tier
-  is for. So the report counts such calls as MEDIUM and names them apart
-  (`gene_order_only_goi`). A promoted call goes into the tree but does not seed
-  the next search wave, so the search runs as it would without the promotion.
-  Off by default (`classify_context_min_collinear 0`); it was on for one day from
-  2026-10-14 and was switched off because reversed and shuffled home proteins,
-  searched in the same windows, meet the rule too. Measurements:
-  `docs/PARAMETERS.md`.
+- **Specific**: no real competitor, or a margin of at least 3.3 bits over the best other
+  home protein. Within ±3.3 bits a model in the slot or core of a significant block is
+  decided for the gene (positional tie-break), unless that protein lies in the gene's own
+  home neighbourhood: in a tandem array position cannot tell the two apart.
+- AMBIGUOUS calls ("needs curation") are kept, drawn and reported, never counted. A
+  gene-order-only call is offered only in a genome where no home locus and no rescue pass
+  produced a counted call of the gene.
+- **Ranking among candidates** (`rank_key`): label, then E-value (values below 1e-10
+  count as equal), then the block's E_syn, then bits, then the shorter span, then
+  position. In a window the label is provisional, on the E-value of the place before the
+  genome's multiplier; the final label is set at the end of the genome on Eeff.
+- **Frame guard**: a miniprot model's E-value is computed on the translation of its CDS
+  (first exon's phase honoured). When that has a stop before its end or a length that is
+  not a multiple of 3, another frame over the same exons is used if it is clean
+  (`FrameFixed=1`), else only the model's hit regions are judged (`FrameBroken=1`).
+- The hull rescue judges its models with the same function; it has no block E-value, so
+  its place is the whole genome.
+- The identity-based classifier (`_classify_goi_evidence`) still writes a provisional
+  label when a model is built; every GOI row with an E-value is relabelled at the end of
+  its genome, so that label does not reach the output. Until 2026-10-14 it was the label:
+  HIGH at ≥ 50 % identity with two exons and two flanking genes in home order, MEDIUM at
+  ≥ 40 %, AMBIGUOUS for hit chains in blocks of ≥ 5 flanking genes, and a context
+  promotion (one day on by default, removed) lifted weak models on gene order alone.
 - A model also gets a status that does not depend on confidence: `fragment` below
   0.4 coverage, `complete` from 0.7 coverage with at least 2 exons, else `partial`.
 
@@ -1044,7 +1033,6 @@ of 9 without.
 | `fallback_short_query_len` / `_min_aln_aa` / `_min_bits` | 150 / 15 / 30 | §7.7 |
 | `classify_high_min_identity` / `classify_medium_min_identity` | 50 / 40 | §7.8 |
 | `classify_high_min_collinear` | 3 | §7.8 |
-| `classify_context_min_collinear` / `_min_identity` / `_min_qcov` | 4 / 15 / 0.5 | §7.8 |
 | `classify_tandem_min_identity` / `_min_qcov` | 50 / 0.35 | §7.8 |
 | `classify_fallback_strong_min_identity_floor` | 30 | §7.8 |
 | `classify_fragment_max_qcov` / `classify_complete_min_qcov` | 0.4 / 0.7 | §7.8 |

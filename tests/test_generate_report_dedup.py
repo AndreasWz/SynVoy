@@ -208,7 +208,7 @@ class TestDedupeIntegration(unittest.TestCase):
         self.assertEqual(summary["headline_metric"], 4)
         self.assertEqual(summary["cross_locus_duplicate_goi"], 1)
         self.assertEqual(summary["goi_hits_collapsed_by_dedup"], 1)
-        self.assertIn("4 high-confidence", summary["headline"])
+        self.assertIn("4 ortholog(s) (4 high confidence)", summary["headline"])
 
         records = report["goi_dedup"]["records"]
         high = [r for r in records if r["confidence"] == "HIGH"]

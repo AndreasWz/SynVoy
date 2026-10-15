@@ -424,7 +424,7 @@ def _select_goi_context_genes(genes, flank_bp=200000):
 
     def _chrom_key(item):
         chrom, glist = item
-        best = max((_model_strength(x) for x in glist), default=(0, 0.0))
+        best = max((_model_strength(x) for x in glist), default=(0, 0.0, 0.0, 0.0))
         return (len(glist), best)
 
     goi_chrom, goi_list = max(per_chrom.items(), key=_chrom_key)
@@ -504,15 +504,21 @@ def _preferred_target_label(gene):
 
 
 def _model_strength(gene):
-    """How strongly a model matches its query, for choosing among models: the bit score
-    against the home protein (``Bits=``, on GOI models written since 2026-10-14), else
-    identity (flanking models, older runs). A model with a bit score ranks above one
-    without, so the two units are never compared. Same rule as the report's dedup
-    (generate_report._model_strength) and the search's choice among overlapping models."""
-    bits = gene.get("bits")
+    """How strongly a model matches its query, for choosing among models of one label
+    (higher is better): the judge's order (bin/synvoy_label.rank_key) for a model with an
+    E-value in its expected place (``Eeff=``, since 2026-10-14): E with ties below 1e-10,
+    then the block's E_syn, then bits; else the bit score against the home protein
+    (``Bits=``); else identity (flanking models, older runs). The kinds rank in that order,
+    so their units are never compared. Same order as the search and the report."""
+    eeff, bits = gene.get("eeff"), gene.get("bits")
+    if eeff is not None:
+        esyn = gene.get("block_esyn")
+        return (2, -math.log10(max(float(eeff), 1e-10)),
+                -math.log10(max(float(esyn), 1e-300)) if esyn is not None else 0.0,
+                float(bits or 0.0))
     if bits is not None:
-        return (1, float(bits))
-    return (0, float(gene.get("identity", 0.0) or 0.0))
+        return (1, float(bits), 0.0, 0.0)
+    return (0, float(gene.get("identity", 0.0) or 0.0), 0.0, 0.0)
 
 
 def _goi_priority_key(gene):
@@ -608,6 +614,11 @@ def parse_target_gff(gff_file, cap=True):
                 bits = float(attrs["Bits"]) if attrs.get("Bits") else None
             except ValueError:
                 bits = None
+            try:
+                eeff = float(attrs["Eeff"]) if attrs.get("Eeff") else None
+                block_esyn = float(attrs["BlockEsyn"]) if attrs.get("BlockEsyn") else None
+            except ValueError:
+                eeff = block_esyn = None
 
             role = (attrs.get("SynVoyRole") or "").strip().lower()
             if not role:
@@ -636,6 +647,9 @@ def parse_target_gff(gff_file, cap=True):
                 "synteny_context": attrs.get("SyntenyContext", ""),
                 "query_coverage": query_coverage,
                 "bits":         bits,
+                "eeff":         eeff,
+                "block_esyn":   block_esyn,
+                "basis":        attrs.get("Basis", ""),
                 "inference_reason": attrs.get("InferenceReason", ""),
                 "gff_id":       gene_id,
             })
@@ -662,9 +676,7 @@ def parse_target_gff(gff_file, cap=True):
                 -_goi_priority_key(g)[1],
                 -_goi_priority_key(g)[2],
                 -_goi_priority_key(g)[3],
-                -strength[0],
-                -strength[1],
-            )
+            ) + tuple(-x for x in strength)
         genes.sort(key=_dedup_sort_key)
 
         kept = []
@@ -2380,7 +2392,7 @@ def _ribbon_legend_groups(goi_label, low_quality=False):
         (f"GOI: {goi_label}", [
             (_lg_arrow(GOI_COLOUR, GOI_BORDER), "GOI call"),
             (_lg_arrow("url(#ambiguousGoi)", GOI_BORDER, "6,3"),
-             "ambiguous or low-confidence call"),
+             "call that needs curation, or no significant match"),
             ("★", "GOI name, on the home row"),
             ("×N", "N copies (the best call and every call of at least medium confidence)"),
             ("+N weak", "further weak calls; all calls are drawn")]),

@@ -38,7 +38,6 @@ workflow ADJUDICATE_AND_REPORT {
     qc_summary          // genome QC summary JSON
     goi_for_tree        // ITERATIVE_SEARCH.out.goi_for_tree (locus_id, faa) — F9 input
     sorted_genomes      // value channel: PHYLO_SORT sorted_genomes.txt (species distances)
-    settings            // value channel: the resolved preset values (§1f settings map)
 
     main:
 
@@ -105,7 +104,7 @@ workflow ADJUDICATE_AND_REPORT {
     // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
     // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
     // STAGE_REGION_GFF like the strong-synteny rescue.
-    RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, settings)
+    RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_proteome)
 
     // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
     // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target

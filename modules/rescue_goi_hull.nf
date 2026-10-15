@@ -8,7 +8,7 @@
 // the true 90 %+ decorin there. This pass runs miniprot of the GOI across the whole
 // flanking neighbourhood (hull) per target chromosome, but only when the hull has strong
 // flanking support and no HIGH GOI model already inside it. Output GFF (Confidence by
-// identity, EvidenceType=synteny_hull_rescue) mixes into the per-locus region GFFs, so the
+// the search's judge since 2026-10-14, EvidenceType=synteny_hull_rescue) mixes into the per-locus region GFFs, so the
 // report machinery picks it up via canonical_genome_id() without changes.
 process RESCUE_GOI_HULL {
     tag "${locus_id}/${genome_name}"
@@ -30,9 +30,9 @@ process RESCUE_GOI_HULL {
     tuple val(locus_id), val(genome_name), path(region_faa), path(region_gff)
     path(genomes_dir)
     path(query_faa)
-    // The resolved preset values (§1f): the HIGH/MEDIUM bars must be those of the main
-    // search, not the launch-time params (short-peptide preset: 40/30, not 50/40; A12).
-    val settings
+    // The home proteome: a rescue model is judged like a candidate of the main search
+    // (bin/synvoy_label.py), with its specificity against the other home proteins.
+    path(home_proteome)
 
     output:
     tuple val(locus_id), path("${genome_name}.hull_rescue.gff"), emit: gff
@@ -73,7 +73,6 @@ process RESCUE_GOI_HULL {
         --max_window ${params.goi_hull_max_window} \\
         --min_identity ${params.goi_hull_min_identity} \\
         --min_coverage ${params.goi_hull_min_coverage} \\
-        --classify_high_min_identity ${settings.classify_high_min_identity} \\
-        --classify_medium_min_identity ${settings.classify_medium_min_identity}
+        --home_proteome ${home_proteome}
     """
 }

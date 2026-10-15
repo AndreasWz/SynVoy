@@ -179,7 +179,7 @@ class TestMultiLocusStagingDiagnostics(unittest.TestCase):
         self.assertGreater(summary["high_confidence_goi"], 0)
         self.assertEqual(summary["headline_metric"], summary["high_confidence_goi"])
         self.assertGreater(summary["genomes_with_goi_annotations"], 0)
-        self.assertIn("high-confidence", summary["headline"])
+        self.assertIn("high confidence", summary["headline"])
         self.assertNotIn("No GOI ortholog", summary["headline"])
 
     def test_headline_empty_run_says_so(self):

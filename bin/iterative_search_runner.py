@@ -111,6 +111,7 @@ try:
     import synvoy_scale
     import synvoy_specificity
     import synvoy_evalue
+    import synvoy_label
 except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -127,6 +128,7 @@ except ImportError:
     import synvoy_scale
     import synvoy_specificity
     import synvoy_evalue
+    import synvoy_label
 
 # Import fragment utilities if available
 try:
@@ -255,21 +257,6 @@ CLASSIFY_THRESHOLDS = {
     # model_status thresholds
     "fragment_max_qcov": 0.4,
     "complete_min_qcov": 0.7,
-    # Context promotion (2026-10-13, _promote_context_supported_goi): a genome with no
-    # HIGH/MEDIUM call for a query gets its best weak model lifted to MEDIUM when its block
-    # keeps >= this many anchors in home order. 0 = off (the default). It was on from
-    # 2026-10-14 for one day: reversed and shuffled home proteins searched in the same Candida
-    # windows meet the rule in 30 of 181 decoy cases with a kept alignment, so it calls chance
-    # alignments. 4 is the value the measurements in docs/PARAMETERS.md used.
-    "context_min_collinear": 0,
-    # Sanity floor for that promotion; the search's E-value filter is the real homology test.
-    "context_min_identity": 15.0,
-    # Query coverage a promoted model needs (never below fragment_max_qcov). With the
-    # fragment bound of 0.4 the rule promoted seven models in the family and melittin
-    # benchmark runs, none on a curated gene, six of them hit chains at 0.42-0.47, two of
-    # those in bumblebees that lost melittin; 0.5 removes those six and one of 46 found
-    # pairs of the pilot.
-    "context_min_qcov": 0.5,
 }
 
 # Family-consistency config (Change A in TP53_IMPLEMENTATION_FIX_PLAN.md).
@@ -1021,10 +1008,15 @@ def _candidate_parent(cand) -> str:
 
 
 def greedy_select(candidates) -> List[Dict[str, Any]]:
-    """Candidates in goi_candidate_order; one that overlaps an accepted one by more than
-    half of its own length is dropped."""
+    """Candidates in the judge's order (synvoy_label.rank_key, judge_candidates), else in
+    goi_candidate_order; one that overlaps an accepted one by more than half of its own
+    length is dropped."""
     final, accepted = [], []
-    for cand in sorted(candidates, key=goi_candidate_order):
+    if candidates and all('rank_key' in c for c in candidates):
+        ordered = sorted(candidates, key=lambda c: c['rank_key'])
+    else:
+        ordered = sorted(candidates, key=goi_candidate_order)
+    for cand in ordered:
         c_start, c_end = cand['start'], cand['end']
         c_len = c_end - c_start
         if c_len <= 0:
@@ -1102,7 +1094,10 @@ def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w
         g0, g1 = int(cand['start']), int(cand['end'])
         place, place_bp = synvoy_evalue.place_of((g0, g1), terms['significant'], terms['slot'],
                                                  terms['core'], terms['window'], terms['genome_len'])
-        subjects = synvoy_evalue.split_at_stops((cand.get('record') or {}).get('seq', ''))
+        protein = cand.get('label_protein')
+        if protein is None:
+            protein = (cand.get('record') or {}).get('seq', '')
+        subjects = synvoy_evalue.split_at_stops(protein)
         e_tbn = float('inf')
         for h in tblastn_raw or []:
             hs, he = int(h.get('start', 0)), int(h.get('end', 0))
@@ -1178,6 +1173,132 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
                                + [a.get(k, '') for k in keys]) + "\n")
             n += 1
     return n
+
+
+GOI_CLASS_OF_LABEL = {"HIGH": "confident_goi", "MEDIUM": "probable_goi",
+                      "AMBIGUOUS": "syntenic_candidate_unconfirmed", "LOW": "ambiguous_goi_family_member"}
+
+
+def prepare_label_proteins(candidates, subseq, w_start) -> None:
+    """The protein a miniprot model's E-value is computed on (plan 3.1): the translation
+    of its CDS, honouring the first exon's phase. The length must be a multiple of 3 and
+    the translation free of stops before its end; otherwise another frame over the same
+    exons is used when it is clean (FrameFixed=1), and when none is the model is judged
+    on its hit regions only (FrameBroken=1: a pseudogene is as likely as a frameshift).
+    Kept as ``cand['label_protein']``; other evidence types use their translated hits."""
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9:
+            continue
+        cand['label_protein'] = (cand.get('record') or {}).get('seq', '')
+        if _parse_gff_attr_string(cols[8]).get('EvidenceType') != 'exon_annotation':
+            continue
+        rows = []
+        for line in gff[1:]:
+            c = line.split('\t')
+            if len(c) >= 9 and c[2] == 'CDS':
+                rows.append((int(c[3]), int(c[4]), int(c[7]) if c[7] in '012' else 0))
+        if not rows:
+            continue
+        minus = cols[6] == '-'
+        rows.sort(reverse=minus)
+        dna = ''
+        for start, end, _phase in rows:
+            piece = subseq[start - w_start - 1:end - w_start]
+            dna += reverse_complement(piece) if minus else piece
+        protein, status = synvoy_label.frame_guard(dna[rows[0][2]:])
+        if status == 'broken':
+            cand['label_protein'] = ''
+            cols[8] += ';FrameBroken=1'
+        else:
+            cand['label_protein'] = protein
+            if status == 'fixed':
+                cols[8] += ';FrameFixed=1'
+        gff[0] = '\t'.join(cols)
+
+
+def _place_evalue(cand) -> float:
+    """EPlace of a candidate (annotate_place_evalues), inf when it has none."""
+    gff = cand.get('gff') or []
+    cols = gff[0].split('\t') if gff else []
+    try:
+        return float(_parse_gff_attr_string(cols[8]).get('EPlace', 'inf')) if len(cols) >= 9 else float('inf')
+    except ValueError:
+        return float('inf')
+
+
+def _judge_attrs(a: Dict[str, str], e_key: str) -> Tuple[str, str]:
+    """synvoy_label.judge on a candidate's GFF attributes, with E from ``e_key``."""
+    def num(key):
+        try:
+            return float(a[key])
+        except (KeyError, ValueError):
+            return None
+    real = a.get('RealCompetitor')
+    near = a.get('BestOtherInNeighbourhood')
+    esyn = num('BlockEsyn')
+    return synvoy_label.judge(
+        num(e_key), a.get('Place', 'genome'),
+        esyn is not None and esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN,
+        num('SpecMargin'), None if real in (None, '') else real == '1',
+        None if near in (None, '') else near == '1', num('QueryCoverage'))
+
+
+def judge_candidates(candidates) -> None:
+    """Provisional label and rank of each candidate of a window, on its E-value in its
+    place before the genome-level multiplier (finalize_place_evalues relabels with Eeff):
+    the choice among overlapping candidates goes by synvoy_label.rank_key."""
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        a = _parse_gff_attr_string(cols[8]) if len(cols) >= 9 else {}
+        conf, _basis = _judge_attrs(a, 'EPlace') if 'EPlace' in a else ('LOW', 'not_significant')
+        try:
+            e = float(a.get('EPlace', 'inf'))
+            esyn = float(a.get('BlockEsyn', 'inf'))
+        except ValueError:
+            e, esyn = float('inf'), float('inf')
+        cand['rank_key'] = synvoy_label.rank_key(
+            conf, e, esyn, cand.get('bits'), int(cand['end']) - int(cand['start']),
+            int(cand.get('start', 0) or 0), (cand.get('record') or {}).get('id', ''))
+
+
+def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
+    """The label of every GOI row with an Eeff (label rework, step 4): synvoy_label.judge
+    on Eeff, its place and block, specificity and coverage. Confidence keeps its four
+    codes; Basis says why (significant_specific / not_specific / gene_order_only /
+    not_significant); GOIClass follows the label (a tandem copy keeps tandem_goi_copy)."""
+    out, counts = [], defaultdict(int)
+    for line in gff_lines:
+        cols = line.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'Eeff=' not in cols[8]:
+            out.append(line)
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        if a.get('SynVoyRole') != 'goi':
+            out.append(line)
+            continue
+        conf, basis = _judge_attrs(a, 'Eeff')
+        counts[f"{conf}/{basis}"] += 1
+        goi_class = ('tandem_goi_copy' if a.get('EvidenceType') == 'tandem_copy'
+                     else GOI_CLASS_OF_LABEL[conf])
+        pairs = []
+        for pair in cols[8].split(';'):
+            k = pair.split('=', 1)[0]
+            if k == 'Confidence':
+                pair = f'Confidence={conf}'
+            elif k == 'GOIClass':
+                pair = f'GOIClass={goi_class}'
+            elif k == 'InferenceReason':
+                pair = f'InferenceReason={basis}_in_{a.get("Place", "genome")}'
+            elif k == 'Basis':
+                continue
+            pairs.append(pair)
+        pairs.append(f'Basis={basis}')
+        cols[8] = ';'.join(pairs)
+        out.append('\t'.join(cols))
+    return out, dict(counts)
 
 
 def goi_candidate_order(cand) -> Tuple[float, int, int, int, str]:
@@ -1774,106 +1895,6 @@ def _resolve_fallback_signals(
             structural_similarity = float(ss) if structural_similarity is None else max(structural_similarity, float(ss))
 
     return seq_identity, embedding_similarity, structural_similarity, (not seq_hits and bool(ml_hits))
-
-
-CONTEXT_PROMOTABLE_EVIDENCE = frozenset({"exon_annotation", "fallback_hit_span"})
-
-
-def _promote_context_supported_goi(gff_lines: List[str]) -> Tuple[List[str], int]:
-    """Lift one weak GOI model per query to MEDIUM when gene ORDER, not identity, carries it.
-
-    The identity bars (MEDIUM 40, relaxed to 30 at most by section 1g) assume the ortholog
-    keeps a share of its sequence that scales with the distance of its neighbours. Fast
-    genes do not: on the Candida pilot (2026-10-13) the curated orthologs that a protein
-    search misses were modelled on the right gene at 18-38 % identity, their neighbours at
-    58-85 %, and labelled LOW or AMBIGUOUS, so the report dropped 27 of 34 of them. Their
-    blocks kept 4-15 anchors in home order. The models beside them were fragments, or sat
-    in genomes that already had a confident call.
-
-    Rule, per query (SynVoy_Parent) and genome, applied after every block is written:
-      * no HIGH or MEDIUM call for this query in the genome, a tandem copy included
-        (tandem copies are `gene` rows, every other model an `mRNA` row);
-      * candidates: exon models and hit chains (not rescued exons, raw hits, tandem copies)
-        labelled LOW or AMBIGUOUS, coverage >= context_min_qcov (and never a fragment),
-        identity >= context_min_identity, BlockCollinearSupport >= context_min_collinear;
-      * the candidate with the longest collinear run wins (then identity x coverage) and
-        becomes MEDIUM / probable_goi with ContextPromoted=<old label>.
-    The promoted call does not seed the next wave (_classify_goi_for_seed_and_tree), and it
-    still goes through the report's paralog-ownership check, which has to catch a family
-    relative sitting in the same conserved neighbourhood.
-
-    Off by default (context_min_collinear 0; it was on, at 4, for one day from 2026-10-14:
-    decoys -- reversed and shuffled home proteins searched in the same windows -- meet the
-    rule in 30 of 181 Candida decoy cases with a kept alignment). Gene order cannot tell "the
-    gene is here" from "the gene was lost and a relative or a chance match sits in its
-    place", which is why the AMBIGUOUS tier exists and why the report names these calls
-    apart (gene_order_only_goi). Measured: with a coverage floor of 0.4 the rule promoted
-    seven models in the apyrase/DPP4/serine-protease/melittin runs, none on a curated gene,
-    two of them the AMBIGUOUS calls in the bumblebees that lost melittin; 0.5 leaves one (a
-    relative, which the ownership check then demotes). On 12 family-benchmark seeds not
-    used to choose either value: 44 promoted, 2 demoted by the ownership check, 29 of the
-    other 42 on a curated family gene (9 of the 13 wrong in one seed whose home locus is
-    not where the curated genes are). SECP from no call at all to locus recall 0.50.
-    """
-    ct = CLASSIFY_THRESHOLDS
-    min_coll = int(ct.get("context_min_collinear", 0) or 0)
-    if min_coll <= 0 or not gff_lines:
-        return gff_lines, 0
-    min_ident = float(ct.get("context_min_identity", 0.0) or 0.0)
-    min_qcov = max(float(ct.get("context_min_qcov", 0.0) or 0.0),
-                   float(ct.get("fragment_max_qcov", 0.4)))
-
-    confident: set = set()
-    best: Dict[str, Tuple[Tuple[int, float], int]] = {}
-    for i, line in enumerate(gff_lines):
-        parts = line.split("\t")
-        if len(parts) < 9 or parts[2] not in ("mRNA", "gene"):
-            continue
-        attrs = _parse_gff_attributes(parts[8])
-        if attrs.get("SynVoyRole") != "goi":
-            continue
-        query = attrs.get("SynVoy_Parent") or attrs.get("Name", "")
-        conf = (attrs.get("Confidence") or "").upper()
-        if conf in ("HIGH", "MEDIUM"):
-            confident.add(query)
-            continue
-        if (parts[2] != "mRNA" or conf not in ("LOW", "AMBIGUOUS")
-                or attrs.get("EvidenceType") not in CONTEXT_PROMOTABLE_EVIDENCE):
-            continue
-        try:
-            ident = float(attrs.get("Identity", 0) or 0)
-            qcov = float(attrs.get("QueryCoverage", 0) or 0)
-            coll = int(attrs.get("BlockCollinearSupport", 0) or 0)
-        except ValueError:
-            continue
-        if qcov < min_qcov or ident < min_ident or coll < min_coll:
-            continue
-        key = (coll, ident * qcov)
-        if query not in best or key > best[query][0]:
-            best[query] = (key, i)
-
-    out = list(gff_lines)
-    n = 0
-    for query, (_key, i) in best.items():
-        if query in confident:
-            continue
-        parts = out[i].split("\t")
-        old = _parse_gff_attributes(parts[8]).get("Confidence", "")
-        new_attrs = []
-        for pair in parts[8].split(";"):
-            k = pair.split("=", 1)[0]
-            if k == "Confidence":
-                pair = "Confidence=MEDIUM"
-            elif k == "GOIClass":
-                pair = "GOIClass=probable_goi"
-            elif k == "InferenceReason":
-                pair = "InferenceReason=low_identity_in_conserved_gene_order"
-            new_attrs.append(pair)
-        new_attrs.append(f"ContextPromoted={old}")
-        parts[8] = ";".join(new_attrs)
-        out[i] = "\t".join(parts)
-        n += 1
-    return out, n
 
 
 def _classify_flanking_evidence(
@@ -5292,26 +5313,31 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         raw_candidates = [c for c in raw_candidates if not is_decoy_parent(_candidate_parent(c))]
     place_terms = block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
                                     block_collinear_support, flanking_candidates)
-    if decoy_candidates:
-        score_goi_candidates(decoy_candidates, goi_query_by_parent)
-        decoy_final = greedy_select(decoy_candidates)
-        annotate_goi_specificity(decoy_final, goi_query_by_parent, args)
-        annotate_place_evalues(decoy_final, goi_query_by_parent, hits_by_gene, place_terms,
+    def _judge_window(cands):
+        """Every candidate judged (label rework, step 4) before the choice among them.
+        Specificity (an exhaustive search of the home proteome) only where it can matter:
+        a candidate whose E-value in its place is above 1 is LOW whatever its specificity,
+        and E only grows with the genome's multiplier."""
+        prepare_label_proteins(cands, subseq, w_start)
+        score_goi_candidates(cands, goi_query_by_parent)
+        annotate_place_evalues(cands, goi_query_by_parent, hits_by_gene, place_terms,
                                subseq, w_start, tblastn_raw)
+        annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
+                                 goi_query_by_parent, args)
+        judge_candidates(cands)
+        return greedy_select(cands)
+
+    if decoy_candidates:
+        decoy_final = _judge_window(decoy_candidates)
         _ctx = getattr(args, 'genome_ctx', None)
         if _ctx is not None:
             for cand in decoy_final:
                 _ctx.setdefault('decoy_lines', []).extend(cand['gff'])
 
-    # Greedy non-overlapping selection for GOI/tandem candidates, by bit score against
-    # the home protein (score_goi_candidates, goi_candidate_order).
+    # Greedy non-overlapping selection for GOI/tandem candidates, by the judge's rank
+    # (label on the E-value in the place, then E, block, bits, shorter span).
     if raw_candidates:
-        score_goi_candidates(raw_candidates, goi_query_by_parent)
-        final_candidates = greedy_select(raw_candidates)
-
-        annotate_goi_specificity(final_candidates, goi_query_by_parent, args)
-        annotate_place_evalues(final_candidates, goi_query_by_parent, hits_by_gene, place_terms,
-                               subseq, w_start, tblastn_raw)
+        final_candidates = _judge_window(raw_candidates)
         for cand in final_candidates:
             rec = cand['record']
             if rec['id'] in found_ids:
@@ -5624,7 +5650,7 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
 
     A MEDIUM seeds exactly when its genome has no HIGH, and then it becomes the next
     wave's relative query: a MEDIUM that is specific only by a few bits is a fine call but
-    a poor query. AMBIGUOUS, LOW and context-promoted calls never seed. Every HIGH/MEDIUM
+    a poor query. AMBIGUOUS and LOW calls never seed. Every HIGH/MEDIUM
     call that does not seed feeds the tree (`goi_for_tree.faa`) only.
 
     Until then a call seeded when it was HIGH or MEDIUM and of class confident_goi /
@@ -5643,7 +5669,7 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
         if role != "goi":
             continue
         confidence = meta.get("confidence", "")
-        if confidence in _TREE_QUALIFYING_CONFIDENCE and not meta.get("context_promoted"):
+        if confidence in _TREE_QUALIFYING_CONFIDENCE:
             calls[meta.get("parent") or extract_base_gene_id(gid)].append((g, meta))
         else:
             suppressed += 1
@@ -6647,17 +6673,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         feature_meta = {}
 
-        all_gff_lines, n_promoted = _promote_context_supported_goi(all_gff_lines)
-        if n_promoted:
-            logger.info(
-                f"[{genome_name}] Context promotion: {n_promoted} GOI model(s) LOW/AMBIGUOUS -> "
-                f"MEDIUM on >= {CLASSIFY_THRESHOLDS['context_min_collinear']} anchors in home order."
-            )
         all_gff_lines = finalize_place_evalues(all_gff_lines, args.genome_ctx)
+        all_gff_lines, _label_counts = relabel_goi_lines(all_gff_lines)
+        if _label_counts:
+            logger.info(f"[{genome_name}] GOI labels: "
+                        + ", ".join(f"{k} {v}" for k, v in sorted(_label_counts.items())))
         if getattr(args, 'decoy_mode', False):
-            n_decoy = write_decoy_outputs(
-                args, prefix, genome_name,
+            _decoy_lines, _ = relabel_goi_lines(
                 finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx))
+            n_decoy = write_decoy_outputs(args, prefix, genome_name, _decoy_lines)
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
 
         # Write aggregated GFF
@@ -6699,7 +6723,6 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "target_product": attrs.get("TargetProduct", ""),
                      "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
-                     "context_promoted": attrs.get("ContextPromoted", ""),
                      "spec_margin": attrs.get("SpecMargin", ""),
                      "real_competitor": attrs.get("RealCompetitor", ""),
                  }
@@ -6859,10 +6882,11 @@ def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_si
         updated += f";StructuralSimilarity={structural_similarity:.3f}"
 
     boosted = 0
-    # A context-promoted MEDIUM was not reached by this classifier; re-running it here
-    # without the block's gene order must not take it back down.
-    demotes_promoted = 'ContextPromoted' in attr_kv and new_conf != 'HIGH'
-    if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM') and not demotes_promoted:
+    # A row labelled by synvoy_label (Basis=, since 2026-10-14) keeps its label: its
+    # evidence is an E-value in the expected place and specificity, which the identity-
+    # based classifier re-run here does not see. The ML scores are recorded on it.
+    judged = 'Basis' in attr_kv
+    if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM') and not judged:
         updated = updated.replace(f"Confidence={old_conf}", f"Confidence={new_conf}")
         old_reason = attr_kv.get('InferenceReason', '')
         if old_reason:
@@ -7384,17 +7408,6 @@ def main():
                              "flanking to reach this, once a block has >= this many flanking "
                              "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
                              "Set 0 to disable the order gate (count-only, legacy).")
-    parser.add_argument("--classify_context_min_collinear", type=lambda v: int(float(v)), default=0,
-                        help="A genome with no HIGH/MEDIUM call for a query gets its best "
-                             "LOW/AMBIGUOUS exon model or hit chain lifted to MEDIUM when its "
-                             "block keeps at least this many anchors in home order "
-                             "(InferenceReason low_identity_in_conserved_gene_order). "
-                             "0 = off (default).")
-    parser.add_argument("--classify_context_min_identity", type=float, default=15.0,
-                        help="Identity floor (%%) for that promotion.")
-    parser.add_argument("--classify_context_min_qcov", type=float, default=0.5,
-                        help="Query coverage a model needs for that promotion "
-                             "(never below --classify_fragment_max_qcov).")
     parser.add_argument("--decoy_mode", type=str2bool, default=False,
                         help="Also search the reversed home protein and two shuffles of it in "
                              "every window, model and label them like the real query, and write "
@@ -7609,9 +7622,6 @@ def main():
     CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = (
         args.classify_fallback_strong_min_identity_floor)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
-    CLASSIFY_THRESHOLDS["context_min_collinear"] = max(0, args.classify_context_min_collinear)
-    CLASSIFY_THRESHOLDS["context_min_identity"] = args.classify_context_min_identity
-    CLASSIFY_THRESHOLDS["context_min_qcov"] = args.classify_context_min_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
     CLASSIFY_THRESHOLDS["plm_high_threshold"] = args.plm_high_threshold

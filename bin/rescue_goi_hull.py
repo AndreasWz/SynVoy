@@ -29,7 +29,10 @@ from typing import Dict, List, Tuple
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
+import synvoy_evalue  # noqa: E402
+import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
+import synvoy_specificity  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
     _refine_rescue_termini,
     _read_query,
@@ -164,16 +167,8 @@ def _extract_window(genome_path: str, chrom: str, start: int, end: int,
     return ""
 
 
-def _confidence_for(identity: float, high: float, medium: float) -> str:
-    if identity >= high:
-        return "HIGH"
-    if identity >= medium:
-        return "MEDIUM"
-    return "LOW"
-
-
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,
-                         confidence, query_coverage=None, bits=None) -> List[str]:
+                         confidence, query_coverage=None, bits=None, judged="") -> List[str]:
     """Map miniprot window-relative coords to genome coords; SynVoy GFF block tagged
     EvidenceType=synteny_hull_rescue, confidence by identity. ``bits``: the model
     protein's bit score against the query (sequence_utils.sw_bits), written as Bits= like
@@ -191,7 +186,7 @@ def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_i
     common = (f"Name={query_id};SynVoyRole=goi;Confidence={confidence};"
               f"EvidenceType=synteny_hull_rescue;GOIClass=synteny_hull_rescue;"
               f"ModelStatus=rescue;Identity={identity:.1f};TargetGene={query_id}"
-              f"{cov_attr}{bits_attr}")
+              f"{cov_attr}{bits_attr}{(';' + judged) if judged else ''}")
     rows = [
         "\t".join([chrom, "SynVoy_hull", "gene", str(gstart), str(gend), ".", strand, ".",
                    f"ID={parent_id};{common}"]),
@@ -242,6 +237,40 @@ def _translate_model(window_seq: str, cds_rows) -> str:
     return translate(dna).rstrip("*").replace("*", "X")
 
 
+def _genome_length(genome_path: str) -> int:
+    """Total length of the target genome: from its .fai when there is one (samtools
+    faidx writes it on the first window), else by reading the FASTA."""
+    fai = genome_path + ".fai"
+    if os.path.exists(fai):
+        with open(fai) as fh:
+            return sum(int(line.split("\t")[1]) for line in fh if "\t" in line)
+    return sum(len(seq) for _h, _i, seq in parse_fasta(genome_path))
+
+
+def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome):
+    """The label of a rescue model by the search's own judge (synvoy_label, label rework
+    2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
+    own), its specificity against the home proteome, its completeness. Returns
+    (confidence, rank key, GFF attributes)."""
+    qlen = len(query_seq)
+    bits = sw_bits(query_seq, protein) if protein else 0.0
+    evalue, _b = synvoy_evalue.blastp_evalue(
+        query_seq, synvoy_evalue.split_at_stops(protein),
+        synvoy_evalue.search_space(qlen, genome_len))
+    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, protein, bits, None)
+            if proteome is not None and protein else None)
+    cov = _cds_coverage(cds_rows, qlen)
+    conf, basis = synvoy_label.judge(
+        evalue, "genome", False,
+        spec["margin"] if spec else None, spec["real_competitor"] if spec else None, None, cov)
+    span = max(int(c[4]) for c in cds_rows) - min(int(c[3]) for c in cds_rows) if cds_rows else 0
+    key = synvoy_label.rank_key(conf, evalue, None, bits, span, min(int(c[3]) for c in cds_rows) if cds_rows else 0)
+    attrs = f"Basis={basis};Place=genome;Eeff={evalue:.3g}"
+    if spec:
+        attrs += ";" + synvoy_specificity.gff_attrs(spec)
+    return conf, key, attrs, bits
+
+
 def _cds_coverage(cds_rows, query_len: int) -> float:
     """Fraction of the query covered by the model's CDS (aa)."""
     if query_len <= 0:
@@ -280,8 +309,9 @@ def main() -> int:
                     help="Min miniprot %%identity to emit a rescued model")
     ap.add_argument("--min_coverage", type=float, default=0.5,
                     help="Min query coverage (CDS aa / query len) to emit a model")
-    ap.add_argument("--classify_high_min_identity", type=float, default=70.0)
-    ap.add_argument("--classify_medium_min_identity", type=float, default=45.0)
+    ap.add_argument("--home_proteome",
+                    help="Home proteome FASTA (one protein per gene): the rescue model's "
+                         "specificity, as in the main search (synvoy_specificity)")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=600)
     args = ap.parse_args()
@@ -307,6 +337,11 @@ def main() -> int:
 
     import tempfile
     n_emitted = 0
+    proteome = None
+    if args.home_proteome and os.path.exists(args.home_proteome) and os.path.getsize(args.home_proteome):
+        proteome = synvoy_specificity.HomeProteome(
+            [(rid, seq.upper().rstrip("*")) for _h, rid, seq in parse_fasta(args.home_proteome)], {})
+    genome_len = None
     with tempfile.TemporaryDirectory(prefix="synvoy_hull_") as tmp:
         query_fa = os.path.join(tmp, "query.faa")
         with open(query_fa, "w") as fh:
@@ -337,32 +372,38 @@ def main() -> int:
                 fh.write(f">{chrom}\n{window}\n")
             gff_text = _run_miniprot_relaxed(win_fa, query_fa, args.miniprot_outc,
                                              args.miniprot_timeout)
-            # Best model by identity that clears coverage + identity gates.
+            # Every model that clears the coverage and identity gates is judged like a
+            # candidate of the main search (judge_hull_model); the one the judge ranks
+            # first is kept (label, E, bits, shorter span). Until 2026-10-14: the model of
+            # highest identity, labelled by identity alone.
+            if genome_len is None:
+                genome_len = _genome_length(args.target_genome)
             best = None
             for mrna, cds_rows in _parse_miniprot_gff(gff_text):
                 ident = _identity_pct(mrna[8])
                 cov = _cds_coverage(cds_rows, qlen)
-                if ident >= args.min_identity and cov >= args.min_coverage:
-                    if best is None or ident > best[0]:
-                        best = (ident, mrna, cds_rows)
+                if ident < args.min_identity or cov < args.min_coverage:
+                    continue
+                # Same terminal refinement as the main path: a rescue model otherwise stops
+                # where the alignment stopped, a few codons inside the gene (CLAUDE.md §21).
+                _refine_rescue_termini(window, mrna, cds_rows)
+                prot = _translate_model(window, cds_rows)
+                try:
+                    conf, key, judged, bits = judge_hull_model(query_id, query_seq, prot, cds_rows,
+                                                               genome_len, proteome)
+                except RuntimeError:
+                    continue
+                if best is None or key < best[0]:
+                    best = (key, conf, judged, bits, ident, mrna, cds_rows, prot)
             if best is None:
                 continue
-            ident, mrna, cds_rows = best
-            # Same terminal refinement as the main path: a rescue model otherwise stops
-            # where the alignment stopped, a few codons inside the gene (CLAUDE.md §21).
-            _refine_rescue_termini(window, mrna, cds_rows)
-            conf = _confidence_for(ident, args.classify_high_min_identity,
-                                   args.classify_medium_min_identity)
+            _key, conf, judged, bits, ident, mrna, cds_rows, prot = best
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
             best_cov = _cds_coverage(cds_rows, qlen)
-            prot = _translate_model(window, cds_rows)
-            try:
-                bits = sw_bits(query_seq, prot) if prot else None
-            except RuntimeError:
-                bits = None
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
                                                   query_id, parent_id, conf,
-                                                  query_coverage=best_cov, bits=bits))
+                                                  query_coverage=best_cov, bits=bits,
+                                                  judged=judged))
             if prot:
                 faa_records.append((f"{parent_id}.mRNA", prot))
             n_emitted += 1

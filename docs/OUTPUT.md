@@ -33,11 +33,31 @@ which question**, in order of how often they're useful.
 
 ## Confidence levels
 
-Every GOI call carries one of four labels. They mean different things, and only
+Every GOI call carries one of four labels, and `Basis` says why (since 2026-10-14). Only
 the first two are counted as orthologs.
 
-| Label | Meaning |
-|---|---|
+| Label | `Basis` | Rule | Report, figures and web say |
+|---|---|---|---|
+| `HIGH` | `significant_specific` | E ≤ 1e-6 in the expected place, specific with a margin of ≥ 10 bits (or no real competitor), and the model covers ≥ 70 % of the query | ortholog, high confidence |
+| `MEDIUM` | `significant_specific` | E ≤ 1e-3 in the expected place, and specific | ortholog, medium confidence |
+| `AMBIGUOUS` | `not_specific` | E ≤ 1e-3, but another home gene explains the model as well | needs curation: another home gene fits as well |
+| `AMBIGUOUS` | `gene_order_only` | 1e-3 < E ≤ 1 in the slot between the gene's neighbours in a block whose gene order is significant, and specific. Offered only in a genome without a counted call | needs curation: weak match where the gene should be |
+| `LOW` | `not_significant` | everything else: a fragment, a weak hit, a chance alignment | no significant match |
+
+**The E-value** (`Eeff`) is that of the home protein against the model, computed in the
+smallest place SynVoy predicted for the gene: the slot between the nearest found home
+neighbours (± one gene pitch), else the core of the block, else the searched window (each
+only in a block with `BlockEsyn` ≤ 0.1, the chance of that much gene order), else the
+whole genome; times the number of such blocks in the genome. **Specific** means that no
+other protein of the home proteome matches the model as well: no real competitor
+(`RealCompetitor=0`), or a margin of at least 3.3 bits (`SpecMargin`); within ±3.3 bits a
+model in the slot or core of a significant block is decided for the gene, unless the
+competitor lies in the gene's own home neighbourhood (`BestOtherInNeighbourhood=1`, a
+tandem array). A model of the report's paralog check (`paralog_not_goi`) or of
+high identity over a short slice of the query (`identity_coverage_decoupled`) is not
+counted either. Docs: ALGORITHM.md §7.8.
+
+---|---|
 | `HIGH` | A gene model at ≥ 50 % identity in a neighbourhood with conserved, collinear flanking genes. The model has at least two exons, or one exon when the home gene has one and the model covers the query like a complete gene. |
 | `MEDIUM` | A real but weaker case: lower identity, a single exon, or a hit chain with strong support. |
 | `AMBIGUOUS` | A candidate in a conserved neighbourhood whose **own** sequence evidence does not show it is the gene (`syntenic_candidate_unconfirmed`), or a call that matches a home *paralog* better than the query (`paralog_not_goi`). Named in the report, drawn in the plots, **not counted as an ortholog**. A gene lost from a conserved locus leaves the neighbourhood intact, so flanking support alone cannot tell "present" from "lost". |
@@ -76,7 +96,7 @@ Fields of a record in `goi_dedup.records`:
 | `owning_gene`, `owning_locus`, `owning_is_goi_gene`, `ownership_bit`, `ownership_gap` | Result of the paralog check: the home gene the call matches best, and by what margin. |
 | `phylo_verdict`, `phylo_z` | Advisory phylogenetic-placement verdict. |
 | `superseded_wide_model` | `true` when a compact model replaced a sprawling rescue model of the same gene. |
-| `context_promoted` | `LOW` or `AMBIGUOUS` (the label before) when the call is MEDIUM on conserved gene order alone, else empty. Counted in `summary.gene_order_only_goi`. |
+| `basis`, `eeff`, `place`, `block_esyn` | Why the call has its label (`significant_specific`, `not_specific`, `gene_order_only`), its E-value in its place, the place (`slot`, `core`, `window`, `genome`) and the E-value of its block's gene order. Empty for runs before 2026-10-14. |
 
 ### The per-genome table
 
@@ -142,7 +162,7 @@ Attributes on a model's `mRNA` row:
 | `StartCodon`, `StopCodon` | `yes` / `no`: whether the model begins with ATG and ends at a stop codon. SynVoy extends a miniprot model's two ends to the nearest in-frame start / stop when it can do so without crossing a splice site. |
 | `SyntenyContext`, `BlockFlankingSupport`, `BlockCollinearSupport` | The neighbourhood: how many distinct flanking genes its block holds, and the longest run of them in home order |
 | `InferenceReason` | Why it got its confidence (e.g. `goi_tandem_copy_weak_context`, `fragment_model_with_flanking_only`) |
-| `ContextPromoted` | Only on a call raised to MEDIUM by gene order (`InferenceReason=low_identity_in_conserved_gene_order`; `--classify_context_min_collinear 0` switches the rule off): the label it had before, `LOW` or `AMBIGUOUS`. In `synvoy_report.json` the record field is `context_promoted` |
+| `Basis` | GOI models: why the label (`significant_specific`, `not_specific`, `gene_order_only`, `not_significant`; table above). `FrameFixed=1` / `FrameBroken=1`: the model's CDS was not in one clean frame; another frame over the same exons was used, or none was clean and the model was judged on its hit regions only |
 | `SynVoy_Parent` | The query or home gene the model derives from |
 | `TargetGene`, `TargetProduct`, `TargetID` | The target genome's own annotation at that position (needs target GFFs) |
 | `GoiFamilyConsistent`, `GoiFamilyReason` | Family-name check, only when family tokens are set |
@@ -235,10 +255,11 @@ The fields of `summary` worth reading:
 
 | Field | Meaning |
 |---|---|
-| `headline` | One sentence, e.g. `3 high-confidence GOI ortholog annotation(s) (+13 low-confidence) across 3 genome(s).` |
+| `headline` | One sentence, e.g. `12 ortholog(s) (9 high, 3 medium confidence); 4 need curation (3 gene order only, 1 another home gene fits as well); 40 no significant match; across 33 genome(s).` |
 | `high_confidence_goi`, `medium_confidence_goi` | Counts after dedup and the paralog check — the numbers to quote |
-| `gene_order_only_goi` | How many of `medium_confidence_goi` were raised to MEDIUM by gene order with a weak sequence match (their records carry `context_promoted`); the headline names them |
-| `ambiguous_goi`, `low_confidence_goi` | Named separately, never part of the ortholog count |
+| `needs_curation_goi`, `needs_curation_by_basis` | The AMBIGUOUS calls ("needs curation"), never part of the ortholog count, and how many rest on `gene_order_only` and how many are `not_specific`. `ambiguous_goi` is the old name of `needs_curation_goi` (kept for one release) |
+| `gene_order_only_dropped` | Gene-order-only calls not offered because their genome has a counted call of the gene |
+| `low_confidence_goi` | LOW calls, named separately, never part of the ortholog count |
 | `goi_absent_genomes` | Genomes in which no GOI call was **placed**. Not proof of absence. |
 | `goi_found_but_not_syntenic` | Genomes with a strong GOI hit that no synteny gate accepted (see `rejected_candidates`) |
 | `paralog_misassignments`, `locus_reattributed_orthologs`, `cross_locus_duplicate_goi` | What adjudication changed |

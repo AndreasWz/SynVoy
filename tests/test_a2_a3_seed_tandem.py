@@ -188,15 +188,14 @@ class TestSeedRule(unittest.TestCase):
         self.assertEqual(len(seed), 2)
         self.assertEqual(tree_extra, [])
 
-    def test_low_ambiguous_and_promoted_never_seed(self):
+    def test_low_and_ambiguous_never_seed(self):
+        """Neither label seeds, whatever its basis (gene_order_only or not_specific), and
+        neither reaches the tree."""
         seed, tree_extra, suppressed = self._seed({
             "GOI_A|low": self._call("LOW", parent="GOI_A"),
             "GOI_A|amb": self._call("AMBIGUOUS", parent="GOI_A", goi_class="syntenic_candidate_unconfirmed"),
-            "GOI_A|ctx": self._call("MEDIUM", parent="GOI_A", promoted="LOW"),
         })
-        self.assertEqual(seed, [])
-        self.assertEqual([g["id"] for g in tree_extra], ["GOI_A|ctx"])  # a promoted MEDIUM: tree only
-        self.assertEqual(suppressed, 3)
+        self.assertEqual((seed, tree_extra, suppressed), ([], [], 2))
 
 if __name__ == '__main__':
     unittest.main()

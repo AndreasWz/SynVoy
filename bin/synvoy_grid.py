@@ -1538,7 +1538,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
              (arrow(fill_lo, stroke_weak, DASH["LOW"]), "low confidence")]
     if "AMBIGUOUS" in tiers:        # drawn, but must not read as a confident call
         flank.append((arrow(ps._lerp_hex(base, "#ffffff", 0.86 if st.numbers else 0.72), stroke_weak,
-                            DASH["AMBIGUOUS"]), "ambiguous"))
+                            DASH["AMBIGUOUS"]), "needs curation"))
     numbers = []
     if st.numbers:
         numbers.append(("87", "in an arrow: % identity to the home gene"))
@@ -1609,7 +1609,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
                             "aligned hits without a gene model"))
         goi.extend(clade_notes)
         if "mark" in kinds and not st.clade:
-            goi.append((mark(), "weak call (low or ambiguous confidence)"))
+            goi.append((mark(), "weak call (needs curation, or no significant match)"))
         if "break" in kinds:
             goi.append(("//", "what follows is elsewhere in the genome"))
         if "count" in kinds:
@@ -1725,10 +1725,10 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
             s.append(f"At most {st.max_models} gene models are drawn for one genome; "
                      f"{info['copies_not_drawn']} further copies are in the source data.")
         if "mark" in kinds and st.clade:
-            s.append("A small pale box is a weak call (low or ambiguous confidence), in the "
+            s.append("A small pale box is a weak call (needs curation, or no significant match), in the "
                      "colour of its clade (white when it is not in the tree).")
         elif "mark" in kinds:
-            s.append("A small pale mark is a weak call (low or ambiguous confidence): a box for a "
+            s.append("A small pale mark is a weak call (needs curation, or no significant match): a box for a "
                      "gene model, a bar for aligned hits."
                      + (f" At most {st.max_marks} are drawn in a cell; +N counts the rest."
                         if "count" in kinds else ""))

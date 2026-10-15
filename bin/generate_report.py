@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
+import synvoy_label  # noqa: E402
 
 
 KNOWN_SUFFIXES = [
@@ -292,9 +293,13 @@ def _process_gffs_unified(gff_files):
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
                             "mrna_id": model_id,
-                            # Old label of a call raised to MEDIUM by gene order
-                            # (iterative_search_runner._promote_context_supported_goi).
-                            "context_promoted": (attrs.get("ContextPromoted", "") or "").strip().upper(),
+                            # The judge's terms (label rework 2026-10-14, synvoy_label):
+                            # why the label (Basis), the E-value in the expected place, the
+                            # place and its block's E-value of gene order.
+                            "basis": (attrs.get("Basis", "") or "").strip(),
+                            "eeff": (attrs.get("Eeff", "") or "").strip(),
+                            "place": (attrs.get("Place", "") or "").strip(),
+                            "block_esyn": (attrs.get("BlockEsyn", "") or "").strip(),
                         })
 
                     elif role == "flanking" and confidence == "HIGH":
@@ -630,53 +635,67 @@ def low_quality_warnings(failed_genomes, searched):
     return ids, sentences
 
 
-def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, order_only=0):
-    """One-line, unambiguous summary of the GOI ortholog yield, for the summary block.
+def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_basis=None):
+    """One-line summary of the GOI yield, for the summary block (docs/TODO.md §1k; names of
+    the label rework, 2026-10-14):
 
-    Replaces the old reliance on `total_hits` (raw .m8 count, often 0) as the at-a-glance
-    signal — that made successful runs look empty. See docs/TODO.md §1k.
+        12 orthologs (9 high, 3 medium confidence); 4 need curation (3 gene order only,
+        1 another home gene fits as well); 40 no significant match; across 33 genome(s).
 
-    ``ambiguous`` is reported SEPARATELY and never folded into the ortholog count. An
-    AMBIGUOUS call is a candidate sitting in a conserved neighbourhood whose sequence
-    evidence does not establish that it is the gene — on the melittin benchmark that
-    evidence is statistically indistinguishable between species that have the gene and
-    species that lost it, so counting these as orthologs is what produced the
-    over-calling. They are named in the headline so they cannot be silently dropped
-    either.
-
-    ``order_only`` is the part of ``medium`` that was raised to MEDIUM by conserved gene
-    order with a weak sequence match (``--classify_context_min_collinear``, off by
-    default). It is named next to the count, because gene order cannot tell the gene from
-    a relative that sits in its place.
-    """
+    Only HIGH and MEDIUM are orthologs. AMBIGUOUS calls are named apart and never counted:
+    ``gene_order_only`` is a weak match in the slot where the gene was expected,
+    ``not_specific`` a significant match that another home gene explains as well."""
     if not (high or medium or low or ambiguous):
         return "No GOI ortholog annotations were produced."
-    confident = []
-    if high:
-        confident.append(f"{high} high-confidence")
-    if medium:
-        confident.append(f"{medium} medium-confidence")
-    extra = []
+    parts = []
+    if high or medium:
+        conf = []
+        if high:
+            conf.append(f"{high} high")
+        if medium:
+            conf.append(f"{medium} medium")
+        parts.append(f"{high + medium} ortholog(s) ({', '.join(conf)} confidence)")
+    else:
+        parts.append("NO ortholog")
     if ambiguous:
-        extra.append(f"{ambiguous} ambiguous (syntenic candidate, orthology not established)")
+        by = curation_by_basis or {}
+        detail = []
+        if by.get("gene_order_only"):
+            detail.append(f"{by['gene_order_only']} gene order only")
+        if by.get("not_specific"):
+            detail.append(f"{by['not_specific']} another home gene fits as well")
+        rest = ambiguous - sum(v for v in by.values() if v)
+        if rest > 0 and detail:
+            detail.append(f"{rest} by sequence and synteny alone")
+        parts.append(f"{ambiguous} need curation" + (f" ({', '.join(detail)})" if detail else ""))
     if low:
-        extra.append(f"{low} low-confidence")
-    tail = f" (+{'; +'.join(extra)})" if extra else ""
-    if confident:
-        lead = " + ".join(confident)
-        by_order = (f", {order_only} of the medium-confidence by gene order only"
-                    if order_only else "")
-        return f"{lead} GOI ortholog annotation(s){by_order}{tail} across {n_genomes} genome(s)."
-    if ambiguous:
-        return (f"NO confident GOI ortholog; {ambiguous} ambiguous syntenic candidate(s)"
-                + (f" and {low} low-confidence hit(s)" if low else "")
-                + f" across {n_genomes} genome(s).")
-    return f"{low} low-confidence/ambiguous GOI ortholog annotation(s) across {n_genomes} genome(s)."
+        parts.append(f"{low} no significant match")
+    return "; ".join(parts) + f"; across {n_genomes} genome(s)."
 
 
 def _confidence_rank(confidence):
     """HIGH > MEDIUM > AMBIGUOUS > LOW/unknown — used to keep the best member in dedup."""
     return {"HIGH": 3, "MEDIUM": 2, "AMBIGUOUS": 1}.get((confidence or "").upper(), 0)
+
+
+def _record_rank(rec):
+    """Order of records of one gene, best first (smaller is better): label, then the
+    judge's order (synvoy_label.rank_key: E-value in the place with ties below 1e-10, the
+    block's E_syn, bits, shorter span) for records that carry Eeff, else bits or identity
+    (_model_strength) for records written before 2026-10-14 or by a rescue pass."""
+    def num(key, default):
+        try:
+            return float(str(rec.get(key) or "").strip())
+        except ValueError:
+            return default
+    eeff = num("eeff", None)
+    if eeff is not None:
+        judged = synvoy_label.rank_key(rec.get("confidence", ""), eeff, num("block_esyn", None),
+                                       num("bits", 0.0), _span(rec), int(rec.get("start", 0) or 0))
+        return (-_confidence_rank(rec.get("confidence")), 0) + judged[1:]
+    strength = _model_strength(rec)
+    return (-_confidence_rank(rec.get("confidence")), 1, -strength[0], -strength[1], _span(rec),
+            int(rec.get("start", 0) or 0))
 
 
 def _model_strength(rec):
@@ -759,19 +778,6 @@ def _prefers_contained_model(wide, compact, span_ratio, qcov_margin):
     return (wide_cov - compact_cov) < qcov_margin
 
 
-def _order_only_label(members, rep):
-    """The label a gene had before gene order raised it to MEDIUM, or "" when its call does
-    not rest on gene order alone: the kept model was not promoted, later evidence raised it
-    above MEDIUM, or another home locus called the same gene HIGH / MEDIUM on sequence."""
-    old = (rep.get("context_promoted") or "").strip().upper()
-    if not old or (rep.get("confidence") or "").upper() != "MEDIUM":
-        return ""
-    for m in members:
-        if (m.get("confidence") or "").upper() in ("HIGH", "MEDIUM") and not m.get("context_promoted"):
-            return ""
-    return old
-
-
 def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                            fused_span_ratio=2.0, fused_qcov_margin=0.15):
     """Collapse HIGH/MEDIUM/AMBIGUOUS GOI hits that are the same target gene found from
@@ -820,9 +826,7 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                             compact["superseded_wide_model"] = True
                             cl["rep"] = compact
                     else:
-                        better = (_confidence_rank(a["confidence"]), _model_strength(a))
-                        current = (_confidence_rank(cl["rep"]["confidence"]), _model_strength(cl["rep"]))
-                        if better > current:
+                        if _record_rank(a) < _record_rank(cl["rep"]):
                             cl["rep"] = a
                     placed = True
                     break
@@ -846,8 +850,12 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "confidence": rep["confidence"],
                 "identity": rep["identity"],
                 # Bit score against the home protein ("" for a model written before
-                # 2026-10-14); the member with the best label, then the best bits, is kept.
+                # 2026-10-14); the member that ranks first (_record_rank) is kept.
                 "bits": rep.get("bits", ""),
+                "basis": rep.get("basis", ""),
+                "eeff": rep.get("eeff", ""),
+                "place": rep.get("place", ""),
+                "block_esyn": rep.get("block_esyn", ""),
                 "goi_class": "cross_locus_duplicate" if is_cross_dup else rep["goi_class"],
                 "original_goi_class": rep["goi_class"],
                 "target_gene": rep["target_gene"],
@@ -865,13 +873,17 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Join key for the F9 phylo-placement verdicts, which are computed from
                 # goi_for_tree.faa and so are keyed by model id, not coordinates.
                 "mrna_id": rep.get("mrna_id", ""),
-                # "LOW" / "AMBIGUOUS" when this gene is called on gene order alone. Empty when
-                # any home locus gave a HIGH or MEDIUM call of it on sequence.
-                "context_promoted": _order_only_label(members, rep),
             })
 
-    records.sort(key=lambda r: (-_confidence_rank(r["confidence"]),
-                                tuple(-x for x in _model_strength(r)), r["genome"], r["chrom"]))
+    # A weak match where the gene should be (Basis=gene_order_only) is only offered for
+    # curation in a genome that has no counted call of the gene from any home locus or
+    # rescue pass (plan 3.4): where the gene was found, it is a second, weaker candidate.
+    counted_genomes = {r["genome"] for r in records if r["confidence"] in ("HIGH", "MEDIUM")}
+    n_before = len(records)
+    records = [r for r in records
+               if not (r.get("basis") == "gene_order_only" and r["genome"] in counted_genomes)]
+    gene_order_only_dropped = n_before - len(records)
+    records.sort(key=lambda r: (_record_rank(r), r["genome"], r["chrom"]))
     return {
         "records": records,
         "high_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "HIGH"),
@@ -882,6 +894,7 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
         "wide_models_superseded": sum(1 for r in records if r["superseded_wide_model"]),
         "pre_dedup_high_medium": len(considered),
         "post_dedup_records": len(records),
+        "gene_order_only_dropped": gene_order_only_dropped,
     }
 
 
@@ -1689,10 +1702,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                      if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
     dedup_medium = sum(1 for r in _own_recs
                        if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
-    # Part of dedup_medium: MEDIUM on gene order alone (record field context_promoted).
-    dedup_order_only = sum(1 for r in _own_recs
-                           if r.get("confidence") == "MEDIUM" and r.get("context_promoted")
-                           and r.get("goi_class") not in _DEMOTED_CLASSES)
+    # AMBIGUOUS calls: shown as "needs curation", never counted, split by why (Basis).
+    needs_curation_by_basis = dict(Counter(
+        r.get("basis") or "unlabelled" for r in _own_recs if r.get("confidence") == "AMBIGUOUS"))
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
     # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
@@ -1761,18 +1773,22 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # per-home-locus seed count, so the same gene found from N loci reads as one.
             "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low,
                                              genomes_with_goi, ambiguous=dedup_ambiguous,
-                                             order_only=dedup_order_only),
+                                             curation_by_basis=needs_curation_by_basis),
             # How many calls the coverage rule removed from the headline above.
             "coverage_demoted_calls": coverage_demotion_summary.get("demoted", 0),
             "coverage_not_recorded_calls": coverage_demotion_summary.get("coverage_not_recorded", 0),
             "headline_metric": dedup_high,  # distinct high-confidence GOI orthologs (post-dedup)
             "high_confidence_goi": dedup_high,
             "medium_confidence_goi": dedup_medium,
-            # How many of medium_confidence_goi rest on gene order alone (0 unless
-            # --classify_context_min_collinear is set). Subtract for sequence-supported calls.
-            "gene_order_only_goi": dedup_order_only,
-            # Reported, never folded into the ortholog counts. See _format_goi_headline.
+            # AMBIGUOUS calls, reported as "needs curation" and never folded into the ortholog
+            # counts (see _format_goi_headline), and why: gene_order_only = a weak match in
+            # the slot where the gene was expected; not_specific = another home gene explains
+            # the match as well. ambiguous_goi is the old name of the same number (kept for
+            # one release).
+            "needs_curation_goi": dedup_ambiguous,
+            "needs_curation_by_basis": needs_curation_by_basis,
             "ambiguous_goi": dedup_ambiguous,
+            "gene_order_only_dropped": goi_dedup.get("gene_order_only_dropped", 0),
             "phylo_discordant_calls": phylo_summary["discordant"],
             "phylo_would_promote": phylo_summary["would_promote"],
             "high_confidence_goi_pre_dedup": goi_high,

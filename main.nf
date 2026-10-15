@@ -230,6 +230,7 @@ def removedParams() {
             pub_svg                    : "the publication SVG was removed; the figure for print is *_anchor_grid_print.svg, and *_synteny_plot_view.svg is the ribbon plot as a picture",
             enable_matrix_plot         : "the matrix figure was removed; the anchor grid (*_anchor_grid.svg) shows the same and more",
             seed_on_flanking_support   : "seeding follows one rule now: per query and genome the HIGH calls, else the MEDIUM calls, when no other home protein competes for them (docs/ALGORITHM.md, seeds)",
+            classify_context_min_collinear: "the context promotion was removed: a weak match in the slot of a significant block is labelled AMBIGUOUS (Basis=gene_order_only, needs curation), always on and never counted",
         ],
         noEffect: [
             'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
@@ -237,6 +238,7 @@ def removedParams() {
             'keep_intermediate', 'max_retries', 'multi_profile', 'multi_profile_max_jobs',
             'locus_ownership_synteny_window', 'pub_width_mm', 'pub_palette', 'min_exon_query_cov',
             'seed_flanking_min_count', 'seed_flanking_min_qcov',
+            'classify_context_min_identity', 'classify_context_min_qcov',
         ],
     ]
 }
@@ -1509,8 +1511,7 @@ workflow {
             SPLIT_LOCI.out.beds,
             qc_summary_ch,
             ITERATIVE_SEARCH.out.goi_for_tree,
-            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first(),
-            effective_settings_ch
+            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first()
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->
