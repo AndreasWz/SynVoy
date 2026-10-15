@@ -754,9 +754,19 @@ def main():
     # proteins (FASTA header fields `home=` and `genome=`): the search derives its
     # distances from them (bin/synvoy_scale.py).
     genome_bp = sum(len(seq) for seq in genome_seqs.values())
+    # The home locus itself (`goi=`), so the search knows on which side of the gene each
+    # anchor lies (its slot between the nearest neighbours, bin/synvoy_evalue.py).
+    goi_span = {}
+    for region in target_regions:
+        lo, hi = goi_span.get(region['chrom'], (region['start'], region['end']))
+        goi_span[region['chrom']] = (min(lo, region['start']), max(hi, region['end']))
 
     def _home_fields(gene):
-        return f"home={gene['start']}-{gene['end']} genome={genome_bp}"
+        fields = f"home={gene['start']}-{gene['end']} genome={genome_bp}"
+        if gene.get('chrom') in goi_span:
+            lo, hi = goi_span[gene['chrom']]
+            fields += f" goi={lo}-{hi}"
+        return fields
 
     with open(args.out_bed, 'w') as bed_out:
         seen = set()

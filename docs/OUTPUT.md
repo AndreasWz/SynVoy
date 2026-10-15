@@ -136,6 +136,7 @@ Attributes on a model's `mRNA` row:
 | `Confidence`, `GOIClass`, `EvidenceType`, `ModelStatus` | As in the table above |
 | `Identity`, `QueryCoverage`, `Exons` | % identity, fraction of the query covered, exon count. Both always refer to the **home protein** |
 | `Bits` | GOI models: bit score of the model's protein against the home protein (Smith-Waterman, BLOSUM62, gaps 11/1). The search, the report and the figures choose among overlapping models by it |
+| `Place`, `BlockEsyn`, `EPlace`, `EPlaceTblastn`, `SigBlocks`, `Eeff`, `EeffTblastn` | GOI models: the smallest expected place that holds the model (`slot` between its nearest home neighbours, `core`, `window`, or `genome` when its block's E_syn is above 0.1), the block's E-value of gene order, the E-value of the home protein against the model in that place (blastp with composition statistics; and the window's best tblastn hit rescaled to the place), the number of significant blocks searched in the genome, and the two E-values multiplied by it (docs/ALGORITHM.md §7.13). Recorded since 2026-10-14; the labels do not use them yet |
 | `BestOtherHome`, `SpecMargin`, `RealCompetitor`, `BestOtherInNeighbourhood` | GOI models: the home protein other than the GOI's own gene that matches the model best, the bit-score margin of the home GOI protein over it, whether it is a real competitor (`1`: it aligns to the model at E ≤ 0.01 over the home proteome, or is a home family member of the GOI), and whether it lies between the outermost flanking genes of the home locus. A call seeds the next wave only with no real competitor or a margin of at least 10 bits |
 | `SearchQuery`, `SearchQueryIdentity` | Only on a model that the home protein did not find and the gene model of a previously searched genome did: that model's id, and the identity to it. `Identity` is still measured against the home protein |
 | `StartCodon`, `StopCodon` | `yes` / `no`: whether the model begins with ATG and ends at a stop codon. SynVoy extends a miniprot model's two ends to the nearest in-frame start / stop when it can do so without crossing a splice site. |
@@ -388,6 +389,15 @@ run without that table, or one whose figures were drawn without network access (
 cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 
 ---
+
+## Decoy calls (`--decoy_mode`)
+
+With `--decoy_mode true` the search also looks for the reversed home protein and two
+shuffles of it in every window. Their models are in `decoys/<locus>/<genome>.decoy.gff`,
+one row per call in `<genome>.decoy.tsv` (decoy kind, label, place, `Eeff`, `EeffTblastn`,
+bits, specificity). None of them is in the result GFFs, the report or the figures. Each
+is false by construction: the share of decoy cases that reach a label (or an E-value
+threshold) is the false-call rate of that rule on this data.
 
 ## Intermediate / debugging artifacts (most users skip)
 

@@ -73,6 +73,7 @@ GFF_HEADER = '##synvoy-distances'
 _HOME_RE = re.compile(r'(?:^|\s)home=(\d+)-(\d+)')
 _GENOME_RE = re.compile(r'(?:^|\s)genome=(\d+)')
 _COORDS_RE = re.compile(r'(?:^|\s)coords=(\d+)-(\d+)')
+_GOI_RE = re.compile(r'(?:^|\s)goi=(\d+)-(\d+)')
 
 
 def _base_id(record_id: str) -> str:
@@ -93,12 +94,14 @@ def home_geometry_from_headers(headers: Iterable[str]) -> Optional[Dict[str, Any
          'records': {record id: midpoint}     of every query record with coordinates
                                               (an exon record: that exon; a gene record: the gene)
          'n', 'span', 'pitch', 'max_gap'      of the anchors, in bp
-         'home_genome_bp'                     length of the home genome, or None}
+         'home_genome_bp'                     length of the home genome, or None
+         'goi'                                (start, end) of the home locus, or None}
     """
     spans: Dict[str, List[int]] = {}
     exons: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
     records: Dict[str, int] = {}
     genome_bp = None
+    goi = None
     for header in headers:
         header = header.strip()
         if not header:
@@ -110,6 +113,10 @@ def home_geometry_from_headers(headers: Iterable[str]) -> Optional[Dict[str, Any
             m = _GENOME_RE.search(header)
             if m:
                 genome_bp = int(m.group(1))
+        if goi is None:
+            m = _GOI_RE.search(header)
+            if m:
+                goi = (int(m.group(1)), int(m.group(2)))
         gene = _base_id(record_id)
         m = _HOME_RE.search(header)
         if m:
@@ -148,6 +155,7 @@ def home_geometry_from_headers(headers: Iterable[str]) -> Optional[Dict[str, Any
         'pitch': span / (len(order) - 1),
         'max_gap': max(gaps),
         'home_genome_bp': genome_bp,
+        'goi': goi,
     }
 
 

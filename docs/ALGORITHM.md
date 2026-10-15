@@ -726,6 +726,41 @@ The window search keeps the hits of the home protein and of the relative's model
 when it removes overlapping hits (since 2026-10-14): pooled, the relative's hit at a
 relative's gene removed the home protein's own hit there.
 
+### 7.13 E-values in the expected place (recorded, not yet used by the labels)
+
+Since 2026-10-14 (label rework, step 3) every kept GOI model also carries the evidence
+the new label will use (`bin/synvoy_evalue.py`):
+
+- **`BlockEsyn`**: the expected number of windows of this length in the genome that hold,
+  by chance, a run of the block's length (`BlockCollinearSupport`) of anchors in home
+  order, either direction. Each home neighbour with m places in the genome lies in a
+  random window of length W with probability 1 − exp(−mW/G); the number present is a
+  Poisson binomial; for n present anchors in random order the chance of a monotone run
+  ≥ k is computed exactly (Robinson–Schensted–Knuth). A block with E_syn ≤ 0.1 predicted
+  the gene's place.
+- **`Place`**: the smallest of slot (between the nearest found home neighbours on either
+  side of the gene, widened by one gene pitch; the side of each neighbour comes from the
+  home locus span, `goi=` in the anchor headers), core (block ± GOI margin) and window
+  that holds the model, in a block with E_syn ≤ 0.1; else `genome`.
+- **`EPlace`**: blastp of the home protein against the model's protein and against each of
+  its search-hit regions (cut at the aligned span, translated in the hit's frame, split
+  at stop codons), `-comp_based_stats 2 -seg no -word_size 2 -threshold 11`, with the
+  search space set explicitly to |q| × ⌊place/3⌋ (`-searchsp`; `-dbsize` let cut-out hit
+  regions look rarer than they are), read at full precision (JSON). **`EPlaceTblastn`**:
+  the best tblastn row of the home protein inside the model, as tblastn reported it for
+  the window (before the keep floor of 0.1 and the dedup against the other engines' hits),
+  its E rescaled from the window to the place.
+- **`Eeff`**, **`EeffTblastn`**: the two multiplied by `SigBlocks`, the number of
+  significant blocks searched in this genome (each is one predicted place); a model in
+  the genome-wide place is not multiplied.
+
+**Decoy mode** (`--decoy_mode`, off): in every window the reversed home protein and two
+shuffles of it (seeded by the query id) are searched like the home protein, modelled,
+labelled and judged with the same terms, chosen among themselves only, and written to
+`decoys/<locus>/<genome>.decoy.gff` and `.decoy.tsv`. They never seed and never reach the
+result GFF. Every decoy call is false, so their rate per label and place calibrates the
+labels without a truth set. The window search takes about four times as long.
+
 ## 8. Region scores
 
 `cluster_grs.py` scores candidate regions per genome. They are used for the figures

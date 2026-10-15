@@ -1,6 +1,9 @@
 process ITERATIVE_SEARCH {
     tag "iterative"
     label 'process_long'
+    // Decoy calls (--decoy_mode) are published as they are written; nothing else reads them.
+    publishDir path: { "${params.outdir}/decoys/${locus_id}" }, mode: 'copy',
+        pattern: 'iterative_results/decoys/*', saveAs: { fn -> file(fn).name }
 
     input:
     tuple val(locus_id), path(initial_db)
@@ -21,6 +24,7 @@ process ITERATIVE_SEARCH {
     tuple val(locus_id), path("iterative_results/regions/*.faa"), emit: region_genes, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.gff"), emit: gff, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.homology.tsv"), emit: homology, optional: true
+    tuple val(locus_id), path("iterative_results/decoys/*"), emit: decoys, optional: true
 
 
     script:
@@ -92,6 +96,7 @@ process ITERATIVE_SEARCH {
         --classify_tandem_min_qcov ${params.classify_tandem_min_qcov} \\
         --classify_high_min_collinear ${params.classify_high_min_collinear} \\
         --classify_context_min_collinear ${params.classify_context_min_collinear} \\
+        --decoy_mode ${params.decoy_mode} \\
         --classify_context_min_identity ${params.classify_context_min_identity} \\
         --classify_context_min_qcov ${params.classify_context_min_qcov} \\
         --classify_fallback_strong_min_identity_floor ${params.classify_fallback_strong_min_identity_floor} \\

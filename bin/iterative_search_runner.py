@@ -110,6 +110,7 @@ try:
                                     MINIPROT_AVAILABLE)
     import synvoy_scale
     import synvoy_specificity
+    import synvoy_evalue
 except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -125,6 +126,7 @@ except ImportError:
                                     MINIPROT_AVAILABLE)
     import synvoy_scale
     import synvoy_specificity
+    import synvoy_evalue
 
 # Import fragment utilities if available
 try:
@@ -967,6 +969,214 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
         cols[8] = f"{cols[8]};{synvoy_specificity.gff_attrs(spec)}"
         gff[0] = '\t'.join(cols)
         n += 1
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Decoy mode (label rework, step 3): in every window the reversed home protein and two
+# shuffles of it are searched like the home protein, modelled and labelled, and written
+# apart (decoys/<genome>.decoy.gff/.tsv). Every decoy call is false by construction, so
+# their rate per label and place calibrates the labels without truth. They never seed,
+# never reach the result GFF and never compete with real candidates.
+# ---------------------------------------------------------------------------
+DECOY_TAGS = ('~rev', '~shuf1', '~shuf2')
+
+
+def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
+    """Reversed and twice shuffled copies of each HOME GOI protein among a window's
+    queries, ids ``<parent>~rev``, ``~shuf1``, ``~shuf2``. Shuffles are seeded by the id,
+    so a rerun repeats them. A query that is not a home protein gets none: the model of an
+    earlier genome that is a query of its own (a GOI known only from models, such as a
+    seeded tandem copy ``GOI_copy_1|<genome>_b0_l1``) would give ``GOI_copy_1|...~shuf1``,
+    whose hits are filed under the real parent ``GOI_copy_1`` (extract_base_gene_id cuts at
+    the first ``|``) and whose models then count as real. ``home_ids``: the home GOI record
+    ids (args.home_goi_ids); without them a query is a home protein when its id is its
+    parent id."""
+    import random
+    import zlib
+    out = []
+    for q in queries:
+        qid, seq = q.get('id', ''), q.get('seq', '')
+        parent = extract_base_gene_id(qid)
+        is_home = (qid in home_ids) if home_ids else (qid == parent)
+        if (not qid or not seq or not is_home or is_decoy_parent(parent)
+                or parent.endswith(RELATIVE_QUERY_TAG)):
+            continue
+        out.append({'id': parent + '~rev', 'seq': seq[::-1]})
+        for tag in DECOY_TAGS[1:]:
+            residues = list(seq)
+            random.Random(zlib.crc32((parent + tag).encode())).shuffle(residues)
+            out.append({'id': parent + tag, 'seq': ''.join(residues)})
+    return out
+
+
+def is_decoy_parent(parent: str) -> bool:
+    return any(parent.endswith(t) for t in DECOY_TAGS)
+
+
+def _candidate_parent(cand) -> str:
+    gff = cand.get('gff') or []
+    cols = gff[0].split('\t') if gff else []
+    return _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '') if len(cols) >= 9 else ''
+
+
+def greedy_select(candidates) -> List[Dict[str, Any]]:
+    """Candidates in goi_candidate_order; one that overlaps an accepted one by more than
+    half of its own length is dropped."""
+    final, accepted = [], []
+    for cand in sorted(candidates, key=goi_candidate_order):
+        c_start, c_end = cand['start'], cand['end']
+        c_len = c_end - c_start
+        if c_len <= 0:
+            continue
+        if any(max(0, min(c_end, a_end) - max(c_start, a_start)) > 0.5 * c_len
+               for a_start, a_end in accepted):
+            continue
+        final.append(cand)
+        accepted.append((c_start, c_end))
+    return final
+
+
+def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
+                      collinear_support, flanking_candidates) -> Dict[str, Any]:
+    """The places of a block (synvoy_evalue): its E_syn from the run of anchors in home
+    order and their genome-wide places, the slot between the nearest found home
+    neighbours on either side of the gene (widened by one gene pitch), the core and the
+    window. Records E_syn in ``args.genome_ctx`` for the genome-level multiplier."""
+    ctx = getattr(args, 'genome_ctx', None) or {}
+    genome_len = int(ctx.get('genome_len') or 0) or (w_end - w_start)
+    neighbours = list((getattr(args, 'home_rank', None) or {}).keys())
+    places = ctx.get('places', {})
+    esyn = synvoy_evalue.e_syn(int(collinear_support or 0), [places.get(g, 0) for g in neighbours],
+                               max(1, w_end - w_start), genome_len)
+    ctx.setdefault('block_esyn', {})[block_idx] = esyn
+    ranks = getattr(args, 'goi_ranks', None) or {}
+    best: Dict[int, Tuple[float, Tuple[int, int]]] = {}
+    for cand in flanking_candidates or []:
+        rank = ranks.get(_candidate_parent(cand))
+        if rank is None:
+            continue
+        score = float(cand.get('score', 0) or 0)
+        if rank not in best or score > best[rank][0]:
+            best[rank] = (score, (int(cand['start']), int(cand['end'])))
+    geometry = getattr(args, 'home_geometry', None) or {}
+    pitch = float(geometry.get('pitch', 0) or 0) * float(getattr(args, 'expansion', 1.0) or 1.0)
+    slot = synvoy_evalue.slot_span({r: span for r, (_s, span) in best.items()}, pitch)
+    return {'esyn': esyn, 'significant': esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN,
+            'slot': slot, 'core': (core_start, core_end), 'window': (w_start, w_end),
+            'genome_len': genome_len, 'window_len': max(1, w_end - w_start)}
+
+
+def clip_hit_in_frame(hs: int, he: int, strand: str, lo: int, hi: int):
+    """The part of a window hit [hs, he) that lies inside [lo, hi) (0-based, half-open),
+    trimmed by whole codons from the end the hit is read from (plus strand: hs; minus
+    strand: he), so it keeps the hit's reading frame. None when < 15 bp remain."""
+    s, e = max(hs, lo), min(he, hi)
+    if strand == '-':
+        e = he - -(-(he - e) // 3) * 3
+    else:
+        s = hs + -(-(s - hs) // 3) * 3
+    return (s, e) if e - s >= 15 else None
+
+
+def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w_start,
+                           tblastn_raw=None) -> None:
+    """Place and E-value in that place of every kept GOI candidate (label rework, steps 3-4):
+    Place, BlockEsyn, EPlace (blastp of the home protein against the candidate's protein
+    and its search-hit regions -- the part of each hit inside the candidate's span, in the
+    hit's frame, split at stops: a model with a broken frame is judged on these alone --
+    composition-based, -searchsp = |q| x floor(place / 3)) and
+    EPlaceTblastn (the best tblastn hit of the home protein inside the candidate, as tblastn
+    reported it for the window, before the window search's keep floor and dedup, its E
+    rescaled from the window to the place). finalize_place_evalues multiplies both by the
+    number of significant blocks of the genome."""
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9:
+            continue
+        parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
+        q = (by_parent.get(parent) or {}).get('seq', '')
+        if not q:
+            continue
+        g0, g1 = int(cand['start']), int(cand['end'])
+        place, place_bp = synvoy_evalue.place_of((g0, g1), terms['significant'], terms['slot'],
+                                                 terms['core'], terms['window'], terms['genome_len'])
+        subjects = synvoy_evalue.split_at_stops((cand.get('record') or {}).get('seq', ''))
+        e_tbn = float('inf')
+        for h in tblastn_raw or []:
+            hs, he = int(h.get('start', 0)), int(h.get('end', 0))
+            if (extract_base_gene_id(h.get('query', '')) == parent
+                    and w_start + hs + 1 >= g0 and w_start + he <= g1):
+                e_tbn = min(e_tbn, float(h.get('evalue', float('inf'))))
+        for key in (parent, parent + RELATIVE_QUERY_TAG):
+            for h in hits_by_gene.get(key, []):
+                region = clip_hit_in_frame(int(h.get('gstart', 0)), int(h.get('gend', 0)),
+                                           h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)
+                if region is None:
+                    continue
+                dna = subseq[region[0]:region[1]]
+                if h.get('strand', '+') == '-':
+                    dna = reverse_complement(dna)
+                dna = dna[:len(dna) - len(dna) % 3]
+                subjects += synvoy_evalue.split_at_stops(translate(dna))
+        e_place, _bits = synvoy_evalue.blastp_evalue(q, subjects, synvoy_evalue.search_space(len(q), place_bp))
+        if e_tbn != float('inf'):
+            e_tbn *= place_bp / terms['window_len']
+        cand['place'] = place
+        cols[8] = (f"{cols[8]};Place={place};BlockEsyn={terms['esyn']:.3g};"
+                   f"EPlace={e_place:.3g};EPlaceTblastn={e_tbn:.3g}")
+        gff[0] = '\t'.join(cols)
+
+
+def finalize_place_evalues(gff_lines: List[str], ctx: Dict[str, Any]) -> List[str]:
+    """Eeff and EeffTblastn of every GOI row with an EPlace: the place's E-value times the
+    number of significant blocks searched in this genome (each is one predicted place);
+    a candidate in the genome-wide place is not multiplied. SigBlocks records the factor."""
+    n_sig = max(1, sum(1 for e in (ctx.get('block_esyn') or {}).values()
+                       if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN))
+    out = []
+    for line in gff_lines:
+        cols = line.split('\t')
+        if len(cols) >= 9 and cols[2] in ('mRNA', 'gene') and 'EPlace=' in cols[8]:
+            a = _parse_gff_attr_string(cols[8])
+            mult = 1 if a.get('Place') == 'genome' else n_sig
+            try:
+                e1 = float(a.get('EPlace', 'inf')) * mult
+                e2 = float(a.get('EPlaceTblastn', 'inf')) * mult
+            except ValueError:
+                out.append(line)
+                continue
+            cols[8] = f"{cols[8]};SigBlocks={n_sig};Eeff={e1:.3g};EeffTblastn={e2:.3g}"
+            line = '\t'.join(cols)
+        out.append(line)
+    return out
+
+
+def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
+    """decoys/<genome>.decoy.gff (the models) and .decoy.tsv (one row per call)."""
+    folder = os.path.join(args.output_dir, 'decoys')
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.gff"), 'w') as fh:
+        fh.write("##gff-version 3\n")
+        for ln in lines:
+            fh.write(ln + "\n")
+    keys = ['Confidence', 'EvidenceType', 'Place', 'BlockEsyn', 'Eeff', 'EeffTblastn', 'Bits',
+            'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage']
+    n = 0
+    with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
+        fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")
+        for ln in lines:
+            cols = ln.split('\t')
+            if len(cols) < 9 or cols[2] not in ('mRNA', 'gene'):
+                continue
+            a = _parse_gff_attr_string(cols[8])
+            parent = a.get('SynVoy_Parent', '')
+            tag = next((t for t in DECOY_TAGS if parent.endswith(t)), '')
+            fh.write("\t".join([genome_name, parent[:-len(tag)] if tag else parent, tag.lstrip('~'),
+                                a.get('ID', ''), cols[0], cols[3], cols[4]]
+                               + [a.get(k, '') for k in keys]) + "\n")
+            n += 1
     return n
 
 
@@ -3079,7 +3289,8 @@ TBLASTN_REPORT_EVALUE = 1000.0
 
 
 def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
-                        genome_name: str, args, unique_id: str, threads: int) -> List[Dict[str, Any]]:
+                        genome_name: str, args, unique_id: str, threads: int,
+                        tblastn_sink: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """
     Run augmented search (MMseqs2 + tblastn + Smith-Waterman) for GOI queries.
     
@@ -3211,6 +3422,15 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 for hit in tblastn_hits:
                     hit['method'] = 'tblastn'
                 all_hits.extend(tblastn_hits)
+            if tblastn_sink is not None:
+                # Every row tblastn reported (E <= TBLASTN_REPORT_EVALUE), before the keep
+                # floor and the spatial dedup: the E source "tblastn per window" of the
+                # label rework (annotate_place_evalues) needs the hit even where it is weak
+                # in the window or where another engine's hit at the same place was kept.
+                for hit in parse_hits(tblastn_hits_file, 0.0, 1, float('inf'),
+                                      query_lengths=goi_query_lengths):
+                    hit['method'] = 'tblastn'
+                    tblastn_sink.append(hit)
         except FileNotFoundError:
             logger.warning(f"[{genome_name}] tblastn/makeblastdb not found on PATH. Install BLAST+ to enable tblastn search.")
         except subprocess.CalledProcessError as blast_err:
@@ -3961,11 +4181,17 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
         goi_queries = list(goi_query_by_parent.values())
 
+    if getattr(args, 'decoy_mode', False):
+        _decoys = decoy_queries(goi_queries, home_goi_ids)
+        goi_queries = goi_queries + _decoys
+        goi_query_by_parent = dict(goi_query_by_parent, **{d['id']: d for d in _decoys})
+
     write_fasta([(q['id'], q['seq']) for q in goi_queries], query_mini_fa)
 
     annotated_records_raw = []
     valid_gff_lines = []
     raw_candidates = []
+    tblastn_raw: List[Dict[str, Any]] = []      # every tblastn row of the window (EeffTblastn)
     flanking_candidates = []
     clean_gname = genome_name.replace('.', '_').replace('-', '_').replace(' ', '_')
 
@@ -4084,7 +4310,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             f"{genome_name}_b{block_idx}",
             args,
             f"{unique_id}_b{block_idx}",
-            threads_per_job
+            threads_per_job,
+            tblastn_sink=tblastn_raw,
         )
 
         all_search_hits = list(augmented_hits_mmseqs) if augmented_hits_mmseqs else []
@@ -4110,8 +4337,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             region_hit['end'] = local_end
             all_search_hits.append(region_hit)
 
+        hits_by_gene = defaultdict(list)
         if all_search_hits:
-            hits_by_gene = defaultdict(list)
             for hit in all_search_hits:
                 local_start = max(0, int(hit.get('start', 0)))
                 local_end = min(len(subseq), int(hit.get('end', 0)))
@@ -5058,33 +5285,33 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
     found_ids = set()
 
+    # Decoy candidates (decoy mode) are chosen, judged and written apart: they never
+    # compete with real candidates, never seed and never reach the result GFF.
+    decoy_candidates = [c for c in raw_candidates if is_decoy_parent(_candidate_parent(c))]
+    if decoy_candidates:
+        raw_candidates = [c for c in raw_candidates if not is_decoy_parent(_candidate_parent(c))]
+    place_terms = block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
+                                    block_collinear_support, flanking_candidates)
+    if decoy_candidates:
+        score_goi_candidates(decoy_candidates, goi_query_by_parent)
+        decoy_final = greedy_select(decoy_candidates)
+        annotate_goi_specificity(decoy_final, goi_query_by_parent, args)
+        annotate_place_evalues(decoy_final, goi_query_by_parent, hits_by_gene, place_terms,
+                               subseq, w_start, tblastn_raw)
+        _ctx = getattr(args, 'genome_ctx', None)
+        if _ctx is not None:
+            for cand in decoy_final:
+                _ctx.setdefault('decoy_lines', []).extend(cand['gff'])
+
     # Greedy non-overlapping selection for GOI/tandem candidates, by bit score against
     # the home protein (score_goi_candidates, goi_candidate_order).
     if raw_candidates:
         score_goi_candidates(raw_candidates, goi_query_by_parent)
-        raw_candidates.sort(key=goi_candidate_order)
-
-        final_candidates = []
-        accepted_intervals = []
-
-        for cand in raw_candidates:
-            c_start, c_end = cand['start'], cand['end']
-            c_len = c_end - c_start
-            if c_len <= 0:
-                continue
-
-            is_overlapping = False
-            for a_start, a_end in accepted_intervals:
-                overlap = max(0, min(c_end, a_end) - max(c_start, a_start))
-                if overlap > 0.5 * c_len:
-                    is_overlapping = True
-                    break
-
-            if not is_overlapping:
-                final_candidates.append(cand)
-                accepted_intervals.append((c_start, c_end))
+        final_candidates = greedy_select(raw_candidates)
 
         annotate_goi_specificity(final_candidates, goi_query_by_parent, args)
+        annotate_place_evalues(final_candidates, goi_query_by_parent, hits_by_gene, place_terms,
+                               subseq, w_start, tblastn_raw)
         for cand in final_candidates:
             rec = cand['record']
             if rec['id'] in found_ids:
@@ -5775,6 +6002,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
+        # Genome-wide places of every anchor, before one-anchor-per-place: how often each
+        # home neighbour falls into a window by chance (synvoy_evalue.e_syn).
+        _anchor_places = synvoy_evalue.places_per_gene(
+            h for h in hits if not is_goi_query_id(h.get('query', '')))
         if not getattr(args, 'disable_anchor_resolution', False):
             _n_before = len(hits)
             hits = resolve_anchor_hits(hits)
@@ -5795,6 +6026,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         # From here on `args` holds this genome's distances in base pairs.
         args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name)
+        # What the blocks of this genome share for the E-values of their candidates
+        # (block_place_terms, finalize_place_evalues) and the decoy calls (decoy mode).
+        args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},
+                           'decoy_lines': []}
         c_dist = args.cluster_distance
         _bridge_max_gap = args.synteny_bridge_max_gap
         _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
@@ -5954,6 +6189,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         all_gff_lines = []
         
         genome_seqs = load_genome(genome_path)
+        args.genome_ctx['genome_len'] = sum(len(v) for v in genome_seqs.values())
         native_gff_path = find_native_annotation_path(genome_path)
         native_annot_index = load_native_annotation_index(native_gff_path)
         if native_gff_path and native_annot_index:
@@ -6417,6 +6653,12 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 f"[{genome_name}] Context promotion: {n_promoted} GOI model(s) LOW/AMBIGUOUS -> "
                 f"MEDIUM on >= {CLASSIFY_THRESHOLDS['context_min_collinear']} anchors in home order."
             )
+        all_gff_lines = finalize_place_evalues(all_gff_lines, args.genome_ctx)
+        if getattr(args, 'decoy_mode', False):
+            n_decoy = write_decoy_outputs(
+                args, prefix, genome_name,
+                finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx))
+            logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
 
         # Write aggregated GFF
         if all_gff_lines:
@@ -7153,6 +7395,11 @@ def main():
     parser.add_argument("--classify_context_min_qcov", type=float, default=0.5,
                         help="Query coverage a model needs for that promotion "
                              "(never below --classify_fragment_max_qcov).")
+    parser.add_argument("--decoy_mode", type=str2bool, default=False,
+                        help="Also search the reversed home protein and two shuffles of it in "
+                             "every window, model and label them like the real query, and write "
+                             "their calls to decoys/ (never seeded, never counted). Every decoy call "
+                             "is false: their rate per label and place calibrates the labels.")
     parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
                         help="§1x: record GOI hits that clear the quality bar but are "
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
@@ -7452,6 +7699,11 @@ def main():
 
     # Home neighbourhood geometry for the distances in gene pitches (synvoy_scale).
     args.home_geometry = synvoy_scale.home_geometry(args.initial_db)
+    # Home rank of each anchor relative to the gene (-1 nearest on its left, +1 on its
+    # right), for the slot of a block (synvoy_evalue.block terms); empty without the
+    # home locus span in the query set (goi= in the anchor headers).
+    args.goi_ranks = synvoy_evalue.ranks_around_goi(
+        (args.home_geometry or {}).get('genes', {}), (args.home_geometry or {}).get('goi'))
     if args.home_geometry:
         logger.info(
             f"Home neighbourhood: {args.home_geometry['n']} anchors over "

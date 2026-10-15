@@ -1031,6 +1031,11 @@ Sizes of the hull rescue (a miniprot search of the gene across the whole flankin
 
 The default gap-bridging rule counts the anchored flanking genes on the left of a gap only, so the same evidence bridges or not depending on where the gap falls. `synteny_bridge_two_sided true` weighs both sides together. It is **off pending measurement**: larger blocks raise the flanking support that some confidence rules read, so it can promote more calls. `synteny_bridge_max_per_block` caps how many gaps one block may chain (`0` = unlimited).
 
+### `decoy_mode`
+**Type:** Boolean | **Default:** `false`
+
+Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them) are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs, the report or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data. Costs about four times the window search.
+
 ### `report_nonsyntenic_candidates`
 **Type:** Boolean | **Default:** `true`
 
