@@ -7,11 +7,9 @@ identity AND real query coverage clear their floors; a short high-identity local
 window (the Vollenhovia/Polistes "79%"/"71%" overcalls, now carrying their true
 low qcov via QW2) is demoted to LOW.
 
-A3 — un-neuter the wave seed (opt-in): when `seed_on_flanking_support` is on, a
-HIGH/MEDIUM GOI feature seeds the expanding DB regardless of goi_class (incl.
-tandem_goi_copy) provided flanking support + query coverage clear the floors — so
-Apis cerana's 100%-identical melittin can bridge to the next wave. Default off ⇒
-behaviour identical to before.
+A3 — the opt-in flanking-supported seeding was replaced on 2026-10-14 by one seed
+rule (label rework, step 2): per query and genome the HIGH calls, else the MEDIUM calls,
+each only when specific against the home proteome. Its tests are TestSeedRule below.
 """
 
 import os
@@ -126,97 +124,79 @@ class TestTandemContext(unittest.TestCase):
         self.assertEqual(self._conf(90.0, 0.30, 10)[2], "goi_tandem_copy_low_coverage")
 
 
-class TestA3FlankingSeed(unittest.TestCase):
-    """A3: opt-in flanking-supported seeding of tandem/divergent orthologs."""
+class TestSeedRule(unittest.TestCase):
+    """Seeds of the next wave (label rework 2026-10-14, step 2; replaced the A3 opt-in).
 
-    def _apis_cerana_meta(self, flanking="9", qcov="1.0"):
-        return {
-            "GOI_copy_1|Apis_cerana_fna_b0_l1": {
-                "role": "goi", "confidence": "MEDIUM", "goi_class": "tandem_goi_copy",
-                "block_flanking_support": flanking, "query_coverage": qcov,
-            },
-        }
+    Per query and genome: the HIGH calls if there is one, else the MEDIUM calls, each only
+    when it is specific (no real competitor in the home proteome, or a margin of >= 10 bits
+    over it). The class filter is gone: a tandem copy seeds like any call."""
 
-    def test_default_off_tandem_does_not_seed(self):
-        """Default (flag off): tandem copy goes to tree, not seed — unchanged."""
-        genes = [_gene("GOI_copy_1|Apis_cerana_fna_b0_l1")]
-        seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
-            genes, self._apis_cerana_meta(), _is_goi
-        )
-        self.assertEqual(seed, [])
-        self.assertEqual(len(tree_extra), 1)
-        self.assertEqual(suppressed, 1)
+    def _seed(self, meta):
+        genes = [_gene(gid) for gid in meta]
+        return _classify_goi_for_seed_and_tree(genes, meta, _is_goi)
 
-    def test_flag_on_strong_flanking_seeds(self):
-        """Flag on + strong flanking + high coverage → tandem copy seeds."""
-        genes = [_gene("GOI_copy_1|Apis_cerana_fna_b0_l1")]
-        seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
-            genes, self._apis_cerana_meta(), _is_goi,
-            seed_on_flanking_support=True, seed_min_flanking=2, seed_min_qcov=0.5,
-        )
+    @staticmethod
+    def _call(conf, parent="GOI_Melt", goi_class="probable_goi", margin="", real="", promoted=""):
+        return {"role": "goi", "confidence": conf, "goi_class": goi_class, "parent": parent,
+                "spec_margin": margin, "real_competitor": real, "context_promoted": promoted}
+
+    def test_tandem_copy_seeds_now(self):
+        """Apis cerana's melittin copy (tandem_goi_copy) seeds: the class filter is gone."""
+        seed, tree_extra, suppressed = self._seed({
+            "GOI_copy_1|Apis_cerana_fna_b0_l1": self._call("MEDIUM", goi_class="tandem_goi_copy",
+                                                           margin="40.0", real="1")})
         self.assertEqual(len(seed), 1)
+        self.assertEqual((tree_extra, suppressed), ([], 0))
+
+    def test_high_takes_the_seat_from_a_medium_relative(self):
+        """A genome with a HIGH call seeds only its HIGH calls; the paralog MEDIUM next to it
+        (apyrase: three genomes, margins -339 to -363 bits) feeds the tree only."""
+        seed, tree_extra, _ = self._seed({
+            "GOI_A|g_b0_l1_exon_ann": self._call("HIGH", parent="GOI_A", margin="350.0", real="1"),
+            "GOI_A|g_b0_l1m2_exon_ann": self._call("MEDIUM", parent="GOI_A", margin="-350.0", real="1"),
+        })
+        self.assertEqual([g["id"] for g in seed], ["GOI_A|g_b0_l1_exon_ann"])
+        self.assertEqual([g["id"] for g in tree_extra], ["GOI_A|g_b0_l1m2_exon_ann"])
+
+    def test_medium_seeds_where_there_is_no_high(self):
+        seed, _t, _s = self._seed({"GOI_A|g_b0_l1": self._call("MEDIUM", parent="GOI_A",
+                                                                margin="12.0", real="1")})
+        self.assertEqual(len(seed), 1)
+
+    def test_specificity_bar_is_10_bits_against_a_real_competitor(self):
+        for margin, seeds in (("10.0", 1), ("9.9", 0), ("-1.2", 0)):
+            seed, tree_extra, _ = self._seed({"GOI_A|g_b0_l1": self._call(
+                "HIGH", parent="GOI_A", margin=margin, real="1")})
+            self.assertEqual(len(seed), seeds, margin)
+            self.assertEqual(len(tree_extra), 1 - seeds, margin)
+
+    def test_no_real_competitor_seeds_whatever_the_margin(self):
+        seed, _t, _s = self._seed({"GOI_A|g_b0_l1": self._call("MEDIUM", parent="GOI_A",
+                                                                margin="-5.0", real="0")})
+        self.assertEqual(len(seed), 1)
+
+    def test_without_specificity_terms_the_label_decides(self):
+        """No home proteome in the run: no terms, nothing held back."""
+        seed, _t, _s = self._seed({"GOI_A|g_b0_l1": self._call("MEDIUM", parent="GOI_A")})
+        self.assertEqual(len(seed), 1)
+
+    def test_queries_are_pooled_apart(self):
+        seed, tree_extra, _ = self._seed({
+            "GOI_A|g_b0_l1": self._call("HIGH", parent="GOI_A", margin="50", real="1"),
+            "GOI_B|g_b1_l1": self._call("MEDIUM", parent="GOI_B", margin="50", real="1"),
+        })
+        self.assertEqual(len(seed), 2)
         self.assertEqual(tree_extra, [])
-        self.assertEqual(suppressed, 0)
 
-    def test_flag_on_weak_flanking_does_not_seed(self):
-        """Flag on but flanking below floor → still withheld (tree only)."""
-        genes = [_gene("GOI_copy_1|Apis_cerana_fna_b0_l1")]
-        seed, tree_extra, _ = _classify_goi_for_seed_and_tree(
-            genes, self._apis_cerana_meta(flanking="1"), _is_goi,
-            seed_on_flanking_support=True, seed_min_flanking=2, seed_min_qcov=0.5,
-        )
+    def test_low_ambiguous_and_promoted_never_seed(self):
+        seed, tree_extra, suppressed = self._seed({
+            "GOI_A|low": self._call("LOW", parent="GOI_A"),
+            "GOI_A|amb": self._call("AMBIGUOUS", parent="GOI_A", goi_class="syntenic_candidate_unconfirmed"),
+            "GOI_A|ctx": self._call("MEDIUM", parent="GOI_A", promoted="LOW"),
+        })
         self.assertEqual(seed, [])
-        self.assertEqual(len(tree_extra), 1)
-
-    def test_flag_on_low_coverage_does_not_seed(self):
-        """Flag on, strong flanking, but coverage below floor → withheld."""
-        genes = [_gene("GOI_copy_1|Apis_cerana_fna_b0_l1")]
-        seed, tree_extra, _ = _classify_goi_for_seed_and_tree(
-            genes, self._apis_cerana_meta(qcov="0.3"), _is_goi,
-            seed_on_flanking_support=True, seed_min_flanking=2, seed_min_qcov=0.5,
-        )
-        self.assertEqual(seed, [])
-        self.assertEqual(len(tree_extra), 1)
-
-    def test_flag_on_low_confidence_never_seeds(self):
-        """A LOW-confidence feature never seeds even with strong flanking+coverage."""
-        genes = [_gene("GOI_copy_1|noise")]
-        meta = {
-            "GOI_copy_1|noise": {
-                "role": "goi", "confidence": "LOW", "goi_class": "ambiguous_goi_family_member",
-                "block_flanking_support": "20", "query_coverage": "0.9",
-            },
-        }
-        seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
-            genes, meta, _is_goi, seed_on_flanking_support=True,
-        )
-        self.assertEqual(seed, [])
-        self.assertEqual(tree_extra, [])  # LOW never reaches the tree either
-        self.assertEqual(suppressed, 1)
-
-    def test_flag_on_missing_coverage_attr_does_not_seed(self):
-        """Empty QueryCoverage attr (None) can't satisfy the coverage floor."""
-        genes = [_gene("GOI_copy_1|Apis_cerana_fna_b0_l1")]
-        seed, _tree, _s = _classify_goi_for_seed_and_tree(
-            genes, self._apis_cerana_meta(qcov=""), _is_goi,
-            seed_on_flanking_support=True,
-        )
-        self.assertEqual(seed, [])
-
-    def test_confident_goi_seeds_regardless_of_flag(self):
-        """Normal confident_goi path is untouched by A3."""
-        genes = [_gene("GOI_Melt|Apis_florea_fna_b0_l1_exon_ann")]
-        meta = {
-            "GOI_Melt|Apis_florea_fna_b0_l1_exon_ann": {
-                "role": "goi", "confidence": "HIGH", "goi_class": "confident_goi",
-            },
-        }
-        for flag in (False, True):
-            seed, _t, _s = _classify_goi_for_seed_and_tree(
-                genes, meta, _is_goi, seed_on_flanking_support=flag
-            )
-            self.assertEqual(len(seed), 1)
-
+        self.assertEqual([g["id"] for g in tree_extra], ["GOI_A|ctx"])  # a promoted MEDIUM: tree only
+        self.assertEqual(suppressed, 3)
 
 if __name__ == '__main__':
     unittest.main()

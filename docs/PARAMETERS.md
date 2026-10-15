@@ -486,11 +486,6 @@ These control the **short-query GOI fallback gate** — the "fallback" model emi
 
 For a query shorter than `fallback_short_query_len` (aa), SynVoy instead gates the fallback on **absolute aligned length** (`fallback_short_min_aln_aa`) AND **bitscore** (`fallback_short_min_bits`) — coverage is no longer a veto — so the real, divergent hit is emitted in its own flanking-seeded block. A micro-window (a few aa) is still rejected by the aligned-length floor, and a statistically weak hit by the bitscore floor. Queries at or above `fallback_short_query_len` keep the coverage floor unchanged, so long single-copy or paralog-family genes (e.g. LY6, TP53) are unaffected, and a high-coverage divergent ortholog (e.g. the *Tetramorium* myrmicitoxin at ~40% identity × ~76% coverage) clears either path. Set `fallback_short_query_len 0` to disable the short-query path entirely (legacy coverage gate for all queries). Lower `fallback_short_min_aln_aa`/`fallback_short_min_bits` for extremely short or divergent peptide families; raise them if a short-query run produces spurious LOW fallbacks. This is the core of the §A1 "fumble" fix.
 
-### `seed_on_flanking_support` / `seed_flanking_min_count` / `seed_flanking_min_qcov`
-**Types:** Boolean / Integer / Float | **Defaults:** `false` / `2` / `0.5` | **Range (qcov):** 0–1
-
-**Opt-in.** Controls which recovered GOI models seed the *expanding query database* that feeds later phylo-distance waves. By default only `confident_goi`/`probable_goi` (HIGH/MEDIUM with a qualifying class) seed the next wave, which "neuters" the iterative design for gene families: a `tandem_goi_copy` — even a close relative's 100%-identical copy — never seeds, so it can't bridge to a more divergent species searched in a later wave. When `seed_on_flanking_support=true`, a HIGH/MEDIUM GOI feature ALSO seeds *regardless of its `goi_class`* provided it sits in a real syntenic context: its block flanking support is at least `seed_flanking_min_count` (genes) AND its query coverage is at least `seed_flanking_min_qcov`. The gate keys on synteny + coverage, not identity, so it does not preferentially admit paralogs; §1m collinearity-aware placement and §1m home-paralog ownership remain the drift backstops. LOW-confidence features never seed regardless of this flag. Kept off by default pending benchmark validation that it does not drift onto paralogs (e.g. TP53→TP63/TP73); the determinism guarantee of `deterministic_goi_search` is what makes that before/after measurement meaningful. Raise the floors to be more conservative, lower them to bridge more aggressively across very divergent gene families.
-
 ---
 
 ## 8. MMseqs2 Configuration
@@ -1050,7 +1045,7 @@ Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints 
 
 ## 20. Removed parameters
 
-Removed on 2026-10-09 (the two figure switches on 2026-10-13). Passing one of the first group stops the run at start with the replacement named; one of the second group prints a warning and is ignored.
+Removed on 2026-10-09 (the two figure switches on 2026-10-13, the three seed options on 2026-10-14). Passing one of the first group stops the run at start with the replacement named; one of the second group prints a warning and is ignored.
 
 **Replaced**
 
@@ -1060,6 +1055,7 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13). Passing one of th
 | `enable_name_locus`, `name_locus_min_identity`, `name_locus_pad` | `home_locus_mode` (`auto` already makes the annotated home gene the primary locus; `gene_only` = that locus alone). `--home_goi_gene SYMBOL` still names the gene |
 | `pub_svg` | Nothing: the publication SVG of the ribbon plot was removed. The figure for print is `*_anchor_grid_print.svg`; `*_synteny_plot_view.svg` is the ribbon plot as a picture |
 | `enable_matrix_plot` | Nothing: the matrix figure was removed. The anchor grid (`*_anchor_grid.svg`) shows the same and more |
+| `seed_on_flanking_support` | Nothing (2026-10-14): seeds follow one rule, the HIGH calls of a query in a genome, else its MEDIUM calls, each when no other home protein competes for it (ALGORITHM.md §7.12) |
 
 **Had no effect** (declared and accepted, read by nothing)
 
@@ -1076,6 +1072,7 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13). Passing one of th
 | `locus_ownership_synteny_window` | read by nothing |
 | `min_exon_query_cov` | a coverage floor for exon hits; the line that applied it was commented out in March 2026 |
 | `pub_width_mm`, `pub_palette` | read by nothing (the print figure has a fixed size, see OUTPUT.md) |
+| `seed_flanking_min_count`, `seed_flanking_min_qcov` | floors of `seed_on_flanking_support` (2026-10-14); they acted only when that was switched on |
 
 `plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette` (all were parsed and never read) and, since 2026-10-13, `--pub_svg` (its figure was removed). A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`. `plot_synteny_matrix.py` no longer exists.
 

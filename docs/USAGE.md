@@ -303,9 +303,6 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before. |
 | `--synteny_bridge_max_rank_gap` | `5` | Max home-rank jump still treated as a collinear continuation when bridging. |
 | `--synteny_bridge_min_anchors` | `2` | Min anchored flanking genes a block needs before it may bridge a gap (3 until 2026-10-14). |
-| `--seed_on_flanking_support` | `false` | **(opt-in)** Also seed the expanding query DB (and thus later waves) with a HIGH/MEDIUM GOI feature regardless of its `goi_class` (e.g. a `tandem_goi_copy`) when flanking support and query coverage clear the floors below. Lets a close relative's perfect/divergent ortholog bridge to a more divergent species in the next wave. |
-| `--seed_flanking_min_count` | `2` | Min flanking-gene support required for `--seed_on_flanking_support`. |
-| `--seed_flanking_min_qcov` | `0.5` | Min query coverage required for `--seed_on_flanking_support`. |
 
 ### Smith-Waterman Local Search
 

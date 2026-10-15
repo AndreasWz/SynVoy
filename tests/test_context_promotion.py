@@ -131,8 +131,7 @@ def test_ml_rescoring_keeps_a_promoted_call():
     assert _attrs(new)["Confidence"] == "MEDIUM"
 
 
-@pytest.mark.parametrize("seed_on_flanking", [False, True])
-def test_promoted_call_feeds_the_tree_but_never_seeds(seed_on_flanking):
+def test_promoted_call_feeds_the_tree_but_never_seeds():
     genes = [{"id": "GOI_q1|g_b0_l1", "seq": "M" * 50}, {"id": "GOI_q2|g_b1_l1", "seq": "M" * 50}]
     meta = {
         "GOI_q1|g_b0_l1": {"role": "goi", "confidence": "MEDIUM", "goi_class": "probable_goi",
@@ -143,8 +142,7 @@ def test_promoted_call_feeds_the_tree_but_never_seeds(seed_on_flanking):
                             "context_promoted": ""},
     }
     seed, tree_extra, suppressed = isr._classify_goi_for_seed_and_tree(
-        genes, meta, lambda gid: gid.startswith("GOI_"),
-        seed_on_flanking_support=seed_on_flanking)
+        genes, meta, lambda gid: gid.startswith("GOI_"))
     assert [g["id"] for g in seed] == ["GOI_q2|g_b1_l1"]
     assert [g["id"] for g in tree_extra] == ["GOI_q1|g_b0_l1"]
     assert suppressed == 1

@@ -96,9 +96,6 @@ process ITERATIVE_SEARCH {
         --classify_context_min_qcov ${params.classify_context_min_qcov} \\
         --classify_fallback_strong_min_identity_floor ${params.classify_fallback_strong_min_identity_floor} \\
         --report_nonsyntenic_candidates ${params.report_nonsyntenic_candidates} \\
-        --seed_on_flanking_support ${params.seed_on_flanking_support} \\
-        --seed_flanking_min_count ${params.seed_flanking_min_count} \\
-        --seed_flanking_min_qcov ${params.seed_flanking_min_qcov} \\
         --rank_wave_binning ${params.rank_wave_binning} \\
         --disable_wavefront ${params.disable_wavefront} \\
         --disable_distance_autotune ${params.disable_distance_autotune} \\

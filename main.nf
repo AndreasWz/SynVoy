@@ -229,12 +229,14 @@ def removedParams() {
             name_locus_pad             : "the name lookup it belonged to was replaced by --home_locus_mode",
             pub_svg                    : "the publication SVG was removed; the figure for print is *_anchor_grid_print.svg, and *_synteny_plot_view.svg is the ribbon plot as a picture",
             enable_matrix_plot         : "the matrix figure was removed; the anchor grid (*_anchor_grid.svg) shows the same and more",
+            seed_on_flanking_support   : "seeding follows one rule now: per query and genome the HIGH calls, else the MEDIUM calls, when no other home protein competes for them (docs/ALGORITHM.md, seeds)",
         ],
         noEffect: [
             'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
             'max_consecutive_empty_blocks', 'gap_min_size', 'gap_evalue', 'gap_min_alnlen',
             'keep_intermediate', 'max_retries', 'multi_profile', 'multi_profile_max_jobs',
             'locus_ownership_synteny_window', 'pub_width_mm', 'pub_palette', 'min_exon_query_cov',
+            'seed_flanking_min_count', 'seed_flanking_min_qcov',
         ],
     ]
 }

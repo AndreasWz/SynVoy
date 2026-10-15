@@ -15,7 +15,8 @@ process PREPARE_HOME_PROTEOME {
     """
     if [ "$home_gff" != "NO_GFF" ]; then
         echo "Extracting proteins from Home GFF..."
-        gff_to_faa.py --gff $home_gff --genome $home_genome --output home_proteome.faa
+        gff_to_faa.py --gff $home_gff --genome $home_genome --output home_proteome.faa \\
+            --coords_tsv home_genes.tsv
         # No predicted GFF needed - use provided one
         touch home_predicted.gff.skip
     else
@@ -48,5 +49,10 @@ process PREPARE_HOME_PROTEOME {
     # Create MMseqs DB for fast searching
     mkdir home_proteome_db
     mmseqs createdb home_proteome.faa home_proteome_db/db
+    # The search's specificity check (bin/synvoy_specificity.py) aligns each GOI model
+    # to every home protein and needs gene positions: both travel in the folder the
+    # search already receives (--home_db_dir), so ITERATIVE_SEARCH needs no new input.
+    cp home_proteome.faa home_proteome_db/home_proteome.faa
+    if [ -s home_genes.tsv ]; then cp home_genes.tsv home_proteome_db/home_genes.tsv; fi
     """
 }

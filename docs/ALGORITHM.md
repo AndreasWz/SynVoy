@@ -698,12 +698,33 @@ A strong GOI hit that fails these conditions is written to
 
 ### 7.12 What is added to the query set
 
-`_classify_goi_for_seed_and_tree`:
+**Specificity** (`bin/synvoy_specificity.py`, written on every kept GOI model). The
+model's protein x is aligned (Smith-Waterman, BLOSUM62, gaps 11/1) to every protein of
+the home proteome (one per gene, the longest isoform). The best one other than the GOI's
+own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
+p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
+whole proteome, or when it is a home family member of the GOI (the two align at E ≤ 1e-3,
+blastp with composition-based statistics). `BestOtherInNeighbourhood=1` when p* lies
+between the outermost flanking genes of the home locus: there, position cannot tell
+the GOI from p*. The search is exhaustive: on the Candida pilot a prefilter (MMseqs2,
+top 15) missed two home paralogs. The proteome and its gene positions reach the search
+inside the home MMseqs2 database folder (`home_proteome.faa`, `home_genes.tsv`). Labels
+do not use these terms yet.
 
-- A GOI model with confidence HIGH or MEDIUM and class `confident_goi` or
-  `probable_goi` is added to the query set of the following waves.
-- A HIGH or MEDIUM model of another class (in practice a tandem copy) is not added,
-  but is passed to the tree.
+**Seeds** (`_classify_goi_for_seed_and_tree`), per query in a genome and home locus,
+after all blocks are labelled: the HIGH calls, or the MEDIUM calls when there is no
+HIGH call; of these, the ones with no real competitor or a margin of at least 10 bits.
+They join the query set of the following waves, and the window search's relative query
+is chosen among them. Every other HIGH or MEDIUM call is passed to the tree only;
+AMBIGUOUS, LOW and context-promoted calls never seed. Until 2026-10-14 a call seeded
+when it was HIGH or MEDIUM of class `confident_goi` or `probable_goi`: a tandem copy
+never did, and a relative's MEDIUM next to a HIGH call in the same genome did (apyrase:
+three genomes, margins of −339 to −363 bits); the opt-in `--seed_on_flanking_support`
+was removed.
+
+The window search keeps the hits of the home protein and of the relative's model apart
+when it removes overlapping hits (since 2026-10-14): pooled, the relative's hit at a
+relative's gene removed the home protein's own hit there.
 
 ## 8. Region scores
 

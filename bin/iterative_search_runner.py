@@ -109,6 +109,7 @@ try:
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
     import synvoy_scale
+    import synvoy_specificity
 except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -123,6 +124,7 @@ except ImportError:
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
     import synvoy_scale
+    import synvoy_specificity
 
 # Import fragment utilities if available
 try:
@@ -911,6 +913,58 @@ def score_goi_candidates(raw_candidates, by_parent) -> int:
             continue
         cand['bits'] = bits
         cols[8] = f"{cols[8]};Bits={bits:.1f}"
+        gff[0] = '\t'.join(cols)
+        n += 1
+    return n
+
+
+_HOME_PROTEOME_CACHE: Dict[str, Any] = {}
+
+
+def _home_proteome(args):
+    """The home proteome of this run (synvoy_specificity.HomeProteome), loaded once per
+    worker process from the home MMseqs2 database folder; None when it is not there."""
+    folder = getattr(args, 'home_db_dir', None) or ''
+    if folder not in _HOME_PROTEOME_CACHE:
+        proteome = synvoy_specificity.HomeProteome.load(folder)
+        if proteome is None:
+            logger.warning(
+                f"No {synvoy_specificity.PROTEOME_FILE} in --home_db_dir {folder!r}: GOI models get "
+                "no specificity terms, and seeds are chosen by their label alone.")
+        hood = proteome.neighbourhood(getattr(args, 'home_flanking_ids', []) or []) if proteome else None
+        _HOME_PROTEOME_CACHE[folder] = (proteome, hood)
+    return _HOME_PROTEOME_CACHE[folder]
+
+
+def annotate_goi_specificity(candidates, by_parent, args) -> int:
+    """Specificity of every kept GOI candidate against the home proteome (label rework,
+    step 2; synvoy_specificity): BestOtherHome, SpecMargin (bits against the home protein
+    minus bits against the best other home protein), RealCompetitor and, with home gene
+    coordinates, BestOtherInNeighbourhood, appended to the candidate's mRNA/gene row and
+    kept as ``cand['specificity']``. Needs ``cand['bits']`` (score_goi_candidates).
+    Labels do not use it yet; the seed rule does (_classify_goi_for_seed_and_tree)."""
+    proteome, hood = _home_proteome(args)
+    if proteome is None:
+        return 0
+    n = 0
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9 or cand.get('bits') is None:
+            continue
+        parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
+        home = by_parent.get(parent) or {}
+        protein = (cand.get('record') or {}).get('seq', '')
+        if not home.get('seq') or not protein:
+            continue
+        try:
+            spec = synvoy_specificity.specificity(proteome, parent, home['seq'], protein,
+                                                  float(cand['bits']), hood)
+        except Exception as exc:  # pragma: no cover - defensive: never lose a model over this
+            logger.warning(f"specificity of {cand.get('record', {}).get('id', '')} failed: {exc}")
+            continue
+        cand['specificity'] = spec
+        cols[8] = f"{cols[8]};{synvoy_specificity.gff_attrs(spec)}"
         gff[0] = '\t'.join(cols)
         n += 1
     return n
@@ -3329,7 +3383,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             if os.path.exists(f):
                 os.remove(f)
         
-        # Deduplicate hits by position (Greedy Spatial Clustering)
+        # Deduplicate hits by position (Greedy Spatial Clustering), per query: the home
+        # protein and the relative's model (``<parent>~rel``) are deduplicated apart. Pooled,
+        # the higher bit score won, so at a paralog's DNA the relative's hit removed the home
+        # protein's hit there (label rework 2026-10-14, A5), and the home protein's own
+        # evidence for that place was lost.
         if all_hits:
             # Sort by bitscore desc, then evalue asc
             # Ensure bits is float
@@ -3341,14 +3399,16 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                                          x['chrom'], x['start'], x['end'], x['query']))
             
             kept_hits = []
+            kept_by_query = defaultdict(list)
             for hit in all_hits:
-                # Check overlap with kept hits
+                # Check overlap with kept hits of the same query
                 is_overlapped = False
                 h_start = hit['start']
                 h_end = hit['end']
                 h_len = h_end - h_start
+                same_query = kept_by_query[extract_base_gene_id(hit.get('query', ''))]
                 
-                for kept in kept_hits:
+                for kept in same_query:
                     if hit['chrom'] != kept['chrom']: continue
                     
                     k_start = kept['start']
@@ -3366,6 +3426,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 
                 if not is_overlapped:
                     kept_hits.append(hit)
+                    same_query.append(hit)
             
             all_hits = kept_hits
             print(f"[{genome_name}] Combined augmented search: {len(all_hits)} unique hits (spatially filtered).", flush=True)
@@ -5023,6 +5084,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 final_candidates.append(cand)
                 accepted_intervals.append((c_start, c_end))
 
+        annotate_goi_specificity(final_candidates, goi_query_by_parent, args)
         for cand in final_candidates:
             rec = cand['record']
             if rec['id'] in found_ids:
@@ -5296,7 +5358,6 @@ def run_mmseqs_easy_search_with_retries(
     return False, last_details, last_resource_fail
 
 
-_SEED_QUALIFYING_CLASSES = {"confident_goi", "probable_goi"}
 _TREE_QUALIFYING_CONFIDENCE = {"HIGH", "MEDIUM"}
 
 
@@ -5310,45 +5371,43 @@ def _safe_float(value, default=None):
         return default
 
 
-def _classify_goi_for_seed_and_tree(
-    all_genes, feature_meta, is_goi_query_id_fn,
-    seed_on_flanking_support=False,
-    seed_min_flanking=2,
-    seed_min_qcov=0.5,
-):
+def _seed_is_specific(meta) -> bool:
+    """A call may seed when no other home protein competes for it: no real competitor, or
+    a margin of at least SEED_MIN_MARGIN_BITS (10) bits over the best one. A model without
+    specificity terms (no home proteome in the run) is not held back."""
+    if meta.get("real_competitor", "") == "":
+        return True
+    if meta.get("real_competitor") in ("0", 0, False):
+        return True
+    margin = _safe_float(meta.get("spec_margin"))
+    return margin is not None and margin >= synvoy_specificity.SEED_MIN_MARGIN_BITS
+
+
+def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn):
     """Split GOI-role genes into (seed, tree_extra, suppressed_count).
 
-    Seed genes feed `expanded_db.faa` (used as the next wave's MMseqs2 query DB
-    AND historically as the tree input). Strict filter: HIGH/MEDIUM confidence
-    AND goi_class in {confident_goi, probable_goi}.
+    Seed genes feed `expanded_db.faa`, the next wave's query set; the window search's
+    relative query (select_goi_queries) is chosen among them too. The rule, per query
+    (SynVoy_Parent) in this genome and home locus, after all its blocks are labelled
+    (label rework of 2026-10-14, step 2):
 
-    Tree-extra genes feed `goi_for_tree.faa` *in addition to* the seed list:
-    HIGH/MEDIUM-confidence GOI hits whose goi_class disqualified them from
-    seeding (typically `tandem_goi_copy`). They appear in MAFFT/IQ-TREE so
-    species like Apis cerana — which only carry tandem-duplicate evidence —
-    are not silently dropped from the phylogeny.
+      pool  = the HIGH calls if there is one, else the MEDIUM calls;
+      seeds = the pool members that are specific (_seed_is_specific: no real competitor
+              in the home proteome, or a margin of >= 10 bits over it).
 
-    A3 (TODO_JUN, opt-in via ``seed_on_flanking_support``): the strict class
-    filter "neutered" the wave — divergent/tandem orthologs (e.g. Apis cerana's
-    100%-identical melittin, classed `tandem_goi_copy`) never seeded the next
-    wave, so a close relative's perfect copy couldn't bridge to a more divergent
-    bee. When enabled, a HIGH/MEDIUM GOI feature ALSO seeds — regardless of
-    goi_class — on a generic synteny signal: strong flanking support
-    (``block_flanking_support >= seed_min_flanking``) AND real query coverage
-    (``query_coverage >= seed_min_qcov``). It keys on coverage+flanking, not
-    identity, so it doesn't preferentially admit paralogs; §1m collinearity and
-    §1m ownership remain the drift backstops.
+    A MEDIUM seeds exactly when its genome has no HIGH, and then it becomes the next
+    wave's relative query: a MEDIUM that is specific only by a few bits is a fine call but
+    a poor query. AMBIGUOUS, LOW and context-promoted calls never seed. Every HIGH/MEDIUM
+    call that does not seed feeds the tree (`goi_for_tree.faa`) only.
 
-    A context-promoted call (``_promote_context_supported_goi``) rests on gene order,
-    not on sequence. It feeds the tree but never seeds the next wave, so the search
-    itself runs as without the promotion and a wrong promotion cannot carry into
-    later waves.
+    Until then a call seeded when it was HIGH or MEDIUM and of class confident_goi /
+    probable_goi (a tandem copy never seeded, a paralog MEDIUM next to a HIGH call did),
+    with an opt-in path for flanking support (--seed_on_flanking_support, removed).
 
-    Suppressed_count is the total of GOI-role genes that did NOT qualify for
-    seeding (used for logging).
+    Suppressed_count is the number of GOI-role genes that do not seed (for the log).
     """
-    seed = []
-    tree_extra = []
+    calls: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = defaultdict(list)
+    seed, tree_extra = [], []
     suppressed = 0
     for g in all_genes:
         gid = g.get("id", "")
@@ -5357,23 +5416,20 @@ def _classify_goi_for_seed_and_tree(
         if role != "goi":
             continue
         confidence = meta.get("confidence", "")
-        goi_class = meta.get("goi_class", "")
-        promoted = bool(meta.get("context_promoted"))
-        qualifies = (not promoted
-                     and confidence in _TREE_QUALIFYING_CONFIDENCE
-                     and goi_class in _SEED_QUALIFYING_CLASSES)
-        if (not qualifies and not promoted and seed_on_flanking_support
-                and confidence in _TREE_QUALIFYING_CONFIDENCE):
-            fs = _safe_float(meta.get("block_flanking_support"))
-            qc = _safe_float(meta.get("query_coverage"))
-            if (fs is not None and qc is not None
-                    and fs >= seed_min_flanking and qc >= seed_min_qcov):
-                qualifies = True
-        if qualifies:
-            seed.append(g)
+        if confidence in _TREE_QUALIFYING_CONFIDENCE and not meta.get("context_promoted"):
+            calls[meta.get("parent") or extract_base_gene_id(gid)].append((g, meta))
         else:
             suppressed += 1
             if confidence in _TREE_QUALIFYING_CONFIDENCE:
+                tree_extra.append(g)
+    for parent in sorted(calls):
+        members = calls[parent]
+        level = "HIGH" if any(m.get("confidence") == "HIGH" for _g, m in members) else "MEDIUM"
+        for g, meta in members:
+            if meta.get("confidence") == level and _seed_is_specific(meta):
+                seed.append(g)
+            else:
+                suppressed += 1
                 tree_extra.append(g)
     return seed, tree_extra, suppressed
 
@@ -6402,6 +6458,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
                      "context_promoted": attrs.get("ContextPromoted", ""),
+                     "spec_margin": attrs.get("SpecMargin", ""),
+                     "real_competitor": attrs.get("RealCompetitor", ""),
                  }
 
              with open(tsv_out, 'w') as tf:
@@ -6440,12 +6498,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # calls are still reported in GFF/plots but should not recursively seed
         # later waves.
         new_genes, tree_extra_genes, suppressed_seed_count = (
-            _classify_goi_for_seed_and_tree(
-                all_genes, feature_meta, is_goi_query_id,
-                seed_on_flanking_support=getattr(args, 'seed_on_flanking_support', False),
-                seed_min_flanking=getattr(args, 'seed_flanking_min_count', 2),
-                seed_min_qcov=getattr(args, 'seed_flanking_min_qcov', 0.5),
-            )
+            _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id)
         )
         if all_genes:
             logger.info(
@@ -7116,18 +7169,6 @@ def main():
     parser.add_argument("--classify_tandem_min_qcov", type=float, default=0.35,
                         help="§A2: min query coverage for MEDIUM tandem_copy; a high-identity "
                              "but short local window (true low qcov) is demoted to LOW.")
-    # §A3 (TODO_JUN) — un-neuter the wave seed (opt-in). A HIGH/MEDIUM GOI feature
-    # seeds the expanding DB on strong flanking + real coverage regardless of
-    # goi_class, so a close relative's tandem/divergent ortholog can bridge to a
-    # more divergent species in the next wave.
-    parser.add_argument("--seed_on_flanking_support", type=str2bool, default=False,
-                        help="§A3: also seed the next wave with a HIGH/MEDIUM GOI feature "
-                             "(any goi_class, incl. tandem_goi_copy) when flanking support and "
-                             "query coverage clear the floors below. Default off until validated.")
-    parser.add_argument("--seed_flanking_min_count", type=int, default=2,
-                        help="§A3: min flanking-gene support for flanking-supported seeding.")
-    parser.add_argument("--seed_flanking_min_qcov", type=float, default=0.5,
-                        help="§A3: min query coverage for flanking-supported seeding.")
     # §A4 (TODO_JUN) — rank/quantile wave binning (opt-in). The phylo-distance
     # metric saturates for tight clades (all bees → dist≈0.99 after max-norm),
     # collapsing absolute-threshold binning into ~4 undifferentiated waves with
@@ -7405,6 +7446,9 @@ def main():
     # The GOI entries of the pristine query set are the home protein; everything that
     # joins them later is a gene model of a genome searched earlier (select_goi_queries).
     args.home_goi_ids = build_home_goi_ids(args.initial_db)
+    # The flanking genes of this home locus: their span at home is the neighbourhood in
+    # which position cannot tell the GOI from a relative (synvoy_specificity).
+    args.home_flanking_ids = sorted(build_home_rank(args.initial_db))
 
     # Home neighbourhood geometry for the distances in gene pitches (synvoy_scale).
     args.home_geometry = synvoy_scale.home_geometry(args.initial_db)

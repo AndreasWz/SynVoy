@@ -43,8 +43,10 @@ def _is_goi_query_id(gid):
 
 class TestSeedTreeClassifier(unittest.TestCase):
 
-    def test_tandem_copy_goes_to_tree_not_seed(self):
-        """Apis cerana scenario: only tandem_goi_copy GOI evidence."""
+    def test_tandem_copies_seed_like_any_call(self):
+        """Apis cerana scenario: only tandem_goi_copy GOI evidence. Since 2026-10-14 the class
+        does not matter (label rework, step 2): MEDIUM copies of a genome without a HIGH call
+        seed when no other home protein competes for them, else they feed the tree only."""
         all_genes = [
             _gene("GOI_copy_2|Apis_cerana_fna_b0_l1"),
             _gene("GOI_copy_1|Apis_cerana_fna_b0_l1"),
@@ -62,8 +64,14 @@ class TestSeedTreeClassifier(unittest.TestCase):
         seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
             all_genes, meta, _is_goi_query_id
         )
-        self.assertEqual(seed, [],
-                         msg="tandem_goi_copy must not seed the next wave")
+        self.assertEqual(len(seed), 2, msg="no specificity terms: the label decides")
+        self.assertEqual((tree_extra, suppressed), ([], 0))
+        for m in meta.values():
+            m.update(parent="GOI_Melt", real_competitor="1", spec_margin="4.0")
+        seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
+            all_genes, meta, _is_goi_query_id
+        )
+        self.assertEqual(seed, [], msg="a relative competes within 10 bits: no seed")
         self.assertEqual(len(tree_extra), 2,
                          msg="MEDIUM tandem copies must reach the tree FASTA")
         self.assertEqual(suppressed, 2)
@@ -138,10 +146,10 @@ class TestSeedTreeClassifier(unittest.TestCase):
         seed, tree_extra, suppressed = _classify_goi_for_seed_and_tree(
             all_genes, meta, _is_goi_query_id
         )
-        self.assertEqual(len(seed), 0)
-        self.assertEqual(len(tree_extra), 2,
-                         msg="Apis cerana must contribute 2 tree-only GOI hits")
-        self.assertEqual(suppressed, 2)
+        # Since 2026-10-14 the copies seed (no class filter; no specificity terms here).
+        self.assertEqual(len(seed), 2)
+        self.assertEqual(tree_extra, [])
+        self.assertEqual(suppressed, 0)
 
     def test_unknown_meta_falls_back_to_id_heuristic(self):
         """If feature_meta is missing for a gene, role is inferred from the id."""
