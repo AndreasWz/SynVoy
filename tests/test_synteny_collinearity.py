@@ -411,3 +411,20 @@ def test_ordered_block_outranks_a_repeated_single_gene():
                                          home_rank=_HOME_RANK, bridge_max_gap=_GAP)
     assert blocks[0]["chrom"] == "c2"
     assert blocks[0]["collinear_chain_len"] == 3
+
+
+def test_each_bridge_records_the_anchors_it_rested_on():
+    """`A B … D E F` bridges on 2 anchors (the floor of 2, since 2026-10-14); the block
+    keeps that number so the log can list bridges the floor of 3 would have refused."""
+    blocks = isr.identify_synteny_blocks(
+        _two_segments("AB", "DEF"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert len(blocks) == 1 and blocks[0]["bridge_anchors"] == [2]
+    blocks = isr.identify_synteny_blocks(
+        _two_segments("ABC", "DE"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert blocks[0]["bridge_anchors"] == [3]
+    unbridged = isr.identify_synteny_blocks(
+        _two_segments("A", "BCD"), max_intron=20_000, cluster_distance=_CD,
+        home_rank=_HOME_RANK, bridge_max_gap=_GAP)
+    assert all(b["bridge_anchors"] == [] for b in unbridged)

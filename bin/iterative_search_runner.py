@@ -2611,6 +2611,10 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
     synteny_blocks = []
     current_block = [all_loci[0]]
     bridges_in_block = 0
+    # Distinct anchors a block held when each of its gaps was bridged, per block (in the
+    # order blocks are closed): the evidence a bridge rested on, for the log.
+    bridge_anchors: List[List[int]] = []
+    current_bridge_anchors: List[int] = []
 
     i = 1
     while i < len(all_loci):
@@ -2636,6 +2640,7 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
             right = _right_cluster(all_loci, i, cluster_distance)
             if _can_bridge_two_sided(current_block, right, home_rank,
                                      bridge_max_rank_gap, bridge_min_anchors):
+                current_bridge_anchors.append(len(set(_block_anchor_ranks(current_block, home_rank))))
                 current_block.extend(right)
                 bridges_in_block += 1
                 i += len(right)
@@ -2645,20 +2650,24 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
             # #1 gap-bridging: the flanking continue the home-order run across a
             # large gap (a local rearrangement that the GOI may sit inside), so
             # keep one block spanning the gap instead of dropping the interior.
+            current_bridge_anchors.append(len(set(_block_anchor_ranks(current_block, home_rank))))
             current_block.append(locus)
             bridges_in_block += 1
             i += 1
             continue
 
         synteny_blocks.append(current_block)
+        bridge_anchors.append(current_bridge_anchors)
         current_block = [locus]
         bridges_in_block = 0
+        current_bridge_anchors = []
         i += 1
     synteny_blocks.append(current_block)
+    bridge_anchors.append(current_bridge_anchors)
 
     # --- Step 4: Format, Score (collinearity) and Sort Blocks ---
     final_blocks = []
-    for block in synteny_blocks:
+    for block, anchors_at_bridges in zip(synteny_blocks, bridge_anchors):
         chrom = block[0]['chrom']
         start = min(l['start'] for l in block)
         end = max(l['end'] for l in block)
@@ -2700,6 +2709,7 @@ def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
             'collinear_chain_len': chain_len,
             'collinear_direction': direction,
             'bridged': bridged,
+            'bridge_anchors': list(anchors_at_bridges),
         })
 
     if use_collinearity:
@@ -5116,6 +5126,8 @@ def merge_synteny_blocks(blocks, padding):
                 next_block.get('collinear_chain_len', 0))
             current_block['bridged'] = bool(
                 current_block.get('bridged') or next_block.get('bridged'))
+            current_block['bridge_anchors'] = (list(current_block.get('bridge_anchors', []))
+                                               + list(next_block.get('bridge_anchors', [])))
             
             # 3. Combine hits if present
             if 'hits' in next_block:
@@ -5792,6 +5804,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     f"[{genome_name}] §1m collinearity: bridged a flanking gap in "
                     f"{_n_bridged} block(s) (home-order continuation across rearrangement)."
                 )
+            for _b in synteny_blocks:
+                if _b.get('bridge_anchors'):
+                    # One line per bridged block: the anchors it held at each bridge (a
+                    # bridge on 2 is one the floor of 3 refused until 2026-10-14).
+                    logger.info(
+                        f"[{genome_name}] bridged block {_b['chrom']}:{_b['start']}-{_b['end']}: "
+                        f"anchors before each gap {','.join(map(str, _b['bridge_anchors']))}; "
+                        f"genes {','.join(_b.get('genes', []))}")
 
         if not synteny_blocks:
             logger.info(f"[{genome_name}] No valid syntenic region found.")
