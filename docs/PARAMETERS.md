@@ -428,7 +428,7 @@ Upper limit of the adaptive margin. Only read when `region_padding` is a number.
 
 ### The thresholds of the window search (`aug_relaxed_*`)
 
-The names come from an earlier design with several rounds of ever more relaxed searches. There is one search per window now. MMseqs2 and tblastn are run on the window with a wide E-value, and of what they return a hit is kept when it reaches
+The names come from an earlier design with several rounds of ever more relaxed searches. There is one search per window now. MMseqs2 (E 10) and tblastn (E 1000) are run on the window with a wide E-value, and of what they return a hit is kept when it reaches
 
 - E ≤ `search_evalue × aug_relaxed_parse_evalue_mult` (0.01 × 10 = **0.1**, counted over the window, not the genome),
 - identity ≥ `max(aug_relaxed_identity_min, min_hit_identity × aug_relaxed_identity_factor)` (**15 %**), and
@@ -447,7 +447,9 @@ The factor between the E-value for anchors in the whole genome (`search_evalue`)
 ### `aug_relaxed_evalue_cap`
 **Type:** Float | **Default:** `10.0` | **Range:** 0.1–100
 
-Together they set the E-value handed to MMseqs2 and tblastn for the window: `min(aug_relaxed_evalue_cap, search_evalue × aug_relaxed_evalue_mult)` = 10. Hits between that value and the kept threshold of 0.1 are computed and then discarded, so neither parameter changes the result as long as their product stays above the kept threshold. Lowering them below it would tighten the window search; raising them does nothing.
+Together they set the E-value handed to MMseqs2 for the window: `min(aug_relaxed_evalue_cap, search_evalue × aug_relaxed_evalue_mult)` = 10. Hits between that value and the kept threshold of 0.1 are computed and then discarded, so neither parameter changes the result as long as their product stays above the kept threshold. Lowering them below it would tighten the window search; raising them does nothing.
+
+tblastn does not use them (since 2026-10-14): it always reports to E 1000. For tblastn the cutoff is more than an output filter. It combines HSPs by sum statistics only among the ones it keeps, so with the old cutoff of 10 weak HSPs that would have joined a significant set were thrown away first, and the E-value of what it did report changed with the setting. On the Candida pilot a curated ortholog was absent from tblastn's output in SynVoy's own window at 10 and reported at E 0.005 at 1000. The kept threshold of 0.1 applies to tblastn as before.
 
 ### `aug_relaxed_identity_min`
 **Type:** Float (%) | **Default:** `15.0` | **Range:** 5–50

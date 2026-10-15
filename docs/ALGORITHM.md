@@ -519,8 +519,10 @@ longer than 10,000 aa is not searched with Smith-Waterman (a warning says so): t
 memory of one piece grows with the square of the query length. A missing
 Smith-Waterman backend stops the run (`allow_missing_smith_waterman = false`).
 
-MMseqs2 and tblastn run with E ≤ 10; the limit of 0.1 is applied when their output is
-read. The hits of the three engines are pooled in order of bit score, and a hit is
+MMseqs2 runs with E ≤ 10 and tblastn with E ≤ 1000; the limit of 0.1 is applied when
+their output is read. tblastn's cutoff is wide on purpose: it links HSPs by sum statistics
+only among those it keeps, so a cutoff of 10 also changed the E-value of what it
+reported, and a weak true gene could vanish from its output. The hits of the three engines are pooled in order of bit score, and a hit is
 dropped when more than half of it overlaps a hit already kept. The genome-wide hits
 that lie in the window are then added (GOI hits only for the two queries above).
 

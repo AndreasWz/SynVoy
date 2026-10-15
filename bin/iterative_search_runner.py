@@ -2951,6 +2951,16 @@ def run_augmented_mmseqs_with_retries(
 
     return False, last_details or "unknown augmented MMseqs failure"
 
+# E-value handed to tblastn in a search window, whatever the window search's own settings.
+# Not only an output filter: tblastn links HSPs by sum statistics only among those it keeps,
+# so its cutoff also changes the E-value of what it reports. With the old cutoff of 10
+# (min(aug_relaxed_evalue_cap, search_evalue x aug_relaxed_evalue_mult)) the curated
+# ortholog of one hidden pair of the Candida pilot (2026-10-14) was absent from tblastn's
+# output in SynVoy's own 43-kb window and reported at E 0.005 with 1000. The kept threshold
+# (E <= 0.1, identity >= 15 %, length >= 15) is applied when the output is read, as before.
+TBLASTN_REPORT_EVALUE = 1000.0
+
+
 def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
                         genome_name: str, args, unique_id: str, threads: int) -> List[Dict[str, Any]]:
     """
@@ -3006,7 +3016,6 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         }
         
         # Shared relaxed thresholds for augmented search.
-        relaxed_evalue = min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)
         relaxed_identity = max(args.aug_relaxed_identity_min, args.min_identity * args.aug_relaxed_identity_factor)
         relaxed_length = max(args.aug_relaxed_length_min, int(args.min_length // args.aug_relaxed_length_div))
 
@@ -3063,7 +3072,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     "tblastn",
                     "-query", query_fasta,
                     "-db", blast_db_prefix,
-                    "-evalue", str(relaxed_evalue),
+                    "-evalue", str(TBLASTN_REPORT_EVALUE),
                     "-seg", "no",
                     "-max_target_seqs", "5000",
                     "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
