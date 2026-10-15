@@ -321,3 +321,14 @@ def test_species_tree_puts_the_home_genome_into_the_cladogram():
     assert 'class="grid-tree"' in svg and 'class="tree-unplaced"' not in svg
     order = [r["species"] for r in res["source"] if r["column"] == "F0"]
     assert order == ["Apis mellifera", "Bombus terrestris", "Bombus impatiens", "Vespa crabro"]
+
+
+def test_gene_position_map_draws_ambiguous_palest():
+    """An AMBIGUOUS GOI call is drawn palest in the gene-position map; it used to fall through
+    to the identity shade of a HIGH call (label rework 2026-10-14)."""
+    def goi_fill(conf):
+        tracks, colours = _tracks(n_targets=1, target_goi=[dict(_goi(7000), confidence=conf, identity=90.0)])
+        html = ps.render_anchor_grid_positional(tracks, colours, {}, {}, SimpleNamespace())
+        return re.search(r'<title>T [^<]*</title><path [^>]*fill="(#[0-9a-fA-F]{6})"', html).group(1).lower()
+    assert goi_fill("AMBIGUOUS") == ps._lerp_hex(ps.GOI_COLOUR, "#ffffff", 0.72).lower()
+    assert goi_fill("HIGH") != goi_fill("AMBIGUOUS")

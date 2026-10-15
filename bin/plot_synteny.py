@@ -5125,6 +5125,10 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                         p["strand"] != anchor_strand.get(p["key"]))
             if is_home:
                 fill = p["colour"]
+            elif conf == "AMBIGUOUS":
+                # Palest, as everywhere else: it used to fall through to the HIGH branch
+                # and was drawn as a confident call (label rework 2026-10-14).
+                fill = _lerp_hex(p["colour"], "#ffffff", 0.72)
             elif conf == "LOW":
                 fill = _lerp_hex(p["colour"], "#ffffff", 0.55)
             elif conf == "MEDIUM":
