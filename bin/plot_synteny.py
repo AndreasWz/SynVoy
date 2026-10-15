@@ -424,8 +424,8 @@ def _select_goi_context_genes(genes, flank_bp=200000):
 
     def _chrom_key(item):
         chrom, glist = item
-        best_identity = max((x.get("identity", 0.0) for x in glist), default=0.0)
-        return (len(glist), best_identity)
+        best = max((_model_strength(x) for x in glist), default=(0, 0.0))
+        return (len(glist), best)
 
     goi_chrom, goi_list = max(per_chrom.items(), key=_chrom_key)
     goi_min = min(g["start"] for g in goi_list)
@@ -503,6 +503,18 @@ def _preferred_target_label(gene):
     return target_gene or name or gene.get("home_gene_id", "")
 
 
+def _model_strength(gene):
+    """How strongly a model matches its query, for choosing among models: the bit score
+    against the home protein (``Bits=``, on GOI models written since 2026-10-14), else
+    identity (flanking models, older runs). A model with a bit score ranks above one
+    without, so the two units are never compared. Same rule as the report's dedup
+    (generate_report._model_strength) and the search's choice among overlapping models."""
+    bits = gene.get("bits")
+    if bits is not None:
+        return (1, float(bits))
+    return (0, float(gene.get("identity", 0.0) or 0.0))
+
+
 def _goi_priority_key(gene):
     goi_like = 1 if _is_goi_target_gene(gene) else 0
     resolved = 1 if _is_resolved_goi_target_gene(gene) else 0
@@ -518,7 +530,7 @@ def _goi_priority_key(gene):
         resolved,
         _confidence_rank(gene.get("confidence")),
         class_rank,
-        float(gene.get("identity", 0.0)),
+        _model_strength(gene),
     )
 
 
@@ -592,6 +604,10 @@ def parse_target_gff(gff_file, cap=True):
                 query_coverage = None
             if query_coverage is not None and query_coverage != query_coverage:
                 query_coverage = None
+            try:
+                bits = float(attrs["Bits"]) if attrs.get("Bits") else None
+            except ValueError:
+                bits = None
 
             role = (attrs.get("SynVoyRole") or "").strip().lower()
             if not role:
@@ -619,6 +635,7 @@ def parse_target_gff(gff_file, cap=True):
                 "model_status": attrs.get("ModelStatus", ""),
                 "synteny_context": attrs.get("SyntenyContext", ""),
                 "query_coverage": query_coverage,
+                "bits":         bits,
                 "inference_reason": attrs.get("InferenceReason", ""),
                 "gff_id":       gene_id,
             })
@@ -636,14 +653,17 @@ def parse_target_gff(gff_file, cap=True):
     # Deduplicate overlapping entries (same genomic region from different queries)
     # GOI entries are ALWAYS preferred over non-GOI entries at the same locus.
     if len(genes) > 1:
-        # Sort: GOI first (always kept), then by descending identity
+        # Sort: GOI first (always kept), then by descending bit score (identity for
+        # models without one, see _model_strength)
         def _dedup_sort_key(g):
+            strength = _model_strength(g)
             return (
                 -_goi_priority_key(g)[0],
                 -_goi_priority_key(g)[1],
                 -_goi_priority_key(g)[2],
                 -_goi_priority_key(g)[3],
-                -g["identity"],
+                -strength[0],
+                -strength[1],
             )
         genes.sort(key=_dedup_sort_key)
 
@@ -2177,7 +2197,7 @@ def _track_label_jobs(track, home_products):
             goi_genes.append((gene, resolved))
     if not goi_genes:
         return []
-    goi_genes.sort(key=lambda gr: (gr[1], gr[0].get("identity", 0.0)), reverse=True)
+    goi_genes.sort(key=lambda gr: (gr[1], _model_strength(gr[0])), reverse=True)
     best_gene, best_resolved = goi_genes[0]
     # "xN" counts gene copies; most extra GOI calls of a genome are weak hits.
     flags = [c for _, c in _goi_copies_and_weak([g for g, _ in goi_genes], is_home)]
@@ -2667,7 +2687,7 @@ def render_synteny_html(all_tracks, gene_colours,
             return None
         def _key(g):
             resolved = True if track["is_home"] else _is_resolved_goi_target_gene(g)
-            return (1 if resolved else 0, g.get("identity", 0.0))
+            return (1 if resolved else 0, _model_strength(g))
         return max(gois, key=_key)
 
     # Why two groups + group-opacity: every track is GOI-centred, so many
@@ -4452,7 +4472,7 @@ def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
     out = {}
     for key, genes in buckets.items():
         genes.sort(key=lambda g: (_confidence_rank(g.get("confidence")),
-                                   g.get("identity", 0.0)), reverse=True)
+                                   _model_strength(g)), reverse=True)
         # `genes` (all copies, genomic order) lets the GOI column enrol every
         # tandem toxin copy as its own notched arrow instead of collapsing to ×N.
         out[key] = {"best": genes[0], "n": len(genes),
@@ -4725,9 +4745,10 @@ def _goi_number_label(gene):
 
 
 def _goi_best(genes):
-    """Representative GOI model: confidence, then identity, then query coverage."""
+    """Representative GOI model: confidence, then bit score against the home protein
+    (identity for models without one, _model_strength), then query coverage."""
     return max(genes, key=lambda g: (_confidence_rank(g.get("confidence")),
-                                     g.get("identity", 0.0) or 0.0,
+                                     _model_strength(g),
                                      g.get("query_coverage") or 0.0,
                                      -g.get("start", 0)))
 

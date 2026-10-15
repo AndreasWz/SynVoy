@@ -962,6 +962,24 @@ SW_LAMBDA_11_1 = 0.267
 SW_K_11_1 = 0.041
 
 
+def sw_bits(query_seq: str, subject_seq: str) -> float:
+    """Bit score of the best local alignment of two proteins: BLOSUM62, BLAST gap costs
+    11/1 (parasail 12/1), ``(lambda * S - ln K) / ln 2`` with lambda 0.267, K 0.041.
+
+    A score in bits does not depend on the lengths or the database, so models of one gene
+    built from different evidence (a spliced model, a chain of hits, a single exon) can be
+    ranked by it. 0.0 for an empty sequence. Raises RuntimeError without parasail.
+    """
+    if not query_seq or not subject_seq:
+        return 0.0
+    try:
+        import parasail  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised only without parasail
+        raise RuntimeError("parasail-python is required for Smith-Waterman alignment") from exc
+    score = parasail.sw_striped_32(query_seq, subject_seq, 12, 1, parasail.blosum62).score
+    return (SW_LAMBDA_11_1 * score - math.log(SW_K_11_1)) / math.log(2)
+
+
 def sw_pair_evalue(seq_a: str, seq_b: str) -> Tuple[float, float, float]:
     """E-value of the best local alignment of two proteins: ``(evalue, score, identity)``.
 

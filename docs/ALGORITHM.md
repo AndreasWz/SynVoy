@@ -570,8 +570,17 @@ For each GOI query:
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
    Both are always LOW.
 
-All candidates of a window are ranked, and one that overlaps an accepted candidate by
-more than half of its own length is dropped.
+Every candidate gets a bit score: the Smith-Waterman score of its protein (the model's
+translation, or the translated hits of a chain, copy or single hit) against the home
+protein, BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`.
+The candidates of a window are ranked by it, then by the shorter span (a chain over two
+copies scores what its better copy scores, and must not win over that copy), then by
+flanking support, start and id; one that overlaps an accepted candidate by more than
+half of its own length is dropped. Until 2026-10-14 they were ranked by identity, longer
+span first, and only hit chains had a bit score (that of their best hit). On the Candida
+pilot, bits picked the model on the curated gene in 29 of the 31 genome pairs with
+several models, identity in 16. The strict fallback on single hits ranks hits by bit
+score too.
 
 ### 7.8 Confidence
 
@@ -776,8 +785,10 @@ this order:
 
 1. **Deduplication** (`dedupe_goi_annotations`). HIGH, MEDIUM and AMBIGUOUS calls of
    one genome and scaffold are one gene when they overlap reciprocally by more than
-   80 %. The call with the higher confidence, then identity, is kept, with the list
-   of home loci that found it. A model contained in a wider one replaces it when the
+   80 %. The call with the higher confidence, then the higher bit score against the
+   home protein (identity for a model without one), is kept, with the list of home
+   loci that found it. The figures choose their representative GOI model by the same
+   rule. A model contained in a wider one replaces it when the
    wider model is at least twice as long and adds less than 0.15 query coverage.
 2. **Phylogenetic placement** (`phylo_placement_check.py`). Across all calls, sequence
    divergence (1 − identity to the query) is fitted against the taxonomic distance of

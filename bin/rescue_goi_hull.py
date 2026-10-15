@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
-from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement  # noqa: E402
+from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
 import synvoy_scale  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
     _refine_rescue_termini,
@@ -173,9 +173,11 @@ def _confidence_for(identity: float, high: float, medium: float) -> str:
 
 
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,
-                         confidence, query_coverage=None) -> List[str]:
+                         confidence, query_coverage=None, bits=None) -> List[str]:
     """Map miniprot window-relative coords to genome coords; SynVoy GFF block tagged
-    EvidenceType=synteny_hull_rescue, confidence by identity."""
+    EvidenceType=synteny_hull_rescue, confidence by identity. ``bits``: the model
+    protein's bit score against the query (sequence_utils.sw_bits), written as Bits= like
+    on the main path's models, so the report ranks rescue and main models alike."""
     mp_start, mp_end, strand = int(mrna[3]), int(mrna[4]), mrna[6]
     identity = _identity_pct(mrna[8])
     gstart = window_start + mp_start - 1
@@ -185,10 +187,11 @@ def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_i
     # latter, and a coverage-based demotion could not fire without also demoting
     # good full-length rescues.
     cov_attr = "" if query_coverage is None else f";QueryCoverage={query_coverage:.3f}"
+    bits_attr = "" if bits is None else f";Bits={bits:.1f}"
     common = (f"Name={query_id};SynVoyRole=goi;Confidence={confidence};"
               f"EvidenceType=synteny_hull_rescue;GOIClass=synteny_hull_rescue;"
               f"ModelStatus=rescue;Identity={identity:.1f};TargetGene={query_id}"
-              f"{cov_attr}")
+              f"{cov_attr}{bits_attr}")
     rows = [
         "\t".join([chrom, "SynVoy_hull", "gene", str(gstart), str(gend), ".", strand, ".",
                    f"ID={parent_id};{common}"]),
@@ -352,10 +355,14 @@ def main() -> int:
                                    args.classify_medium_min_identity)
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
             best_cov = _cds_coverage(cds_rows, qlen)
+            prot = _translate_model(window, cds_rows)
+            try:
+                bits = sw_bits(query_seq, prot) if prot else None
+            except RuntimeError:
+                bits = None
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
                                                   query_id, parent_id, conf,
-                                                  query_coverage=best_cov))
-            prot = _translate_model(window, cds_rows)
+                                                  query_coverage=best_cov, bits=bits))
             if prot:
                 faa_records.append((f"{parent_id}.mRNA", prot))
             n_emitted += 1

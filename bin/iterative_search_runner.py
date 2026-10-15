@@ -104,7 +104,7 @@ try:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span,
+        sw_align, sw_align_span, sw_bits,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -118,7 +118,7 @@ except ImportError:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span,
+        sw_align, sw_align_span, sw_bits,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -879,6 +879,53 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent):
         cand['record'] = record
         kept.append(cand)
     return kept
+
+
+def score_goi_candidates(raw_candidates, by_parent) -> int:
+    """Bit score of every GOI candidate against the HOME protein of its GOI.
+
+    Smith-Waterman of the candidate's protein (the model's translation, or the translated
+    hits of a chain, a copy, a rescued exon or a raw hit) against the home protein
+    (sequence_utils.sw_bits: BLOSUM62, BLAST gaps 11/1, lambda 0.267, K 0.041). Kept as
+    ``cand['bits']`` for the choice among overlapping candidates and written as ``Bits=``
+    on the candidate's mRNA/gene row. Until 2026-10-14 only hit chains carried a bit score
+    (that of their best single hit) and the choice went by identity; on the Candida pilot
+    bits picked the model on the curated gene in 29 of 31 genome pairs with several
+    models, identity in 16. Run after rebase_relative_candidates, so every candidate's
+    parent is its home GOI. Returns how many candidates were scored.
+    """
+    n = 0
+    for cand in raw_candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9:
+            continue
+        parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
+        home = by_parent.get(parent) or {}
+        protein = (cand.get('record') or {}).get('seq', '')
+        if not home.get('seq') or not protein:
+            continue
+        try:
+            bits = sw_bits(home['seq'], protein)
+        except RuntimeError:
+            continue
+        cand['bits'] = bits
+        cols[8] = f"{cols[8]};Bits={bits:.1f}"
+        gff[0] = '\t'.join(cols)
+        n += 1
+    return n
+
+
+def goi_candidate_order(cand) -> Tuple[float, int, int, int, str]:
+    """Order of GOI candidates for the greedy choice among overlapping ones: bit score
+    against the home protein (score_goi_candidates), then the SHORTER span (a chain over
+    two copies must not win over the copy it contains at the same score), then block
+    flanking support, start, id. Until 2026-10-14: identity first, longer span first."""
+    return (-float(cand.get('bits', 0.0) or 0.0),
+            int(cand['end']) - int(cand['start']),
+            -int(cand.get('flanking_support', 0) or 0),
+            int(cand.get('start', 0) or 0),
+            (cand.get('record') or {}).get('id', ''))
 
 
 def is_goi_query_id(query_id: str) -> bool:
@@ -4376,9 +4423,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             args.min_exon_alnlen,
                             int(max(15, len(parent_query_seq) * 0.6))
                         )
+                        # Bit score first (was identity, then length, then bits).
                         sorted_hits = sorted(
                             work_hits,
-                            key=lambda h: (h.get('pident', 0), h.get('alnlen', 0), h.get('bits', 0)),
+                            key=lambda h: (h.get('bits', 0), h.get('pident', 0), h.get('alnlen', 0)),
                             reverse=True
                         )[:max(1, args.gap_max_hits)]
 
@@ -4933,16 +4981,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
     found_ids = set()
 
-    # Greedy non-overlapping selection for GOI/tandem candidates.
+    # Greedy non-overlapping selection for GOI/tandem candidates, by bit score against
+    # the home protein (score_goi_candidates, goi_candidate_order).
     if raw_candidates:
-        # A1: among GOI candidates, break identity/length ties by flanking-supported
-        # bitscore so a real divergent model outranks a coverage-inflated artifact.
-        raw_candidates.sort(
-            key=lambda x: (x.get('score', 0), x['end'] - x['start'],
-                           x.get('flanking_support', 0), x.get('bits', 0),
-                           x.get('start', 0), x.get('record', {}).get('id', '')),
-            reverse=True
-        )
+        score_goi_candidates(raw_candidates, goi_query_by_parent)
+        raw_candidates.sort(key=goi_candidate_order)
 
         final_candidates = []
         accepted_intervals = []

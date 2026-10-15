@@ -68,6 +68,7 @@ Fields of a record in `goi_dedup.records`:
 | `confidence` | `HIGH` / `MEDIUM` / `AMBIGUOUS` (LOW calls are not listed here; they are counted in `summary`). |
 | `goi_class` | `confident_goi`, `probable_goi`, `synteny_hull_rescue` (found by the hull rescue), `syntenic_candidate_unconfirmed`, `paralog_not_goi`, `cross_locus_duplicate` (the same gene reached from two home loci), `identity_coverage_decoupled` (high identity over a short slice of the query). `original_goi_class` keeps the class before adjudication. |
 | `identity`, `query_cov` | % identity to the query and the fraction of the query the model covers. |
+| `bits` | Bit score of the model's protein against the home protein (the `Bits` attribute; empty for runs before 2026-10-14). Of several records of one gene the one with the best confidence, then the best bit score, is kept. |
 | `model_status` | `complete` / `partial` / `fragment`. |
 | `mrna_id` | The model's ID in the per-genome GFF (or in `rescue/`). |
 | `target_gene` | The target genome's own gene name at that position, when target annotations were available. |
@@ -134,6 +135,7 @@ Attributes on a model's `mRNA` row:
 | `SynVoyRole` | `goi` or `flanking` |
 | `Confidence`, `GOIClass`, `EvidenceType`, `ModelStatus` | As in the table above |
 | `Identity`, `QueryCoverage`, `Exons` | % identity, fraction of the query covered, exon count. Both always refer to the **home protein** |
+| `Bits` | GOI models: bit score of the model's protein against the home protein (Smith-Waterman, BLOSUM62, gaps 11/1). The search, the report and the figures choose among overlapping models by it |
 | `SearchQuery`, `SearchQueryIdentity` | Only on a model that the home protein did not find and the gene model of a previously searched genome did: that model's id, and the identity to it. `Identity` is still measured against the home protein |
 | `StartCodon`, `StopCodon` | `yes` / `no`: whether the model begins with ATG and ends at a stop codon. SynVoy extends a miniprot model's two ends to the nearest in-frame start / stop when it can do so without crossing a splice site. |
 | `SyntenyContext`, `BlockFlankingSupport`, `BlockCollinearSupport` | The neighbourhood: how many distinct flanking genes its block holds, and the longest run of them in home order |

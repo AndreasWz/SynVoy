@@ -288,6 +288,7 @@ def _process_gffs_unified(gff_files):
                             "goi_class": goi_class,
                             "identity": (attrs.get("Identity", "") or "").strip(),
                             "query_cov": (attrs.get("QueryCoverage", "") or "").strip(),
+                            "bits": (attrs.get("Bits", "") or "").strip(),
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
                             "mrna_id": model_id,
@@ -678,6 +679,19 @@ def _confidence_rank(confidence):
     return {"HIGH": 3, "MEDIUM": 2, "AMBIGUOUS": 1}.get((confidence or "").upper(), 0)
 
 
+def _model_strength(rec):
+    """How strongly a model matches the query, for choosing among models of one gene: its
+    bit score against the home protein (``Bits=``, written since 2026-10-14) when it has
+    one, else its identity (older runs). A model with a bit score ranks above one without,
+    so the two units are never compared. On the Candida pilot, label then bits picked the
+    model on the curated gene in 28 of 31 genome pairs with several models, label then
+    identity in 16."""
+    bits = str(rec.get("bits") or "").strip()
+    if bits:
+        return (1, _safe_float(bits))
+    return (0, _safe_float(rec.get("identity")))
+
+
 def collect_goi_annotations(gff_files):
     """Flatten every GOI mRNA across all per-locus region GFFs into structured
     records (genome, target chrom/start/end, confidence, identity, provenance).
@@ -764,7 +778,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
     multiple home loci (docs/TODO.md §1h).
 
     Key: ``(genome, target_chrom)`` plus reciprocal coordinate overlap > ``min_overlap``.
-    The kept record is the highest-confidence / highest-identity member, with a
+    The kept record is the highest-confidence member, then the one with the highest bit
+    score against the home protein (identity for models without one), with a
     ``provenance`` list of the source home loci it was recovered from. When the
     identity is bit-for-bit identical across >=2 loci (a near-certain "one gene,
     many seeds" signal) the record is reclassified ``goi_class=cross_locus_duplicate``.
@@ -805,8 +820,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                             compact["superseded_wide_model"] = True
                             cl["rep"] = compact
                     else:
-                        better = (_confidence_rank(a["confidence"]), _safe_float(a["identity"]))
-                        current = (_confidence_rank(cl["rep"]["confidence"]), _safe_float(cl["rep"]["identity"]))
+                        better = (_confidence_rank(a["confidence"]), _model_strength(a))
+                        current = (_confidence_rank(cl["rep"]["confidence"]), _model_strength(cl["rep"]))
                         if better > current:
                             cl["rep"] = a
                     placed = True
@@ -830,6 +845,9 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "end": rep["end"],
                 "confidence": rep["confidence"],
                 "identity": rep["identity"],
+                # Bit score against the home protein ("" for a model written before
+                # 2026-10-14); the member with the best label, then the best bits, is kept.
+                "bits": rep.get("bits", ""),
                 "goi_class": "cross_locus_duplicate" if is_cross_dup else rep["goi_class"],
                 "original_goi_class": rep["goi_class"],
                 "target_gene": rep["target_gene"],
@@ -852,7 +870,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "context_promoted": _order_only_label(members, rep),
             })
 
-    records.sort(key=lambda r: (-_confidence_rank(r["confidence"]), -_safe_float(r["identity"]), r["genome"], r["chrom"]))
+    records.sort(key=lambda r: (-_confidence_rank(r["confidence"]),
+                                tuple(-x for x in _model_strength(r)), r["genome"], r["chrom"]))
     return {
         "records": records,
         "high_confidence_goi_deduped": sum(1 for r in records if r["confidence"] == "HIGH"),
