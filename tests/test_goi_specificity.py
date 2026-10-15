@@ -3,9 +3,10 @@ rework (2026-10-14) does with it.
 
 bin/synvoy_specificity.py: p* (the best other home protein, exhaustive Smith-Waterman),
 the margin bits(q, x) - bits(p*, x), whether p* is a real competitor (E <= 0.01 over the
-proteome, or a home family member of q at a composition-corrected pairwise E <= 1e-3), and
-whether p* lies in the home neighbourhood of the locus. iterative_search_runner writes them
-on every kept GOI model; the window search deduplicates its hits per query (A5).
+proteome, or a home family member of q at a composition-corrected pairwise E <= 1e-3, SEG on
+both proteins), and whether p* lies in the home neighbourhood of the locus.
+iterative_search_runner writes them on every kept GOI model; the window search deduplicates
+its hits per query (A5).
 """
 import os
 import random
@@ -135,6 +136,25 @@ def test_family_test_uses_blastp_composition_statistics():
     hits = json.loads(out)["BlastOutput2"][0]["report"]["results"]["bl2seq"][0]["hits"]
     expect = min(h["evalue"] for hit in hits for h in hit["hsps"]) if hits else float("inf")
     assert spec.pairwise_evalue(a, b) == expect
+
+
+def test_a_shared_low_complexity_stretch_makes_no_family(monkeypatch):
+    """A short q with a melittin-like PEPEP repeat and a long protein with an E/P-rich
+    stretch align only there. With SEG on both proteins they are no family, in either
+    direction; with SEG off on the query they were one. A relative at 45 % identity with a
+    short repeat in both stays a family member."""
+    if not spec._blastp():
+        pytest.skip("blastp not installed")
+    q = _random(22, 100) + "AAPEPEPAPEPEAEADAEADPEAG" + _random(26, 200)
+    p = _random(140, 300) + "EPEPKSEPTPEPASEPEPQTEPKP" + _random(140, 400)
+    assert spec.pairwise_evalue(q, p) > spec.FAMILY_MEMBER_EVALUE
+    assert spec.pairwise_evalue(p, q) > spec.FAMILY_MEMBER_EVALUE
+    repeat = "EAEAEAEAEAEA"
+    relative = _mutate(Q, 0.55, 12)
+    assert spec.pairwise_evalue(Q[:110] + repeat + Q[110:],
+                                relative[:110] + repeat + relative[110:]) <= spec.FAMILY_MEMBER_EVALUE
+    monkeypatch.setattr(spec, "FAMILY_TEST_SEG", "no")
+    assert spec.pairwise_evalue(q, p) <= spec.FAMILY_MEMBER_EVALUE
 
 
 def test_family_test_without_blastp_falls_back_to_karlin_altschul(monkeypatch):

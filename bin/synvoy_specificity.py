@@ -14,8 +14,8 @@ other protein of the home genome explains it as well. Used by iterative_search_r
   margin         bits(q, x) - bits(p*, x).
   real           p* is a real competitor when it aligns to x at E <= 0.01 over the whole
   competitor     proteome, or when it is a home family member of q (q and p* align at
-                 E <= 1e-3 with composition-based statistics; see FAMILY_TEST_SEG for what
-                 that does and does not do against low-complexity repeats).
+                 E <= 1e-3 with composition-based statistics, low-complexity stretches of
+                 both masked: see FAMILY_TEST_SEG).
   neighbourhood  every protein-coding home gene on the scaffold of this home locus between
                  its outermost flanking genes, the relatives the flanking walk skipped
                  included (extract_flanking_genes.py drops genes that align to q). A p* in
@@ -45,13 +45,14 @@ GENES_FILE = "home_genes.tsv"
 
 REAL_COMPETITOR_EVALUE = 0.01   # p* aligns to x at this E over the whole home proteome
 FAMILY_MEMBER_EVALUE = 1e-3     # q and p* are one family (pairwise, composition-corrected)
-# SEG masking in the family test. The plan (2026-10-14, correction 9) asks for
-# composition-based statistics alone, "so repeats do not count". Measured the same day on the
-# honeybee proteome: melittin against its two best repeat look-alikes (PEPEP stretch, query
-# residues 21-45) gives E 5.3e-4 and 4.5e-4 with -comp_based_stats 2 -seg no (plain
-# Karlin-Altschul 8.4e-7 and 6.4e-6), still family members at 1e-3; with -seg yes 2.6 and 5.3.
-# Kept as the plan says until that is decided (tmp/label_rework_2026-10-14/STATE.md).
-FAMILY_TEST_SEG = "no"
+# SEG in the family test, so that a shared low-complexity stretch does not make two proteins
+# one family. In a pairwise blastp run (-subject), -seg masks the QUERY only; with
+# -comp_based_stats 1-3 blastp masks the SUBJECT itself whatever -seg says. With -seg no the
+# test was one-sided: melittin as the query against its two best look-alikes in the honeybee
+# proteome (the PEPEP stretch, query residues 21-45) gave blastp E 5.3e-4 and 4.5e-4, family
+# members at 1e-3, while each look-alike as the query gave blastp E 2.6 and 5.3. With -seg yes
+# both sides are masked: blastp E 2.6 and 5.3 in both directions (BLAST+ 2.16 and 2.17).
+FAMILY_TEST_SEG = "yes"
 SEED_MIN_MARGIN_BITS = 10.0     # specificity bar of a seed: margin >= 10 bits or no real competitor
 OWN_GENE_MIN_IDENTITY = 95.0    # a home protein is q itself at this identity ...
 OWN_GENE_MIN_COVERAGE = 0.9     # ... over this share of q
@@ -141,8 +142,8 @@ class HomeProteome:
 
     def family_evalue(self, q_id: str, q_seq: str, p_id: str) -> float:
         """Pairwise E-value of q and a home protein with composition-based statistics
-        (blastp -comp_based_stats 2, read at full precision from its JSON output). Plain
-        Karlin-Altschul when blastp is missing."""
+        (blastp -comp_based_stats 2 -seg yes, read at full precision from its JSON output).
+        Plain Karlin-Altschul when blastp is missing."""
         key = (q_id, p_id)
         if key not in self._family:
             self._family[key] = pairwise_evalue(q_seq, self._seq(p_id))
@@ -178,9 +179,9 @@ def _blastp() -> Optional[str]:
 
 
 def pairwise_evalue(a: str, b: str) -> float:
-    """E-value of the best alignment of two proteins, composition-corrected (blastp
-    -comp_based_stats 2, -seg no). Without blastp: Karlin-Altschul at BLAST 11/1, with a
-    warning, because that one calls low-complexity look-alikes a family."""
+    """E-value of the best alignment of two proteins, composition-corrected, with SEG on
+    both proteins (blastp -comp_based_stats 2 -seg yes). Without blastp: Karlin-Altschul at
+    BLAST 11/1, with a warning, because that one calls low-complexity look-alikes a family."""
     if not a or not b:
         return float("inf")
     blastp = _blastp()
