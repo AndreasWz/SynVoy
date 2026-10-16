@@ -133,7 +133,7 @@ and merges a hit into the previous one when both are on the same scaffold and st
 and it starts less than 1 kb after the previous one ends. A merged interval carries
 the lowest E-value and the highest bit score of its members.
 
-### 5.3 Parameter preset
+### 5.3 Parameter preset and preset modules
 
 `profile_hits.py` summarises the hits with E ≤ `search_evalue`. Hits that cover the
 same DNA are reduced to the best one (both programs report every exon). Hits with at
@@ -143,9 +143,18 @@ cover the query at most once (`one_copy_score`). A locus is *strong* when its sc
 at least half of the top locus's; `bit_ratio` is the top score divided by the second;
 `primary_copies` is the number of aligned query residues at the top locus divided by
 the query length (about 1 for one gene with any number of exons, about 2 for a tandem
-pair).
+pair). Each locus also gets its **coverage**, the share of the query covered by the
+union of its hits: `secondary_full_length` says that a strong locus other than the top
+one covers at least half of the query (a full-length relative), `shared_domain_only`
+that there are two or more strong loci and every secondary one covers less (relatives
+that share a domain). The profile carries the query's own features too
+(`query_features.py`): length, self bit score, the share of low-complexity residues
+(12-residue windows of Shannon entropy ≤ 2.2 bits, an approximation of BLAST's SEG),
+the share in repeated 4-mers, an N-terminal signal peptide (n-, h- and c-region with the
+−1/−3 rule; a heuristic, not SignalP), a C-terminal GPI-anchor signal, and cysteines.
 
-`auto_select_preset.py` → `select_preset` applies the first rule that matches:
+**The old chooser.** `auto_select_preset.py` → `select_preset` applies the first rule
+that matches:
 
 | Order | Condition | Preset |
 |---|---|---|
@@ -155,8 +164,10 @@ pair).
 | 4 | `primary_copies` ≥ 1.5 (several copies at the home locus) | `preset_tandem_family` |
 | 5 | otherwise | `preset_single_copy` |
 
-More than 5 strong loci, or more than 10 loci, add a large-family warning. The number
-of alignment rows decides nothing: a row is one exon in one search program.
+Rule 3 is in effect "at least 2 strong loci": a strong locus scores at least half of the
+top one, so the ratio of the top two is at most 2. More than 5 strong loci, or more than
+10 loci, add a large-family warning. The number of alignment rows decides nothing: a row
+is one exon in one search program.
 
 What each preset changes (`resolve_effective_params.py` → `PRESET_OVERRIDES`):
 
@@ -172,9 +183,55 @@ also lowered the identity thresholds of the earlier label (HIGH 40, MEDIUM 30, t
 copies 40) and three presets switched on a family-name gate (`strict_goi_family`); both
 went with the identity-based label.
 
-The chosen values travel to the later steps as a `settings` map of 13 parameters. A
-value the user changed at launch is kept over the preset. `--auto_apply_preset false`
-leaves the defaults in place; `--preset_override` picks a preset by hand.
+**Preset modules** (`select_modules.py`, since 2026-10-15). A gene is not one kind: it can
+be short, cysteine-rich, secreted and in a tandem array at once, and the first-match rule
+gives it one preset. A module is one kind of gene; each tests its own trigger, they
+stack, and none comes first. The triggers read the hit profile with the query features,
+the home gene model (`goi_info.json`) and the home neighbourhood (`home_context.py`:
+family members of the query among the ±`n_flanking_genes` genes next to it, tested with
+the label's family test, blastp with composition-based statistics at E ≤ 1e-3; and the
+distance to the scaffold end).
+
+| Id | Module | Trigger | What it changes (today) |
+|---|---|---|---|
+| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`) |
+| A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
+| A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
+| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`) |
+| B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | nothing yet (a flag) |
+| B3 | `signal_anchor` | a signal peptide or a GPI tail | nothing yet (a flag) |
+| B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
+| C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | nothing (advisory) |
+| C2 | `home_context` | the home gene < 40 kb from the end of a scaffold of ≥ 1 Mb | nothing (advisory) |
+
+The thresholds marked as triggers are today's values or assumed, never tuned. Rules that
+hold for every module:
+
+- **A module never moves the label.** It may widen the search, tighten the inputs of the
+  specificity test, change how completeness is measured, or add report labels; the
+  judge's significance levels (§7.8) are constants, not parameters.
+- **Every key belongs to a class with a merge rule** (`KEY_CLASS`), so the order of the
+  modules never matters: the anchor filter `goi_relative_evalue` takes the largest E (it
+  keeps the most relatives out of the anchors); the region caps and the model-status
+  bounds may be written by one module only. `n_flanking_genes` and `expand_goi_similar`
+  are forbidden to modules.
+- **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
+  under `legacy`, or `--preset_override` in any mode) < a value the user set at launch
+  (a `-profile preset_X` included) < `--user_override`.
+
+`--modules` selects the mode: `legacy` (**the default** until each module is measured)
+applies the chooser's preset exactly as before and only records which triggers fire;
+`auto` applies every module whose trigger fires; `none` applies nothing; a list
+(`short_query,local_family`) applies exactly those modules; deltas
+(`auto,-dispersed_family,+cys_framework`) edit `auto`. The old preset names are the
+module sets {B1}, {A1}, {A2} and {}, with the same values.
+
+The chosen values travel to the later steps as a `settings` map of 13 parameters
+(`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
+preset or a module. `--auto_apply_preset false` leaves the defaults in place;
+`--preset_override` picks a preset by hand. `effective_params.json` records the mode,
+the modules applied and why, the triggers that fire, the source of every value and the
+features; the report copies it as `run_settings`.
 
 ### 5.4 Splitting into home loci
 

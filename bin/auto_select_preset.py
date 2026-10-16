@@ -8,7 +8,10 @@ parameters. Decision policy (first match wins):
   query_len < short_peptide_max          -> preset_short_peptide
   n_strong_loci >= 2  and  bit_ratio < single_copy_min_ratio
                                           -> preset_paralog_discrimination
-                                             (relatives at other places of the genome)
+                                             (relatives at other places of the genome;
+                                             a strong locus scores >= half of the top one,
+                                             so the ratio is <= 2 and the rule is in
+                                             effect n_strong_loci >= 2)
   primary_copies >= tandem_min_copies    -> preset_tandem_family
                                              (several copies next to each other)
   otherwise                               -> preset_single_copy
@@ -23,7 +26,9 @@ never recognised because all its copies fall into one locus. Xaver's luciferase 
 (50 loci, four of them strong) still lands on preset_paralog_discrimination + WARN.
 
 Prints the chosen preset + reasoning; the workflow can echo this and let the user
-override with --preset_override <profile>.
+override with --preset_override <profile>. Under --modules legacy (the default) this
+choice is the run's preset; under --modules auto the preset modules
+(select_modules.py) decide instead and this choice is only recorded.
 """
 
 import argparse

@@ -38,6 +38,7 @@ workflow ADJUDICATE_AND_REPORT {
     qc_summary          // genome QC summary JSON
     goi_for_tree        // ITERATIVE_SEARCH.out.goi_for_tree (locus_id, faa) — F9 input
     sorted_genomes      // value channel: PHYLO_SORT sorted_genomes.txt (species distances)
+    effective_params    // value channel: effective_params.json (RESOLVE_SETTINGS) -> run_settings
 
     main:
 
@@ -231,7 +232,8 @@ workflow ADJUDICATE_AND_REPORT {
         params.qc_fail_policy,
         collected_locus_ownership,
         collected_panel_meta,
-        collected_phylo
+        collected_phylo,
+        effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS"))
     )
 
     emit:

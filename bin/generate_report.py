@@ -1870,6 +1870,33 @@ def format_empty_staging_message(diagnostics):
     return "\n".join(lines)
 
 
+RUN_SETTINGS_KEYS = ("modules_mode", "modules_applied", "modules_would_fire", "preset_applied",
+                     "apply_reason", "legacy_preset", "user_set_kept", "settings", "source",
+                     "features")
+
+
+def load_run_settings(path):
+    """What decided the run's settings (effective_params.json of RESOLVE_EFFECTIVE_PARAMS):
+    the preset or the preset modules that were applied and why, the triggers that fire, the
+    resulting settings and the features the triggers read. None without the file (or for a
+    sentinel)."""
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return None
+    try:
+        with open(path) as fh:
+            text = fh.read().strip()
+        if not text or text.lower().startswith("sentinel"):
+            return None
+        data = json.loads(text)
+    except (OSError, ValueError):
+        return None
+    out = {k: data.get(k) for k in RUN_SETTINGS_KEYS}
+    out["modules_mode"] = out["modules_mode"] or "legacy"
+    out["modules_applied"] = out["modules_applied"] or []
+    out["modules_would_fire"] = out["modules_would_fire"] or []
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate SynVoy final evidence report")
     parser.add_argument("--results_dir", required=True)
@@ -1911,6 +1938,11 @@ def main():
         help="Query coverage below which a high-identity GOI call is demoted.",
     )
     parser.add_argument(
+        "--effective_params", default=None,
+        help="effective_params.json of RESOLVE_EFFECTIVE_PARAMS, written into the report as "
+             "run_settings: which preset or preset modules ran, why, and on which features.",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -1929,6 +1961,7 @@ def main():
         identity_decoupled_min_identity=args.identity_decoupled_min_identity,
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
     )
+    report["run_settings"] = load_run_settings(args.effective_params)
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)
     print(f"Report generated: {args.output}")

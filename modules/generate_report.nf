@@ -18,6 +18,7 @@ process GENERATE_REPORT {
     path locus_ownership_files, stageAs: 'locus_ownership/?/*'  // §1m
     path panel_meta            // §1m panel sidecar — single file or sentinel
     path phylo_placement_files, stageAs: 'phylo_placement/?/*'  // F9
+    path effective_params      // RESOLVE_EFFECTIVE_PARAMS output, or a sentinel -> run_settings
 
     output:
     path "synvoy_report.json", emit: report
@@ -99,6 +100,7 @@ process GENERATE_REPORT {
         ${params.disable_coverage_demotion.toString().toBoolean() ? '--disable_coverage_demotion' : ''} \\
         --phylo_placement_dir staged_results/phylo_placement \\
         ${params.phylo_placement_promote.toString().toBoolean() ? '--phylo_placement_promote' : ''} \\
+        --effective_params ${effective_params} \\
         --output synvoy_report.json
     """
 }

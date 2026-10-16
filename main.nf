@@ -26,7 +26,7 @@ include { ADJUDICATE_AND_REPORT } from './subworkflows/adjudicate_and_report.nf'
 // 4 aliases so each per-locus file type (gff / faa / homology.tsv / scores.tsv) gets
 // its own STAGE_REGION_FOR_REPORT instance — each prefixes basenames with the locus_id
 // before they reach GENERATE_REPORT's flat-cp staging (docs/TODO.md §1h + follow-up).
-include { RESOLVE_EFFECTIVE_PARAMS } from './modules/resolve_effective_params.nf'
+include { RESOLVE_SETTINGS } from './subworkflows/resolve_settings.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
@@ -257,6 +257,62 @@ def removedParams() {
     ]
 }
 
+// The params a preset or a preset module may set (bin/resolve_effective_params.py). They
+// reach EXTRACT_FLANKING / ITERATIVE_SEARCH / CLUSTER_REGIONS through the `settings` map of
+// RESOLVE_SETTINGS (subworkflows/resolve_settings.nf), never as ${params.x}: a key read as
+// a param there would win over the module. A key a module writes is listed here.
+def presetDefaultKeys() {
+    return [
+        'sw_min_score', 'sw_min_identity',
+        'min_hit_identity', 'min_hit_length',
+        'classify_fragment_max_qcov', 'classify_complete_min_qcov',
+        'expand_goi_similar', 'goi_family_tokens',
+        'goi_relative_evalue',
+        'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
+        'adaptive_max_regions', 'adaptive_unique_gene_floor',
+    ]
+}
+
+// The preset modules by id (bin/select_modules.py, MODULES; tests/test_modules.py keeps
+// the two lists equal). --modules is checked against them before any task starts.
+def presetModules() {
+    return [A1: 'local_family', A2: 'dispersed_family', A3: 'shared_domain',
+            B1: 'short_query', B2: 'low_complexity', B3: 'signal_anchor', B4: 'cys_framework',
+            C1: 'exon_structure', C2: 'home_context']
+}
+
+// --modules as text (default 'legacy', see nextflow.config).
+def modulesSpec() {
+    return (params.modules == null ? 'legacy' : params.modules).toString().trim()
+}
+
+def checkModulesSpec(validationErrors) {
+    def text = modulesSpec()
+    if (params.modules instanceof Boolean || text.toLowerCase() in ['true', 'false']) {
+        validationErrors << "--modules got a boolean (${params.modules}): write the value in quotes, e.g. --modules 'auto,-dispersed_family' (Nextflow reads a bare -x as true)."
+        return
+    }
+    def parts = text.split(',').collect { p -> p.trim() }.findAll { p -> p }
+    if (!parts) {
+        return
+    }
+    def base = parts[0].toLowerCase()
+    def rest = base in ['legacy', 'auto', 'none'] ? parts.drop(1) : parts
+    if (base == 'legacy' && rest) {
+        validationErrors << "--modules legacy takes no module list (it applies the old preset)."
+        return
+    }
+    def known = presetModules().collectMany { id, name -> [id.toLowerCase(), name] } as Set
+    rest.each { p ->
+        def name = p.replaceFirst(/^[+-]/, '').toLowerCase()
+        if (!(name in known)) {
+            validationErrors << "--modules: unknown preset module '${p}' (known: ${presetModules().collect { id, n -> "${n} (${id})" }.join(', ')})."
+        } else if (p.startsWith('-') && base != 'auto') {
+            validationErrors << "--modules: '${p}' removes a module, which only follows 'auto'."
+        }
+    }
+}
+
 // A distance that is derived unless a number fixes it: 'auto' or a number >= 0.
 def checkAutoDistance(String name, validationErrors) {
     def text = (params[name] == null ? 'auto' : params[name]).toString().trim().toLowerCase()
@@ -329,6 +385,7 @@ def validateNumericParams(validationErrors, validationWarnings) {
             validationWarnings << "--${name} no longer exists. It had no effect${note}; remove it from the command line or config."
         }
     }
+    checkModulesSpec(validationErrors)
     if (!(params.home_locus_mode in ['auto', 'gene_only', 'alignment'])) {
         validationErrors << "Invalid --home_locus_mode '${params.home_locus_mode}'. Must be 'auto', 'gene_only' or 'alignment'."
     }
@@ -1072,43 +1129,6 @@ workflow {
         }
     }
 
-    // 4a-bis. §1f: resolve preset-affected params at runtime. LOCATE_GENE's
-    // advisory auto_preset.json (or params.preset_override) → effective_params.json,
-    // exposed downstream as `val settings` so the chosen preset actually takes
-    // effect in EXTRACT_FLANKING / ITERATIVE_SEARCH / CLUSTER_REGIONS without a
-    // pipeline restart. Defaults flow through unchanged when auto_apply_preset=false.
-    def preset_default_keys = [
-        'sw_min_score','sw_min_identity',
-        'min_hit_identity','min_hit_length',
-        'classify_fragment_max_qcov','classify_complete_min_qcov',
-        'expand_goi_similar','goi_family_tokens',
-        'goi_relative_evalue',
-        'adaptive_score_floor_frac','adaptive_score_floor_abs',
-        'adaptive_max_regions','adaptive_unique_gene_floor',
-    ]
-    def preset_defaults_map = preset_default_keys.collectEntries { k -> [(k): params[k]] }
-    def preset_defaults_json = groovy.json.JsonOutput.toJson(preset_defaults_map)
-
-    auto_preset_ch = LOCATE_GENE.out.auto_preset
-        .ifEmpty(file("${projectDir}/assets/sentinels/NO_AUTO_PRESET"))
-
-    RESOLVE_EFFECTIVE_PARAMS(
-        auto_preset_ch,
-        preset_defaults_json,
-        params.preset_override ?: '',
-        !paramBool(params.auto_apply_preset)
-    )
-
-    effective_settings_ch = RESOLVE_EFFECTIVE_PARAMS.out.json
-        .map { f ->
-            def parsed = new groovy.json.JsonSlurper().parse(f)
-            def s = parsed.settings as Map
-            // Surface the chosen preset in the console banner for auditability.
-            log.info "[INFO] §1f preset applied: ${parsed.preset_applied ?: 'none'} (${parsed.apply_reason})"
-            s
-        }
-        .first()
-
     // 4b. ANNOTATE GOI EXONS
     // Uses hits from LOCATE_GENE to annotate individual exons of the GOI
     // If GFF available: matches GOI to annotated gene and extracts CDS/exons
@@ -1131,6 +1151,13 @@ workflow {
     ANNOTATE_GOI.out.info.view { info ->
         "${c.green}[OK  ]${c.reset} ${c.white}${'ANNOTATE_GOI'.padRight(24)}${c.reset} GOI exon annotation complete"
     }
+
+    // 4c. Settings of the run: the preset or the preset modules (§1f; subworkflows/resolve_settings.nf).
+    RESOLVE_SETTINGS(normalized_gene_ready_ch.first(), home_genome_ch, home_gff_ch,
+        ANNOTATE_GOI.out.bed, ANNOTATE_GOI.out.info, LOCATE_GENE.out.hit_profile, LOCATE_GENE.out.auto_preset,
+        groovy.json.JsonOutput.toJson(presetDefaultKeys().collectEntries { k -> [(k): params[k]] }),
+        params.preset_override ?: '', !paramBool(params.auto_apply_preset), modulesSpec())
+    effective_settings_ch = RESOLVE_SETTINGS.out.settings
     
     // 5. SPLIT LOCI. The annotated home gene that matches the query is the primary
     // locus (home_locus_mode); further loci are other places where the query aligns well.
@@ -1513,7 +1540,8 @@ workflow {
             SPLIT_LOCI.out.beds,
             qc_summary_ch,
             ITERATIVE_SEARCH.out.goi_for_tree,
-            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first()
+            FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first(),
+            RESOLVE_SETTINGS.out.json
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

@@ -243,6 +243,7 @@ terms were redefined then.
 | `regions`, `synteny_results` | Region statistics per genome |
 | `warnings` | Sentences to read before any number: a target genome that failed the assembly quality check and was searched anyway (a genome you chose is kept, see `qc_fail_policy`). Empty on a clean run. Such a genome is also in `summary.low_quality_genomes_searched`, its calls carry `low_quality_assembly: true`, and its row has a dagger (†) in the figures |
 | `genome_qc`, `qc_summary` | Assembly quality of each target |
+| `run_settings` | What decided the run's settings (from `effective_params.json`): `modules_mode` (`--modules`), `modules_applied` and `modules_would_fire` (preset modules with the reason each fired), `preset_applied` and `apply_reason`, the chooser's `legacy_preset`, `settings` and `source` (per parameter: default, `module:<id>`, `preset:<name>`, `user_set`), `user_set_kept`, and the `features` the triggers read (query features, home loci, home neighbourhood). `null` when the file is missing |
 | `staging_diagnostics` | Plumbing diagnostics — useful when something looks wrong |
 
 The fields of `summary` worth reading:
@@ -421,7 +422,7 @@ threshold) is the false-call rate of that rule on this data.
 | Directory | Contents |
 |---|---|
 | `query/` | `normalized_query.faa` — the cleaned query (translated if the input was DNA; only the first record of a multi-sequence file) |
-| `locate_gene/` | The query's hits on the home genome, `hit_profile.json`, `auto_preset.json`, `effective_params.json` |
+| `locate_gene/` | The query's hits on the home genome, `hit_profile.json`, `auto_preset.json`, `home_context.json`, `effective_params.json` |
 | `split_loci/` | One BED per home locus (the annotated home gene is the first one; `--home_locus_mode`) |
 | `flanking/` | The flanking genes of each home locus (`synteny_block_locus_<N>.bed`, proteins) |
 | `annotate_goi/` | The GOI's exon structure on the home genome (`goi_exons.faa`, `goi_annotation.bed`, `goi_info.json`) |
@@ -435,8 +436,9 @@ Two files are worth knowing on a healthy run:
 
 | File | Why |
 |---|---|
-| `locate_gene/hit_profile.json` | The hit distribution SynVoy read off the home genome — how many loci, how strong. |
-| `locate_gene/effective_params.json` | Which preset was applied and the parameter values the search actually ran with. `source` says, per parameter, whether a value is the default, a preset's, or yours (`user_set`); `user_set_kept` lists values of yours that were kept although the preset wanted something else. Look here first when a parameter seems ignored. |
+| `locate_gene/hit_profile.json` | The hit distribution SynVoy read off the home genome — how many loci, how strong, how much of the query each locus covers — and the query's own features (`query_features`: length, low complexity, signal peptide, GPI tail, cysteines). |
+| `locate_gene/home_context.json` | The home gene's neighbourhood: family members of the query among the genes next to it (`relatives_nearby`, tested with the label's family test), and its distance to the scaffold end. |
+| `locate_gene/effective_params.json` | Which preset or preset modules were applied and the parameter values the search actually ran with. `source` says, per parameter, whether a value is the default, a module's (`module:A1`), a preset's, or yours (`user_set`); `user_set_kept` lists values of yours that were kept although a preset or module wanted something else; `modules_would_fire` lists every module whose trigger fires, also under `--modules legacy`. Look here first when a parameter seems ignored. |
 
 `qc/genome_qc_summary.json` (top level) has the assembly statistics of each target.
 `logs/<PROCESS>__<tag>___<output>/` holds `stdout.log`, `stderr.log` and `script.sh`

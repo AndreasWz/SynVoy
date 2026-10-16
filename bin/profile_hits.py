@@ -23,6 +23,14 @@ Metrics emitted:
                        aligned query residues of its hits / query length. About 1 for
                        one gene, whatever its number of exons; about 2 for a tandem pair.
   identity_{min,q1,median,q3,max}, identity_iqr   percent-identity spread of the HSPs
+  loci                 the 10 strongest loci: chrom, start, end, bit, qcov (the share of the
+                       query covered by the UNION of the locus's hits)
+  secondary_full_length  a strong locus other than the top one covers >= 0.5 of the query
+                       (a full-length relative elsewhere in the genome)
+  shared_domain_only   two or more strong loci, but every strong secondary one covers < 0.5
+                       of the query (relatives share a domain only)
+  query_features       the query's own features (query_features.py): length, self bits,
+                       low complexity, repeats, signal peptide, GPI tail, cysteines
 
 The score of a locus is the score of one copy of the gene there: the best total bit
 score of hits that cover the query at most once (sequence_utils.one_copy_score), after
@@ -41,8 +49,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from query_features import first_sequence, query_features  # noqa: E402
 from sequence_utils import one_copy_score  # noqa: E402
 from synvoy_scale import FALLBACK_LOCUS_GAP_BP, genes_between, load_gene_spans  # noqa: E402
+
+SECONDARY_FULL_QCOV = 0.5      # a secondary locus covering this share of the query is a full-length relative
+TOP_LOCI_REPORTED = 10
 
 
 def _read_query_len(query_fasta):
@@ -115,6 +127,21 @@ def nonredundant(hits):
     return kept
 
 
+def _union_length(intervals):
+    """Residues covered by the union of closed intervals [a, b]."""
+    total, cur_s, cur_e = 0, None, None
+    for a, b in sorted(intervals):
+        if cur_e is None or a > cur_e + 1:
+            if cur_e is not None:
+                total += cur_e - cur_s + 1
+            cur_s, cur_e = a, b
+        else:
+            cur_e = max(cur_e, b)
+    if cur_e is not None:
+        total += cur_e - cur_s + 1
+    return total
+
+
 def _cluster_loci(hits, window, gene_spans=None, gap_genes=5):
     """Merge HSPs into independent loci of the home genome.
 
@@ -123,7 +150,9 @@ def _cluster_loci(hits, window, gene_spans=None, gap_genes=5):
     sequence without annotated genes when they are at most ``window`` bp apart. With
     ``window`` given and ``gene_spans`` None the distance decides everywhere.
     Returns the loci, strongest first: ``{'bit': score of one copy of the gene there,
-    'aligned': aligned query residues of all hits}`` each. Expects non-redundant hits."""
+    'aligned': aligned query residues of all hits (a copy number), 'qres': query residues
+    covered by the union of the hits (a coverage), 'start'/'end': the locus's span}``
+    each. Expects non-redundant hits."""
     def same_locus(locus, h):
         if locus["chrom"] != h["chrom"]:
             return False
@@ -140,10 +169,12 @@ def _cluster_loci(hits, window, gene_spans=None, gap_genes=5):
             loci[-1]["hits"].append(h)
             loci[-1]["aligned"] += aligned
         else:
-            loci.append({"chrom": h["chrom"], "end": h["tend"], "hits": [h], "aligned": aligned})
+            loci.append({"chrom": h["chrom"], "start": h["tstart"], "end": h["tend"], "hits": [h],
+                         "aligned": aligned})
     for locus in loci:
+        locus["qres"] = _union_length([(h["qstart"], h["qend"]) for h in locus["hits"]])
         locus["bit"] = one_copy_score(locus.pop("hits"))
-    return sorted(loci, key=lambda l: -l["bit"])
+    return sorted(loci, key=lambda l: (-l["bit"], l["chrom"], l["start"]))
 
 
 def _quantile(sorted_vals, q):
@@ -158,10 +189,12 @@ def _quantile(sorted_vals, q):
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
-def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_spans=None, gap_genes=5):
+def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_spans=None, gap_genes=5,
+                  query_seq=None):
     n_raw = len(hits)
     if max_evalue is not None:
         hits = [h for h in hits if h.get("evalue", 0.0) <= max_evalue]
+    feats = query_features(query_seq) if query_seq else None
     if not hits:
         return {
             "query_len": query_len, "n_hits": 0, "n_hits_raw": n_raw, "n_independent_loci": 0,
@@ -169,6 +202,8 @@ def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_sp
             "bit_ratio": None, "primary_copies": None, "identity_min": None,
             "identity_q1": None, "identity_median": None, "identity_q3": None,
             "identity_max": None, "identity_iqr": None,
+            "loci": [], "secondary_full_length": False, "shared_domain_only": False,
+            "query_features": feats,
         }
 
     if query_len is None:
@@ -180,6 +215,10 @@ def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_sp
     bit_ratio = (top_bit / second_bit) if second_bit else None
     n_strong = sum(1 for l in loci if l["bit"] >= strong_frac * top_bit)
     primary_copies = loci[0]["aligned"] / query_len if query_len else None
+    for locus in loci:
+        locus["qcov"] = min(1.0, locus["qres"] / query_len) if query_len else None
+    strong_secondary = [l for l in loci[1:] if l["bit"] >= strong_frac * top_bit]
+    secondary_full = any((l["qcov"] or 0.0) >= SECONDARY_FULL_QCOV for l in strong_secondary)
 
     idents = sorted(h["pident"] for h in hits)
     q1 = _quantile(idents, 0.25)
@@ -201,6 +240,13 @@ def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_sp
         "identity_q3": round(q3, 1),
         "identity_max": round(idents[-1], 1),
         "identity_iqr": round(q3 - q1, 1),
+        "loci": [{"chrom": l["chrom"], "start": l["start"], "end": l["end"],
+                  "bit": round(l["bit"], 1),
+                  "qcov": round(l["qcov"], 3) if l["qcov"] is not None else None}
+                 for l in loci[:TOP_LOCI_REPORTED]],
+        "secondary_full_length": secondary_full,
+        "shared_domain_only": n_strong >= 2 and not secondary_full,
+        "query_features": feats,
     }
 
 
@@ -230,10 +276,11 @@ def main():
     gap_text = str(args.locus_gap).strip().lower()
     gap_bp = None if gap_text in ("auto", "") else int(float(gap_text))
     gene_spans = None if gap_bp is not None else load_gene_spans(args.gff, {h["chrom"] for h in hits})
+    query_seq = first_sequence(args.query) if args.query and os.path.exists(args.query) else None
     profile = build_profile(hits, _read_query_len(args.query),
                             gap_bp if gap_bp is not None else FALLBACK_LOCUS_GAP_BP, args.strong_frac,
                             max_evalue=args.max_evalue, gene_spans=gene_spans,
-                            gap_genes=args.locus_gap_genes)
+                            gap_genes=args.locus_gap_genes, query_seq=query_seq)
     profile["locus_unit"] = ("bp" if gap_bp is not None else
                              "genes" if gene_spans else "bp (no annotation)")
     with open(args.output, "w") as fh:

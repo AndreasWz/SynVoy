@@ -204,11 +204,16 @@ def test_boolean_params_are_never_tested_by_raw_truthiness():
         ".toString().toBoolean() elsewhere):\n  " + "\n  ".join(offenders))
 
 
-def test_settings_keys_read_by_modules_are_provided_by_main_nf():
+def _preset_default_keys() -> set[str]:
+    """The keys main.nf feeds the settings map (top-level presetDefaultKeys())."""
     main = (ROOT / "main.nf").read_text()
-    m = re.search(r"def preset_default_keys = \[(.*?)\]", main, re.S)
-    assert m
-    provided = set(re.findall(r"'([a-z_]+)'", m.group(1)))
+    m = re.search(r"def presetDefaultKeys\(\) \{\s*return \[(.*?)\]", main, re.S)
+    assert m, "main.nf no longer defines presetDefaultKeys()"
+    return set(re.findall(r"'([a-z_]+)'", m.group(1)))
+
+
+def test_settings_keys_read_by_modules_are_provided_by_main_nf():
+    provided = _preset_default_keys()
     read = {}
     for nf in NF_FILES:
         for n, line in enumerate(_code(nf), 1):
@@ -277,6 +282,9 @@ SCRIPTS_WITH_OPTIONS = {
     "build_home_paralog_panel.py": (),
     "generate_report.py": (),
     "resolve_effective_params.py": (),
+    "query_features.py": (),
+    "home_context.py": (),
+    "select_modules.py": (),
 }
 
 

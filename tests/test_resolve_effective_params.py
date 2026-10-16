@@ -273,11 +273,11 @@ def test_preset_overrides_match_groovy_configs():
 # shipped in nextflow.config.
 # ──────────────────────────────────────────────────────────────────────
 
-# Must list exactly the keys main.nf feeds the resolver (preset_default_keys).
+# Must list exactly the keys main.nf feeds the resolver (presetDefaultKeys()).
 def _preset_default_keys_from_main_nf() -> list[str]:
     text = (ROOT / "main.nf").read_text()
-    m = re.search(r"def preset_default_keys = \[(.*?)\]", text, re.S)
-    assert m, "main.nf no longer defines preset_default_keys"
+    m = re.search(r"def presetDefaultKeys\(\) \{\s*return \[(.*?)\]", text, re.S)
+    assert m, "main.nf no longer defines presetDefaultKeys()"
     return re.findall(r"'([a-z_]+)'", m.group(1))
 
 

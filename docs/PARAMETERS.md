@@ -25,6 +25,8 @@ Until 2026-10-09 `preset_short_peptide` also lowered four hit floors (`sw_min_sc
 
 To pin one by hand: `-profile <execution>,preset_short_peptide` (at launch) or `--preset_override preset_short_peptide`.
 
+**Preset modules** (`--modules`, since 2026-10-15) are the successor of the four presets: every kind of gene (short, low complexity, signal peptide, family members next to it, a full-length relative elsewhere, …) is a module that tests its own trigger, and they stack. The default `--modules legacy` keeps the chooser and its preset exactly as above and only records which modules would fire; see [`modules`](#modules).
+
 `<execution>` is one of `auto`, `standard`, `conda`, `docker`, `docker_max`, `singularity`,
 `slurm`, `hpc_singularity`, `hpc_conda`, `lrz_ai`, `lrz_ai_container` — see
 [USAGE.md § 2](USAGE.md#2-execution-profiles) for the full table. A memory tier
@@ -870,7 +872,22 @@ When true (default), the preset chosen from the LOCATE_GENE hit profile is appli
 ### `preset_override`
 **Type:** String | **Default:** `''` (empty — let auto-detection choose)
 
-Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution.
+Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution. Under `--modules auto` (or a list) a pinned preset is applied on top of the modules.
+
+### `modules`
+**Type:** String | **Default:** `'legacy'`
+
+Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-parameter-preset-and-preset-modules)). Instead of one preset chosen by the first matching rule, each kind of gene is a module that tests its own trigger: `local_family` (A1), `dispersed_family` (A2), `shared_domain` (A3), `short_query` (B1), `low_complexity` (B2), `signal_anchor` (B3), `cys_framework` (B4), `exon_structure` (C1), `home_context` (C2). Modules stack, merge by fixed rules (their order never matters), and never move the label of a call.
+
+| Value | Meaning |
+|---|---|
+| `legacy` | the default until each module has been measured: the chooser's preset is applied exactly as before; the triggers are evaluated and recorded only (`effective_params.json` → `modules_would_fire`, report `run_settings`) |
+| `auto` | every module whose trigger fires |
+| `none` | no preset and no module: the defaults |
+| `short_query,local_family` | exactly these modules, whether their trigger fires or not (names or ids, e.g. `B1,A1`) |
+| `auto,-dispersed_family,+cys_framework` | `auto` without one module and with another |
+
+Put a value that contains a minus sign in quotes: `--modules 'auto,-dispersed_family'`. A value you set yourself for any of the settings keys wins over every module. Unknown names stop the run at the start. The console shows the modules after `[INFO] modules (...)`; `intermediate/locate_gene/home_context.json` holds the home neighbourhood the triggers read.
 
 ### `allow_unknown_species`
 **Type:** Boolean | **Default:** `false`

@@ -17,9 +17,15 @@ diffs them and fails CI on drift.
 
 Resolution order (later wins):
   1. defaults from --defaults <json>          (passed in from nextflow.config params)
-  2. preset overrides from PRESET_OVERRIDES[preset]
-  3. values the user set themselves           (detected via --shipped_config)
-  4. --user_override KEY=VAL                  (explicit, for callers that know)
+  2. preset modules (--modules auto or a list; select_modules.py), merged by key class
+  3. preset overrides from PRESET_OVERRIDES[preset]: the chooser's preset under
+     --modules legacy (the default), or --preset_override in any mode
+  4. values the user set themselves           (detected via --shipped_config)
+  5. --user_override KEY=VAL                  (explicit, for callers that know)
+
+Under --modules legacy the module triggers are evaluated and recorded only
+(modules_would_fire); the preset is applied exactly as before the modules existed, and
+its nominal module set is listed in modules_applied (reason "legacy: <preset>").
 
 Step 3 exists because the --defaults map is the launch-time ``params``: it
 already contains whatever the user passed on the command line, in a params
@@ -41,6 +47,12 @@ import json
 import os
 import re
 import sys
+
+try:
+    import select_modules
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import select_modules
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -161,21 +173,37 @@ def detect_user_set(defaults: dict, shipped: dict) -> dict:
 def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = "",
             disable_auto_apply: bool = False,
             user_overrides: dict | None = None,
-            user_set: dict | None = None) -> dict:
-    """Apply the resolution order (defaults < preset < user-set < user CLI) and
+            user_set: dict | None = None,
+            modules_spec: object = "legacy",
+            features: dict | None = None) -> dict:
+    """Apply the resolution order (defaults < modules < preset < user-set < user CLI) and
     return a flat ``{settings: ..., preset_applied: ..., source: ...}`` result.
 
-    ``source`` is a per-key trace: ``default`` | ``preset:<name>`` | ``user_set`` |
-    ``user_cli``. ``user_set_kept`` lists the keys where a value the user set was
-    kept although the applied preset wanted a different one."""
+    ``source`` is a per-key trace: ``default`` | ``module:<ids>`` | ``preset:<name>`` |
+    ``user_set`` | ``user_cli``. ``user_set_kept`` lists the keys where a value the user
+    set was kept although a module or the applied preset wanted a different one.
+    ``modules_spec`` is the --modules value (ValueError when it is not one); ``features``
+    the flat dict of select_modules.flat_features."""
     settings = dict(defaults)
     source = {k: "default" for k in defaults}
     preset_applied: str | None = None
     apply_reason = ""
+    feats = features or {}
+    mode, chosen, fired = select_modules.choose(modules_spec, feats)
+    modules_applied: list = []
+    wanted: dict = {}
 
     if disable_auto_apply:
         apply_reason = "auto_apply_preset=false → defaults flow through"
     else:
+        if mode in ("auto", "list") and chosen:
+            by_id = {m.id: m for m in select_modules.MODULES}
+            mod_settings, mod_source = select_modules.merge([by_id[d["id"]] for d in chosen], feats)
+            for k, v in mod_settings.items():
+                source[k] = mod_source[k] if k in settings else mod_source[k] + "(new)"
+                settings[k] = v
+                wanted[k] = v
+            modules_applied = chosen
         if preset_override:
             if preset_override not in VALID_PRESETS:
                 # Loud failure mode: a user-pinned override that doesn't exist is
@@ -187,13 +215,16 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             else:
                 preset_applied = preset_override
                 apply_reason = f"user pinned preset_override={preset_override}"
+        elif mode != "legacy":
+            apply_reason = (f"modules {mode}: "
+                            + (", ".join(f"{d['id']} {d['name']}" for d in chosen) or "none"))
         elif auto_preset:
-            chosen = (auto_preset.get("preset") or "").strip()
-            if chosen in VALID_PRESETS:
-                preset_applied = chosen
-                apply_reason = f"auto_preset.json chose {chosen}"
-            elif chosen:
-                apply_reason = f"auto_preset.json's preset='{chosen}' is unknown — defaults applied"
+            chosen_preset = (auto_preset.get("preset") or "").strip()
+            if chosen_preset in VALID_PRESETS:
+                preset_applied = chosen_preset
+                apply_reason = f"auto_preset.json chose {chosen_preset}"
+            elif chosen_preset:
+                apply_reason = f"auto_preset.json's preset='{chosen_preset}' is unknown — defaults applied"
             else:
                 apply_reason = "auto_preset.json had no preset field — defaults applied"
         else:
@@ -209,13 +240,17 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             else:
                 source[k] = f"preset:{preset_applied}"
             settings[k] = v
+            wanted[k] = v
+        if mode == "legacy":
+            by_id = {m.id: m for m in select_modules.MODULES}
+            modules_applied = [{"id": i, "name": by_id[i].name, "reason": f"legacy: {preset_applied}"}
+                               for i in select_modules.LEGACY_ALIAS.get(preset_applied, ())]
 
     user_set_kept = []
     if user_set:
         for k in sorted(user_set):
             v = user_set[k]
-            if preset_applied and k in PRESET_OVERRIDES[preset_applied] \
-                    and _norm(PRESET_OVERRIDES[preset_applied][k]) != _norm(v):
+            if k in wanted and _norm(wanted[k]) != _norm(v):
                 user_set_kept.append(k)
             settings[k] = v
             source[k] = "user_set"
@@ -225,12 +260,18 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             settings[k] = v
             source[k] = "user_cli"
 
+    legacy_pick = (auto_preset or {}).get("preset") if isinstance(auto_preset, dict) else None
     return {
         "preset_applied": preset_applied,
         "apply_reason": apply_reason,
         "settings": settings,
         "source": source,
         "user_set_kept": user_set_kept,
+        "modules_mode": mode,
+        "modules_applied": modules_applied,
+        "modules_would_fire": fired,
+        "legacy_preset": legacy_pick,
+        "features": feats,
     }
 
 
@@ -270,6 +311,16 @@ def main() -> None:
                          "differs from the default declared there was set by the user "
                          "and is kept over the preset. Omit for the old behaviour "
                          "(a preset overrides every key it names).")
+    ap.add_argument("--hit_profile", default="",
+                    help="hit_profile.json of LOCATE_GENE (with query_features); a sentinel or "
+                         "missing file = no hit features")
+    ap.add_argument("--goi_info", default="", help="goi_info.json of ANNOTATE_GOI")
+    ap.add_argument("--home_context", default="",
+                    help="home_context.json of HOME_CONTEXT (a sentinel or missing file = none)")
+    ap.add_argument("--modules", default="legacy",
+                    help="Preset modules: legacy (default: the old preset, triggers recorded "
+                         "only), auto, none, a list (short_query,local_family) or deltas "
+                         "(auto,-dispersed_family). See select_modules.py")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -317,23 +368,36 @@ def main() -> None:
                   f"from defaults, so a preset may override them", file=sys.stderr)
         user_set = detect_user_set(defaults, shipped)
 
-    result = resolve(
-        defaults,
-        auto_preset=auto_preset,
-        preset_override=args.preset_override,
-        disable_auto_apply=args.disable_auto_apply,
-        user_overrides=user_overrides,
-        user_set=user_set,
-    )
+    features = select_modules.flat_features(_read_json_or_empty(args.hit_profile),
+                                            _read_json_or_empty(args.goi_info),
+                                            _read_json_or_empty(args.home_context))
+    try:
+        result = resolve(
+            defaults,
+            auto_preset=auto_preset,
+            preset_override=args.preset_override,
+            disable_auto_apply=args.disable_auto_apply,
+            user_overrides=user_overrides,
+            user_set=user_set,
+            modules_spec=args.modules,
+            features=features,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     with open(args.output, "w") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
 
     print(f"EFFECTIVE-PRESET: {result['preset_applied']} ({result['apply_reason']})")
+    applied = ", ".join(f"{d['id']} {d['name']} ({d['reason']})" for d in result["modules_applied"])
+    fired = ", ".join(f"{d['id']} {d['name']} ({d['reason']})" for d in result["modules_would_fire"])
+    print(f"MODULES: mode {result['modules_mode']}; applied: {applied or 'none'}; "
+          f"triggers firing: {fired or 'none'}")
     if result["user_set_kept"]:
         kept = ", ".join(f"{k}={result['settings'][k]}" for k in result["user_set_kept"])
         print(f"EFFECTIVE-PRESET: kept {len(result['user_set_kept'])} user-set value(s) "
-              f"over {result['preset_applied']}: {kept}")
+              f"over {result['preset_applied'] or 'the modules'}: {kept}")
 
 
 if __name__ == "__main__":

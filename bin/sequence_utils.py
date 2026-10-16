@@ -1070,3 +1070,170 @@ def longest_collinear_run(ranks):
     inc = _lis_non_decreasing(vals)
     dec = _lis_non_decreasing(list(reversed(vals)))
     return (inc, '+') if inc >= dec else (dec, '-')
+
+
+# =============================================================================
+# PROTEIN SEQUENCE FEATURES (query_features.py)
+# =============================================================================
+
+# Kyte & Doolittle (1982) hydropathy scale. Residues outside the 20 (X, B, Z, U, *) are 0.
+KYTE_DOOLITTLE = {
+    'A': 1.8, 'R': -4.5, 'N': -3.5, 'D': -3.5, 'C': 2.5, 'Q': -3.5, 'E': -3.5, 'G': -0.4,
+    'H': -3.2, 'I': 4.5, 'L': 3.8, 'K': -3.9, 'M': 1.9, 'F': 2.8, 'P': -1.6, 'S': -0.8,
+    'T': -0.7, 'W': -0.9, 'Y': -1.3, 'V': 4.2,
+}
+
+
+def mean_hydropathy(seq: str) -> float:
+    """Mean Kyte-Doolittle hydropathy of ``seq`` (0.0 for an empty one)."""
+    if not seq:
+        return 0.0
+    return sum(KYTE_DOOLITTLE.get(c, 0.0) for c in seq.upper()) / len(seq)
+
+
+def shannon_entropy(seq: str) -> float:
+    """Shannon entropy in bits of the residue composition of ``seq``."""
+    if not seq:
+        return 0.0
+    counts: Dict[str, int] = {}
+    for c in seq:
+        counts[c] = counts.get(c, 0) + 1
+    n = len(seq)
+    return -sum((k / n) * math.log2(k / n) for k in counts.values())
+
+
+def low_complexity_mask(seq: str, window: int = 12, max_entropy: float = 2.2) -> List[bool]:
+    """True for every residue inside some window of ``window`` residues whose composition
+    has a Shannon entropy of at most ``max_entropy`` bits. SEG's trigger window and
+    complexity (K1) of BLAST's `-seg 12 2.2 2.5`, without SEG's extension and trimming, so
+    an approximation of what SEG masks. A sequence shorter than the window is one window."""
+    s = seq.upper()
+    n = len(s)
+    mask = [False] * n
+    if n == 0:
+        return mask
+    w = min(window, n)
+    for i in range(0, n - w + 1):
+        if shannon_entropy(s[i:i + w]) <= max_entropy:
+            for j in range(i, i + w):
+                mask[j] = True
+    return mask
+
+
+def repeat_kmer_mask(seq: str, k: int = 4, min_offset: int = 4) -> List[bool]:
+    """True for every residue covered by an exact ``k``-mer that occurs again in ``seq`` at
+    an offset of at least ``min_offset`` (so a k-mer does not count as repeated by
+    overlapping itself, e.g. AAAAA)."""
+    s = seq.upper()
+    n = len(s)
+    mask = [False] * n
+    where: Dict[str, List[int]] = {}
+    for i in range(0, n - k + 1):
+        where.setdefault(s[i:i + k], []).append(i)
+    for starts in where.values():
+        if len(starts) < 2:
+            continue
+        for i in starts:
+            if any(abs(i - j) >= min_offset for j in starts):
+                for p in range(i, i + k):
+                    mask[p] = True
+    return mask
+
+
+# =============================================================================
+# CODING MODELS FROM A GFF (gff_to_faa.py, home_context.py)
+# =============================================================================
+
+def cds_models_by_gene(gff_file: str, chroms: Optional[set] = None) -> Dict[str, Dict[str, Any]]:
+    """The longest coding model of every gene of a GFF3: ``{gene_id: {'chrom', 'strand',
+    'exons': [(start, end, phase), ...]}}`` (1-based CDS rows in file order).
+
+    CDS rows are grouped by their Parent (the mRNA); an mRNA is assigned to its gene by
+    walking up the Parent links until an ID starting with ``gene-``/``gene:`` (NCBI,
+    Ensembl) or the top of the chain; per gene the mRNA with the most CDS bases wins (the
+    first one on a tie). ``chroms`` restricts the models to those sequences. Missing file
+    -> {}."""
+    relationships: Dict[str, str] = {}
+    mrnas: Dict[str, Dict[str, Any]] = {}
+    if not os.path.exists(gff_file):
+        return {}
+
+    def attrs_of(text: str) -> Dict[str, str]:
+        out = {}
+        for item in text.strip().split(';'):
+            if '=' in item:
+                k, v = item.strip().split('=', 1)
+                out[k] = v
+        return out
+
+    with open(gff_file) as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.split('\t')
+            if len(parts) < 9:
+                continue
+            attrs = attrs_of(parts[8])
+            fid, parent = attrs.get('ID'), attrs.get('Parent')
+            if fid and parent:
+                relationships[fid] = parent
+    with open(gff_file) as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.split('\t')
+            if len(parts) < 9 or parts[2] != 'CDS':
+                continue
+            if chroms is not None and parts[0] not in chroms:
+                continue
+            mrna_id = attrs_of(parts[8]).get('Parent')
+            if not mrna_id:
+                continue
+            if mrna_id not in mrnas:
+                mrnas[mrna_id] = {'chrom': parts[0], 'strand': parts[6], 'exons': []}
+            mrnas[mrna_id]['exons'].append((int(parts[3]), int(parts[4]),
+                                            int(parts[7]) if parts[7] != '.' else 0))
+    longest: Dict[str, Dict[str, Any]] = {}
+    for mrna_id, info in mrnas.items():
+        ancestor = mrna_id
+        visited = set()
+        while ancestor in relationships and ancestor not in visited:
+            visited.add(ancestor)
+            if ancestor.startswith('gene-') or ancestor.startswith('gene:'):
+                break
+            ancestor = relationships[ancestor]
+        length = sum(e[1] - e[0] + 1 for e in info['exons'])
+        if ancestor not in longest or length > longest[ancestor]['length']:
+            longest[ancestor] = {'id': mrna_id, 'length': length, 'info': info}
+    return {gid: d['info'] for gid, d in longest.items()}
+
+
+def cds_model_protein(info: Dict[str, Any], chrom_seq: str) -> str:
+    """Protein of a coding model (``cds_models_by_gene``) on its chromosome's sequence:
+    CDS joined in coding order, the first coding CDS's phase trimmed, translated, cut at
+    the first stop. '' when nothing is left."""
+    exons = sorted(info['exons'], key=lambda x: x[0])
+    coding_first_phase = exons[0][2] if info['strand'] == '+' else exons[-1][2]
+    dna_seq = ''.join(chrom_seq[s - 1:e] for s, e, _p in exons)
+    if info['strand'] == '-':
+        dna_seq = reverse_complement(dna_seq)
+    if coding_first_phase > 0:
+        dna_seq = dna_seq[coding_first_phase:]
+    prot = translate(dna_seq)
+    return prot.split('*')[0] if '*' in prot else prot
+
+
+def stream_fasta_lengths(filepath: str) -> Dict[str, int]:
+    """{clean id: length} of every record of a FASTA (plain or .gz), without holding a
+    sequence in memory: a 3 Gb genome is read line by line."""
+    lengths: Dict[str, int] = {}
+    name = None
+    _open = gzip.open if str(filepath).endswith('.gz') else open
+    with _open(filepath, 'rt') as f:
+        for line in f:
+            if line.startswith('>'):
+                name = extract_id(line[1:].rstrip('\n\r'))
+                lengths[name] = 0
+            elif name is not None:
+                lengths[name] += len(line.strip())
+    return lengths
