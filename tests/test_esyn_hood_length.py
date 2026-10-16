@@ -45,4 +45,4 @@ def test_a_smaller_searched_window_no_longer_shrinks_esyn():
 
 def test_the_runner_passes_the_neighbourhood():
     src = open(os.path.join(os.path.dirname(__file__), "..", "bin", "iterative_search_runner.py")).read()
-    assert "hood_len=hood_end - hood_start)" in src
+    assert "hood_len=hood_end - hood_start," in src

@@ -516,6 +516,11 @@ How tandem copies of the GOI are found among its hits in a search window. Off (t
 
 A GOI gene model from miniprot is extended to its own start and stop codon (`refine_model_termini`). The search's hits cannot see an exon below about 10 to 15 aa, and miniprot rarely places a first exon of 5 to 16 aa, so a model often begins at the second exon; the walk upstream then reaches an ATG in the intron. With this switch (batch G3A, 2026-10-16) the walk is skipped when the home gene has two or more exons, its first exon is at most 30 aa, and the query residues missing before the model's first CDS are within 5 aa of that exon's length; the model then carries `FirstExon=missing` and `MissingQueryStart=1-<n>`. The same holds at the stop end (`LastExon=missing`, `MissingQueryEnd`). Labels do not read these attributes. Applies to the home query and its decoys only.
 
+### `goi_genome_wide_path`
+**Type:** Boolean | **Default:** `false`
+
+A GOI hit outside every searched window is modelled today only by the dispersed-GOI rescue (`enable_dispersed_goi_rescue`: ≥ 40 % identity, E ≤ 1e-10, ≥ 50 aligned residues, inside the envelope of ≥ 3 anchors on its chromosome). With this switch (FINAL step 5, 2026-10-16), in a genome with at least one block at E_syn ≤ 0.1, the GOI hits outside every window are grouped per chromosome into places; a place is modelled when the home protein's E against its hits over the whole genome is at most 1e-3 and no other home protein explains it as well (specificity in the genome place), at most the query's home family size + 1 places per genome, best E first. Its calls are judged in the genome place and carry `GenomeWide=1`; every place, also the ones cut by the cap, is listed with its E in `hits/<genome>.genome_wide.tsv` and in the report's `genome_wide_path` block. The genome place has no decoy calibration. Needs the home proteome (a home GFF, or the borrowed one).
+
 ### `goi_join_leftover_hits`
 **Type:** Boolean | **Default:** `false`
 

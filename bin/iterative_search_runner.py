@@ -12,6 +12,7 @@ import uuid
 import sys
 import json
 import logging
+import math
 import contextlib
 import time
 from bisect import bisect_right
@@ -104,7 +105,7 @@ try:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask,
     )
@@ -123,7 +124,7 @@ except ImportError:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask,
     )
@@ -943,7 +944,7 @@ def greedy_select(candidates) -> List[Dict[str, Any]]:
 
 def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
                       collinear_support, flanking_candidates,
-                      hood_len: Optional[int] = None) -> Dict[str, Any]:
+                      hood_len: Optional[int] = None, genome_wide: bool = False) -> Dict[str, Any]:
     """The places of a block (synvoy_evalue): its E_syn from the run of anchors in home
     order and their genome-wide places, the slot between the nearest found home
     neighbours on either side of the gene (widened by one gene pitch), the core and the
@@ -952,9 +953,16 @@ def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
     ``hood_len``: the length of the neighbourhood the collinear run was counted in (block
     +- padding). E_syn is computed for that length (review fix RF-1b): with derived
     distances the searched window can be smaller, and E_syn for the searched length was
-    too small by about (hood / searched)^(k-1). Default: the window length."""
+    too small by about (hood / searched)^(k-1). Default: the window length.
+
+    ``genome_wide``: a window of the genome-wide path (FINAL step 5), no block: no E_syn
+    (it is not counted in the multiplier), every candidate in the genome place."""
     ctx = getattr(args, 'genome_ctx', None) or {}
     genome_len = int(ctx.get('genome_len') or 0) or (w_end - w_start)
+    if genome_wide:
+        return {'esyn': float('inf'), 'significant': False, 'slot': None, 'slot_inverted': None,
+                'core': (core_start, core_end), 'window': (w_start, w_end),
+                'genome_len': genome_len, 'window_len': max(1, w_end - w_start)}
     neighbours = list((getattr(args, 'home_rank', None) or {}).keys())
     places = ctx.get('places', {})
     esyn = synvoy_evalue.e_syn(int(collinear_support or 0), [places.get(g, 0) for g in neighbours],
@@ -1443,7 +1451,7 @@ def judge_candidates(candidates) -> None:
         numbers = cand.get('judge_numbers') or {}
         conf, _basis = (_judge_attrs(a, 'EPlace', numbers) if 'EPlace' in a
                         else ('LOW', 'not_significant'))
-        cand['window_label'] = conf
+        cand['window_label'], cand['window_basis'] = conf, _basis
         try:
             e = float(numbers['EPlace'] if 'EPlace' in numbers else a.get('EPlace', 'inf'))
             esyn = float(numbers['BlockEsyn'] if 'BlockEsyn' in numbers else a.get('BlockEsyn', 'inf'))
@@ -4497,15 +4505,25 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         search_pad = min(padding, int(args.search_margin))
     w_start = max(0, block['start'] - search_pad)
     w_end = min(slen, block['end'] + search_pad)
+    # A place of the genome-wide path (FINAL step 5, genome_wide_goi_pass) is no block: its
+    # window is given, outside every other window, and it is judged in the genome place.
+    genome_wide = bool(block.get('genome_wide'))
+    if genome_wide:
+        w_start, w_end = int(block['window'][0]), int(block['window'][1])
+        hood_start, hood_end = w_start, w_end
     subseq = genome_seqs[chrom][w_start:w_end]
     # Where the window ran past a scaffold end (ContextTruncated; target_policy.tsv).
-    window_truncated = context_truncation(block['start'], block['end'], search_pad, slen)
+    window_truncated = '' if genome_wide else context_truncation(block['start'], block['end'], search_pad, slen)
     if getattr(args, 'genome_ctx', None) is not None:
-        args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
+        if not genome_wide:
+            args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
+        args.genome_ctx.setdefault('windows', []).append((chrom, w_start, w_end))
     # Keep final GOI calls anchored near the flanking-defined block.
     core_margin = getattr(args, 'goi_margin', None) or args.gap_search_window
     core_start = max(0, block['start'] - core_margin)
     core_end = min(slen, block['end'] + core_margin)
+    if genome_wide:
+        core_start, core_end = w_start, w_end
     # DNA around a candidate's hits that the gene model may use: never less than the
     # gene's own span at home.
     goi_model_margin = max(args.gap_search_window,
@@ -4518,6 +4536,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     neighbourhood_hits = [
         h for h in hits
         if h['chrom'] == chrom and h['end'] > hood_start and h['start'] < hood_end
+        and (not genome_wide or is_goi_query_id(h.get('query', '')))
     ]
     relevant_hits = [h for h in neighbourhood_hits if h['end'] > w_start and h['start'] < w_end]
     block_flanking_support = len({
@@ -4598,7 +4617,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
         goi_queries = list(goi_query_by_parent.values())
 
-    if getattr(args, 'decoy_mode', False):
+    if getattr(args, 'decoy_mode', False) and not genome_wide:
+        # No decoys in a genome-wide window: it is placed by the real query's own hit, so
+        # decoys there calibrate nothing (the report says the genome place is uncalibrated).
         _decoys = decoy_queries(goi_queries, home_goi_ids)
         goi_queries = goi_queries + _decoys
         goi_query_by_parent = dict(goi_query_by_parent, **{d['id']: d for d in _decoys})
@@ -5733,10 +5754,17 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         raw_candidates = [c for c in raw_candidates if not is_decoy_parent(_candidate_parent(c))]
     place_terms = block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
                                     block_collinear_support, flanking_candidates,
-                                    hood_len=hood_end - hood_start)
-    if getattr(args, 'genome_ctx', None) is not None:
+                                    hood_len=hood_end - hood_start, genome_wide=genome_wide)
+    if getattr(args, 'genome_ctx', None) is not None and not genome_wide:
         args.genome_ctx.setdefault('block_slot', {})[block_idx] = (place_terms['slot'],
                                                                    place_terms['slot_inverted'])
+    if genome_wide:
+        # The genome-wide path's origin flag (FINAL step 5): the rule below is keyed on it,
+        # not on Place=genome, which hull models and weak blocks' candidates share.
+        for _c in raw_candidates:
+            if _c.get('gff'):
+                _c['gff'][0] += ";GenomeWide=1"
+
     def _judge_all(cands):
         """Every candidate judged (label rework, step 4) before the choice among them.
         Specificity (an exhaustive search of the home proteome) only where it can matter:
@@ -5788,6 +5816,15 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         """The judged candidates (_judge_all), with --goi_join_leftover_hits (batch G3B) the
         leftover hits joined into confident models, then the choice among them."""
         _judge_all(cands)
+        if genome_wide:
+            # A model of the genome-wide path that another home protein explains as well is
+            # not kept: paralogs from all over the genome would fill "needs curation"
+            # (REPORT finding 5a). Its place was specific; its model is not.
+            _kept = [c for c in cands if c.get('window_basis') != 'not_specific']
+            if len(_kept) < len(cands) and getattr(args, 'genome_ctx', None) is not None:
+                args.genome_ctx['genome_wide_dropped'] = (args.genome_ctx.get('genome_wide_dropped', 0)
+                                                          + len(cands) - len(_kept))
+            cands = _kept
         if getattr(args, 'goi_join_leftover_hits', False):
             cands, n_joined = join_leftover_hits(
                 cands, getattr(args, 'goi_fallback_max_gap', args.max_intron),
@@ -6455,6 +6492,238 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
         seen.add(key)
         seeds.append(h)
     return seeds
+
+
+# ---------------------------------------------------------------------------
+# FINAL step 5 (batch of 2026-10-15; --goi_genome_wide_path, off by default): strong GOI
+# hits outside every searched window. The §1o rescue models such a hit only at >= 40 %
+# identity, E <= 1e-10 and >= 50 aligned residues, inside the envelope of >= 3 anchors on its
+# chromosome (select_dispersed_goi_seeds); the rest go to the §1x table. This path has none
+# of those gates: the GOI hits outside every window are grouped into places (per chromosome,
+# within the GOI's intron bound or the model margin), and a place is modelled when the home protein's blastp E
+# against its hits over the whole genome is at most the label's MEDIUM bar and the
+# specificity holds in the genome place (synvoy_label.is_specific): a non-specific place is
+# not modelled. At most N places per home GOI and genome, best E first, N = q's home family
+# members + 1 (home_family_size; REPORT finding 5b). Each window is the place +- the model
+# margin, outside every other window, without decoys and without the flanking pass; its
+# candidates are judged in the genome place (no multiplier), carry GenomeWide=1, and one that
+# another home protein explains as well is not kept. Only in a genome with at least one block
+# at E_syn <= 0.1. Every place is listed in hits/<genome>.genome_wide.tsv.
+# ---------------------------------------------------------------------------
+GENOME_WIDE_FAMILY_PREFILTER_EVALUE = 0.1   # family count: test proteins whose SW gives KA E <= this
+GENOME_WIDE_COLUMNS = ['genome', 'parent', 'chrom', 'start', 'end', 'hits', 'best_hit_identity',
+                       'evalue_genome', 'bits', 'best_other', 'margin', 'real_competitor',
+                       'specific', 'rank', 'cap', 'decision']
+_FAMILY_SIZE_CACHE: Dict[Tuple[str, str, str], int] = {}
+
+
+def home_family_size(proteome, q_id: str, q_seq: str, own_gene_id: Optional[str] = None) -> int:
+    """q's home family: home proteins other than q's own gene that the label's own family
+    test calls family members (HomeProteome.family_evalue <= FAMILY_MEMBER_EVALUE: blastp
+    with composition-based statistics and SEG on both proteins), over the whole home
+    proteome. Only proteins whose Smith-Waterman score against q gives a pairwise
+    Karlin-Altschul E <= GENOME_WIDE_FAMILY_PREFILTER_EVALUE (100 x that bar) are tested;
+    blastp masks with SEG and aligns heuristically, so it does not score a pair higher."""
+    key = (q_id, q_seq, own_gene_id or '')
+    if key not in _FAMILY_SIZE_CACHE:
+        own = proteome.own_gene(q_id, q_seq, own_gene_id)
+        seqs = dict(proteome.records)
+        n = 0
+        for raw, rid in proteome.scores(q_seq):
+            if rid == own:
+                continue
+            ka = SW_K_11_1 * len(q_seq) * len(seqs.get(rid, '')) * math.exp(-SW_LAMBDA_11_1 * raw)
+            if ka > GENOME_WIDE_FAMILY_PREFILTER_EVALUE:
+                continue
+            if proteome.family_evalue(q_id, q_seq, rid) <= synvoy_specificity.FAMILY_MEMBER_EVALUE:
+                n += 1
+        _FAMILY_SIZE_CACHE[key] = n
+    return _FAMILY_SIZE_CACHE[key]
+
+
+def genome_wide_places(hits, windows, home_parents, max_gap: int) -> List[Dict[str, Any]]:
+    """The GOI hits outside every searched window (``windows``: (chrom, start, end), 0-based
+    half-open like the hits), per home GOI and chromosome, joined into places while a hit
+    starts at most ``max_gap`` after the place ends. A hit of a model or exon query belongs
+    to its home parent; with one home GOI, every GOI hit does. Sorted by parent and position."""
+    parents = sorted(home_parents)
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for h in hits:
+        query = h.get('query', '')
+        if not is_goi_query_id(query):
+            continue
+        base = extract_base_gene_id(query)
+        if is_decoy_parent(base):
+            continue
+        parent = base if base in home_parents else (parents[0] if len(parents) == 1 else None)
+        if parent is None:
+            continue
+        c, s, e = h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0))
+        if e <= s or any(wc == c and s < we and e > ws for wc, ws, we in windows):
+            continue
+        grouped[(parent, c)].append(h)
+    places = []
+    for (parent, chrom), group in sorted(grouped.items()):
+        group.sort(key=lambda h: (int(h['start']), int(h['end'])))
+        runs = [[group[0]]]
+        for h in group[1:]:
+            if int(h['start']) - max(int(x['end']) for x in runs[-1]) <= max_gap:
+                runs[-1].append(h)
+            else:
+                runs.append([h])
+        places += [{'parent': parent, 'chrom': chrom, 'start': min(int(h['start']) for h in run),
+                    'end': max(int(h['end']) for h in run), 'hit_list': run, 'hits': len(run)}
+                   for run in runs]
+    return places
+
+
+def choose_genome_wide_places(places: List[Dict[str, Any]], cap_of) -> List[Dict[str, Any]]:
+    """The places to model: E over the genome at most synvoy_label.MEDIUM_EVALUE and
+    specific, per home GOI best E first (ties by position), the first ``cap_of(parent)``.
+    Sets ``decision`` (modelled / cut_by_cap / not_specific / not_significant) on every place,
+    ``rank`` and ``cap`` on the eligible ones; ``cap_of`` is asked only for a GOI that has one."""
+    eligible: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for p in places:
+        p.setdefault('rank', '')
+        p.setdefault('cap', '')
+        if not float(p.get('evalue', float('inf'))) <= synvoy_label.MEDIUM_EVALUE:
+            p['decision'] = 'not_significant'
+        elif not p.get('specific'):
+            p['decision'] = 'not_specific'
+        else:
+            eligible[p['parent']].append(p)
+    kept = []
+    for parent in sorted(eligible):
+        ordered = sorted(eligible[parent], key=lambda p: (float(p['evalue']), p['chrom'], int(p['start'])))
+        cap = cap_of(parent)
+        for i, p in enumerate(ordered, 1):
+            p['rank'], p['cap'] = i, cap
+            p['decision'] = 'modelled' if i <= p['cap'] else 'cut_by_cap'
+            if p['decision'] == 'modelled':
+                kept.append(p)
+    return kept
+
+
+def genome_wide_window(place: Dict[str, Any], margin: int, chrom_len: int, windows) -> Tuple[int, int]:
+    """The window of a place: its hits +- ``margin``, inside its chromosome and outside every
+    searched window on it (the place itself lies outside all of them)."""
+    lo, hi = max(0, int(place['start']) - margin), min(int(chrom_len), int(place['end']) + margin)
+    for c, ws, we in windows:
+        if c != place['chrom']:
+            continue
+        if we <= int(place['start']):
+            lo = max(lo, int(we))
+        elif ws >= int(place['end']):
+            hi = min(hi, int(ws))
+    return lo, hi
+
+
+def _hit_pieces(genome_seqs, h) -> List[str]:
+    """A genome-wide hit translated in its frame, in pieces between stops."""
+    seq = genome_seqs.get(h.get('chrom'), '')
+    dna = seq[int(h['start']):int(h['end'])]
+    if h.get('strand', '+') == '-':
+        dna = reverse_complement(dna)
+    dna = dna[:len(dna) - len(dna) % 3]
+    return synvoy_evalue.split_at_stops(translate(dna)) if dna else []
+
+
+def _write_genome_wide_table(args, prefix, genome_name, places) -> None:
+    path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.genome_wide.tsv")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=GENOME_WIDE_COLUMNS, delimiter='\t')
+            w.writeheader()
+            for p in places:
+                w.writerow({k: p.get(k, '') for k in GENOME_WIDE_COLUMNS})
+    except OSError as exc:
+        logger.warning(f"[{genome_name}] could not write {path}: {exc}")
+
+
+def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, unique_id,
+                         threads_per_job, native_annot_index, prefix, first_idx):
+    """FINAL step 5 for one genome (see above): ``(genes, gff_lines)`` of the windows it
+    searched."""
+    ctx = args.genome_ctx
+    n_sig = sum(1 for e in (ctx.get('block_esyn') or {}).values()
+                if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN)
+    if not n_sig:
+        logger.info(f"[{genome_name}] genome-wide path: no block at E_syn <= "
+                    f"{synvoy_evalue.SIGNIFICANT_BLOCK_ESYN}, not run.")
+        return [], []
+    proteome, hood = _home_proteome(args)
+    if proteome is None:
+        logger.warning(f"[{genome_name}] genome-wide path: no home proteome, so no specificity "
+                       f"and no family size: not run.")
+        return [], []
+    home_parents = set(home_goi_parents(args))
+    _q, by_parent, _alias = select_goi_queries(db_sequences, getattr(args, 'home_goi_ids', None),
+                                               use_relative=False)
+    windows = ctx.setdefault('windows', [])
+    margin = max(int(args.gap_search_window),
+                 int(getattr(args, 'goi_home_span', 0) * float(getattr(args, 'expansion', 1.0) or 1.0)))
+    # Hits closer than the model margin are one place, so no two windows overlap.
+    max_gap = max(margin, int(getattr(args, 'goi_fallback_max_gap', args.max_intron) or args.max_intron))
+    places = genome_wide_places(hits, list(windows), home_parents, max_gap)
+    if not places:
+        return [], []
+    genome_len = int(ctx.get('genome_len') or 0)
+    own_id = getattr(args, 'home_goi_gene_id', None)
+    n_flank = int(getattr(args, 'n_flanking_genes', 0) or 0)
+    for p in places:
+        q = (by_parent.get(p['parent']) or {}).get('seq', '')
+        subjects = sorted({piece for h in p['hit_list'] for piece in _hit_pieces(genome_seqs, h)})
+        p.update(genome=genome_name,
+                 best_hit_identity=round(max(float(h.get('pident', 0) or 0) for h in p['hit_list']), 1))
+        if not q or not subjects:
+            p['evalue_genome'], p['evalue'] = 'inf', float('inf')
+            continue
+        e, _b = synvoy_evalue.blastp_evalue(q, subjects, synvoy_evalue.search_space(len(q), genome_len))
+        p['evalue'], p['evalue_genome'] = e, f"{e:.3g}"
+        if e > synvoy_label.MEDIUM_EVALUE:
+            continue
+        best = max(subjects, key=lambda s: (sw_bits(q, s), s))
+        bits = sw_bits(q, best)
+        spec = synvoy_specificity.specificity(proteome, p['parent'], q, best, bits, hood, n_flank,
+                                              own_gene_id=own_id)
+        p['specific'] = synvoy_label.is_specific(spec['margin'], spec['real_competitor'], 'genome',
+                                                 False, spec.get('in_neighbourhood'))
+        p.update(bits=f"{bits:.1f}", best_other=spec['best_other'], margin=f"{float(spec['margin']):.1f}",
+                 real_competitor=int(bool(spec['real_competitor'])), specific=int(bool(p['specific'])))
+    caps = {}
+
+    def cap_of(parent):
+        if parent not in caps:
+            q = (by_parent.get(parent) or {}).get('seq', '')
+            caps[parent] = home_family_size(proteome, parent, q, own_id) + 1 if q else 1
+        return caps[parent]
+    kept = choose_genome_wide_places(places, cap_of)
+    genes, gff = [], []
+    dropped_before = ctx.get('genome_wide_dropped', 0)
+    for k, p in enumerate(kept):
+        lo, hi = genome_wide_window(p, margin, len(genome_seqs.get(p['chrom'], '')), windows)
+        if hi <= lo:
+            p['decision'] = 'no_window'
+            continue
+        block = {'chrom': p['chrom'], 'start': p['start'], 'end': p['end'], 'genes': [p['parent']],
+                 'genes_count': 1, 'loci_count': p['hits'], 'genome_wide': True, 'window': (lo, hi)}
+        g, lines = process_region_block(first_idx + k, block, hits, genome_seqs, db_sequences,
+                                        genome_name, args, unique_id, threads_per_job,
+                                        native_annot_index=native_annot_index)
+        genes.extend(g)
+        gff.extend(lines)
+    _write_genome_wide_table(args, prefix, genome_name, places)
+    counts = defaultdict(int)
+    for p in places:
+        counts[p.get('decision', '')] += 1
+    logger.info(
+        f"[{genome_name}] genome-wide path: {len(places)} place(s) outside every window: "
+        + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+        + f"; cap {', '.join(f'{pa} {c}' for pa, c in sorted(caps.items())) or '-'} "
+        f"(home family + 1); {ctx.get('genome_wide_dropped', 0) - dropped_before} model(s) not kept "
+        f"(not specific).")
+    return genes, gff
 
 
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
@@ -7192,6 +7461,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     _covered.append((_lchrom, _lstart - args.region_padding,
                                      _lend + args.region_padding))
 
+        # FINAL step 5: strong GOI hits outside every searched window (genome_wide_goi_pass).
+        if getattr(args, 'goi_genome_wide_path', False):
+            _gw_genes, _gw_gff = genome_wide_goi_pass(
+                args, hits, genome_seqs, base_db_sequences, genome_name, unique_id,
+                threads_per_job, native_annot_index, prefix, len(synteny_blocks) + 5000)
+            all_genes.extend(_gw_genes)
+            all_gff_lines.extend(_gw_gff)
+
         # --- Flanking gene tracking summary (Step 4) ---
         still_missing = all_db_flanking_parents - found_flanking_parents
         if all_db_flanking_parents:
@@ -7905,6 +8182,13 @@ def main():
                              "the missing query residues within 5 aa of it), do not walk to an ATG "
                              "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
                              "instead. Home GOI and decoys only (batch G3A; off by default)")
+    parser.add_argument("--goi_genome_wide_path", type=str2bool, default=False,
+                        help="Model GOI hits outside every searched window when the home protein's "
+                             "E against them over the whole genome is <= 1e-3 and no other home "
+                             "protein explains them as well; at most the home family size + 1 "
+                             "places per GOI and genome, best E first, judged in the genome place; "
+                             "only in a genome with a block at E_syn <= 0.1 (FINAL step 5; off by "
+                             "default)")
     parser.add_argument("--goi_join_leftover_hits", type=str2bool, default=False,
                         help="Join a GOI hit that no gene model covers into a confident (HIGH or "
                              "MEDIUM) model of the home query or its decoy when it continues the "

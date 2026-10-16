@@ -916,6 +916,32 @@ of its own when:
 A strong GOI hit that fails these conditions is written to
 `hits/<genome>.nonsyntenic.tsv`, so the report can say "found, not syntenic".
 
+With `goi_genome_wide_path` (off by default; FINAL step 5, batch of 2026-10-15) a GOI hit
+outside every searched window is modelled without these gates, in a genome that has at
+least one block at E_syn ≤ 0.1:
+
+- the GOI hits outside every window are grouped per chromosome into places (hits within
+  the GOI's intron bound of each other);
+- a place qualifies when the home protein's blastp E against its hits (in their frames, in
+  pieces between stops) over the whole genome (`-searchsp` = |q| × genome / 3) is at most
+  1e-3, the label's MEDIUM bar, and the specificity holds in the genome place: no real
+  competitor, or a margin of at least 3.3 bits (§7.8). A place another home protein
+  explains as well is not modelled, so it never becomes "needs curation";
+- at most N places per home GOI and genome are modelled, best E first, N = the query's
+  home family members + 1: the home proteins other than the query's own gene that the
+  label's family test calls family members (blastp E ≤ 1e-3 with composition-based
+  statistics and SEG; only proteins whose Smith-Waterman score gives a Karlin-Altschul
+  E ≤ 0.1 are tested);
+- each place is searched in a window of its hits ± the model margin, outside every other
+  window, without decoys and without the flanking pass. Its candidates are judged in the
+  genome place (no multiplier), carry `GenomeWide=1`, and one that another home protein
+  explains as well is not kept.
+
+Every place is listed in `hits/<genome>.genome_wide.tsv` with its E over the genome, its
+specificity terms, its rank, the cap and what became of it (`modelled`, `cut_by_cap`,
+`not_specific`, `not_significant`); the report's `genome_wide_path` block lists them. The
+genome place has no decoy calibration: decoys are searched in block windows only.
+
 ### 7.12 What is added to the query set
 
 **Specificity** (`bin/synvoy_specificity.py`, written on every kept GOI model). The

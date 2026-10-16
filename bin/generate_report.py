@@ -505,6 +505,7 @@ def _dir_diagnostics(dir_path, patterns, sample_size=5):
 
 
 NONSYNTENIC_SUFFIX = ".nonsyntenic.tsv"
+GENOME_WIDE_SUFFIX = ".genome_wide.tsv"
 NOT_SEARCHED_SUFFIX = ".not_searched.tsv"
 TARGET_POLICY_SUFFIX = ".target_policy.tsv"
 _CONTEXT_ORDER = {"complete": 0, "left": 1, "right": 1, "both": 1, "NA": 2}
@@ -698,6 +699,57 @@ def summarize_nonsyntenic_candidates(records, per_genome):
                  "unplaceable hit is not read as a genome with no hit."),
         "candidates": records,
     }
+
+
+GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched window, from the genome-wide "
+                     "path (FINAL step 5, --goi_genome_wide_path): modelled when the home "
+                     "protein's E against them over the whole genome is <= 1e-3 and no other "
+                     "home protein explains them as well, at most the home family size + 1 per "
+                     "genome, best E first. Their calls carry GenomeWide=1 and Place=genome. The "
+                     "genome place has no decoy calibration: decoys are searched in block windows "
+                     "only.")
+
+
+def collect_genome_wide_places(paths):
+    """The places of the genome-wide path (hits/<genome>.genome_wide.tsv,
+    iterative_search_runner.genome_wide_goi_pass): one record per place with its E over the
+    genome and what became of it. Unreadable files are skipped."""
+    records = []
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if not row.get("chrom"):
+                        continue
+                    records.append({
+                        "genome": canonical_genome_id(
+                            row.get("genome") or os.path.basename(path).split(GENOME_WIDE_SUFFIX)[0]),
+                        "parent": row.get("parent", ""), "chrom": row.get("chrom", ""),
+                        "start": _safe_int(row.get("start")), "end": _safe_int(row.get("end")),
+                        "hits": _safe_int(row.get("hits")),
+                        "best_hit_identity": _safe_float(row.get("best_hit_identity")),
+                        "evalue_genome": row.get("evalue_genome", ""),
+                        "best_other": row.get("best_other", ""), "margin": row.get("margin", ""),
+                        "real_competitor": row.get("real_competitor", ""),
+                        "rank": row.get("rank", ""), "cap": row.get("cap", ""),
+                        "decision": row.get("decision", ""),
+                    })
+        except (OSError, csv.Error):
+            continue
+    records.sort(key=lambda r: (r["genome"], r["parent"], r["chrom"], r["start"]))
+    return records
+
+
+def summarize_genome_wide_places(records):
+    """Report block of the genome-wide path: places per decision and genome, every place
+    (the ones cut by the cap with their E), and the note on calibration."""
+    by_decision, per_genome = {}, {}
+    for r in records:
+        by_decision[r["decision"]] = by_decision.get(r["decision"], 0) + 1
+        g = per_genome.setdefault(r["genome"], {})
+        g[r["decision"]] = g.get(r["decision"], 0) + 1
+    return {"total": len(records), "by_decision": by_decision, "per_genome": per_genome,
+            "note": GENOME_WIDE_NOTE, "places": records}
 
 
 def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
@@ -1692,7 +1744,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     hits_scan = scan_dir_by_suffix(
         hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,),
                    "not_searched": (NOT_SEARCHED_SUFFIX,),
-                   "target_policy": (TARGET_POLICY_SUFFIX,)})
+                   "target_policy": (TARGET_POLICY_SUFFIX,),
+                   "genome_wide": (GENOME_WIDE_SUFFIX,)})
     not_searched = collect_not_searched(hits_scan["not_searched"])
     target_policy = collect_target_policy(hits_scan["target_policy"])
     fasta_files = regions_scan["fasta"]
@@ -1873,6 +1926,13 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     for rec in goi_dedup.get("records", []):
         if rec.get("genome") in low_quality_ids:
             rec["low_quality_assembly"] = True
+    genome_wide_records = collect_genome_wide_places(hits_scan["genome_wide"])
+    genome_wide_modelled = sum(1 for r in genome_wide_records if r["decision"] == "modelled")
+    if genome_wide_modelled:
+        warnings.append(
+            f"{genome_wide_modelled} place(s) outside every searched window were modelled by "
+            "the genome-wide path (GenomeWide=1, Place=genome); the genome place has no decoy "
+            "calibration (genome_wide_path).")
 
     report = {
         # Things a reader must know before reading any number below. Empty on a clean run.
@@ -1894,6 +1954,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         # §1x — the run's known false negatives: strong GOI hits it refused on synteny
         # grounds and used to discard in silence.
         "rejected_candidates": nonsyntenic_block,
+        **({"genome_wide_path": summarize_genome_wide_places(genome_wide_records)}
+           if genome_wide_records else {}),
         # Per target genome: the median flanking identity, the blocks searched and whether
         # the best block's window ran past a scaffold end (hits/<genome>.target_policy.tsv).
         "target_policy": target_policy,

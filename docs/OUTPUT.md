@@ -243,6 +243,7 @@ terms were redefined then.
 | `goi_dedup` | `records` — the adjudicated calls described above — plus dedup statistics |
 | `self_consistency` | `flags`: things the run noticed about its own result — `identity_coverage_decoupled`, `paralog_misassignment`, `locus_reattributed`, `cross_locus_duplicate`, `strong_synteny_no_goi`, `phylo_discordant` |
 | `rejected_candidates` | GOI hits that cleared the quality bar but were refused by a synteny gate, with the gate and the distance to the nearest flanking gene. Not orthology calls — listed so a genome with a strong unplaceable hit is not read as a genome with no hit. |
+| `genome_wide_path` | Only with `--goi_genome_wide_path`: the places of GOI hits outside every searched window (`hits/<genome>.genome_wide.tsv`), with the home protein's E over the genome, the specificity terms, the rank, the cap (home family size + 1) and the decision (`modelled`, `cut_by_cap`, `not_specific`, `not_significant`), per genome and in all; with a sentence in `warnings` when a place was modelled. Their calls carry `GenomeWide=1` and `Place=genome`; the genome place has no decoy calibration |
 | `gene_family_advisory` | Set when the query looks like a member of a large family, where calls are candidates rather than orthologs |
 | `annotations` | Counts by role, confidence, class and evidence type; `per_genome` breakdown |
 | `regions`, `synteny_results` | Region statistics per genome |
