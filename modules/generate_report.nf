@@ -19,6 +19,8 @@ process GENERATE_REPORT {
     path panel_meta            // §1m panel sidecar — single file or sentinel
     path phylo_placement_files, stageAs: 'phylo_placement/?/*'  // F9
     path effective_params      // RESOLVE_EFFECTIVE_PARAMS output, or a sentinel -> run_settings
+    path home_db               // the home protein database folder: without a home GFF its
+                               // home_annotation.json (batch HG-5b) -> home_annotation
 
     output:
     path "synvoy_report.json", emit: report
@@ -102,6 +104,7 @@ process GENERATE_REPORT {
         --phylo_placement_dir staged_results/phylo_placement \\
         ${params.phylo_placement_promote.toString().toBoolean() ? '--phylo_placement_promote' : ''} \\
         --effective_params ${effective_params} \\
+        --home_db_dir ${home_db} \\
         --output synvoy_report.json
     """
 }

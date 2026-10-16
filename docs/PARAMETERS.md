@@ -610,6 +610,11 @@ The species model used by Augustus for gene prediction. Augustus uses pre-traine
 
 The window size around each candidate locus for gene prediction. When Augustus or Prodigal is run on a candidate syntenic region, this parameter defines how much flanking sequence is included around the region for gene prediction context. Gene prediction tools perform better with surrounding context because they can detect gene boundaries more accurately when they see the transitions from intergenic to genic regions. The default of 50,000 bp provides ample context for most eukaryotic genes. For bacteria, this could be reduced to 10,000–20,000 bp. For very large eukaryotic genes that span hundreds of kilobases, increasing this ensures the entire gene plus some context is captured. Note: this parameter is defined in nextflow.config but its wiring to the gene prediction processes may be incomplete in the current pipeline version.
 
+### `borrow_target_flank`
+**Type:** Integer (bp) | **Default:** `100000`
+
+Only for a home genome without an annotation (`borrow_annotations.py`, since 2026-10-16): the home gene predictions near the query's locus are searched against the closest annotated target, and the annotated genes of the hit cluster that holds most of them, plus this many base pairs on each side, are transferred to the home genome as gene models (miniprot, identity ≥ 30 %, query coverage ≥ 50 %, reciprocal best match). Those models become anchors like annotated genes. A larger flank transfers more neighbours; the walk then still takes `n_flanking_genes` per side.
+
 ### `pred_keep_pct`
 **Type:** Float | **Default:** `0.10` | **Range:** 0–1
 

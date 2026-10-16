@@ -1204,6 +1204,9 @@ workflow {
         "${c.green}[OK  ]${c.reset} ${c.white}${'SPLIT_LOCI'.padRight(24)}${c.reset} identified ${count} locus/loci"
     }
     
+    distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
+        .map { file -> tuple(file.baseName, file) }
+
     // Prepare effective home GFF (borrowed annotations + predictions) when targets exist
     def has_targets = params.target_genomes || params.mode == 'easy'
     if (has_targets) {
@@ -1215,7 +1218,6 @@ workflow {
         // Prepare Home Proteome (Run once, used for RBH + borrowing)
         uiStatus('RUN ', 'PREPARE_HOME', 'Preparing home proteome database')
         PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first())
-        home_proteome_db_ch = PREPARE_HOME_PROTEOME.out.db
         PREPARE_HOME_PROTEOME.out.db.view { db ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'PREPARE_HOME'.padRight(24)}${c.reset} home proteome ready"
         }
@@ -1224,12 +1226,30 @@ workflow {
         gff_status.real.view { gff ->
             "${c.dim}[SKIP]${c.reset} ${c.white}${'BORROW_ANNOT'.padRight(24)}${c.reset} home GFF found (${gff.name})"
         }
+        // PHYLO_SORT by home locus, before BORROW: the closest annotated target is borrowed from.
+        distinct_loci_ch
+            .map { locus_id, bed -> locus_id }
+            .combine(home_genome_ch)
+            .map { rec ->
+                def norm = normalizeCombineRecord(rec, 1)
+                norm ? tuple(norm[0], norm[1]) : null
+            }
+            .filter { rec -> rec != null }
+            .set { phylo_sort_inputs } // [locus_id, home_genome]
+        uiStatus('RUN ', 'PHYLO_SORT', 'Sorting genomes by phylogenetic distance')
+        PHYLO_SORT(phylo_sort_inputs, genomes_dir_ch, home_species_for_sort_ch)
+        PHYLO_SORT.out.sorted_list.view { locus, sorted ->
+            "${c.green}[OK  ]${c.reset} ${c.white}${'PHYLO_SORT'.padRight(24)}${c.reset} ordering complete for ${locus}"
+        }
+
         uiStatus('RUN ', 'BORROW_ANNOT', 'Checking targets for annotation borrowing when home GFF is missing')
         BORROW_ANNOTATIONS(
             home_genome_ch,
-            PREPARE_HOME_PROTEOME.out.faa,
+            PREPARE_HOME_PROTEOME.out.gff,
             genomes_dir_ch,
-            LOCATE_GENE.out.bed.first(),
+            SPLIT_LOCI.out.beds.map { b -> HomeLoci.primary(b) },
+            PHYLO_SORT.out.sorted_list.map { _l, f -> f }.first(),
+            ANNOTATE_GOI.out.bed,
             params.n_flanking_genes,
             gff_status.missing.map { true }
         )
@@ -1237,14 +1257,10 @@ workflow {
             "${c.green}[OK  ]${c.reset} ${c.white}${'BORROW_ANNOT'.padRight(24)}${c.reset} borrowed annotations generated"
         }
 
-        // Build effective GFF from all available sources:
-        // 1. User-provided / NCBI GFF (if present and real)
-        // 2. Prodigal-predicted GFF (when no annotation was available)
-        // 3. Borrowed annotations from annotated target genomes
-        fallback_gff_ch = PREPARE_HOME_PROTEOME.out.gff
-            .mix(BORROW_ANNOTATIONS.out.gff)
-            .collectFile(name: 'merged_home_annotations.gff')
-            .ifEmpty(no_gff_file)
+        // The home GFF, or without one the predictions + borrowed models (one merged file).
+        fallback_gff_ch = BORROW_ANNOTATIONS.out.gff.ifEmpty(no_gff_file)
+        home_proteome_db_ch = gff_status.real.combine(PREPARE_HOME_PROTEOME.out.db).map { _g, db -> db }
+            .mix(BORROW_ANNOTATIONS.out.db).first()
         
         effective_home_gff_ch = gff_status.real
             .concat(
@@ -1254,9 +1270,6 @@ workflow {
     } else {
         effective_home_gff_ch = home_gff_ch
     }
-
-    distinct_loci_ch = SPLIT_LOCI.out.beds.flatten()
-        .map { file -> tuple(file.baseName, file) }
 
     // 6. Extract Flanking Genes
     uiStatus('RUN ', 'EXTRACT_FLANKING', "Extracting flanking genes (n=${params.n_flanking_genes})")
@@ -1285,29 +1298,7 @@ workflow {
     if (params.target_genomes || params.mode == 'easy') {
         
         uiPhase(2, 'Phylogenetic Ordering and Iterative Search')
-        
-        EXTRACT_FLANKING.out.bed
-            .map { locus_id, bed -> locus_id }
-            .combine(home_genome_ch)
-            .map { rec ->
-                def norm = normalizeCombineRecord(rec, 1)
-                norm ? tuple(norm[0], norm[1]) : null
-            }
-            .filter { rec -> rec != null }
-            .set { phylo_sort_inputs } // [locus_id, home_genome]
 
-        uiStatus('RUN ', 'PHYLO_SORT', 'Sorting genomes by phylogenetic distance')
-        
-        PHYLO_SORT(
-            phylo_sort_inputs,
-            genomes_dir_ch,
-            home_species_for_sort_ch
-        )
-        
-        PHYLO_SORT.out.sorted_list.view { locus, sorted ->
-            "${c.green}[OK  ]${c.reset} ${c.white}${'PHYLO_SORT'.padRight(24)}${c.reset} ordering complete for ${locus}"
-        }
-        
         // QC
         def qc_policy = qcFailPolicy()
         uiStatus('RUN ', 'GENOME_QC', "Assessing target genome quality (policy: ${qc_policy})")
@@ -1548,7 +1539,7 @@ workflow {
             genomes_dir_ch.first(),
             normalized_gene_ready_ch.first(),
             effective_home_gff_ch,
-            PREPARE_HOME_PROTEOME.out.db,
+            home_proteome_db_ch,
             SPLIT_LOCI.out.beds,
             qc_summary_ch,
             ITERATIVE_SEARCH.out.goi_for_tree,

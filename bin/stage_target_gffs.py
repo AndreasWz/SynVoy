@@ -9,7 +9,7 @@ Pro-Mode counterpart to Easy Mode's automatic annotation download. In Easy Mode
     ``<genome>.gff`` / ``.gff3`` (+ ``.gz``) next to each genome FASTA and, when
     found, stamps ``TargetGene`` / ``TargetProduct`` / ``TargetID`` onto every
     emitted model and feeds the family-consistency gate.
-  * ``borrow_annotations.find_annotated_target()`` looks for ``<genome>.gff``
+  * ``borrow_annotations.annotated_targets()`` looks for ``<genome>.gff``
     when the HOME genome has no annotation of its own.
 
 In Pro Mode the user passes plain FASTAs (``--target_genomes`` is FASTA-only by
@@ -219,7 +219,7 @@ def count_usable_features(path: Path) -> Tuple[int, int]:
 def place(gff: Path, dest: Path) -> None:
     """Link the annotation into place; decompress .gz so every consumer reads it.
 
-    ``borrow_annotations.find_annotated_target()`` only probes plain ``.gff``,
+    ``borrow_annotations.annotated_targets()`` only probes plain ``.gff``,
     so gzipped input is expanded rather than linked -- otherwise it would work
     for the search layer but silently not for annotation borrowing.
     """

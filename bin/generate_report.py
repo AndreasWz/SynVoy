@@ -2047,6 +2047,33 @@ def copies_in_slot_by_genome(records, home_copies):
     return out
 
 
+def load_home_annotation(folder):
+    """Where the home annotation of a run without a home GFF came from (borrow_annotations.py,
+    batch HG-5b: home_annotation.json in the home protein database folder), with a warning:
+    the home proteome then holds only the predicted genes near the query's hits and the gene
+    models transferred from one annotated target, so the specificity terms compare a model
+    with these alone. None with a home GFF (no such file)."""
+    path = os.path.join(folder, "home_annotation.json") if folder else ""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    out = {k: info.get(k) for k in ("source", "partial", "target", "target_choice", "target_region",
+                                    "borrowed", "predicted", "predictions_dropped", "proteins")}
+    out["genes_left_out_over_goi"] = len(info.get("left_out_over_goi") or [])
+    borrowed = (f" and {out['borrowed']} gene model(s) transferred from {out['target']}"
+                if out.get("borrowed") else "")
+    out["warning"] = ("The home genome has no annotation: its proteome is partial, the "
+                      f"{out.get('predicted') or 0} predicted gene(s) near the query's hits{borrowed}. "
+                      "BestOtherHome and RealCompetitor compare the calls with these proteins only.")
+    return out
+
+
 def load_run_settings(path):
     """What decided the run's settings (effective_params.json of RESOLVE_EFFECTIVE_PARAMS):
     the preset or the preset modules that were applied and why, the triggers that fire, the
@@ -2127,6 +2154,12 @@ def main():
              "run_settings: which preset or preset modules ran, why, and on which features.",
     )
     parser.add_argument(
+        "--home_db_dir", default=None,
+        help="The home protein database folder of the search. Without a home annotation it "
+             "holds home_annotation.json (borrow_annotations.py): the report says where the "
+             "home annotation and proteome came from and that the proteome is partial.",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -2146,6 +2179,10 @@ def main():
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
     )
     report["run_settings"] = load_run_settings(args.effective_params)
+    home_annotation = load_home_annotation(args.home_db_dir)
+    if home_annotation:
+        report["home_annotation"] = home_annotation
+        report.setdefault("warnings", []).append(home_annotation["warning"])
     slot_units = copies_in_slot_by_genome(report.get("goi_dedup", {}).get("records", []),
                                           (report["run_settings"] or {}).get("home_copies"))
     if slot_units:

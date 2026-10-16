@@ -383,11 +383,33 @@ walk and a GOI marker of its own, so a tandem array of three copies gave three w
    GOI's own position is never taken.
 4. Genes without CDS are kept for the figures but do not count towards the 10.
 
-Without a home GFF, a substitute annotation is built first: genes are predicted
-around the locus (`prodigal_on_regions.py`, Augustus or Prodigal) and annotations are
-transferred from annotated target genomes (`borrow_annotations.py`). If that yields
-nothing either, `extract_flanking_genes.py` predicts genes within 50 kb of the locus
-and keeps the longest tenth, at least 21. Predictions are written as gene, mRNA and CDS
+Without a home GFF, a substitute annotation is built first. Genes are predicted
+around the query's hits (`prodigal_on_regions.py`, Augustus or Prodigal), and
+`borrow_annotations.py` transfers the genes of one annotated target genome (batch HG-5b):
+
+1. the home locus is the best interval of the primary home locus (§5.4), with a window of
+   `pred_flank_window` (50 kb) around it, widened until it holds 2 × `n_flanking_genes`
+   predicted genes or reaches 500 kb;
+2. the target is the closest annotated target (at least 10 CDS rows) by the run's
+   phylogenetic distances (PHYLO_SORT, which now runs before this step); several at that
+   distance, or no distances, are told apart by the median identity of the hits of the
+   window's predicted proteins;
+3. the window's predicted proteins are searched against it (MMseqs2, E ≤ 1e-3), their
+   hits clustered per scaffold with the 50 kb gap, and the cluster with the most home
+   proteins, ± `borrow_target_flank` (100 kb), is the target region;
+4. each annotated protein of that region is aligned to the home window with miniprot;
+   a model with identity ≥ 30 % and query coverage ≥ 50 % whose best protein in the
+   target region is the one it came from becomes a gene model with CDS rows
+   (`ID=borrowed_<target gene>`, `Note=transferred from <target>`) and replaces a
+   prediction it overlaps by more than half.
+
+The predictions and the borrowed models form one merged GFF. The home proteome of such a
+run is built from it (the longest coding model per gene), without the genes over the
+query's own home model, and the report flags it as partial (`home_annotation`). Until
+2026-10-16 the borrowed rows had no CDS (the walk read them as non-coding: drawn, never
+anchors) and came from the best-annotated target, placed by the first row of the hit
+table. If no annotation can be built at all, `extract_flanking_genes.py` predicts genes
+within 50 kb of the locus and keeps the longest tenth, at least 21. Predictions are written as gene, mRNA and CDS
 rows, and a CDS that belongs to no feature of the merged file still counts as a gene
 (until 2026-10-15 one borrowed gene row made every Prodigal prediction vanish); AUGUSTUS
 proteins carry their region and genome coordinates like Prodigal's.

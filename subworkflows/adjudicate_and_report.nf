@@ -235,7 +235,8 @@ workflow ADJUDICATE_AND_REPORT {
         collected_locus_ownership,
         collected_panel_meta,
         collected_phylo,
-        effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS"))
+        effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS")),
+        home_db
     )
 
     emit:

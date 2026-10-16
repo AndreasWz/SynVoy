@@ -6,7 +6,7 @@ consumers probe for an annotation next to the genome:
   * iterative_search_runner.find_native_annotation_path() — its first candidate
     is Path(genome).with_suffix('.gff'); a hit stamps TargetGene/TargetProduct
     onto every model and feeds the family-consistency gate.
-  * borrow_annotations.find_annotated_target() — probes fna.with_suffix('.gff').
+  * borrow_annotations.annotated_targets() — probes fna.with_suffix('.gff').
 
 ...while cluster_regions.nf resolves the genome with a `find -name
 "<genome_name>*"` glob where <genome_name> INCLUDES the extension. So the name
