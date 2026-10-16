@@ -124,7 +124,8 @@ def _synteny_tracks(home_goi_name):
          "genome_id": "target1", "goi_status": "resolved", "offset": 0, "breaks": [],
          "minus_strand_row": None,
          "genes": [gene("orthA", 120, 200, home_gene_id="geneA"),
-                   gene("GOI_match", 250, 330, home_gene_id=home_goi_name)]},
+                   dict(gene("GOI_match", 250, 330, home_gene_id=home_goi_name),
+                        confidence="HIGH")]},
     ]
 
 
@@ -178,7 +179,8 @@ def test_overlong_label_is_clipped_with_an_ellipsis():
 def test_label_jobs_tag_the_best_goi_with_the_copy_count():
     track = _synteny_tracks("GOI_Melt")[1]
     track["genes"].append(dict(track["genes"][1], name="GOI_second", identity=40.0,
-                               start=400, end=480, start_plot=400, end_plot=480))
+                               confidence="LOW", start=400, end=480, start_plot=400,
+                               end_plot=480))
     jobs = ps._track_label_jobs(track, {})
     assert len(jobs) == 1
     # The second call has no confidence of at least medium: it is a weak call, not a copy.

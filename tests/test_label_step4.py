@@ -150,9 +150,28 @@ def test_gene_order_only_is_offered_only_where_nothing_was_counted():
             _rec("g2", "AMBIGUOUS", basis="gene_order_only", eeff="0.3"),
             _rec("g3", "AMBIGUOUS", basis="not_specific", eeff="1e-9")]
     out = gr.dedupe_goi_annotations(recs)
+    dropped = gr.drop_gene_order_only(out, {"paralog_not_goi", "identity_coverage_decoupled"})
     kept = sorted((r["genome"], r["basis"]) for r in out["records"])
     assert kept == [("g1", "significant_specific"), ("g2", "gene_order_only"), ("g3", "not_specific")]
-    assert out["gene_order_only_dropped"] == 1
+    assert out["gene_order_only_dropped"] == 1 and [r["genome"] for r in dropped] == ["g1"]
+    assert out["gene_order_only_dropped_records"] == [
+        {"genome": "g1", "chrom": "chr1", "start": 5000, "end": 5400, "mrna_id": "m5000",
+         "provenance": ["locus_1"]}]
+    assert out["ambiguous_goi_deduped"] == 2
+
+
+def test_gene_order_only_is_kept_where_the_counted_call_was_demoted():
+    """Review fix RF-3: the check runs after the ownership and coverage demotions. A genome
+    whose only counted call turns out to be a paralog (or a high-identity sliver) keeps its
+    weak candidate in the slot."""
+    recs = [_rec("g1", "HIGH"), _rec("g1", "AMBIGUOUS", basis="gene_order_only", eeff="0.3",
+                                     start=5000, end=5400)]
+    out = gr.dedupe_goi_annotations(recs)
+    assert len(out["records"]) == 2          # the dedup itself drops nothing any more
+    out["records"][0]["goi_class"] = "paralog_not_goi"        # what the ownership step does
+    gr.drop_gene_order_only(out, {"paralog_not_goi", "identity_coverage_decoupled"})
+    assert [r["basis"] for r in out["records"]] == ["significant_specific", "gene_order_only"]
+    assert out["gene_order_only_dropped"] == 0 and out["gene_order_only_dropped_records"] == []
 
 
 def test_headline_names_what_needs_curation():

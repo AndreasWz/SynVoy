@@ -980,14 +980,6 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                    if rep.get("copies_in_slot") else {}),
             })
 
-    # A weak match where the gene should be (Basis=gene_order_only) is only offered for
-    # curation in a genome that has no counted call of the gene from any home locus or
-    # rescue pass (plan 3.4): where the gene was found, it is a second, weaker candidate.
-    counted_genomes = {r["genome"] for r in records if r["confidence"] in ("HIGH", "MEDIUM")}
-    n_before = len(records)
-    records = [r for r in records
-               if not (r.get("basis") == "gene_order_only" and r["genome"] in counted_genomes)]
-    gene_order_only_dropped = n_before - len(records)
     records.sort(key=lambda r: (_record_rank(r), r["genome"], r["chrom"]))
     return {
         "records": records,
@@ -999,8 +991,33 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
         "wide_models_superseded": sum(1 for r in records if r["superseded_wide_model"]),
         "pre_dedup_high_medium": len(considered),
         "post_dedup_records": len(records),
-        "gene_order_only_dropped": gene_order_only_dropped,
     }
+
+
+def drop_gene_order_only(goi_dedup, demoted_classes):
+    """A weak match where the gene should be (Basis=gene_order_only) is offered for curation
+    only in a genome without a counted call of the gene from any home locus or rescue pass
+    (plan 3.4): where the gene was found, it is a second, weaker candidate. Counted = HIGH or
+    MEDIUM and not demoted by the ownership or the coverage rule, so this runs after them
+    (review fix RF-3: it ran inside the dedup, and a genome whose only call was then demoted
+    had lost its candidate as well). The dropped records are listed
+    (``gene_order_only_dropped_records``): the per-genome GFFs and the figures drop the same
+    rows (bin/apply_report_drops.py). Mutates ``goi_dedup``; returns the dropped records."""
+    records = goi_dedup.get("records", [])
+    counted = {r["genome"] for r in records
+               if r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in demoted_classes}
+    dropped = [r for r in records if r.get("basis") == "gene_order_only" and r["genome"] in counted]
+    keep = {id(r) for r in records} - {id(r) for r in dropped}
+    goi_dedup["records"] = [r for r in records if id(r) in keep]
+    goi_dedup["gene_order_only_dropped"] = len(dropped)
+    goi_dedup["gene_order_only_dropped_records"] = [
+        {"genome": r["genome"], "chrom": r["chrom"], "start": r["start"], "end": r["end"],
+         "mrna_id": r.get("mrna_id", ""), "provenance": r.get("provenance", [])}
+        for r in dropped]
+    goi_dedup["ambiguous_goi_deduped"] = sum(
+        1 for r in goi_dedup["records"] if r.get("confidence") == "AMBIGUOUS")
+    goi_dedup["post_dedup_records"] = len(goi_dedup["records"])
+    return dropped
 
 
 def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
@@ -1804,6 +1821,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     )
 
     _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
+    drop_gene_order_only(goi_dedup, _DEMOTED_CLASSES)
+    dedup_ambiguous = goi_dedup["ambiguous_goi_deduped"]
     absence = genome_absence_categories(goi_dedup.get("records", []), target_policy,
                                         _DEMOTED_CLASSES)
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium

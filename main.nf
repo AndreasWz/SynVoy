@@ -1525,25 +1525,6 @@ workflow {
             tree: item[6]
         }.set { plot_inputs_split }
 
-        uiStatus('RUN ', 'PLOT_SYNTENY', 'Generating synteny visualizations')
-
-        PLOT_SYNTENY(
-            plot_inputs_split.home_bed,       // home_bed
-            plot_inputs_split.query_bed,      // query_bed (per-locus, was global)
-            effective_home_gff_ch,            // home_gff (user-provided or Prodigal-predicted)
-            plot_inputs_split.target_gffs,    // target_gffs
-            plot_inputs_split.candidate_beds, // candidate_beds
-            plot_inputs_split.homology_tsvs,  // homology_tsvs
-            plot_inputs_split.tree,           // tree
-            species_map_ch,                   // species_mapping.tsv (already a value channel)
-            home_species_for_sort_ch,         // home species label of the home row
-            qc_summary_ch                     // genome quality summary (value channel)
-        )
-        
-        PLOT_SYNTENY.out.plot.view { plot ->
-            "${c.green}[OK  ]${c.reset} ${c.white}${'PLOT_SYNTENY'.padRight(24)}${c.reset} synteny visualization complete"
-        }
-        
         // Final Reporting
         uiPhase(5, 'Report Generation')
         uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
@@ -1571,6 +1552,26 @@ workflow {
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'GENERATE_REPORT'.padRight(24)}${c.reset} analysis report generated"
+        }
+
+        uiStatus('RUN ', 'PLOT_SYNTENY', 'Generating synteny visualizations')
+
+        PLOT_SYNTENY(
+            plot_inputs_split.home_bed,       // home_bed
+            plot_inputs_split.query_bed,      // query_bed (per-locus, was global)
+            effective_home_gff_ch,            // home_gff (user-provided or Prodigal-predicted)
+            plot_inputs_split.target_gffs,    // target_gffs
+            plot_inputs_split.candidate_beds, // candidate_beds
+            plot_inputs_split.homology_tsvs,  // homology_tsvs
+            plot_inputs_split.tree,           // tree
+            species_map_ch,                   // species_mapping.tsv (already a value channel)
+            home_species_for_sort_ch,         // home species label of the home row
+            qc_summary_ch,                    // genome quality summary (value channel)
+            ADJUDICATE_AND_REPORT.out.report_for_plot   // drawn after the report: leave out what it drops
+        )
+
+        PLOT_SYNTENY.out.plot.view { plot ->
+            "${c.green}[OK  ]${c.reset} ${c.white}${'PLOT_SYNTENY'.padRight(24)}${c.reset} synteny visualization complete"
         }
     }
 

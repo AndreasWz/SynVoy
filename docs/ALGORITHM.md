@@ -355,7 +355,10 @@ The order of the flanking genes in this file defines the home rank
 number of taxonomy nodes that the two lineages do not share. It uses a local taxonomy
 database when one is installed, otherwise the NCBI lineage of the assembly accession
 in the file name, otherwise a MinHash distance between the genomes (k = 21). Targets
-are sorted closest first.
+are sorted closest first. Without a usable `TAXDB` (a folder with `taxa.sqlite`), ETE3
+opens its default database (`~/.etetoolkit/taxa.sqlite`), so two machines can order the
+waves differently; `intermediate/phylo_sort/sort_provenance.json` records the strategy,
+the database that was opened (path, size, date, md5) and the order.
 
 **Quality.** `assess_genome_quality.py` fails a genome with N50 below 5 kb or more
 than 500,000 sequences. With `qc_fail_policy = auto`, a failed genome is removed when
@@ -703,7 +706,10 @@ coverage:
   home neighbourhood: in a tandem array position cannot tell the two apart.
 - AMBIGUOUS calls ("needs curation") are kept, drawn and reported, never counted. A
   gene-order-only call is offered only in a genome where no home locus and no rescue pass
-  produced a counted call of the gene.
+  produced a counted call of the gene; counted means after the ownership and coverage
+  demotions of the report ([§10](#10-adjudication-and-the-report)). Where the report drops one, the per-genome
+  GFF and the figures leave it out too (`apply_report_drops.py`; the figures are drawn
+  after the report).
 - **Slot.** Without the home locus span (`goi=` in the anchor headers) no block has a
   slot; the search then warns once and judges in the core, the window or the genome.
 - **Without parasail** no `Bits=` is computed: every candidate type is ordered by the best
@@ -974,9 +980,14 @@ this order:
 4. **Coverage demotion** (`apply_coverage_demotion`). A HIGH or MEDIUM call with
    identity ≥ 50 % and a recorded coverage below 0.35 is relabelled
    `identity_coverage_decoupled`.
-5. **Headline.** HIGH and MEDIUM calls are counted without the two relabelled classes.
+5. **Gene-order-only calls** (`drop_gene_order_only`). An AMBIGUOUS call with
+   `Basis=gene_order_only` is dropped in a genome that has a counted call (HIGH or MEDIUM,
+   not relabelled in steps 3–4); the dropped calls are listed in
+   `goi_dedup.gene_order_only_dropped_records`. Until 2026-10-15 this ran inside step 1, so
+   a genome whose only call steps 3–4 then relabelled had lost its candidate as well.
+6. **Headline.** HIGH and MEDIUM calls are counted without the two relabelled classes.
    AMBIGUOUS and LOW calls are reported separately.
-6. **Self-consistency flags**: strong synteny without a GOI, the same gene found from
+7. **Self-consistency flags**: strong synteny without a GOI, the same gene found from
    several home loci, and the flags of steps 2–4.
 
 ## 11. Tree
@@ -989,7 +1000,16 @@ tree with IQ-TREE (model selection `-m MFP`; 1000 ultrafast bootstrap replicates
 
 `plot_synteny.py` draws one set of figures per home locus from the home annotation,
 the models of [§7](#7-the-search-in-one-target-genome) and the regions of
-[§8](#8-region-scores).
+[§8](#8-region-scores). The figures are drawn after the report: `apply_report_drops.py`
+copies the per-genome GFFs into `plot_inputs_*` without the gene-order-only calls the
+report dropped ([§10](#10-adjudication-and-the-report), step 5), and the figures are drawn
+from those copies.
+
+- **Labels.** A GOI call is drawn as resolved when its label is HIGH or MEDIUM, whatever
+  its class (a HIGH tandem copy was drawn as unresolved, an AMBIGUOUS call as resolved
+  until 2026-10-15); AMBIGUOUS calls are drawn in the needs-curation style. The best GOI
+  call of a row, the overlap dedup and the GOI cap rank by label, then by the strength of
+  the match (E in its place, the block's E_syn, bits).
 
 - **Home row.** The GOI is drawn from the home annotation: the transcript whose CDS
   covers the hits best. Only coding exons are drawn.

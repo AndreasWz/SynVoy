@@ -320,13 +320,13 @@ def _is_fragment_goi(gene):
 
 
 def _is_resolved_goi_target_gene(gene):
+    """A GOI call drawn as resolved: label HIGH or MEDIUM, whatever its class (review fix
+    RF-3). The class decided before: a HIGH tandem copy (tandem_goi_copy) was drawn as
+    unresolved, and an AMBIGUOUS call (syntenic_candidate_unconfirmed), which needs
+    curation, as a confident one."""
     if not _is_goi_target_gene(gene):
         return False
-    goi_class = (gene.get("goi_class") or "").strip().lower()
-    confidence = (gene.get("confidence") or "").strip().upper()
-    if goi_class in {"ambiguous_goi_family_member", "tandem_goi_copy"}:
-        return False
-    return confidence != "LOW"
+    return (gene.get("confidence") or "").strip().upper() in GOI_COPY_TIERS
 
 
 def _track_goi_status(track):
@@ -522,22 +522,13 @@ def _model_strength(gene):
 
 
 def _goi_priority_key(gene):
-    goi_like = 1 if _is_goi_target_gene(gene) else 0
-    resolved = 1 if _is_resolved_goi_target_gene(gene) else 0
-    goi_class = (gene.get("goi_class") or "").strip().lower()
-    class_rank = {
-        "confident_goi": 3,
-        "probable_goi": 2,
-        "tandem_goi_copy": 1,
-        "ambiguous_goi_family_member": 0,
-    }.get(goi_class, 1 if goi_like else -1)
-    return (
-        goi_like,
-        resolved,
-        _confidence_rank(gene.get("confidence")),
-        class_rank,
-        _model_strength(gene),
-    )
+    """(GOI, label rank, _model_strength), higher first: GOI models before the others, then
+    HIGH > MEDIUM > AMBIGUOUS > LOW, then the strength of the match (review fix RF-3: the
+    class came between the label and the strength, so a weaker confident_goi model beat a
+    stronger tandem copy with the same label)."""
+    return (1 if _is_goi_target_gene(gene) else 0,
+            _confidence_rank(gene.get("confidence")),
+            _model_strength(gene))
 
 
 def parse_target_gff(gff_file, cap=True):
@@ -670,13 +661,8 @@ def parse_target_gff(gff_file, cap=True):
         # Sort: GOI first (always kept), then by descending bit score (identity for
         # models without one, see _model_strength)
         def _dedup_sort_key(g):
-            strength = _model_strength(g)
-            return (
-                -_goi_priority_key(g)[0],
-                -_goi_priority_key(g)[1],
-                -_goi_priority_key(g)[2],
-                -_goi_priority_key(g)[3],
-            ) + tuple(-x for x in strength)
+            goi_like, rank, strength = _goi_priority_key(g)
+            return (-goi_like, -rank) + tuple(-x for x in strength)
         genes.sort(key=_dedup_sort_key)
 
         kept = []
@@ -2140,7 +2126,9 @@ def _build_tooltip_json(gene, track, home_products):
     if resolved:
         data["goiTag"] = "GOI"
     elif ambiguous:
-        data["goiTag"] = "GOI-like / ambiguous"
+        data["goiTag"] = ("GOI call, needs curation"
+                          if (gene.get("confidence") or "").upper() == "AMBIGUOUS"
+                          else "GOI-like, low confidence")
     elif goi_f and is_home:
         data["goiTag"] = "GOI"
 
@@ -2190,8 +2178,8 @@ def _track_label_jobs(track, home_products):
     """The on-canvas labels of one track as ``[(gene, text)]``: at most one.
 
     The GOI is named once, on the home track ("★ name"). Another track carries only
-    its copy count ("×N", "+N weak") at its best GOI call (resolved > ambiguous, then
-    highest identity), and nothing when it has a single copy: one rotated name per
+    its copy count ("×N", "+N weak") at its best GOI call (by label, then
+    _model_strength), and nothing when it has a single copy: one rotated name per
     track repeated the same word down the figure, and one per copy of a tandem
     family stacked into an unreadable pile. Every copy stays drawn, with its
     details in the hover tooltip and the click-to-pin layer.
@@ -2209,7 +2197,8 @@ def _track_label_jobs(track, home_products):
             goi_genes.append((gene, resolved))
     if not goi_genes:
         return []
-    goi_genes.sort(key=lambda gr: (gr[1], _model_strength(gr[0])), reverse=True)
+    goi_genes.sort(key=lambda gr: (gr[1], _confidence_rank(gr[0].get("confidence")),
+                                   _model_strength(gr[0])), reverse=True)
     best_gene, best_resolved = goi_genes[0]
     # "xN" counts gene copies; most extra GOI calls of a genome are weak hits.
     flags = [c for _, c in _goi_copies_and_weak([g for g, _ in goi_genes], is_home)]
@@ -2699,7 +2688,7 @@ def render_synteny_html(all_tracks, gene_colours,
             return None
         def _key(g):
             resolved = True if track["is_home"] else _is_resolved_goi_target_gene(g)
-            return (1 if resolved else 0, _model_strength(g))
+            return (1 if resolved else 0, _confidence_rank(g.get("confidence")), _model_strength(g))
         return max(gois, key=_key)
 
     # Why two groups + group-opacity: every track is GOI-centred, so many

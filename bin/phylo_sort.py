@@ -3,9 +3,15 @@
 phylo_sort.py - Sort target genomes by phylogenetic distance from home genome.
 
 Strategies (tried in order):
-  1. ETE3 + local taxonomy database (offline, fast)
+  1. ETE3 + local taxonomy database (offline, fast). Without a usable --taxdb (a sqlite
+     file, or a folder holding taxa.sqlite) ETE3 opens its default database
+     (~/.etetoolkit/taxa.sqlite), so the order depends on the machine's copy.
   2. NCBI Datasets CLI - extract taxonomy from GCF_/GCA_ accessions (online)
-  3. Alphabetical fallback with distance=0
+  3. MinHash distance to the home genome, or alphabetical without a home FASTA
+
+--provenance writes which strategy produced the order and, for strategy 1, the path, size,
+date and md5 of the taxonomy database that was opened (review fix RF-3: the laptop and LRZ
+ordered the waves differently, and nothing recorded why).
 
 The key insight: in pro mode, genome filenames typically contain NCBI assembly
 accessions (e.g. GCF_029169275.1.fna). We can extract taxonomy lineages
@@ -19,10 +25,26 @@ import re
 import json
 import subprocess
 import argparse
+from datetime import datetime, timezone
 try:
     from ete3 import NCBITaxa
 except ImportError:
     NCBITaxa = None
+
+# What decided the order of this run (written by --provenance).
+PROVENANCE = {}
+
+
+def file_fingerprint(path):
+    """Path, size, modification time (UTC) and md5 of a file."""
+    digest = hashlib.md5()
+    with open(path, 'rb') as fh:
+        for block in iter(lambda: fh.read(1 << 20), b''):
+            digest.update(block)
+    st = os.stat(path)
+    return {"path": os.path.abspath(path), "bytes": st.st_size,
+            "modified": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(timespec='seconds'),
+            "md5": digest.hexdigest()}
 
 
 # =============================================================================
@@ -335,10 +357,15 @@ def sort_by_ete3(args, target_list):
         print(f"[phylo_sort] ETE3 init failed: {e}")
         return None
 
+    dbfile = getattr(ncbi, 'dbfile', '')
+    if dbfile and os.path.isfile(dbfile):
+        PROVENANCE['taxonomy_db'] = file_fingerprint(dbfile)
+        print(f"[phylo_sort] Taxonomy database: {dbfile} (md5 {PROVENANCE['taxonomy_db']['md5']})")
     home_taxid = get_taxid(args.home, ncbi)
     if not home_taxid:
         print(f"[phylo_sort] Could not find TaxID for home: {args.home}")
         return None
+    PROVENANCE['home_taxid'] = int(home_taxid)
 
     print(f"[phylo_sort] Home TaxID: {home_taxid}")
 
@@ -372,6 +399,7 @@ def sort_by_ete3(args, target_list):
     real_distances = [d for d, _ in scored if d < float('inf')]
     if not real_distances:
         return None
+    PROVENANCE['targets_without_taxid'] = sorted(t for d, t in scored if d == float('inf'))
 
     scored.sort(key=lambda x: (x[0], x[1]))
     return scored
@@ -439,12 +467,15 @@ def _collect_targets(args):
 def fallback_sort(args, target_list):
     """Fallback sort using MinHash Jaccard distance or alphabetical if fasta missing."""
     if not hasattr(args, 'home_fasta') or not args.home_fasta or not os.path.exists(args.home_fasta):
+        PROVENANCE['strategy'] = 'alphabetical'
         print("[phylo_sort] Falling back to alphabetical sorting (no home_fasta)")
         with open(args.output, 'w') as out:
             for target in sorted([os.path.basename(t) for t in target_list]):
                 out.write(f"{target}\t0\n")
         return
 
+    PROVENANCE['strategy'] = 'minhash'
+    PROVENANCE['minhash'] = {"k": 21, "sketch_size": 10000, "home_fasta": os.path.basename(args.home_fasta)}
     print(f"[phylo_sort] Falling back to MinHash sorting against {args.home_fasta}")
     home_sketch = minhash_sketch(args.home_fasta)
     results = []
@@ -489,9 +520,34 @@ def main():
                         help="Path to taxonomy DB (directory or sqlite file)")
     parser.add_argument("--output", required=True,
                         help="Output sorted list of genomes")
+    parser.add_argument("--provenance", default="",
+                        help="Write what decided the order (strategy, taxonomy database with "
+                             "md5) to this JSON file")
 
     args = parser.parse_args()
+    PROVENANCE.update({"home": args.home, "taxdb": args.taxdb})
+    try:
+        _sort(args)
+    finally:
+        if args.provenance:
+            _write_provenance(args)
 
+
+def _write_provenance(args):
+    order = []
+    if os.path.exists(args.output):
+        with open(args.output) as fh:
+            order = [ln.rstrip("\n").split("\t") for ln in fh if ln.strip()]
+    PROVENANCE.setdefault('strategy', 'failed')
+    PROVENANCE['sorted_genomes'] = os.path.basename(args.output)
+    PROVENANCE['order'] = order
+    with open(args.provenance, 'w') as fh:
+        json.dump(PROVENANCE, fh, indent=1)
+        fh.write("\n")
+    print(f"[phylo_sort] Order by {PROVENANCE['strategy']}; provenance in {args.provenance}")
+
+
+def _sort(args):
     # Collect target files
     target_list = []
     if args.targets:
@@ -506,6 +562,7 @@ def main():
 
     if not target_list:
         print("[phylo_sort] Warning: No targets found")
+        PROVENANCE['strategy'] = 'no_targets'
         with open(args.output, 'w') as f:
             pass
         return
@@ -513,9 +570,14 @@ def main():
     # Strategy 1: ETE3 + local taxonomy DB
     result = sort_by_ete3(args, target_list)
     if result:
+        PROVENANCE['strategy'] = 'ete3_taxonomy'
         print(f"[phylo_sort] Sorted by ETE3 taxonomy ({len(result)} genomes)")
         _write_result(args.output, result)
         return
+    PROVENANCE.pop('home_taxid', None)
+    PROVENANCE.pop('targets_without_taxid', None)
+    if 'taxonomy_db' in PROVENANCE:      # opened, but it could not place the genomes
+        PROVENANCE['taxonomy_db_not_used'] = PROVENANCE.pop('taxonomy_db')
 
     # Strategy 2: NCBI Datasets CLI (accession-based)
     home_identifier = args.home if args.home else ''
@@ -524,6 +586,8 @@ def main():
         home_identifier = args.home
     result = sort_by_accession_taxonomy(home_identifier, target_list)
     if result:
+        PROVENANCE['strategy'] = 'accession_taxonomy'
+        PROVENANCE['lineages'] = 'NCBI datasets CLI, looked up online at run time'
         print(f"[phylo_sort] Sorted by accession taxonomy ({len(result)} genomes)")
         _write_result(args.output, result)
         return

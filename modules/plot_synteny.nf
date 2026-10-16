@@ -12,6 +12,7 @@ process PLOT_SYNTENY {
     path species_map
     val home_species
     path genome_qc   // genome_qc_summary.json: a target that failed the check is marked in the figures
+    path report      // synvoy_report.json (or NO_REPORT): what the report drops, the GFFs and figures leave out
 
     output:
     path "*_synteny_plot.html", emit: plot
@@ -46,7 +47,9 @@ process PLOT_SYNTENY {
     def homo_str = homology_tsvs ? homology_tsvs.join(' ') : ''
     
     // Only include arguments if they have values
-    def gffs_arg = gffs_str ? "--target_gffs ${gffs_str}" : ""
+    // The figures read the per-genome GFFs from the plot-input folder, where
+    // apply_report_drops.py wrote them without the rows the report drops.
+    def gffs_arg = gffs_str ? "--target_gffs \$target_gffs_in" : ""
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
@@ -82,8 +85,11 @@ process PLOT_SYNTENY {
         # Point plot_synteny to the much smaller subset GFF
         FINAL_HOME_GFF="\$SUBSET_GFF"
     fi
+    target_gffs_in=""
     if [ -n "${gffs_str}" ]; then
-        cp ${gffs_str} "\$inputs_dir/" || true
+        ${projectDir}/bin/apply_report_drops.py --report $report --out_dir "\$inputs_dir" ${gffs_str} \\
+            || cp ${gffs_str} "\$inputs_dir/" || true
+        for f in ${gffs_str}; do target_gffs_in="\$target_gffs_in \$inputs_dir/\$(basename "\$f")"; done
     fi
     if [ -n "${cands_str}" ]; then
         cp ${cands_str} "\$inputs_dir/" || true

@@ -41,7 +41,7 @@ the first two are counted as orthologs.
 | `HIGH` | `significant_specific` | E ≤ 1e-6 in the expected place, specific with a margin of ≥ 10 bits (or no real competitor), and the model covers ≥ 70 % of the query | ortholog, high confidence |
 | `MEDIUM` | `significant_specific` | E ≤ 1e-3 in the expected place, and specific | ortholog, medium confidence |
 | `AMBIGUOUS` | `not_specific` | E ≤ 1e-3, but another home gene explains the model as well | needs curation: another home gene fits as well |
-| `AMBIGUOUS` | `gene_order_only` | 1e-3 < E ≤ 1 in the slot between the gene's neighbours in a block whose gene order is significant, and specific. Offered only in a genome without a counted call | needs curation: weak match where the gene should be |
+| `AMBIGUOUS` | `gene_order_only` | 1e-3 < E ≤ 1 in the slot between the gene's neighbours in a block whose gene order is significant, and specific. Offered only in a genome without a counted call (counted after the report's paralog and coverage checks); elsewhere it is left out of the report, the per-genome GFFs and the figures | needs curation: weak match where the gene should be |
 | `LOW` | `not_significant` | everything else: a fragment, a weak hit, a chance alignment | no significant match |
 
 **The E-value** (`Eeff`) is that of the home protein against the model, computed in the
@@ -260,7 +260,7 @@ The fields of `summary` worth reading:
 | `headline` | One sentence, e.g. `12 ortholog(s) (9 high, 3 medium confidence); 4 need curation (3 gene order only, 1 another home gene fits as well); 40 no significant match; across 33 genome(s).` |
 | `high_confidence_goi`, `medium_confidence_goi` | Counts after dedup and the paralog check — the numbers to quote |
 | `needs_curation_goi`, `needs_curation_by_basis` | The AMBIGUOUS calls ("needs curation"), never part of the ortholog count, and how many rest on `gene_order_only` and how many are `not_specific`. `ambiguous_goi` is the old name of `needs_curation_goi` (kept for one release) |
-| `gene_order_only_dropped` | Gene-order-only calls not offered because their genome has a counted call of the gene |
+| `gene_order_only_dropped` | Gene-order-only calls not offered because their genome has a counted call of the gene; `goi_dedup.gene_order_only_dropped_records` lists them (genome, position, model id). The per-genome GFFs in `plot_inputs_*` and the figures leave them out too |
 | `low_confidence_goi` | LOW calls, named separately, never part of the ortholog count |
 | `goi_absent_genomes` | Genomes in which no GOI call was **placed**. Not proof of absence. |
 | `goi_found_but_not_syntenic` | Genomes with a strong GOI hit that no synteny gate accepted (see `rejected_candidates`) |
@@ -445,7 +445,7 @@ columns of `hits/<genome>.target_policy.tsv` in a decoy run.
 | `split_loci/` | One BED per home locus (the annotated home gene is the first one; `--home_locus_mode`) |
 | `flanking/` | The flanking genes of each home locus (`synteny_block_locus_<N>.bed`, proteins) |
 | `annotate_goi/` | The GOI's exon structure on the home genome (`goi_exons.faa`, `goi_annotation.bed`, `goi_info.json`) |
-| `phylo_sort/` | Target genomes ordered closest first, with distances |
+| `phylo_sort/` | Target genomes ordered closest first, with distances (`sorted_genomes.txt`), and `sort_provenance.json`: the strategy that ordered them (`ete3_taxonomy`, `accession_taxonomy`, `minhash`, `alphabetical`), the taxonomy database ETE3 opened (path, size, date, md5), the home TaxID and the order. Two machines with different taxonomy databases order the search waves differently |
 | `initial_db/` | The starting query set (flanking proteins + GOI) |
 | `qc/` | The targets that passed assembly QC |
 | `phylo_placement/` | Per-locus phylogenetic-placement table |

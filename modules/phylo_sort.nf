@@ -9,6 +9,8 @@ process PHYLO_SORT {
     
     output:
     tuple val(locus_id), path("sorted_genomes.txt"), emit: sorted_list
+    // Which strategy ordered the genomes, and the taxonomy database (path, md5) it used.
+    path "sort_provenance.json", emit: provenance, optional: true
     
     script:
     """
@@ -39,15 +41,15 @@ process PHYLO_SORT {
             --home_fasta "$home_genome" \\
             --targets_dir $genomes_dir \\
             --taxdb \$TAXDB \\
-            --output sorted_genomes.txt || {
+            --output sorted_genomes.txt --provenance sort_provenance.json || {
                 echo "Phylogenetic sorting failed, falling back to MinHash"
-                phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
+                phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt --provenance sort_provenance.json
             }
     else
         echo "No TaxDB found (set TAXDB environment variable)"
         echo "Using MinHash fallback (no taxonomic phylogenetic sorting)"
         # Use phylo_sort's fallback logic
-        phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt
+        phylo_sort.py --home "\$HOME_QUERY" --home_fasta "$home_genome" --targets_dir $genomes_dir --taxdb "NO_DB" --output sorted_genomes.txt --provenance sort_provenance.json
     fi
     """
 }

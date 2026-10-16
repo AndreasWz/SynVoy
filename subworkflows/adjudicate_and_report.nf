@@ -239,4 +239,9 @@ workflow ADJUDICATE_AND_REPORT {
 
     emit:
     report = GENERATE_REPORT.out.report
+    // The report once for every locus's PLOT_SYNTENY (a value channel): the figures and the
+    // per-genome GFFs leave out what the report drops (bin/apply_report_drops.py).
+    report_for_plot = GENERATE_REPORT.out.report
+        .ifEmpty(file("${projectDir}/assets/sentinels/NO_REPORT"))
+        .first()
 }
