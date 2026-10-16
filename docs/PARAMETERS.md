@@ -511,6 +511,11 @@ How the GOI's hits in a search window are chained into a gene when miniprot buil
 
 How tandem copies of the GOI are found among its hits in a search window. Off (the default, as before): any two hits that each cover at least 35 % of the query make a tandem, and each copy is the single span of its hits. On (batch G2, 2026-10-16): copies are built per strand from hits that continue the query (as `goi_chain_query_aware` chains them), a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits (both for a query under 150 aa), copies sharing genome are one, and a tandem needs two counted copies that overlap in the query by more than half; each copy is written as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or two programs' hits of one exon, no longer make a tandem. Works with both `tandem_copy_parent` settings.
 
+### `goi_first_exon_guard`
+**Type:** Boolean | **Default:** `false`
+
+A GOI gene model from miniprot is extended to its own start and stop codon (`refine_model_termini`). The search's hits cannot see an exon below about 10 to 15 aa, and miniprot rarely places a first exon of 5 to 16 aa, so a model often begins at the second exon; the walk upstream then reaches an ATG in the intron. With this switch (batch G3A, 2026-10-16) the walk is skipped when the home gene has two or more exons, its first exon is at most 30 aa, and the query residues missing before the model's first CDS are within 5 aa of that exon's length; the model then carries `FirstExon=missing` and `MissingQueryStart=1-<n>`. The same holds at the stop end (`LastExon=missing`, `MissingQueryEnd`). Labels do not read these attributes. Applies to the home query and its decoys only.
+
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
 

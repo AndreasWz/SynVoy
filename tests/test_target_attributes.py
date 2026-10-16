@@ -72,9 +72,10 @@ def test_home_exon_count_ignores_tandem_copies_of_the_home_model(tmp_path):
     info = {"method": "hit_annotation",
             "exons": [{"id": "GOI_q|exon_1"}, {"id": "GOI_q|exon_2"}, {"id": "GOI_copy_1"}]}
     (tmp_path / "goi_info.json").write_text(json.dumps(info))
-    src = (ROOT / "bin" / "iterative_search_runner.py").read_text()
-    assert 'not str(_e.get("id", "")).startswith("GOI_copy_")' in src
-    assert '("tandem_duplication", "full_protein_only")' in src
+    assert isr.home_exon_terms(*isr.read_home_exons(str(tmp_path / "goi_info.json"))) == (2, None)
+    for method in ("tandem_duplication", "full_protein_only"):          # no gene model at home
+        assert isr.home_exon_terms(method, [40, 50])[0] is None
+    assert isr.home_exon_terms(*isr.read_home_exons(str(tmp_path / "missing.json"))) == (None, None)
 
 
 # ============================================================ target_policy.tsv

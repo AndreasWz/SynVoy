@@ -866,6 +866,45 @@ def decoy_cases(candidates) -> List[List[Dict[str, Any]]]:
     return [cases[k] for k in sorted(cases)]
 
 
+def read_home_exons(goi_info_path) -> Tuple[Optional[str], List[int]]:
+    """``(method, exon lengths in aa)`` of the home gene model (goi_info.json of ANNOTATE_GOI),
+    tandem copies of the home model left out, in exon order; ``(None, [])`` without the file.
+    The one reader of the home exons (ExonsKept, the first-exon guard of batch G3A).
+    ANNOTATE_GOI leaves out exons under 3 aa, so the first listed exon can be exon 2."""
+    if not goi_info_path:
+        return None, []
+    try:
+        with open(goi_info_path) as fh:
+            info = json.load(fh)
+        exons = [e for e in (info.get("exons") or []) if not str(e.get("id", "")).startswith("GOI_copy_")]
+        exons.sort(key=lambda e: int(e.get("exon_num", 0) or 0))
+        return info.get("method", ""), [int(e.get("length_aa", 0) or 0) for e in exons]
+    except (OSError, TypeError, ValueError, AttributeError):
+        return None, []
+
+
+def home_exon_terms(method, lengths):
+    """``(exon count, structure)`` of the home gene from :func:`read_home_exons`. The count
+    (ExonsKept) is unknown when ANNOTATE_GOI built no gene model (tandem_duplication /
+    full_protein_only); the structure (first-exon guard, G3A) only for an annotated home gene
+    of >= 2 exons."""
+    count = (len(lengths) or None) if method not in (None, "tandem_duplication", "full_protein_only") else None
+    structure = ({'first_aa': lengths[0], 'last_aa': lengths[-1], 'num_exons': len(lengths)}
+                 if method == "gff_annotation" and len(lengths) >= 2 else None)
+    return count, structure
+
+
+def first_exon_guard_structure(args, parent: str):
+    """The home gene's exon lengths for the first-exon guard of ``parent`` (batch G3A,
+    --goi_first_exon_guard): only for the home GOI and its decoys, never for the relative's
+    query (``~rel``); None otherwise or without an annotated multi-exon home gene."""
+    if not getattr(args, 'goi_first_exon_guard', False) or parent.endswith(RELATIVE_QUERY_TAG):
+        return None
+    if parent not in set(home_goi_parents(args)) and not is_decoy_parent(parent):
+        return None
+    return getattr(args, 'home_goi_structure', None)
+
+
 def is_decoy_parent(parent: str) -> bool:
     """A decoy's parent: ``<home parent>~rev|~shuf1|~shuf2``, with ``~rel`` behind it for a
     decoy of the relative's query until the rebase files it under the home decoy."""
@@ -2411,6 +2450,23 @@ def _query_union_coverage(hits: List[Dict[str, Any]], query_len: int) -> float:
     fallback classifier's qcov >= 0.75 arm called that MEDIUM.
     """
     return min(1.0, _query_residues(hits) / max(1, int(query_len)))
+
+
+def missing_exon_attrs(exons) -> str:
+    """``;MissingQueryStart=1-<p-1>;FirstExon=missing`` (and the end's counterpart) of a model
+    whose terminal home exon is missing (batch G3A, set by annotate_goi_exons._build_model);
+    '' otherwise."""
+    if not exons:
+        return ''
+    out = ''
+    ordered = sorted(exons, key=lambda e: e.get('qstart', 0))
+    start = ordered[0].get('missing_query_start')
+    end = ordered[-1].get('missing_query_end')
+    if start:
+        out += f";MissingQueryStart={start[0]}-{start[1]};FirstExon=missing"
+    if end:
+        out += f";MissingQueryEnd={end[0]}-{end[1]};LastExon=missing"
+    return out
 
 
 def _query_residues(hits: List[Dict[str, Any]]) -> int:
@@ -4489,6 +4545,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                 f"{avg_pident:.1f}\t{strand}\t.\t"
                 f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons, core_cov=model_core_cov), global_start, global_end, strand)}"
+                f"{missing_exon_attrs(exons)}"
             )
         ]
         for eidx, exon in enumerate(exons, 1):
@@ -4770,6 +4827,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 parent_query_seq,
                                 subseq,
                                 chrom,
+                                home_structure=first_exon_guard_structure(args, parent_id),
                                 gap_search_window=goi_model_margin,
                                 sensitive=is_goi_parent,
                                 max_models=(1 if getattr(args, 'disable_multi_model', False)
@@ -7683,6 +7741,11 @@ def main():
     parser.add_argument("--report_low_complexity", type=str2bool, default=False,
                         help="Write LowComplexity (low-complexity share of the model protein) on "
                              "the GOI models (advisory)")
+    parser.add_argument("--goi_first_exon_guard", type=str2bool, default=False,
+                        help="Where a GOI model lacks a short home first (or last) exon (<= 30 aa, "
+                             "the missing query residues within 5 aa of it), do not walk to an ATG "
+                             "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
+                             "instead. Home GOI and decoys only (batch G3A; off by default)")
     parser.add_argument("--tandem_query_restart", type=str2bool, default=False,
                         help="Tandem copies of the GOI are query restarts: copies built per strand "
                              "from hits that continue the query, counted at >= 0.35 union "
@@ -7947,19 +8010,10 @@ def main():
         logger.error(str(exc))
         sys.exit(1)
 
-    # Exons of the home gene, without tandem copies of the home model (ExonsKept); unknown
-    # when ANNOTATE_GOI built no gene model (tandem_duplication / full_protein_only).
-    args.home_goi_exons = None
-    if getattr(args, "goi_info", None):
-        try:
-            with open(args.goi_info) as _fh:
-                _gi = json.load(_fh)
-            if _gi.get("method") not in ("tandem_duplication", "full_protein_only"):
-                _n = sum(1 for _e in (_gi.get("exons") or [])
-                         if not str(_e.get("id", "")).startswith("GOI_copy_"))
-                args.home_goi_exons = _n or None
-        except (OSError, TypeError, ValueError):
-            args.home_goi_exons = None
+    # Exons of the home gene, without tandem copies of the home model (ExonsKept), and the
+    # exon lengths of an annotated multi-exon home gene (the first-exon guard of G3A).
+    args.home_goi_exons, args.home_goi_structure = home_exon_terms(
+        *read_home_exons(getattr(args, "goi_info", None)))
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov

@@ -1501,9 +1501,45 @@ def _terminus_bound(unaligned_query_residues, hard_cap):
     return min(hard_cap, _TERMINUS_UNKNOWN_QUERY_BOUND)
 
 
+FIRST_EXON_GUARD_MAX_AA = 30   # a home terminal exon this short can be missing from a model
+FIRST_EXON_GUARD_SLACK_AA = 5
+
+
+def missing_terminal_exons(cds_ordered, query_len, home_structure):
+    """The query residues a model lacks where a short home terminal exon is (batch G3A):
+    ``{'start': (1, p - 1)}`` when the model's first CDS (coding order) begins at query
+    position p > 3 and p - 1 is within 5 aa of the home first exon's length (an exon of at
+    most 30 aa; for one of 8 aa or less p - 1 >= max(4, L - 2) on the low side), and the same
+    as ``{'end': (q + 1, query_len)}`` at the other end. ``home_structure`` is
+    ``{'first_aa', 'last_aa', 'num_exons'}`` of the home gene model; nothing for a home gene of
+    one exon."""
+    out = {}
+    if not home_structure or int(home_structure.get('num_exons') or 0) < 2 or not cds_ordered:
+        return out
+
+    def window(length):
+        low = max(4, length - 2) if length <= 8 else length - FIRST_EXON_GUARD_SLACK_AA
+        return low, length + FIRST_EXON_GUARD_SLACK_AA
+    first = int(home_structure.get('first_aa') or 0)
+    p = int(cds_ordered[0].get('qstart', 0) or 0)
+    if 0 < first <= FIRST_EXON_GUARD_MAX_AA and p > 3:
+        lo, hi = window(first)
+        if lo <= p - 1 <= hi:
+            out['start'] = (1, p - 1)
+    last = int(home_structure.get('last_aa') or 0)
+    q = int(cds_ordered[-1].get('qend', 0) or 0)
+    unaligned = int(query_len) - q
+    if 0 < last <= FIRST_EXON_GUARD_MAX_AA and q > 0 and unaligned > 3:
+        lo, hi = window(last)
+        if lo <= unaligned <= hi:
+            out['end'] = (q + 1, int(query_len))
+    return out
+
+
 def refine_model_termini(cds_ordered, chrom_seq, strand,
                          max_start_codons=TERMINUS_MAX_START_CODONS,
-                         max_stop_codons=TERMINUS_MAX_STOP_CODONS):
+                         max_stop_codons=TERMINUS_MAX_STOP_CODONS,
+                         walk_start=True, walk_stop=True):
     """Extend a miniprot model's terminal CDS to the gene's own start and stop codon.
 
     ``cds_ordered`` is the model's CDS list in CODING order (the caller reverses it on the
@@ -1528,6 +1564,9 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
     chance ``GT`` in a valine codon blocked a 5-codon walk to the real stop. Refusing to
     invent residues is the safer error.
 
+    ``walk_start`` / ``walk_stop`` False leave that terminus alone (batch G3A: where a short
+    home first or last exon is missing, the nearest ATG or stop lies in the intron).
+
     Returns ``(prefix_aa, suffix_aa)``: the residues the extension adds to miniprot's own
     translation. The stop codon itself is not translated, so ``suffix_aa`` holds only the
     coding residues in front of it.
@@ -1541,7 +1580,7 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
     n = len(chrom_seq)
 
     # --- start codon: walk upstream, in frame, from the first coding base
-    if int(first.get('phase', 0) or 0) == 0:
+    if walk_start and int(first.get('phase', 0) or 0) == 0:
         if strand == '+':
             edge = int(first['gstart'])
             at_splice = edge >= 2 and chrom_seq[edge - 2:edge].upper() == 'AG'
@@ -1578,7 +1617,7 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
 
     # --- stop codon: walk downstream, in frame, from the last coding base
     coding_len = (int(last['gend']) - int(last['gstart'])) - int(last.get('phase', 0) or 0)
-    if coding_len > 0 and coding_len % 3 == 0:
+    if walk_stop and coding_len > 0 and coding_len % 3 == 0:
         if strand == '+':
             edge = int(last['gend'])
             at_splice = edge + 2 <= n and chrom_seq[edge:edge + 2].upper() == 'GT'
@@ -1693,8 +1732,12 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
                 os.remove(f)
 
 
-def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
+def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0, home_structure=None):
     """Exon list and protein of ONE parsed miniprot model: ``(exons, full_protein)``.
+
+    ``home_structure`` (the home gene's exon lengths, --goi_first_exon_guard, batch G3A): a
+    terminus where a short home exon is missing is not walked, and the first / last exon dict
+    carries ``missing_query_start`` / ``missing_query_end``.
 
     ``exons`` are dicts with id, seq, exon_num, qstart, qend, gstart, gend, strand, chrom,
     pident, has_start_codon, has_stop_codon, splice_donor, splice_acceptor; coordinates
@@ -1716,6 +1759,7 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
     # BEFORE the walk is what miniprot's own translation covers.
     cds_codons_before = sum(int(c['gend']) - int(c['gstart'])
                             for c in cds_ordered) // 3
+    missing = missing_terminal_exons(cds_ordered, len(query_seq), home_structure)
     term_prefix, term_suffix = refine_model_termini(
         cds_ordered, chrom_seq, model_strand,
         max_start_codons=_terminus_bound(
@@ -1724,6 +1768,8 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
         max_stop_codons=_terminus_bound(
             max(0, len(query_seq) - int(cds_ordered[-1].get('qend', 0) or 0)),
             TERMINUS_MAX_STOP_CODONS),
+        walk_start='start' not in missing,
+        walk_stop='end' not in missing,
     )
     if term_prefix or term_suffix:
         print(f"[miniprot] Terminal refinement: +{len(term_prefix)} aa at the N "
@@ -1808,7 +1854,11 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
     print(f"[miniprot] Model rank {best.get('rank', 1)}: {len(exons)} exon(s), "
           f"{len(full_protein)} aa, identity={best['identity']:.2f}, "
           f"score={best['score']:.0f}", file=sys.stderr)
-    
+    if exons and 'start' in missing:
+        exons[0]['missing_query_start'] = missing['start']
+    if exons and 'end' in missing:
+        exons[-1]['missing_query_end'] = missing['end']
+
     return exons, full_protein
 
 
@@ -1854,7 +1904,8 @@ MINIPROT_OUTS_DEFAULT = 0.99
 
 
 def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
-                         sensitive=False, region_offset=0, max_models=10, evidence=None):
+                         sensitive=False, region_offset=0, max_models=10, evidence=None,
+                         home_structure=None):
     """Every gene model miniprot finds in the region that does not lie on a better one.
 
     miniprot chains the query to each place it aligns and reports the alignments in order
@@ -1910,7 +1961,8 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
             try:
                 # Always built on the unmasked sequence: the ends of a model are refined
                 # on the DNA next to it.
-                exons, protein = _build_model(model, query_seq, chrom_seq, chrom_name, region_offset)
+                exons, protein = _build_model(model, query_seq, chrom_seq, chrom_name, region_offset,
+                                              home_structure=home_structure)
             except Exception as e:
                 print(f"[miniprot] Error: {e}", file=sys.stderr)
                 continue
@@ -1964,12 +2016,14 @@ def annotate_exons_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
 
 
 def annotate_models_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
-                                   gap_search_window=50000, sensitive=False, max_models=10):
+                                   gap_search_window=50000, sensitive=False, max_models=10,
+                                   home_structure=None):
     """
     Every gene model for a set of hits (see miniprot_gene_models), best first:
     ``[(exons, full_protein), ...]``, empty when there is none. The hits are also the
     evidence for further copies: while one of them lies on no model, miniprot is run
-    again on the region with the models found so far masked.
+    again on the region with the models found so far masked. ``home_structure``: see
+    _build_model (batch G3A).
     """
     if not hits or not query_seq or not chrom_seq:
         return []
@@ -1994,6 +2048,7 @@ def annotate_models_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
         region_offset=region_start,
         max_models=max_models,
         evidence=evidence if int(max_models) > 1 else None,
+        home_structure=home_structure,
     )
 
 

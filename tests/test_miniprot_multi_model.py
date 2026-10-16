@@ -168,7 +168,7 @@ def fake_runs(monkeypatch):
             seen.append(target)
             return queue.pop(0) if queue else []
         monkeypatch.setattr(ag, "_run_miniprot", fake)
-        monkeypatch.setattr(ag, "_build_model", lambda model, q, seq, name, offset: (
+        monkeypatch.setattr(ag, "_build_model", lambda model, q, seq, name, offset, home_structure=None: (
             [{"gstart": c["gstart"] + offset, "gend": c["gend"] + offset} for c in model["cds_list"]],
             model["id"]))
         return seen

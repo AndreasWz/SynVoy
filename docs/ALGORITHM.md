@@ -746,6 +746,14 @@ For each GOI query:
    its end; never more than 30 upstream, 20 downstream). It does not start at a
    splice site (`AG` before the first base, `GT` after the last), does not cross a
    stop codon, and changes nothing when it finds no start or stop.
+   With `goi_first_exon_guard` (off by default, batch G3A) the walk is skipped where a
+   short home first exon is missing: the home gene has ≥ 2 exons, its first is at most
+   30 aa, and the query residues before the model's first CDS are within 5 aa of that
+   length (for an exon of 8 aa or less: at least max(4, length − 2)). The nearest ATG then
+   lies in the intron. The model keeps miniprot's start and carries
+   `MissingQueryStart=1-<p−1>` and `FirstExon=missing`; the same at the stop end
+   (`MissingQueryEnd`, `LastExon=missing`). Only for the home query and its decoys, not
+   for the relative's query.
 5. **Hit chain** (`fallback_hit_span`), when miniprot returns no model. The hits on
    the majority strand are chained in genomic order so that their query positions
    only rise (or only fall, on the minus strand). Two hits are not linked when they
