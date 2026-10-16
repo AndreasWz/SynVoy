@@ -24,6 +24,7 @@ nearest found home neighbours on either side (widened by 1 gene pitch), else the
 """
 import functools
 import json
+import logging
 import math
 import os
 import shutil
@@ -187,6 +188,19 @@ def split_at_stops(protein: str, min_len: int = 5) -> List[str]:
     return [p for p in protein.split("*") if len(p) >= min_len]
 
 
+logger = logging.getLogger(__name__)
+# Failed blastp calls of this process (review fix RF-1c): each one is logged as a warning,
+# because its candidate is judged with E = inf; the runner stops at the start without blastp.
+BLASTP_FAILURES = {"count": 0}
+
+
+def _blastp_failed(reason: str) -> Tuple[float, float]:
+    BLASTP_FAILURES["count"] += 1
+    logger.warning("blastp for a place E-value failed (%s); the candidate is judged with E = inf "
+                   "(failure %d of this process)", reason, BLASTP_FAILURES["count"])
+    return float("inf"), 0.0
+
+
 def _blastp() -> Optional[str]:
     found = shutil.which("blastp")
     if found:
@@ -199,11 +213,14 @@ def blastp_evalue(query: str, subjects: Sequence[str], searchsp: int) -> Tuple[f
     """(smallest E, its bit score) of the query against each subject, with
     -comp_based_stats 2 -seg no -word_size 2 -threshold 11 and an explicit -searchsp,
     read from blastp's JSON output (tabular output prints E with 3 decimals between 0.001
-    and 0.1: 0.00146 reads as 0.001). (inf, 0.0) when nothing aligns or blastp is missing."""
+    and 0.1: 0.00146 reads as 0.001). (inf, 0.0) when nothing aligns; a missing blastp, a
+    nonzero exit, an empty or unparsable output also give (inf, 0.0), each with a warning."""
     blastp = _blastp()
     subjects = [s for s in subjects if s]
-    if not blastp or not query or not subjects:
+    if not query or not subjects:
         return float("inf"), 0.0
+    if not blastp:
+        return _blastp_failed("blastp not found")
     best = (float("inf"), 0.0)
     with tempfile.TemporaryDirectory(prefix="synvoy_eeff_") as tmp:
         qf = os.path.join(tmp, "q.faa")
@@ -217,12 +234,14 @@ def blastp_evalue(query: str, subjects: Sequence[str], searchsp: int) -> Tuple[f
                                "-seg", "no", "-word_size", "2", "-threshold", "11",
                                "-searchsp", str(int(searchsp)), "-outfmt", "15"],
                               capture_output=True, text=True, check=False)
-        if proc.returncode != 0 or not proc.stdout.strip():
-            return best
+        if proc.returncode != 0:
+            return _blastp_failed(f"exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+        if not proc.stdout.strip():
+            return _blastp_failed("no output")
         try:
             data = json.loads(proc.stdout)
         except ValueError:
-            return best
+            return _blastp_failed("unparsable JSON output")
         for rep in data.get("BlastOutput2", []):
             results = rep.get("report", {}).get("results", {})
             for search in results.get("bl2seq", []) or ([results["search"]] if "search" in results else []):

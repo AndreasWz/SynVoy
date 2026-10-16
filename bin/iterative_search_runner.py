@@ -6682,6 +6682,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if _label_counts:
             logger.info(f"[{genome_name}] GOI labels: "
                         + ", ".join(f"{k} {v}" for k, v in sorted(_label_counts.items())))
+        if synvoy_evalue.BLASTP_FAILURES["count"]:
+            logger.warning(f"[{genome_name}] {synvoy_evalue.BLASTP_FAILURES['count']} blastp call(s) of "
+                           f"this worker failed so far; their candidates were judged with E = inf.")
         if getattr(args, 'decoy_mode', False):
             _decoy_lines, _ = relabel_goi_lines(
                 finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx))
@@ -7800,6 +7803,11 @@ def main():
         sys.exit(1)
     if args.goi_candidate_regions_per_query < 1:
         logger.error(f"goi_candidate_regions_per_query must be >= 1 (got {args.goi_candidate_regions_per_query})")
+        sys.exit(1)
+    # Every GOI label rests on blastp (the E-value in the place, synvoy_evalue): without it
+    # each candidate would be judged with E = inf, i.e. LOW, with no visible cause.
+    if synvoy_evalue._blastp() is None:
+        logger.error("blastp not found: the GOI labels need it (BLAST+, as tblastn). Install BLAST+.")
         sys.exit(1)
     if args.sw_max_alignments_per_piece < 1:
         logger.error(f"sw_max_alignments_per_piece must be >= 1 (got {args.sw_max_alignments_per_piece})")
