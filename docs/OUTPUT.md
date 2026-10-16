@@ -162,6 +162,7 @@ Attributes on a model's `mRNA` row:
 | `GoiFamilyConsistent`, `GoiFamilyReason` | Family-name check, only when family tokens are set (`--goi_family_tokens`); annotation only, it changes no label |
 | `ContextTruncated` | GOI models: `left` / `right` / `both` when the search window of the model's block ran past a scaffold end on that side, so part of the neighbourhood that was meant to be searched is not in the assembly. Absent when the window is complete |
 | `ExonsKept`, `CysKept` | GOI gene models (miniprot): exons of the model / exons of the home gene (tandem copies of the home model not counted; absent when the home gene model is not known), and cysteines of the home protein aligned to a cysteine of the model protein / cysteines of the home protein. Advisory: no label reads them (an intron-poor lineage has fewer exons by nature) |
+| `LowComplexity` | GOI models, only with `--report_low_complexity` (on with the `low_complexity` module): share of the model protein inside low-complexity windows (12 residues, Shannon entropy ≤ 2.2 bits; an approximation of SEG). Advisory |
 | `CopiesInSlot`, `SlotRank` | GOI models, only with `--report_copies_in_slot` (on with the `local_family` module): the GOI models of the block's slot (`Place=slot`) labelled AMBIGUOUS or better, and this model's rank among them counted from the home neighbour on the left. Absent in a block without a slot (a neighbour missing on one side). Advisory: equal rank is not positional orthology |
 | `Rearranged_from` | Flanking models placed on another scaffold than their block |
 
@@ -418,9 +419,15 @@ cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 With `--decoy_mode true` the search also looks for the reversed home protein and two
 shuffles of it in every window. Their models are in `decoys/<locus>/<genome>.decoy.gff`,
 one row per call in `<genome>.decoy.tsv` (decoy kind, label, place, `Eeff`, `EeffTblastn`,
-bits, specificity). None of them is in the result GFFs, the report or the figures. Each
+bits, specificity). None of them is in the result GFFs or the figures. Each
 is false by construction: the share of decoy cases that reach a label (or an E-value
-threshold) is the false-call rate of that rule on this data.
+threshold) is the false-call rate of that rule on this data. The report gives it as
+`decoy_rate`: `cases`, the decoy cases that were searched (home gene × target genome with a
+search window × decoy kind, also one without a decoy model; the home genome is never
+searched), and for `high`, `medium_or_better` and `ambiguous_or_better` the `calls` (cases
+with such a decoy call) and `ci95_upper`, the upper end of their exact (Clopper–Pearson)
+95 % interval. 0 calls means "at most that bound", not 0 %. The per-genome counts are
+columns of `hits/<genome>.target_policy.tsv` in a decoy run.
 
 ## Intermediate / debugging artifacts (most users skip)
 

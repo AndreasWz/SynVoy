@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
+from sequence_utils import clopper_pearson  # noqa: E402
 import synvoy_label  # noqa: E402
 
 
@@ -532,6 +533,40 @@ def collect_target_policy(paths):
         except (OSError, csv.Error):
             continue
     return {g: row for g, (_key, row) in sorted(out.items())}
+
+
+DECOY_COUNT_COLUMNS = ("decoy_cases", "decoy_high", "decoy_medium_plus", "decoy_ambiguous_plus")
+
+
+def collect_decoy_rate(paths):
+    """The run's false-call rate from decoy mode (preset plan PR-8): the decoy cases of every
+    target-policy row (one row per home locus and searched genome; a case = home GOI x decoy
+    kind, as iterative_search_runner.decoy_case_counts counts it), summed. Per label: the
+    calls and the upper end of the exact (Clopper-Pearson) 95 % interval; no bare rate, so
+    that 0 calls is never read as "0 %". None when no row carries decoy counts."""
+    totals = dict.fromkeys(DECOY_COUNT_COLUMNS, 0)
+    rows = 0
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if not str(row.get("decoy_cases") or "").strip():
+                        continue
+                    rows += 1
+                    for k in DECOY_COUNT_COLUMNS:
+                        totals[k] += int(float(row.get(k) or 0))
+        except (OSError, csv.Error, ValueError):
+            continue
+    if not rows:
+        return None
+    n = totals["decoy_cases"]
+    out = {"cases": n, "genome_searches": rows}
+    for key, label in (("decoy_high", "high"), ("decoy_medium_plus", "medium_or_better"),
+                       ("decoy_ambiguous_plus", "ambiguous_or_better")):
+        k = totals[key]
+        out[label] = {"calls": k,
+                      "ci95_upper": round(clopper_pearson(k, n)[1], 4) if n else None}
+    return out
 
 
 def genome_absence_categories(records, target_policy, demoted_classes):
@@ -1932,6 +1967,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "genomes_with_raw_search_hits": len(hits_per_genome),
         },
     }
+    # Decoy mode (the low_complexity module or --decoy_mode): the run's decoy rate.
+    decoy_rate = collect_decoy_rate(hits_scan["target_policy"])
+    if decoy_rate is not None:
+        report["decoy_rate"] = decoy_rate
     return report
 
 
@@ -2098,6 +2137,11 @@ def main():
     # Surface the GOI headline so the run's terminal/log shows the real result rather
     # than only the (often-zero) raw-hit diagnostic. See docs/TODO.md §1k.
     print(f"  {report['summary']['headline']}")
+    decoy = report.get("decoy_rate")
+    if decoy and decoy["cases"]:
+        med = decoy["medium_or_better"]
+        print(f"  Decoy calls MEDIUM or better: {med['calls']} of {decoy['cases']} decoy cases "
+              f"(upper end of the exact 95 % interval: {100 * med['ci95_upper']:.2f} %)")
     for warning in report.get("warnings", []):
         print(f"  [!] {warning}")
 

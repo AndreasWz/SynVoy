@@ -61,7 +61,8 @@ LEGACY_ALIAS = {
 #   figure_regions  one module only (the region caps of the figures)
 #   model_status    one module only (ModelStatus coverage bounds)
 #   report          on when any module turns it on (attributes that decide nothing)
-# Later PRs add specificity_guard (the stricter value) and completeness_basis.
+#   specificity_guard  the stricter value (STRICTER_ORDER)
+# A later PR adds completeness_basis.
 KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "goi_relative_evalue": ("anchor_hygiene", "max"),
     "goi_candidate_regions_per_query": ("search_breadth", "max"),
@@ -75,12 +76,20 @@ KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "classify_complete_min_qcov": ("model_status", "single"),
     "classify_fragment_max_qcov": ("model_status", "single"),
     "report_copies_in_slot": ("report", "any"),
+    "report_low_complexity": ("report", "any"),
+    "goi_relative_statistic": ("specificity_guard", "stricter"),
 }
+# specificity_guard: the stricter value wins; booleans: on when any module turns them on,
+# other keys by this order (last = strictest).
+STRICTER_ORDER: Dict[str, Tuple[str, ...]] = {"goi_relative_statistic": ("sw", "blastp_cbs")}
 # Upper bounds of search_breadth keys, whatever the modules want.
 RESOURCE_CAPS: Dict[str, float] = {"goi_candidate_regions_per_query": 10}
-# Keys that change the home side (anchors, home loci) or that a measurement banned.
+# Keys that change the home side (anchors, home loci), that a measurement banned, or that
+# stay run-level options.
 # expand_goi_similar: with it on, LY6 scaffold recall fell from 8/9 to 0/9.
-FORBIDDEN_FOR_MODULES = frozenset({"n_flanking_genes", "expand_goi_similar"})
+# decoy_mode: a calibration switch of the run; B2 fires on 47 % of the Candida genes, so as
+# a module key it would add the decoy searches to about half of all runs.
+FORBIDDEN_FOR_MODULES = frozenset({"n_flanking_genes", "expand_goi_similar", "decoy_mode"})
 
 
 # ----------------------------------------------------------------------------- features
@@ -262,7 +271,8 @@ MODULES: List[Module] = [
                       "window_tblastn_word_size": 2, "window_tblastn_comp_stats": 0,
                       "window_mmseqs_min_length": 10, "miniprot_short_orf_max_len": 100},
            "preset_short_peptide"),
-    Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity, _none),
+    Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity,
+           lambda f: {"goi_relative_statistic": "blastp_cbs", "report_low_complexity": True}),
     Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor, _none),
     Module("B4", "cys_framework", "sequence signal", "now (advisory)", _t_cys_framework, _none),
     Module("C1", "exon_structure", "structure and locus at home", "now (advisory)",
@@ -340,6 +350,12 @@ def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], 
             mid, v = vals[0]
         elif rule == "any":
             v = any(bool(x) for _m, x in vals)
+        elif rule == "stricter":
+            order = STRICTER_ORDER.get(k)
+            if order is None:
+                v = any(bool(x) for _m, x in vals)
+            else:
+                v = max((x for _m, x in vals), key=order.index)
         else:  # pragma: no cover - a rule without code is a registry error
             raise ValueError(f"key {k}: unknown merge rule {rule}")
         if k in RESOURCE_CAPS:

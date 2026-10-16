@@ -240,8 +240,15 @@ LCS_FALLBACK_THRESHOLD = 35.0   # only used when no aligner is available, see is
 GOI_SELF_EVALUE = 1e-5
 
 
-def is_goi_relative(protein: str, goi_seqs, max_evalue: float) -> bool:
+def is_goi_relative(protein: str, goi_seqs, max_evalue: float, statistic: str = 'sw') -> bool:
     """True when ``protein`` aligns to one of the GOI sequences with E <= ``max_evalue``.
+
+    ``statistic``: 'sw' (Smith-Waterman, BLOSUM62 11/1, Karlin-Altschul) or 'blastp_cbs'
+    (the label's family test, synvoy_specificity.pairwise_evalue: blastp with
+    composition-based statistics), with which a low-complexity neighbour of a
+    low-complexity GOI is no longer a "relative" by its composition alone (preset plan
+    PR-8, the low_complexity module; melittin's PEPEP pro-region passes the plain test at
+    E 8.4e-7).
 
     A gene related to the GOI is not used as an anchor: its matches in a target genome
     fall on the GOI's own relatives, so it would count the same sequence evidence a
@@ -259,6 +266,9 @@ def is_goi_relative(protein: str, goi_seqs, max_evalue: float) -> bool:
     """
     if not protein or not goi_seqs or max_evalue <= 0:
         return False
+    if statistic == 'blastp_cbs':
+        from synvoy_specificity import pairwise_evalue
+        return any(pairwise_evalue(protein, gs) <= max_evalue for gs in goi_seqs)
     try:
         return any(sw_pair_evalue(protein, gs)[0] <= max_evalue for gs in goi_seqs)
     except RuntimeError as exc:
@@ -364,6 +374,10 @@ def main():
                              "this (Smith-Waterman, BLOSUM62, pairwise) is a relative of the GOI "
                              "and is not used as an anchor. 0 switches the test off "
                              "(default: 1e-5)")
+    parser.add_argument("--goi_relative_statistic", choices=["sw", "blastp_cbs"], default="sw",
+                        help="Statistic of that test: Smith-Waterman E-value (default) or blastp "
+                             "with composition-based statistics (the label's family test). The "
+                             "gene at the GOI's own position is always tested with sw")
     parser.add_argument("--max_flanking_distance", type=int, default=0,
                         help="Max distance (bp) from GOI center to walk for flanking genes. "
                              "0 = unlimited (legacy). Prevents reaching into gene deserts when "
@@ -393,8 +407,10 @@ def main():
     goi_seqs = []
     if args.goi_faa and args.goi_faa != 'NO_GOI' and os.path.exists(args.goi_faa):
         goi_seqs = _load_goi_sequences(args.goi_faa)
+        statistic = ("blastp, composition-based statistics" if args.goi_relative_statistic == "blastp_cbs"
+                     else "Smith-Waterman")
         print(f"Loaded {len(goi_seqs)} GOI sequence(s); genes related to them "
-              f"(alignment E <= {args.goi_relative_evalue:g}) are not used as anchors")
+              f"(alignment E <= {args.goi_relative_evalue:g}, {statistic}) are not used as anchors")
 
     # Load INPUT Genes
     target_regions = []
@@ -588,7 +604,8 @@ def main():
                     key = (g.get('chrom'), g.get('start'), g.get('end'), g.get('id'))
                     if key not in _relative_cache:
                         _relative_cache[key] = is_goi_relative(
-                            _gene_protein(g, genome_seqs), goi_seqs, args.goi_relative_evalue)
+                            _gene_protein(g, genome_seqs), goi_seqs, args.goi_relative_evalue,
+                            args.goi_relative_statistic)
                     return _relative_cache[key]
 
                 def _is_goi_itself(g: dict) -> bool:

@@ -106,7 +106,7 @@ try:
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
-        parse_genetic_code_spec,
+        parse_genetic_code_spec, low_complexity_mask,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -125,7 +125,7 @@ except ImportError:
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
-        parse_genetic_code_spec,
+        parse_genetic_code_spec, low_complexity_mask,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -1067,6 +1067,40 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
     return n
 
 
+DECOY_RANK = {"HIGH": 3, "MEDIUM": 2, "AMBIGUOUS": 1, "LOW": 0}
+DECOY_COLUMNS = ['decoy_cases', 'decoy_high', 'decoy_medium_plus', 'decoy_ambiguous_plus']
+
+
+def decoy_case_counts(lines: List[str], home_parents) -> Dict[str, int]:
+    """Decoy cases of one genome search (decoy mode; preset plan PR-8): one case per home GOI
+    parent and decoy kind (rev, shuf1, shuf2), counted whether or not a decoy model came out,
+    with the best label of its decoy models. Only cases that were searched count: a genome
+    without a search window passes no home parents (and the home genome is never searched,
+    so its cases never count; decoy_rates.py of 2026-10-14 counted them from the plot inputs:
+    270 instead of 225 cases on the Candida pilot)."""
+    best = {(p, t): -1 for p in home_parents for t in DECOY_TAGS}
+    for ln in lines:
+        cols = ln.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene'):
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        parent = a.get('SynVoy_Parent', '')
+        tag = next((t for t in DECOY_TAGS if parent.endswith(t)), None)
+        if tag is None:
+            continue
+        key = (parent[:-len(tag)], tag)
+        best[key] = max(best.get(key, -1), DECOY_RANK.get(a.get('Confidence', ''), 0))
+    return {'decoy_cases': len(best),
+            'decoy_high': sum(1 for r in best.values() if r >= 3),
+            'decoy_medium_plus': sum(1 for r in best.values() if r >= 2),
+            'decoy_ambiguous_plus': sum(1 for r in best.values() if r >= 1)}
+
+
+def home_goi_parents(args) -> List[str]:
+    """Base ids of the home GOI records (the parents decoys are made of)."""
+    return sorted({extract_base_gene_id(i) for i in (getattr(args, 'home_goi_ids', None) or ())})
+
+
 GOI_CLASS_OF_LABEL = {"HIGH": "confident_goi", "MEDIUM": "probable_goi",
                       "AMBIGUOUS": "syntenic_candidate_unconfirmed", "LOW": "ambiguous_goi_family_member"}
 
@@ -1223,15 +1257,19 @@ def context_truncation(block_start: int, block_end: int, pad: int, scaffold_len:
     return 'both' if left and right else 'left' if left else 'right' if right else ''
 
 
-def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], truncated: str) -> None:
+def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], truncated: str,
+                          low_complexity: bool = False) -> None:
     """Advisory attributes of the GOI candidates of a window; no label reads them (preset
-    plan of 2026-10-15, PR-2):
+    plan of 2026-10-15, PR-2; LowComplexity PR-8):
 
       ContextTruncated  left / right / both: the window ran past a scaffold end there
       ExonsKept         gene models: exons of the model / exons of the home gene (counted
                         without its tandem copies; absent when that is not known)
       CysKept           gene models: cysteines of the home protein aligned to a cysteine of
                         the model protein / cysteines of the home protein (absent without any)
+      LowComplexity     with ``low_complexity`` (--report_low_complexity): share of the
+                        candidate's protein in low-complexity windows (the query feature
+                        seg_frac, sequence_utils.low_complexity_mask)
     """
     for cand in candidates:
         gff = cand.get('gff') or []
@@ -1256,6 +1294,11 @@ def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], trun
                 if pairs is not None:
                     kept = sum(1 for i, j in pairs if home[i] == 'C' and protein[j] == 'C')
                     extra.append(f"CysKept={kept}/{n_cys}")
+        if low_complexity:
+            protein = (cand.get('label_protein') or (cand.get('record') or {}).get('seq', '') or '').upper()
+            protein = protein.replace('*', '')
+            if protein:
+                extra.append(f"LowComplexity={sum(low_complexity_mask(protein)) / len(protein):.3f}")
         if extra:
             cols[8] = cols[8] + ';' + ';'.join(extra)
             gff[0] = '\t'.join(cols)
@@ -5121,7 +5164,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         annotate_place_evalues(cands, goi_query_by_parent, hits_by_gene, place_terms,
                                subseq, w_start, tblastn_raw)
         annotate_model_extras(cands, goi_query_by_parent, getattr(args, 'home_goi_exons', None),
-                              window_truncated)
+                              window_truncated, getattr(args, 'report_low_complexity', False))
         annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
                                  goi_query_by_parent, args)
         judge_candidates(cands)
@@ -5613,10 +5656,17 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         'truncated_blocks': sum(1 for t in trunc.values() if t),
         'genetic_code': get_genetic_code(),
     }
+    columns = list(TARGET_POLICY_COLUMNS)
+    if getattr(args, 'decoy_mode', False):
+        # Decoy cases of this genome: searched ones only (a genome with a search window,
+        # with or without a decoy model; 0 before the genome end and without a window);
+        # the report sums them into the run's decoy rate.
+        row.update(ctx.get('decoy_counts') or dict.fromkeys(DECOY_COLUMNS, 0))
+        columns += DECOY_COLUMNS
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', newline='') as fh:
-            w = csv.DictWriter(fh, fieldnames=TARGET_POLICY_COLUMNS, delimiter='\t')
+            w = csv.DictWriter(fh, fieldnames=columns, delimiter='\t')
             w.writeheader()
             w.writerow(row)
     except OSError as exc:
@@ -6533,7 +6583,6 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             all_gff_lines = annotate_slot_copies(
                 all_gff_lines, genome_name.replace('.', '_').replace('-', '_').replace(' ', '_'),
                 args.genome_ctx.get('block_slot', {}))
-        _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
         if _label_counts:
             logger.info(f"[{genome_name}] GOI labels: "
                         + ", ".join(f"{k} {v}" for k, v in sorted(_label_counts.items())))
@@ -6541,7 +6590,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             _decoy_lines, _ = relabel_goi_lines(
                 finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx))
             n_decoy = write_decoy_outputs(args, prefix, genome_name, _decoy_lines)
+            args.genome_ctx['decoy_counts'] = decoy_case_counts(
+                _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
+        _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
 
         # Write aggregated GFF
         if all_gff_lines:
@@ -7183,6 +7235,9 @@ def main():
     parser.add_argument("--goi_candidate_regions_per_query", type=int, default=2,
                         help="GOI loci kept per query in a search window, the strongest by "
                              "query coverage, then bits (the local_family module raises it)")
+    parser.add_argument("--report_low_complexity", type=str2bool, default=False,
+                        help="Write LowComplexity (low-complexity share of the model protein) on "
+                             "the GOI models (advisory)")
     parser.add_argument("--report_copies_in_slot", type=str2bool, default=False,
                         help="Write CopiesInSlot / SlotRank on the GOI models (advisory)")
     parser.add_argument("--sw_max_alignments_per_piece", type=int, default=1,

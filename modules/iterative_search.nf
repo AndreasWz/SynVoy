@@ -1,7 +1,8 @@
 process ITERATIVE_SEARCH {
     tag "iterative"
     label 'process_long'
-    // Decoy calls (--decoy_mode) are published as they are written; nothing else reads them.
+    // Decoy calls (--decoy_mode) are published as they are written; the report reads only their
+    // counts (columns of hits/<genome>.target_policy.tsv).
     publishDir path: { "${params.outdir}/decoys/${locus_id}" }, mode: 'copy',
         pattern: 'iterative_results/decoys/*', saveAs: { fn -> file(fn).name }
 
@@ -100,6 +101,7 @@ process ITERATIVE_SEARCH {
         --fallback_short_min_bits ${params.fallback_short_min_bits} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --decoy_mode ${params.decoy_mode} \\
+        --report_low_complexity ${settings.report_low_complexity} \\
         --report_nonsyntenic_candidates ${params.report_nonsyntenic_candidates} \\
         --rank_wave_binning ${params.rank_wave_binning} \\
         --disable_wavefront ${params.disable_wavefront} \\

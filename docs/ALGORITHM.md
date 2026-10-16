@@ -207,7 +207,7 @@ distance to the scaffold end).
 | A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
 | B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
-| B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | nothing yet (a flag) |
+| B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | stricter only: the relative test of the flank walk with blastp and composition-based statistics (`goi_relative_statistic blastp_cbs`); `LowComplexity=` on GOI models |
 | B3 | `signal_anchor` | a signal peptide or a GPI tail | nothing yet (a flag) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
 | C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | nothing (advisory) |
@@ -223,9 +223,10 @@ hold for every module:
   modules never matters: the anchor filter `goi_relative_evalue` takes the largest E (it
   keeps the most relatives out of the anchors); a search-breadth key takes the most
   permissive value and then a fixed cap (`goi_candidate_regions_per_query` ≤ 10); a
-  report switch is on when any module turns it on; the region caps and the model-status
+  report switch is on when any module turns it on; a specificity guard takes the stricter
+  value (`blastp_cbs` over `sw`); the region caps and the model-status
   bounds may be written by one module only. `n_flanking_genes` and `expand_goi_similar`
-  are forbidden to modules.
+  are forbidden to modules, and so is `decoy_mode`, a run-level option.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
   under `legacy`, or `--preset_override` in any mode) < a value the user set at launch
   (a `-profile preset_X` included) < `--user_override`.
@@ -241,7 +242,7 @@ retry follows the `--modules` value itself: `auto` (unless it removes `short_que
 list that names it; never `legacy` or `none`. A run without home hits stops today, so the
 retry can only rescue a run.
 
-The chosen values travel to the later steps as a `settings` map of 19 parameters
+The chosen values travel to the later steps as a `settings` map of 21 parameters
 (`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
@@ -828,7 +829,11 @@ shuffles of it (seeded by the query id) are searched like the home protein, mode
 labelled and judged with the same terms, chosen among themselves only, and written to
 `decoys/<locus>/<genome>.decoy.gff` and `.decoy.tsv`. They never seed and never reach the
 result GFF. Every decoy call is false, so their rate per label and place calibrates the
-labels without a truth set. The window search takes about four times as long.
+labels without a truth set. The window search takes about four times as long. The report
+sums the decoy cases that were searched (home gene × target genome with a search window ×
+decoy kind; the home genome itself is never searched) into `decoy_rate`: per label the
+calls and the upper end of the exact 95 % interval. Decoy mode is a run-level option; no
+preset module sets it.
 
 ## 8. Region scores
 

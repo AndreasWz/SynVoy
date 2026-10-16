@@ -1153,6 +1153,35 @@ def mean_hydropathy(seq: str) -> float:
     return sum(KYTE_DOOLITTLE.get(c, 0.0) for c in seq.upper()) / len(seq)
 
 
+def clopper_pearson(k: int, n: int, conf: float = 0.95) -> Tuple[float, float]:
+    """Exact two-sided (Clopper-Pearson) interval of a proportion of ``k`` in ``n``, by
+    bisection on the binomial distribution; (nan, nan) for n = 0."""
+    if n <= 0:
+        return float("nan"), float("nan")
+    tail = (1.0 - conf) / 2.0
+
+    def cdf(x: int, p: float) -> float:
+        if p <= 0.0:
+            return 1.0
+        if p >= 1.0:
+            return 0.0 if x < n else 1.0
+        return sum(math.comb(n, i) * p ** i * (1.0 - p) ** (n - i) for i in range(x + 1))
+
+    def solve(pred) -> float:
+        lo, hi = 0.0, 1.0
+        for _ in range(100):
+            mid = (lo + hi) / 2.0
+            if pred(mid):
+                hi = mid
+            else:
+                lo = mid
+        return (lo + hi) / 2.0
+
+    lower = 0.0 if k == 0 else solve(lambda p: 1.0 - cdf(k - 1, p) >= tail)
+    upper = 1.0 if k >= n else solve(lambda p: cdf(k, p) <= tail)
+    return lower, upper
+
+
 def shannon_entropy(seq: str) -> float:
     """Shannon entropy in bits of the residue composition of ``seq``."""
     if not seq:

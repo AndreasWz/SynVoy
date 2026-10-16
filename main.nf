@@ -269,7 +269,7 @@ def presetDefaultKeys() {
         'expand_goi_similar', 'goi_family_tokens',
         'goi_relative_evalue', 'goi_candidate_regions_per_query', 'report_copies_in_slot',
         'window_tblastn_word_size', 'window_tblastn_comp_stats', 'window_mmseqs_min_length',
-        'miniprot_short_orf_max_len',
+        'miniprot_short_orf_max_len', 'goi_relative_statistic', 'report_low_complexity',
         'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
         'adaptive_max_regions', 'adaptive_unique_gene_floor',
     ]

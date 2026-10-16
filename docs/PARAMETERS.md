@@ -253,6 +253,11 @@ It replaces `max_flanking_goi_similarity` (longest common subsequence divided by
 
 `preset_tandem_family` uses `1e-3`, which also removes distant members of the family. `0` switches the test off for the neighbours; the gene at the GOI's own position is never an anchor.
 
+### `goi_relative_statistic`
+**Type:** String (`sw` / `blastp_cbs`) | **Default:** `sw`
+
+The statistic of the relative test above. `sw`: the Smith–Waterman E-value. `blastp_cbs`: blastp with composition-based statistics, the test the label uses for family members (`synvoy_specificity.pairwise_evalue`). With Smith–Waterman, a neighbour that shares only a low-complexity stretch with a low-complexity GOI passes as a relative (a protein with a PEPEP stretch against melittin: E 4e-8; with `blastp_cbs`: no hit) and is lost as an anchor. The `low_complexity` preset module (B2) sets `blastp_cbs`. The gene at the GOI's own position is always tested with `sw`. Settings key.
+
 ### `max_flanking_distance`
 **Type:** Integer (bp) | **Default:** `0` (unlimited) | **Range:** 0–5,000,000
 
@@ -1034,7 +1039,12 @@ The default gap-bridging rule counts the anchored flanking genes on the left of 
 ### `decoy_mode`
 **Type:** Boolean | **Default:** `false`
 
-Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them) are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs, the report or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data. Costs about four times the window search.
+Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them) are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data; the report gives it as `decoy_rate`: the decoy cases that were searched (home gene × target genome with a search window × decoy kind; the home genome is never searched) and, per label, the calls and the upper end of the exact (Clopper–Pearson) 95 % interval. Costs about four times the window search. A run-level option: no preset module sets it (the `low_complexity` module, for one, fires on 47 % of the Candida development genes).
+
+### `report_low_complexity`
+**Type:** Boolean | **Default:** `false`
+
+Writes `LowComplexity=` on the GOI models: the share of the model protein inside low-complexity windows (the measure of the query feature `seg_frac`, an approximation of SEG). Advisory. The `low_complexity` module (B2) turns it on.
 
 ### `tandem_copy_parent`
 **Type:** String (`seed` / `home`) | **Default:** `seed`
