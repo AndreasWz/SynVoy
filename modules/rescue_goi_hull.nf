@@ -73,6 +73,6 @@ process RESCUE_GOI_HULL {
         --max_window ${params.goi_hull_max_window} \\
         --min_identity ${params.goi_hull_min_identity} \\
         --min_coverage ${params.goi_hull_min_coverage} \\
-        --home_proteome ${home_proteome}
+        --home_proteome ${home_proteome} ${GeneticCodes.targetArgs(params)}
     """
 }

@@ -6,10 +6,12 @@ import sys
 
 # Use our own sequence utilities (no BioPython)
 try:
-    from sequence_utils import cds_model_protein, cds_models_by_gene, load_genome, write_fasta
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, load_genome,
+                                set_genetic_code, write_fasta)
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import cds_model_protein, cds_models_by_gene, load_genome, write_fasta
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, load_genome,
+                                set_genetic_code, write_fasta)
 
 
 def main():
@@ -20,7 +22,10 @@ def main():
     parser.add_argument("--coords_tsv",
                         help="Also write gene_id, chrom, start, end, strand (1-based, coding span) "
                              "of every protein written, for the search's specificity check")
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the genome (default 1, the standard code)")
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
     
     genome = load_genome(args.genome)
     genes = cds_models_by_gene(args.gff)

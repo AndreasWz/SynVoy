@@ -27,13 +27,15 @@ from pathlib import Path
 try:
     from sequence_utils import (
         parse_fasta, write_fasta, load_genome, reverse_complement,
-        translate, parse_gff, get_feature_id
+        translate, parse_gff, get_feature_id,
+        genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, load_genome, reverse_complement,
-        translate, parse_gff, get_feature_id
+        translate, parse_gff, get_feature_id,
+        genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
 
 
@@ -245,7 +247,7 @@ def search_proteins_against_genome(query_faa, genome_fna, output_bed, output_gff
             '-e', '0.001',
             '--format-output',
             'query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits'
-        ]
+        ] + genetic_code_flag('mmseqs')   # the home genome's code (set by main)
         
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -342,8 +344,16 @@ def main():
                        help="Output FASTA with borrowed protein sequences")
     parser.add_argument("--n_flanking", type=int, default=10,
                        help="Number of flanking genes to consider")
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the home genome (default 1)")
+    parser.add_argument("--target_genetic_codes", default="",
+                        help="Genetic codes of target genomes, 'genome=table,...' "
+                             "(lib/GeneticCodes.groovy builds this)")
+    parser.add_argument("--default_target_genetic_code", type=int, default=1,
+                        help="NCBI genetic code of a target genome not named there (default 1)")
     
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
     
     print("[borrow_annotations] Searching for annotated target genomes...")
     
@@ -358,6 +368,10 @@ def main():
         return
     
     print(f"[borrow_annotations] Using annotated target: {Path(target_fna).name}")
+    # The target's genetic code for the search against it and its CDS; the home genome's
+    # again for the search of the borrowed proteins against the home genome.
+    set_genetic_code(genetic_code_for(target_fna, parse_genetic_code_spec(args.target_genetic_codes),
+                                      args.default_target_genetic_code))
     
     # Step 2: Search home proteins against target genome to find the region
     print("[borrow_annotations] Searching home proteins against annotated target...")
@@ -374,7 +388,7 @@ def main():
             '-e', '0.001',
             '--format-output',
             'query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits'
-        ]
+        ] + genetic_code_flag('mmseqs')   # the annotated target's code
         
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -447,6 +461,7 @@ def main():
     
     # Step 5: Search borrowed proteins against home genome
     print("[borrow_annotations] Searching borrowed CDS against home genome...")
+    set_genetic_code(args.genetic_code)
     search_proteins_against_genome(
         borrowed_faa, args.home_genome, 
         args.output_proteins.replace('.faa', '.bed'),  # temp bed

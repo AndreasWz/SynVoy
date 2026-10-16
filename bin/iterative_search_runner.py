@@ -105,6 +105,8 @@ try:
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
+        get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
+        parse_genetic_code_spec,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -122,6 +124,8 @@ except ImportError:
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
+        get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
+        parse_genetic_code_spec,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -2960,7 +2964,7 @@ def run_augmented_mmseqs_with_retries(
             "--min-seq-id", "0.0",
             "--split-memory-limit", str(attempt["split"]),
             "-v", str(args.mmseqs_verbosity),
-        ]
+        ] + genetic_code_flag("mmseqs")
 
         proc = subprocess.run(
             search_cmd,
@@ -3131,7 +3135,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     "-max_target_seqs", "5000",
                     "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
                     "-out", tblastn_hits_file
-                ],
+                ] + genetic_code_flag("tblastn"),
                 check=True,
                 capture_output=True, text=True
             )
@@ -3182,7 +3186,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     "--min_identity", str(args.sw_min_identity),
                     "--threads", str(threads),
                     "--method", str(args.sw_method)
-                ]
+                ] + genetic_code_flag("synvoy")
                 
                 result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=args.sw_timeout_seconds)
                 
@@ -5236,7 +5240,7 @@ def run_mmseqs_easy_search_with_retries(
             "-e", str(args.evalue),
             "--split-memory-limit", str(attempt["split"]),
             "-v", str(args.mmseqs_verbosity),
-        ]
+        ] + genetic_code_flag("mmseqs")
 
         search_proc = subprocess.run(
             search_cmd,
@@ -5462,7 +5466,7 @@ def _write_not_searched(args, prefix, genome_name, reason, details=''):
 
 TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 'blocks_searched',
                          'significant_blocks', 'best_block_esyn', 'best_block_context',
-                         'truncated_blocks']
+                         'truncated_blocks', 'genetic_code']
 
 
 def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None):
@@ -5487,6 +5491,7 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         'best_block_esyn': f"{esyn[best]:.3g}" if best is not None else 'NA',
         'best_block_context': (trunc.get(best) or 'complete') if best is not None else 'NA',
         'truncated_blocks': sum(1 for t in trunc.values() if t),
+        'genetic_code': get_genetic_code(),
     }
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -5647,6 +5652,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         msg = "Genome file not found"
         logger.error(f"[{genome_name}] {msg}.")
         return genome_name, [], [], msg
+    # This genome's genetic code (--target_genetic_codes, else the default): every
+    # translation of this task follows it (sequence_utils.translate and the engines'
+    # options; one genome per worker task, set again at the start of each).
+    set_genetic_code(genetic_code_for(genome_path, getattr(args, 'genetic_codes', None) or {},
+                                      getattr(args, 'default_target_genetic_code', 1)))
+    if get_genetic_code() != 1:
+        logger.info(f"[{genome_name}] Genetic code: NCBI table {get_genetic_code()}.")
     
     unique_id = uuid.uuid4().hex
     hits_file = f"{args.output_dir}/hits/{prefix}{genome_name}.m8"
@@ -6413,6 +6425,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                  gf.write("##gff-version 3\n")
                  if getattr(args, 'distances', None):
                      gf.write(synvoy_scale.format_gff_header(args.distances) + "\n")
+                 if get_genetic_code() != 1:
+                     gf.write(f"##synvoy-genetic-code {get_genetic_code()}\n")
                  for gl in all_gff_lines:
                      gf.write(gl + "\n")
 
@@ -6711,6 +6725,10 @@ def run_gpu_augment_phase(args, genome_map=None):
                         "seq_goi_chroms": dr.seq_goi_chroms(gff_path, min_confidence="MEDIUM"),
                     }
                     genome_seqs = load_genome(gfasta)
+                    # the ORFs of this genome are predicted with its genetic code
+                    set_genetic_code(genetic_code_for(
+                        gfasta, getattr(args, 'genetic_codes', None) or {},
+                        getattr(args, 'default_target_genetic_code', 1)))
                     chrom_lengths = {c: len(s) for c, s in genome_seqs.items()}
                     windows = dr.cluster_intervals(
                         flanking,
@@ -6934,6 +6952,14 @@ def main():
     parser.add_argument("--min_identity", type=float, default=40.0)
     parser.add_argument("--min_length", type=int, default=50)
     parser.add_argument("--max_intron", type=int, default=20000)
+    parser.add_argument("--target_genetic_codes", default="",
+                        help="Genetic codes of target genomes, 'genome=table,...' (the genome "
+                             "as its file name with or without the extension); others use "
+                             "--default_target_genetic_code. Every translation of a genome "
+                             "follows its table (lib/GeneticCodes.groovy builds this)")
+    parser.add_argument("--default_target_genetic_code", type=int, default=1,
+                        help="NCBI genetic code of a target genome not named in "
+                             "--target_genetic_codes (default 1, the standard code)")
     parser.add_argument("--goi_info", default=None,
                         help="ANNOTATE_GOI goi_info.json — supplies the home GOI's "
                              "genomic footprint so the GOI fallback hit-chain max-gap "
@@ -7248,6 +7274,14 @@ def main():
                              "'auto' (default) = derive it from --dispersed_envelope_margin_genes")
 
     args = parser.parse_args()
+
+    # Genetic codes of the target genomes (process_single_genome sets each genome's).
+    try:
+        args.genetic_codes = parse_genetic_code_spec(args.target_genetic_codes)
+        set_genetic_code(args.default_target_genetic_code)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
 
     # Exons of the home gene, without tandem copies of the home model (ExonsKept); unknown
     # when ANNOTATE_GOI built no gene model (tandem_duplication / full_protein_only).

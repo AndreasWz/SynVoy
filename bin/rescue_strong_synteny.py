@@ -24,6 +24,8 @@ import tempfile
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
+from sequence_utils import (genetic_code_flag, genetic_code_for,  # noqa: E402
+                            parse_genetic_code_spec, set_genetic_code)
 from sequence_utils import parse_gff_attributes  # noqa: E402,F401  (kept for symmetry)
 
 
@@ -72,6 +74,7 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
         f"--outc={min_outc}",
         # Short-peptide friendliness — many ant venom precursors are <100 aa.
         "-L", "10",
+    ] + genetic_code_flag("miniprot") + [   # the target's genetic code ([] for table 1)
         window_fa, query_fa,
     ]
     try:
@@ -219,7 +222,15 @@ def main() -> None:
     ap.add_argument("--window_pad", type=int, default=2000,
                     help="bp padding added each side of the block coords")
     ap.add_argument("--miniprot_timeout", type=int, default=120)
+    ap.add_argument("--target_genetic_codes", default="",
+                    help="Genetic codes of target genomes, 'genome=table,...'; the table of "
+                         "--target_genome is used (lib/GeneticCodes.groovy builds this)")
+    ap.add_argument("--default_target_genetic_code", type=int, default=1,
+                    help="NCBI genetic code of a target genome not named there (default 1)")
     args = ap.parse_args()
+    set_genetic_code(genetic_code_for(args.target_genome,
+                                      parse_genetic_code_spec(args.target_genetic_codes),
+                                      args.default_target_genetic_code))
 
     # Filter scores.tsv to blocks needing rescue.
     rescue_blocks = []

@@ -28,9 +28,12 @@ process ITERATIVE_SEARCH {
 
 
     script:
+    // The target genomes' genetic codes (lib/GeneticCodes.groovy); '' when all use table 1.
+    def gc_args = GeneticCodes.targetArgs(params)
     """
     ${projectDir}/bin/iterative_search_runner.py \\
         --initial_db $initial_db \\
+        ${gc_args} \\
         --sorted_genomes $sorted_genomes_file \\
         --genomes_dir $genomes \\
         --home_db_dir $home_db \\

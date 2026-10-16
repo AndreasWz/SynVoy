@@ -29,6 +29,7 @@ from typing import Dict, List, Tuple
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
+from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
 import synvoy_evalue  # noqa: E402
 import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
@@ -314,7 +315,17 @@ def main() -> int:
                          "specificity, as in the main search (synvoy_specificity)")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=600)
+    ap.add_argument("--target_genetic_codes", default="",
+                    help="Genetic codes of target genomes, 'genome=table,...'; the table of "
+                         "--target_genome is used (lib/GeneticCodes.groovy builds this)")
+    ap.add_argument("--default_target_genetic_code", type=int, default=1,
+                    help="NCBI genetic code of a target genome not named there (default 1)")
     args = ap.parse_args()
+    # The target's genetic code: the model translations here and miniprot's (-T, through
+    # rescue_strong_synteny._run_miniprot_relaxed) follow it.
+    set_genetic_code(genetic_code_for(args.target_genome,
+                                      parse_genetic_code_spec(args.target_genetic_codes),
+                                      args.default_target_genetic_code))
 
     import re
     resolve_hull_distances(args)

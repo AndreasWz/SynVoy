@@ -17,6 +17,11 @@ process LOCATE_GENE {
 
     script:
     def preset_override_arg = params.preset_override ? "--preset_override ${params.preset_override}" : ''
+    // The home genome's genetic code, for the translated searches of a protein query only,
+    // and only when it is not the standard code (a default run's commands are unchanged).
+    def gc = params.home_genetic_code.toString().toInteger()
+    def mm_gc = gc != 1 ? "--translation-table ${gc}" : ''
+    def tbn_gc = gc != 1 ? "-db_gencode ${gc}" : ''
     """
     # 1. MMseqs2 Search
     # Check query type (Protein vs DNA) - look for amino acid-specific chars
@@ -27,10 +32,12 @@ process LOCATE_GENE {
         echo "Detected Protein Query"
         SEARCH_TYPE=2 # translated
         BLAST_CMD="tblastn"
+        MM_GC="${mm_gc}"
     else
         echo "Detected Nucleotide Query"
         SEARCH_TYPE=3 # nucleotide
         BLAST_CMD="blastn"
+        MM_GC=""
     fi
 
     # MMSEQS
@@ -44,13 +51,13 @@ process LOCATE_GENE {
         -v ${params.mmseqs_verbosity} \\
         -e ${params.search_evalue} \\
         --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits" \\
-        -s ${params.mmseqs_sensitivity} || echo "MMSeqs search failed or found no hits"
+        -s ${params.mmseqs_sensitivity} \$MM_GC || echo "MMSeqs search failed or found no hits"
 
     # 2. BLAST Search
     makeblastdb -in $home_genome -dbtype nucl
     
     if [ "\$BLAST_CMD" = "tblastn" ]; then
-        tblastn -query $gene -db $home_genome -out hits_blast.txt -outfmt 6
+        tblastn -query $gene -db $home_genome -out hits_blast.txt -outfmt 6 ${tbn_gc}
     else
         blastn -query $gene -db $home_genome -out hits_blast.txt -outfmt 6
     fi

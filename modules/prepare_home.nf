@@ -12,11 +12,12 @@ process PREPARE_HOME_PROTEOME {
     path "home_predicted.gff", emit: gff, optional: true
     
     script:
+    def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
     """
     if [ "$home_gff" != "NO_GFF" ]; then
         echo "Extracting proteins from Home GFF..."
         gff_to_faa.py --gff $home_gff --genome $home_genome --output home_proteome.faa \\
-            --coords_tsv home_genes.tsv
+            --coords_tsv home_genes.tsv ${gc_arg}
         # No predicted GFF needed - use provided one
         touch home_predicted.gff.skip
     else
@@ -29,7 +30,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome ${params.prodigal_full_genome_fallback} \\
             --gene_predictor ${params.gene_predictor} \\
-            --augustus_species ${params.augustus_species}
+            --augustus_species ${params.augustus_species} ${gc_arg}
     fi
 
     # Guard: if GFF extraction produced an empty file, fall back to gene prediction
@@ -43,7 +44,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome true \\
             --gene_predictor ${params.gene_predictor} \\
-            --augustus_species ${params.augustus_species}
+            --augustus_species ${params.augustus_species} ${gc_arg}
     fi
 
     # Create MMseqs DB for fast searching

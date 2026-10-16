@@ -34,14 +34,14 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
-        parse_gff_attributes
+        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
-        parse_gff_attributes
+        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons
     )
 
 
@@ -790,7 +790,7 @@ def extract_exons_from_gff_match(match, genome_file, query_seq=None):
         if i == n_exons and len(exon_dna) >= 3:
             last_codon = exon_dna[-3:].upper()
             # Check if original (before stop removal) protein ended with stop
-            has_stop_codon = last_codon in ('TAA', 'TAG', 'TGA')
+            has_stop_codon = last_codon in stop_codons()
 
         exons.append({
             'id': f"GOI_{gene_name}|exon_{i}",
@@ -1105,6 +1105,29 @@ def _check_miniprot():
         return False
 
 MINIPROT_AVAILABLE = _check_miniprot()
+_MINIPROT_T_OK = None
+
+
+def _miniprot_genetic_code_args():
+    """['-T', n] for miniprot when the process's genetic code is not the standard one (an
+    index-building option: miniprot builds its index from the target on every call here).
+    -T arrived in miniprot 0.13-r248; an older miniprot would refuse the option, so that is
+    an error, not a silent standard-code run."""
+    global _MINIPROT_T_OK
+    code = get_genetic_code()
+    if code == 1:
+        return []
+    if _MINIPROT_T_OK is None:
+        try:
+            out = subprocess.run(["miniprot", "--version"], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()
+            m = re.match(r"(\d+)\.(\d+)", out)
+            _MINIPROT_T_OK = bool(m) and (int(m.group(1)), int(m.group(2))) >= (0, 13)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            _MINIPROT_T_OK = False
+    if not _MINIPROT_T_OK:
+        raise RuntimeError(f"genetic code {code} needs miniprot >= 0.13 (option -T)")
+    return ["-T", str(code)]
 
 
 def _parse_miniprot_gff(gff_text):
@@ -1203,7 +1226,6 @@ def _parse_miniprot_gff(gff_text):
 # stop at the C terminus, while all ten internal splice junctions were byte-identical to the
 # curated gene. Walking in frame outwards from the terminal CDS recovers those ends.
 
-STOP_CODONS = ('TAA', 'TAG', 'TGA')
 TERMINUS_MAX_START_CODONS = 30
 TERMINUS_MAX_STOP_CODONS = 20
 _TERMINUS_UNKNOWN_QUERY_BOUND = 10
@@ -1253,6 +1275,7 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
     translation. The stop codon itself is not translated, so ``suffix_aa`` holds only the
     coding residues in front of it.
     """
+    stops = stop_codons()       # of the process's genetic code (set_genetic_code)
     if not cds_ordered or not chrom_seq:
         return '', ''
 
@@ -1271,7 +1294,7 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
                 for k in range(1, steps + 1):
                     s = edge - 3 * k
                     codon = chrom_seq[s:s + 3].upper()
-                    if codon in STOP_CODONS:
+                    if codon in stops:
                         break
                     if codon == 'ATG':
                         first['gstart'] = s
@@ -1288,7 +1311,7 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
                 for k in range(1, steps + 1):
                     e = edge + 3 * k
                     codon = reverse_complement(chrom_seq[e - 3:e]).upper()
-                    if codon in STOP_CODONS:
+                    if codon in stops:
                         break
                     if codon == 'ATG':
                         first['gend'] = e
@@ -1302,12 +1325,12 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
         if strand == '+':
             edge = int(last['gend'])
             at_splice = edge + 2 <= n and chrom_seq[edge:edge + 2].upper() == 'GT'
-            already = (edge >= 3 and chrom_seq[edge - 3:edge].upper() in STOP_CODONS)
+            already = (edge >= 3 and chrom_seq[edge - 3:edge].upper() in stops)
             steps = min(max_stop_codons, (n - edge) // 3)
             if not at_splice and not already:
                 for k in range(1, steps + 1):
                     e = edge + 3 * k
-                    if chrom_seq[e - 3:e].upper() in STOP_CODONS:
+                    if chrom_seq[e - 3:e].upper() in stops:
                         last['gend'] = e
                         suffix = translate(chrom_seq[edge:e]).replace('*', '')
                         break
@@ -1316,12 +1339,12 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
             at_splice = (edge >= 2 and
                          reverse_complement(chrom_seq[edge - 2:edge]).upper() == 'GT')
             already = (edge + 3 <= n and
-                       reverse_complement(chrom_seq[edge:edge + 3]).upper() in STOP_CODONS)
+                       reverse_complement(chrom_seq[edge:edge + 3]).upper() in stops)
             steps = min(max_stop_codons, edge // 3)
             if not at_splice and not already:
                 for k in range(1, steps + 1):
                     s = edge - 3 * k
-                    if reverse_complement(chrom_seq[s:s + 3]).upper() in STOP_CODONS:
+                    if reverse_complement(chrom_seq[s:s + 3]).upper() in stops:
                         last['gstart'] = s
                         suffix = translate(
                             reverse_complement(chrom_seq[s:edge])).replace('*', '')
@@ -1383,6 +1406,7 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
                     "-G", "2000",       # Override max intron to small value
                 ])
 
+        cmd.extend(_miniprot_genetic_code_args())
         cmd.extend([target_file, query_file])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -1501,7 +1525,7 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0):
             'pident': best['identity'] * 100,  # miniprot reports 0-1
             'has_start_codon': (i == 1 and exon_prot.startswith('M')),
             'has_stop_codon': (i == len(cds_ordered) and
-                               exon_dna[-3:].upper() in ('TAA', 'TAG', 'TGA')),
+                               exon_dna[-3:].upper() in stop_codons()),
             'splice_donor': splice_donor,
             'splice_acceptor': splice_acceptor,
             'method': 'miniprot'
@@ -1752,7 +1776,10 @@ def main():
     parser.add_argument("--output_info", required=True,
                         help="Output: annotation info JSON")
 
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the home genome (default 1, the standard code)")
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
 
     # Load query sequence
     query_records = list(parse_fasta(args.query))

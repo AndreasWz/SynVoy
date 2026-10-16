@@ -18,10 +18,10 @@ import math
 import sys
 import os
 try:
-    from sequence_utils import parse_fasta, translate, reverse_complement
+    from sequence_utils import parse_fasta, translate, reverse_complement, set_genetic_code
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, translate, reverse_complement
+    from sequence_utils import parse_fasta, translate, reverse_complement, set_genetic_code
 
 try:
     import parasail
@@ -556,8 +556,12 @@ def main():
     parser.add_argument("--threads", type=int, default=1, help="Number of threads")
     parser.add_argument("--method", default="auto", choices=["auto", "parasail", "ssearch36"],
                        help="Smith-Waterman implementation")
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the target DNA, for the six-frame "
+                             "translation (default 1, the standard code)")
     
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
     
     # Decide method
     method = args.method

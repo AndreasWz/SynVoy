@@ -21,6 +21,7 @@ process EXTRACT_FLANKING {
     def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --goi_relative_evalue ${settings.goi_relative_evalue}" : ""
     def dist_arg = params.max_flanking_distance > 0 ? "--max_flanking_distance ${params.max_flanking_distance}" : ""
     def expand_arg = settings.expand_goi_similar.toString().toBoolean() ? "--expand_goi_similar true --expand_goi_similar_distance ${params.expand_goi_similar_distance}" : ""
+    def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
     """
     # Relatives of the GOI are skipped as anchors (alignment E-value); the proteins carry
     # the anchors' home coordinates, from which the search derives its distances.
@@ -38,6 +39,7 @@ process EXTRACT_FLANKING {
         $goi_arg \\
         $dist_arg \\
         $expand_arg \\
+        $gc_arg \\
         --out_bed synteny_block_${locus_id}.bed \\
         --out_faa flanking_proteins_${locus_id}.faa
     """

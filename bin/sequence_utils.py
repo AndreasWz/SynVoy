@@ -441,35 +441,97 @@ def reverse_complement(seq: str) -> str:
     return ''.join(complement.get(base, 'N') for base in reversed(seq))
 
 
-def translate(seq: str, table: int = 1) -> str:
+# NCBI genetic codes (https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi): the
+# amino acid of each of the 64 codons in TCAG order (TTT, TTC, TTA, TTG, TCT, ...), as NCBI
+# prints them ('*' = stop). Codons that are a stop only in context (tables 27, 28, 31)
+# carry their amino acid, as in NCBI's string.
+NCBI_GENETIC_CODES = {
+    1: "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",   # standard
+    2: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG",   # vertebrate mito
+    3: "FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG",   # yeast mito
+    4: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",   # mold mito, Mycoplasma
+    5: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG",   # invertebrate mito
+    6: "FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",   # ciliate nuclear
+    9: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",   # echinoderm mito
+    10: "FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # euplotid nuclear
+    11: "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # bacterial
+    12: "FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # alternative yeast nuclear (CUG-Ser1)
+    13: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG",  # ascidian mito
+    14: "FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG",  # alt. flatworm mito
+    15: "FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Blepharisma
+    16: "FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # chlorophycean mito
+    21: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG",  # trematode mito
+    22: "FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Scenedesmus mito
+    23: "FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Thraustochytrium mito
+    24: "FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG",  # Pterobranchia mito
+    25: "FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # candidate division SR1
+    26: "FFLLSSSSYY**CC*WLLLAPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Pachysolen (CUG-Ala)
+    27: "FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # karyorelict nuclear
+    28: "FFLLSSSSYYQQCCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Condylostoma nuclear
+    29: "FFLLSSSSYYYYCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Mesodinium nuclear
+    30: "FFLLSSSSYYEECC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # peritrich nuclear
+    31: "FFLLSSSSYYEECCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG",  # Blastocrithidia nuclear
+    33: "FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG",  # Cephalodiscidae mito
+}
+# The tables every engine of the search translates with: BLAST+ 2.17 (-db_gencode / -query
+# _gencode: 1-6, 9-16, 21-31, 33), MMseqs2 18 (--translation-table: 1-6, 9-16, 21-31) and
+# miniprot 0.18 (-T: 1-33, of which 7, 8, 17-20 do not exist). 33 is missing in MMseqs2.
+SUPPORTED_GENETIC_CODES = frozenset(list(range(1, 7)) + list(range(9, 17)) + list(range(21, 32)))
+_CODON_ORDER = [a + b + c for a in "TCAG" for b in "TCAG" for c in "TCAG"]
+_CODON_TABLES: Dict[int, Dict[str, str]] = {}
+_GENETIC_CODE = 1     # the process default (set_genetic_code)
+
+
+def check_genetic_code(table: Any) -> int:
+    """The table as an int; ValueError when not every engine of the search supports it."""
+    try:
+        n = int(str(table).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"genetic code '{table}' is not a number") from None
+    if n not in SUPPORTED_GENETIC_CODES:
+        raise ValueError(
+            f"genetic code {n} is not supported by every engine SynVoy uses (BLAST+, MMseqs2, "
+            f"miniprot); use one of {', '.join(map(str, sorted(SUPPORTED_GENETIC_CODES)))}")
+    return n
+
+
+def set_genetic_code(table: Any) -> int:
+    """Set the process default genetic code that translate() and stop_codons() use when
+    no table is named. One per process: the search sets it per target genome at the start
+    of each genome (one genome per worker task)."""
+    global _GENETIC_CODE
+    _GENETIC_CODE = check_genetic_code(table)
+    return _GENETIC_CODE
+
+
+def get_genetic_code() -> int:
+    """The process default genetic code (1 unless set_genetic_code changed it)."""
+    return _GENETIC_CODE
+
+
+def codon_table(table: Optional[int] = None) -> Dict[str, str]:
+    """{codon: amino acid} of an NCBI genetic code (the process default for None)."""
+    n = _GENETIC_CODE if table is None else check_genetic_code(table)
+    if n not in _CODON_TABLES:
+        _CODON_TABLES[n] = dict(zip(_CODON_ORDER, NCBI_GENETIC_CODES[n]))
+    return _CODON_TABLES[n]
+
+
+def stop_codons(table: Optional[int] = None) -> frozenset:
+    """The stop codons of a genetic code (the process default for None)."""
+    return frozenset(c for c, aa in codon_table(table).items() if aa == '*')
+
+
+def translate(seq: str, table: Optional[int] = None) -> str:
     """
-    Translate DNA to protein.
-    
+    Translate DNA to protein with an NCBI genetic code.
+
     Args:
-        seq: DNA sequence
-        table: Genetic code table (currently only table 1 = standard is
-               implemented; other values are accepted but ignored)
+        seq: DNA sequence (U is read as T; a codon with N or another letter is X)
+        table: NCBI table number; None = the process default (set_genetic_code, 1 unless
+               set), so every caller that names no table follows the target's code
     """
-    # Standard genetic code
-    codon_table = {
-        'TTT': 'F', 'TTC': 'F', 'TTA': 'L', 'TTG': 'L',
-        'TCT': 'S', 'TCC': 'S', 'TCA': 'S', 'TCG': 'S',
-        'TAT': 'Y', 'TAC': 'Y', 'TAA': '*', 'TAG': '*',
-        'TGT': 'C', 'TGC': 'C', 'TGA': '*', 'TGG': 'W',
-        'CTT': 'L', 'CTC': 'L', 'CTA': 'L', 'CTG': 'L',
-        'CCT': 'P', 'CCC': 'P', 'CCA': 'P', 'CCG': 'P',
-        'CAT': 'H', 'CAC': 'H', 'CAA': 'Q', 'CAG': 'Q',
-        'CGT': 'R', 'CGC': 'R', 'CGA': 'R', 'CGG': 'R',
-        'ATT': 'I', 'ATC': 'I', 'ATA': 'I', 'ATG': 'M',
-        'ACT': 'T', 'ACC': 'T', 'ACA': 'T', 'ACG': 'T',
-        'AAT': 'N', 'AAC': 'N', 'AAA': 'K', 'AAG': 'K',
-        'AGT': 'S', 'AGC': 'S', 'AGA': 'R', 'AGG': 'R',
-        'GTT': 'V', 'GTC': 'V', 'GTA': 'V', 'GTG': 'V',
-        'GCT': 'A', 'GCC': 'A', 'GCA': 'A', 'GCG': 'A',
-        'GAT': 'D', 'GAC': 'D', 'GAA': 'E', 'GAG': 'E',
-        'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G',
-    }
-    
+    codons = codon_table(table)
     seq = seq.upper().replace('U', 'T')
     protein = []
     
@@ -478,7 +540,7 @@ def translate(seq: str, table: int = 1) -> str:
         if 'N' in codon:
             protein.append('X')
         else:
-            protein.append(codon_table.get(codon, 'X'))
+            protein.append(codons.get(codon, 'X'))
     
     return ''.join(protein)
 
@@ -1264,3 +1326,43 @@ def sw_aligned_pairs(query_seq: str, subject_seq: str) -> List[Tuple[int, int]]:
         elif code == 2:                # D: subject only
             s += length
     return pairs
+
+
+# =============================================================================
+# GENETIC CODE OF A TARGET GENOME (lib/GeneticCodes.groovy hands the option over)
+# =============================================================================
+
+def parse_genetic_code_spec(spec: Optional[str]) -> Dict[str, int]:
+    """{genome: table} of a 'genome=table,genome=table' option ('' or None: {})."""
+    out: Dict[str, int] = {}
+    for item in (spec or "").split(","):
+        if "=" not in item:
+            continue
+        name, table = item.rsplit("=", 1)
+        if name.strip():
+            out[name.strip()] = check_genetic_code(table)
+    return out
+
+
+def genetic_code_for(genome: str, spec: Dict[str, int], default: int = 1) -> int:
+    """The table of a genome: named in ``spec`` by its file name (as given, e.g. with
+    '.fna'), or by that name without '.gz' and its last extension; else ``default``."""
+    name = os.path.basename(str(genome))
+    if name in spec:
+        return spec[name]
+    stem = name[:-3] if name.endswith(".gz") else name
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+    return spec.get(stem, check_genetic_code(default))
+
+
+def genetic_code_flag(tool: str, table: Optional[int] = None) -> List[str]:
+    """The command-line option that gives an engine a genetic code, [] for the standard
+    code (so a default run's commands do not change). ``tool``: 'mmseqs', 'tblastn',
+    'miniprot', 'synvoy' (a SynVoy script's --genetic_code)."""
+    n = get_genetic_code() if table is None else check_genetic_code(table)
+    if n == 1:
+        return []
+    return {"mmseqs": ["--translation-table", str(n)],
+            "tblastn": ["-db_gencode", str(n)],
+            "miniprot": ["-T", str(n)],
+            "synvoy": ["--genetic_code", str(n)]}[tool]

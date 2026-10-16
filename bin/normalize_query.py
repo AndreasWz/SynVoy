@@ -17,10 +17,10 @@ import os
 import sys
 
 try:
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code
 
 
 NUC_ALPHABET = set("ACGTUNRYWSKMBDHV")
@@ -112,7 +112,11 @@ def main():
     parser.add_argument("--warn_below", type=int, default=40,
                         help="Queries shorter than this (aa) run, with a warning that only "
                              "near-identical orthologs can be told from chance (default 40)")
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the home genome for translating a DNA query "
+                             "(default 1, the standard code)")
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
 
     records = list(parse_fasta(args.input))
     if not records:

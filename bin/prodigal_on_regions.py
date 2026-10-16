@@ -10,13 +10,13 @@ import tempfile
 try:
     from sequence_utils import (
         load_genome, write_fasta, parse_fasta,
-        parse_bed as _parse_bed_dicts, str2bool,
+        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         load_genome, write_fasta, parse_fasta,
-        parse_bed as _parse_bed_dicts, str2bool,
+        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code,
     )
 
 try:
@@ -183,7 +183,10 @@ def main():
                         help="Gene predictor: auto, augustus, or prodigal (default: auto)")
     parser.add_argument("--augustus_species", type=str, default="fly",
                         help="Augustus species model (default: fly)")
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the genome (default 1, the standard code)")
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
 
     genome_seqs = load_genome(args.genome)
     regions = parse_bed(args.goi_bed)

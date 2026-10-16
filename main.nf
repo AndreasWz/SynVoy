@@ -386,6 +386,7 @@ def validateNumericParams(validationErrors, validationWarnings) {
         }
     }
     checkModulesSpec(validationErrors)
+    GeneticCodes.errors(params).each { e -> validationErrors << e }
     if (!(params.home_locus_mode in ['auto', 'gene_only', 'alignment'])) {
         validationErrors << "Invalid --home_locus_mode '${params.home_locus_mode}'. Must be 'auto', 'gene_only' or 'alignment'."
     }

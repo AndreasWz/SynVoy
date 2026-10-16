@@ -23,6 +23,6 @@ process BORROW_ANNOTATIONS {
         --goi_bed $goi_bed \\
         --output_gff borrowed_annotations.gff \\
         --output_proteins borrowed_proteins.faa \\
-        --n_flanking $n_flanking
+        --n_flanking $n_flanking ${GeneticCodes.homeArg(params)} ${GeneticCodes.targetArgs(params)}
     """
 }

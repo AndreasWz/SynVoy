@@ -164,7 +164,7 @@ Attributes on a model's `mRNA` row:
 | `ExonsKept`, `CysKept` | GOI gene models (miniprot): exons of the model / exons of the home gene (tandem copies of the home model not counted; absent when the home gene model is not known), and cysteines of the home protein aligned to a cysteine of the model protein / cysteines of the home protein. Advisory: no label reads them (an intron-poor lineage has fewer exons by nature) |
 | `Rearranged_from` | Flanking models placed on another scaffold than their block |
 
-`CDS` rows add `SpliceDonor` / `SpliceAcceptor`.
+`CDS` rows add `SpliceDonor` / `SpliceAcceptor`. A target genome searched with a genetic code other than the standard one carries the header line `##synvoy-genetic-code N` (NCBI table N).
 
 **Model ids.** `GOI_<name>|<genome>_b<block>_l<locus>_<kind>`: the block of flanking
 genes, the candidate locus inside its window (`l1` = the best), and how the model was
@@ -246,7 +246,7 @@ terms were redefined then.
 | `warnings` | Sentences to read before any number: a target genome that failed the assembly quality check and was searched anyway (a genome you chose is kept, see `qc_fail_policy`). Empty on a clean run. Such a genome is also in `summary.low_quality_genomes_searched`, its calls carry `low_quality_assembly: true`, and its row has a dagger (†) in the figures |
 | `genome_qc`, `qc_summary` | Assembly quality of each target |
 | `run_settings` | What decided the run's settings (from `effective_params.json`): `modules_mode` (`--modules`), `modules_applied` and `modules_would_fire` (preset modules with the reason each fired), `preset_applied` and `apply_reason`, the chooser's `legacy_preset`, `settings` and `source` (per parameter: default, `module:<id>`, `preset:<name>`, `user_set`), `user_set_kept`, and the `features` the triggers read (query features, home loci, home neighbourhood). `flags` says what the triggers found: `domain_shared` (relatives share only a domain), `dispersed_family_loci` (the home loci of a family on several places, with the query coverage of each), `home_contig_end` (the home gene lies near a scaffold end), `home_subtelomeric` (and a telomeric repeat sits at that end), `dist_to_scaffold_end`. `null` when the file is missing |
-| `target_policy` | Per target genome (`hits/<genome>.target_policy.tsv` of the search): the median identity of the best hit of each flanking gene (how far the genome is from home; it changes nothing), the blocks searched, how many are significant, the best block's E_syn and whether its window ran past a scaffold end |
+| `target_policy` | Per target genome (`hits/<genome>.target_policy.tsv` of the search): the median identity of the best hit of each flanking gene (how far the genome is from home; it changes nothing), the blocks searched, how many are significant, the best block's E_syn and whether its window ran past a scaffold end, and the genetic code its translations used (`genetic_code`; see `target_genetic_codes`) |
 | `staging_diagnostics` | Plumbing diagnostics — useful when something looks wrong |
 
 The fields of `summary` worth reading:

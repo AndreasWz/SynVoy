@@ -110,6 +110,15 @@ the target genomes (optionally their GFFs).
      assembly is dropped from the automatic search, and kept with a warning when the
      user named the species (`--target_species`) or it is the home assembly.
 
+**Genetic codes.** Each genome is translated with its NCBI table: `--home_genetic_code`
+for the home side, `--target_genetic_codes` (a TSV of genome and table) or
+`--default_target_genetic_code` for each target. All default to table 1, and then no
+engine gets a genetic-code option. The table is a property of the process
+(`sequence_utils.set_genetic_code`): the search sets the target's table at the start of
+each genome, and `translate`, the stop codons of the gene-model walks, the frame guard
+(§7.8) and the options of MMseqs2, tblastn, miniprot and Smith-Waterman follow it.
+Supported are tables 1–6, 9–16 and 21–31, the ones every engine translates with.
+
 ## 5. The home locus
 
 ### 5.1 Query normalisation

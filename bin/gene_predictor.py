@@ -31,7 +31,14 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from sequence_utils import get_genetic_code
+except ImportError:  # pragma: no cover
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from sequence_utils import get_genetic_code
+
 logger = logging.getLogger(__name__)
+_WARNED_PRODIGAL_CODE = set()
 
 # ---------------------------------------------------------------------------
 # Availability checks
@@ -148,6 +155,19 @@ def run_prodigal(
     Returns True on success.
     """
     cmd = ["prodigal", "-i", fasta_in, "-a", faa_out, "-f", "gff", "-o", gff_out]
+    # The process's genetic code (sequence_utils.set_genetic_code). Prodigal's own default
+    # is table 11, which reads every codon as table 1 does (only its start codons differ),
+    # so nothing is passed for 1 or 11. In meta mode Prodigal translates with the tables of
+    # its pre-trained models and ignores -g: a warning then, once per code.
+    code = get_genetic_code()
+    if code not in (1, 11):
+        if meta_mode:
+            if code not in _WARNED_PRODIGAL_CODE:
+                _WARNED_PRODIGAL_CODE.add(code)
+                logger.warning(f"Prodigal -p meta cannot use genetic code {code}: its proteins "
+                               f"are translated with table 11 or 4")
+        else:
+            cmd.extend(["-g", str(code)])
     if meta_mode:
         cmd.extend(["-p", "meta"])
     if quiet:
@@ -189,6 +209,8 @@ def run_augustus(
     ]
     if softmasking:
         cmd.append("--softmasking=1")
+    if get_genetic_code() != 1:       # the process's genetic code (sequence_utils)
+        cmd.append(f"--translation_table={get_genetic_code()}")
     cmd.append(fasta_in)
 
     try:

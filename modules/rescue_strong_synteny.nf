@@ -55,6 +55,6 @@ process RESCUE_STRONG_SYNTENY {
         --output ${genome_name}.rescue.gff \\
         --miniprot_outc ${params.strong_synteny_rescue_miniprot_outc} \\
         --window_pad ${params.strong_synteny_rescue_window_pad} \\
-        --miniprot_timeout ${params.strong_synteny_rescue_miniprot_timeout}
+        --miniprot_timeout ${params.strong_synteny_rescue_miniprot_timeout} ${GeneticCodes.targetArgs(params)}
     """
 }

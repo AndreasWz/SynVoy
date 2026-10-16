@@ -11,14 +11,14 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue,
+        sw_pair_evalue, set_genetic_code,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue,
+        sw_pair_evalue, set_genetic_code,
     )
 
 try:
@@ -379,7 +379,10 @@ def main():
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
+    parser.add_argument("--genetic_code", type=int, default=1,
+                        help="NCBI genetic code of the home genome (default 1, the standard code)")
     args = parser.parse_args()
+    set_genetic_code(args.genetic_code)
     exon_mode = args.exon_mode.lower() == 'true'
     expand_goi_similar = args.expand_goi_similar.lower() == 'true'
 

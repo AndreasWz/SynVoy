@@ -23,6 +23,7 @@ process ANNOTATE_GOI {
     def mmseqs_arg = mmseqs_hits.name != 'NO_MMSEQS_HITS' ? "--mmseqs_hits ${mmseqs_hits}" : ""
     def qid_arg = query_id ? "--query_id ${query_id}" : ""
     def name_arg = gene_name ? "--gene_name '${gene_name}'" : ""
+    def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
     """
     annotate_goi_exons.py \\
         --query ${query_gene} \\
@@ -32,6 +33,7 @@ process ANNOTATE_GOI {
         ${mmseqs_arg} \\
         ${qid_arg} \\
         ${name_arg} \\
+        ${gc_arg} \\
         --gff_search_window ${params.gff_search_window} \\
         --gap_search_window ${params.gap_search_window} \\
         --output_exons goi_exons.faa \\
