@@ -293,23 +293,36 @@ alignments around it are that gene's exons and, often, hits in a relative next d
    names of the query (gene names, synonyms, the protein name) and the query id, with
    case variants and the `gene-` prefix, are looked up in the home GFF. A name only
    points at a gene, so each match is then compared with the query: up to 50 matches
-   are tried, best name match first, and the first gene whose protein agrees with the
-   query is taken (Smith-Waterman, identity ≥ 60 % and a score of at least half the
+   are compared, best name match first, and the first gene whose protein agrees with
+   the query is taken (Smith-Waterman, identity ≥ 60 % and a score of at least half the
    query's self-score). Of that gene, the transcript that agrees best with the query
-   is used.
+   is used. The best other gene compared is recorded as the runner-up.
 2. **Annotation by position and sequence** (`_search_gff_by_region_and_sequence`).
-   Every annotated gene within `gff_search_window` (100 kb) of a hit of the locating
-   step is a candidate. Each of its transcripts is translated and compared with the
-   query by the share of 3-residue words they have in common, scaled by the ratio of
-   the two lengths; the best gene is taken if that value is above 30 %.
+   The candidates are the annotated genes that overlap a hit of the locating step with
+   E ≤ `search_evalue`, or lie within `gff_search_window` (100 kb) of one. Each of their
+   transcripts is compared with the query by the same check as in step 1 (a transcript
+   that shares almost no 3-residue words with the query is skipped before the
+   alignment). Among the genes that pass, one that overlaps a hit comes before one that
+   is only near a hit, then the higher score fraction. When another gene comes within
+   0.05 of the winner's score fraction, the winner is still taken, with a warning and
+   `home_gene_ambiguous: true`; a gene below 95 % identity is named in a warning (a query
+   from another species, or a relative where the query's own gene is not annotated).
+   Without parasail the step uses the rule from before 2026-10-15 and says so in the
+   log: the best share of shared 3-residue words, scaled by the length ratio, above 30 %.
+   That rule needed about 75 to 80 % identity at equal length, so a query from another
+   species or a short isoform fell through to miniprot. The old windows also came from
+   every hit, including tblastn's hits up to E 10.
 3. **miniprot** on the hits ± `gap_search_window` (50 kb), when no annotated gene matches.
 4. **Query protein only**, when there are no hits to work from.
 
 Cases 1 and 2 take the exons from the GFF's CDS rows (`method: gff_annotation`). The
 output is the GOI protein, one sequence per exon, and `goi_info.json` with the gene's
-genomic span and its largest intron. The GOI protein written here, not the query file,
-is what the search uses ([§5.8](#58-the-initial-query-set)): for an annotated gene it
-is the protein of the chosen transcript.
+genomic span and its largest intron and with how the gene was found: `found_by`
+(`name`, `position`, `miniprot` or `none`; `position_3mer` without parasail), `gene_id`,
+`transcript_id`, `identity`, `score_fraction`, `overlaps_hit`, `runner_up_gene_id`,
+`runner_up_score_fraction` and `home_gene_ambiguous`. The GOI protein written here, not
+the query file, is what the search uses ([§5.8](#58-the-initial-query-set)): for an
+annotated gene it is the protein of the chosen transcript.
 
 ### 5.7 Flanking genes
 

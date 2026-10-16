@@ -34,6 +34,7 @@ process ANNOTATE_GOI {
         ${qid_arg} \\
         ${name_arg} \\
         ${gc_arg} \\
+        --max_evalue ${params.search_evalue} \\
         --gff_search_window ${params.gff_search_window} \\
         --gap_search_window ${params.gap_search_window} \\
         --output_exons goi_exons.faa \\

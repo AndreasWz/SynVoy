@@ -99,7 +99,7 @@ def fetch_uniprot_names(query_id):
 # =============================================================================
 
 def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mmseqs_hits,
-                     gff_search_window, gene_name=''):
+                     gff_search_window, gene_name='', max_evalue=None):
     """
     Try to match the GOI to an annotated gene in the GFF.
 
@@ -160,9 +160,14 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
     # Use LOCATE_GENE hits to narrow the search region
     hit_regions = _parse_hit_regions(blast_hits, mmseqs_hits)
     if hit_regions:
-        print(f"[GFF Match] Name not found. Searching proteins in {len(hit_regions)} hit region(s)...")
+        n_sig = len(hit_regions) if max_evalue is None else sum(
+            1 for r in hit_regions if r.get('evalue', float('inf')) <= max_evalue)
+        print(f"[GFF Match] Name not found. Searching proteins near {n_sig} of "
+              f"{len(hit_regions)} hit region(s)"
+              + (f" (E <= {max_evalue})" if max_evalue is not None else "") + "...")
         match = _search_gff_by_region_and_sequence(
-            gff_file, genome_file, query_seq, hit_regions, gff_search_window
+            gff_file, genome_file, query_seq, hit_regions, gff_search_window,
+            max_evalue=max_evalue
         )
         if match:
             print(f"[GFF Match] Found by regional sequence search: {match['gene_id']}")
@@ -184,6 +189,13 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
 HOME_GENE_MIN_IDENTITY = 60.0      # percent identity of the local alignment
 HOME_GENE_MIN_SCORE_FRAC = 0.5     # alignment score / self-score of the QUERY: the gene explains half of the query
 HOME_GENE_MAX_NAME_CANDIDATES = 50  # name matches compared with the query, best name score first
+# The gene by position (batch HG-3, 2026-10-15): a runner-up gene whose score fraction comes
+# within this of the winner's flags the choice (home_gene_ambiguous); a transcript whose
+# shared-3-mer score is below the floor is not aligned at all (a speed filter only: an
+# unrelated protein reaches 3 to 4).
+HOME_GENE_POSITION_MARGIN = 0.05
+HOME_GENE_PREFILTER_3MER = 1.0
+HOME_GENE_NEAR_IDENTICAL = 95.0    # below this identity the gene by position is named in a warning
 
 
 def _cds_protein(cds_parts, chrom_seq, strand):
@@ -249,7 +261,8 @@ def _best_transcript(gene_id, strand, chrom_seq, transcript_to_gene, cds_by_pare
     query's (a query that is itself a short isoform is contained in the long transcript
     just as well), then to the first transcript in the fixed order of
     ``_gene_transcripts``. Returns
-    ``(cds_parts, protein, measure_value)`` or ``None`` when the gene has no CDS."""
+    ``(cds_parts, protein, measure_value, transcript_id)`` or ``None`` when the gene has
+    no CDS."""
     measure = measure or _query_match
     best = None
     for tid, parts in _gene_transcripts(gene_id, transcript_to_gene, cds_by_parent):
@@ -259,14 +272,30 @@ def _best_transcript(gene_id, strand, chrom_seq, transcript_to_gene, cds_by_pare
         value = measure(query_seq, protein)
         key = (value, -abs(len(protein) - len(query_seq or '')))
         if best is None or key > best[0]:
-            best = (key, parts, protein, value)
+            best = (key, parts, protein, value, tid)
     if best is None:
         return None
-    return best[1], best[2], best[3]
+    return best[1], best[2], best[3], best[4]
 
 
 def _is_home_gene(score_frac, identity):
     return identity >= HOME_GENE_MIN_IDENTITY and score_frac >= HOME_GENE_MIN_SCORE_FRAC
+
+
+def _evidence(found_by, transcript_id=None, identity=None, score_fraction=None,
+              overlaps_hit=None, runner_up=None, ambiguous=False):
+    """How the home gene was found, as recorded in goi_info.json (batch HG-3): the path,
+    the transcript, its agreement with the query and the best other gene compared."""
+    return {
+        'found_by': found_by,
+        'transcript_id': transcript_id,
+        'identity': None if identity is None else round(float(identity), 1),
+        'score_fraction': None if score_fraction is None else round(float(score_fraction), 3),
+        'overlaps_hit': overlaps_hit,
+        'runner_up_gene_id': runner_up[0] if runner_up else None,
+        'runner_up_score_fraction': round(float(runner_up[1]), 3) if runner_up else None,
+        'home_gene_ambiguous': bool(ambiguous),
+    }
 
 
 def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=None):
@@ -376,9 +405,9 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
     if not matched_genes:
         return None
 
-    def _result(gene_id, cds_parts):
+    def _result(gene_id, cds_parts, **evidence):
         info = gene_features[gene_id]
-        return {
+        out = {
             'gene_id': gene_id,
             'gene_name': info.get('gene_name', gene_id),
             'chrom': info['chrom'],
@@ -387,6 +416,8 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
             'strand': info['strand'],
             'cds_parts': sorted(cds_parts, key=lambda x: x['start'])
         }
+        out.update(_evidence(found_by='name', **evidence))
+        return out
 
     def _span_as_cds(gene_id):
         info = gene_features[gene_id]
@@ -409,7 +440,7 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
               f"not compared with the query")
         transcripts = _gene_transcripts(best_gene, transcript_to_gene, cds_by_parent)
         if transcripts:
-            return _result(best_gene, transcripts[0][1])
+            return _result(best_gene, transcripts[0][1], transcript_id=transcripts[0][0])
         print(f"[GFF Match] Gene {best_gene} found but no CDS features. Using gene span.")
         return _result(best_gene, _span_as_cds(best_gene))
 
@@ -419,6 +450,9 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
     if len(ranked) > HOME_GENE_MAX_NAME_CANDIDATES:
         print(f"[GFF Match] {len(ranked)} genes match a name; comparing the "
               f"{HOME_GENE_MAX_NAME_CANDIDATES} with the best name score with the query.")
+    # Every name match up to the cap is compared, so that the runner-up is known; the first
+    # one by name score that agrees with the query is taken, as before (batch HG-3).
+    compared, winner = [], None
     for gene_id in ranked[:HOME_GENE_MAX_NAME_CANDIDATES]:
         info = gene_features[gene_id]
         chrom_seq = genome_seqs.get(info['chrom'])
@@ -431,16 +465,27 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
             # translation of the span is the query.
             span = _span_as_cds(gene_id)
             protein = _cds_protein(span, chrom_seq, info['strand'])
-            chosen = (span, protein, _query_match(query_seq, protein))
-        cds_parts, protein, (score_frac, identity) = chosen
+            chosen = (span, protein, _query_match(query_seq, protein), None)
+        cds_parts, protein, (score_frac, identity), tid = chosen
+        compared.append((gene_id, score_frac))
+        if winner is not None:
+            continue
         if _is_home_gene(score_frac, identity):
             print(f"[GFF Match] Best match: {gene_id} (score={matched_genes[gene_id]}); "
                   f"its protein ({len(protein)} aa) agrees with the query: "
                   f"{identity:.1f}% identity, score fraction {score_frac:.2f}")
-            return _result(gene_id, cds_parts)
+            winner = (gene_id, cds_parts, tid, identity, score_frac)
+            continue
         print(f"[GFF Match]   Rejected {gene_id} (name score={matched_genes[gene_id]}): "
               f"its protein does not agree with the query "
               f"({identity:.1f}% identity, score fraction {score_frac:.2f})")
+    if winner is not None:
+        gene_id, cds_parts, tid, identity, score_frac = winner
+        others = [(g, f) for g, f in compared if g != gene_id]
+        runner = max(others, key=lambda gf: gf[1]) if others else None
+        return _result(gene_id, cds_parts, transcript_id=tid, identity=identity,
+                       score_fraction=score_frac,
+                       runner_up=runner)
 
     print("[GFF Match] No gene found by name agrees with the query sequence.")
     return None
@@ -492,20 +537,34 @@ def _parse_hit_regions(blast_hits_file, mmseqs_hits_file):
 
 
 def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_regions,
-                                       gff_search_window):
-    """
-    Search GFF genes near hit regions and compare protein sequences.
+                                       gff_search_window, max_evalue=None):
+    """The annotated gene of the query by its position (batch HG-3, 2026-10-15).
 
-    Instead of searching the entire proteome (slow), we:
-    1. Identify GFF genes overlapping with or near our hit regions
-    2. Extract their protein sequences
-    3. Compare to GOI protein
+    Candidates are the genes that overlap a significant hit (E <= ``max_evalue``; every
+    hit when it is None) or lie within ``gff_search_window`` of one. Each transcript of a
+    candidate is compared with the query as on the name path (``_query_match``: the
+    Smith-Waterman score as a fraction of the query's self-score, and identity), and a gene
+    is accepted with ``_is_home_gene``. Among the accepted genes one that overlaps a
+    significant hit comes first, then the highest score fraction. When another gene (not
+    another transcript) comes within HOME_GENE_POSITION_MARGIN of the winner's score
+    fraction, the winner is still taken, with a warning and ``home_gene_ambiguous``.
+    Without parasail the earlier rule is used: the best shared-3-mer score above 30.
+
+    Until 2026-10-15 every hit made a window (tblastn reports to E 10), and the gene with the
+    best shared-3-mer score above 30 was taken: about 75 to 80 % identity at equal length, so
+    a short-isoform query or one from another species fell through to miniprot, and a close
+    paralog could win where the query's own gene is not annotated.
     """
     SEARCH_WINDOW = max(0, int(gff_search_window))
+    significant = [r for r in hit_regions
+                   if max_evalue is None or float(r.get('evalue', float('inf'))) <= max_evalue]
+    if not significant:
+        print(f"[GFF Match] No hit with E <= {max_evalue} to search around.")
+        return None
 
     # Build search windows
     search_windows = []
-    for region in hit_regions:
+    for region in significant:
         search_windows.append({
             'chrom': region['chrom'],
             'start': max(0, region['start'] - SEARCH_WINDOW),
@@ -536,12 +595,16 @@ def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_reg
                 if (feature['seqid'] == window['chrom'] and
                         feature['start'] <= window['end'] and
                         feature['end'] >= window['start']):
+                    # GFF start is 1-based; a hit's start is 0-based, its end exclusive.
+                    overlaps = any(r['chrom'] == feature['seqid'] and feature['start'] <= r['end']
+                                   and feature['end'] > r['start'] for r in significant)
                     candidate_genes[gene_id] = {
                         'chrom': feature['seqid'],
                         'start': feature['start'],
                         'end': feature['end'],
                         'strand': feature['strand'],
-                        'gene_name': attrs.get('Name', gene_id)
+                        'gene_name': attrs.get('Name', gene_id),
+                        'overlaps_hit': overlaps,
                     }
                     break
 
@@ -567,48 +630,100 @@ def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_reg
     if not candidate_genes:
         return None
 
-    print(f"[GFF Match] Found {len(candidate_genes)} candidate genes in hit regions")
+    n_over = sum(1 for g in candidate_genes.values() if g['overlaps_hit'])
+    print(f"[GFF Match] Found {len(candidate_genes)} candidate genes in hit regions "
+          f"({n_over} overlap a hit)")
 
     # Load genome for protein extraction
     genome_seqs = load_genome(genome_file)
 
-    # Extract proteins for candidate genes and compare to GOI
-    best_match = None
-    best_identity = 0
+    def _result(gene_id, chosen, **evidence):
+        info = candidate_genes[gene_id]
+        cds_parts, protein = chosen[0], chosen[1]
+        out = {
+            'gene_id': gene_id,
+            'gene_name': info.get('gene_name', gene_id),
+            'chrom': info['chrom'],
+            'start': info['start'],
+            'end': info['end'],
+            'strand': info['strand'],
+            'cds_parts': sorted(cds_parts, key=lambda x: x['start']),
+            'protein': protein,
+        }
+        out.update(_evidence(found_by='position', transcript_id=chosen[3],
+                             overlaps_hit=info['overlaps_hit'], **evidence))
+        return out
 
-    for gene_id, gene_info in candidate_genes.items():
+    try:
+        import parasail  # noqa: F401  # type: ignore
+    except ImportError:
+        print("[GFF Match] parasail missing: the gene by position is the best shared-3-mer "
+              "score above 30 (the rule before 2026-10-15), not the name path's check.")
+        best = None
+        for gene_id, gene_info in candidate_genes.items():
+            chrom = gene_info['chrom']
+            if chrom not in genome_seqs:
+                continue
+            chosen = _best_transcript(gene_id, gene_info['strand'], genome_seqs[chrom],
+                                      transcript_to_gene, cds_by_parent, query_seq,
+                                      measure=lambda q, p: (_quick_protein_identity(q, p),))
+            if chosen is not None and chosen[2][0] > 30 and (best is None or chosen[2][0] > best[1][2][0]):
+                best = (gene_id, chosen)
+        if best is None:
+            return None
+        match = _result(best[0], best[1], identity=best[1][2][0])
+        match['found_by'] = 'position_3mer'
+        print(f"[GFF Match] Best protein match: {best[0]} ({best[1][2][0]:.1f} shared-3-mer score)")
+        return match
+
+    def _measure(q, protein):
+        # The shared-3-mer score only spares the alignment of obviously unrelated proteins.
+        if _quick_protein_identity(q, protein) < HOME_GENE_PREFILTER_3MER:
+            return (0.0, 0.0)
+        return _query_match(q, protein)
+
+    scored = []    # (gene_id, chosen, score_frac, identity)
+    for gene_id in sorted(candidate_genes):
+        gene_info = candidate_genes[gene_id]
         chrom = gene_info['chrom']
         if chrom not in genome_seqs:
             continue
-
         # Every transcript of the gene is compared with the query and the best one is
         # kept: the first transcript in the file can be a short isoform.
-        chosen = _best_transcript(
-            gene_id, gene_info['strand'], genome_seqs[chrom],
-            transcript_to_gene, cds_by_parent, query_seq,
-            measure=lambda q, p: (_quick_protein_identity(q, p),))
+        chosen = _best_transcript(gene_id, gene_info['strand'], genome_seqs[chrom],
+                                  transcript_to_gene, cds_by_parent, query_seq, measure=_measure)
         if chosen is None:
             continue
-        cds_parts, protein, (identity,) = chosen
-        cds_parts_sorted = sorted(cds_parts, key=lambda x: x['start'])
-        if identity > best_identity and identity > 30:
-            best_identity = identity
-            best_match = {
-                'gene_id': gene_id,
-                'gene_name': gene_info.get('gene_name', gene_id),
-                'chrom': chrom,
-                'start': gene_info['start'],
-                'end': gene_info['end'],
-                'strand': gene_info['strand'],
-                'cds_parts': cds_parts_sorted,
-                'identity': identity,
-                'protein': protein
-            }
+        score_frac, identity = chosen[2]
+        scored.append((gene_id, chosen, score_frac, identity))
 
-    if best_match:
-        print(f"[GFF Match] Best protein match: {best_match['gene_id']} "
-              f"({best_match['identity']:.1f}% identity)")
-    return best_match
+    accepted = [x for x in scored if _is_home_gene(x[2], x[3])]
+    if not accepted:
+        best = max(scored, key=lambda x: x[2]) if scored else None
+        print("[GFF Match] No gene near the hits agrees with the query"
+              + (f" (best {best[0]}: {best[3]:.1f}% identity, score fraction {best[2]:.2f})"
+                 if best else ""))
+        return None
+    accepted.sort(key=lambda x: (not candidate_genes[x[0]]['overlaps_hit'], -x[2], -x[3], x[0]))
+    gene_id, chosen, score_frac, identity = accepted[0]
+    others = [(g, f) for g, _c, f, _i in scored if g != gene_id]
+    runner = max(others, key=lambda gf: gf[1]) if others else None
+    ambiguous = runner is not None and runner[1] >= score_frac - HOME_GENE_POSITION_MARGIN
+    print(f"[GFF Match] Best protein match: {gene_id} ({identity:.1f}% identity, score "
+          f"fraction {score_frac:.2f}, {'overlaps' if candidate_genes[gene_id]['overlaps_hit'] else 'near'} a hit)"
+          + (f"; runner-up {runner[0]} at {runner[1]:.2f}" if runner else ""))
+    if ambiguous:
+        print(f"[GFF Match] WARNING: the home gene is ambiguous: {runner[0]} agrees with the "
+              f"query nearly as well ({runner[1]:.2f} vs {score_frac:.2f}, margin < "
+              f"{HOME_GENE_POSITION_MARGIN}); {gene_id} is taken.")
+    if identity < HOME_GENE_NEAR_IDENTICAL:
+        # A query from another species, or a paralog where the query's own gene is not
+        # annotated: either way the run says so instead of taking the gene in silence.
+        print(f"[GFF Match] WARNING: {gene_id}, the gene taken by position, is not the query "
+              f"itself ({identity:.1f}% identity): a query from another species, or a "
+              f"relative where the query's own gene is not annotated.")
+    return _result(gene_id, chosen, identity=identity, score_fraction=score_frac,
+                   runner_up=runner, ambiguous=ambiguous)
 
 
 def _quick_protein_identity(seq1, seq2):
@@ -1764,6 +1879,9 @@ def main():
                         help="Raw MMseqs2 hits from LOCATE_GENE (format 6)")
     parser.add_argument("--query_id", default="",
                         help="Query ID (UniProt accession or gene name)")
+    parser.add_argument("--max_evalue", type=float, default=None,
+                        help="Only hits with E <= this make windows for the gene by position "
+                             "(pipeline: search_evalue); default every hit")
     parser.add_argument("--gff_search_window", type=int, default=100000,
                         help="Window around hits for GFF-based search")
     parser.add_argument("--gene_name", default="",
@@ -1803,6 +1921,7 @@ def main():
     exons = []
     full_protein = query_seq
     method_used = "none"
+    match = None
 
     # ========== Try GFF-based approach first ==========
     if gff_available:
@@ -1817,6 +1936,7 @@ def main():
             args.mmseqs_hits,
             args.gff_search_window,
             gene_name=args.gene_name.strip(),
+            max_evalue=args.max_evalue,
         )
 
         if match:
@@ -1954,6 +2074,22 @@ def main():
         } for e in exons],
         'full_protein_length': len(full_protein)
     }
+    # How the home gene was found (batch HG-3, 2026-10-15; keys added, none renamed: the
+    # settings step reads this file). found_by: name / position from the annotation,
+    # miniprot from the hits, none without a model.
+    if method_used == 'gff_annotation' and match:
+        evidence = {k: match.get(k) for k in ('found_by', 'transcript_id', 'identity', 'score_fraction',
+                                              'overlaps_hit', 'runner_up_gene_id',
+                                              'runner_up_score_fraction', 'home_gene_ambiguous')}
+        evidence['gene_id'] = match.get('gene_id')
+    else:
+        evidence = {'found_by': 'miniprot' if exons else 'none', 'gene_id': None,
+                    'transcript_id': None, 'identity': None, 'score_fraction': None,
+                    'overlaps_hit': None, 'runner_up_gene_id': None,
+                    'runner_up_score_fraction': None, 'home_gene_ambiguous': False}
+    info.update({k: evidence[k] for k in ('found_by', 'gene_id', 'transcript_id', 'identity',
+                                          'score_fraction', 'overlaps_hit', 'runner_up_gene_id',
+                                          'runner_up_score_fraction', 'home_gene_ambiguous')})
 
     with open(args.output_info, 'w') as f:
         json.dump(info, f, indent=2)

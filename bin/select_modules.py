@@ -130,6 +130,8 @@ def flat_features(hit_profile: Optional[dict], goi_info: Optional[dict],
         "cys_max90": qf.get("cys_max90"),
         # the home gene model (annotate_goi_exons.py)
         "goi_method": method,
+        "goi_found_by": gi.get("found_by"),
+        "goi_home_gene_ambiguous": gi.get("home_gene_ambiguous"),
         "goi_real_exons": real_exons,
         # the home neighbourhood (home_context.py)
         "goi_gene": hc.get("goi_gene"),
