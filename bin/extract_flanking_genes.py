@@ -45,6 +45,7 @@ def parse_gff_for_genes(gff_file):
     cds_orphans = []
     parent_map = {} # Transcript -> Gene
     transcript_attrs = {} # Transcript ID -> attributes
+    feature_ids = set()   # IDs of every feature that is not a CDS (to find unattached CDS)
     
     with open(gff_file, 'r') as f:
         for line in f:
@@ -60,6 +61,8 @@ def parse_gff_for_genes(gff_file):
                 if '=' in attr:
                     k, v = attr.split('=', 1)
                     attributes[k] = v
+            if feature_type != 'CDS' and attributes.get('ID'):
+                feature_ids.add(attributes['ID'])
             
             if feature_type == 'gene':
                 genes.append({
@@ -133,9 +136,20 @@ def parse_gff_for_genes(gff_file):
 
     # Fallback for CDS-only annotation files (e.g., Prodigal output):
     # synthesize gene-like records from CDS spans so downstream flanking logic
-    # can still select neighboring models around the GOI region.
-    if not processed_genes and (cds_by_parent or cds_orphans):
-        print("GFF contains no gene features; falling back to CDS-derived pseudo genes")
+    # can still select neighboring models around the GOI region. In a file that also
+    # has gene rows (the borrowed annotations of a home genome without its own GFF,
+    # merged with the predictions), only CDS that belong to no feature of the file count
+    # here: no Parent, or a Parent no row defines (batch HG-5a: one borrowed gene row
+    # used to switch the fallback off, and every prediction was lost).
+    mixed = bool(processed_genes)
+    if mixed:
+        cds_by_parent = {pid: rows for pid, rows in cds_by_parent.items() if pid not in feature_ids}
+    if cds_by_parent or cds_orphans:
+        if not mixed:
+            print("GFF contains no gene features; falling back to CDS-derived pseudo genes")
+        else:
+            print(f"GFF mixes gene features with {len(cds_by_parent) + len(cds_orphans)} CDS "
+                  "model(s) that belong to no gene; adding them as CDS-derived pseudo genes")
 
         pseudo_genes = []
 
@@ -174,7 +188,7 @@ def parse_gff_for_genes(gff_file):
                 'cds_parts': [cds_entry]
             })
 
-        processed_genes = pseudo_genes
+        processed_genes = processed_genes + pseudo_genes if mixed else pseudo_genes
 
     return sorted(processed_genes, key=lambda x: (x['chrom'], x['start']))
 

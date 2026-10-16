@@ -97,6 +97,21 @@ def prefix_attrs(attr_str, seq_id):
     return ";".join(out)
 
 
+def _with_parents(parts):
+    """A CDS row without a Parent (Prodigal writes one per gene) as gene, mRNA and CDS rows
+    (batch HG-5a): readers that group CDS by Parent, gff_to_faa.py among them, dropped it.
+    The gene keeps the CDS's id, so a gene is named as before."""
+    attrs = [a for a in parts[8].split(";") if a]
+    cid = next((a.split("=", 1)[1] for a in attrs if a.startswith("ID=")), "")
+    if not cid:
+        cid = f"{parts[0]}_{parts[3]}_{parts[4]}"
+    rest = [a for a in attrs if not a.startswith("ID=")]
+    gene = parts[:2] + ["gene", parts[3], parts[4], ".", parts[6], ".", f"ID={cid}"]
+    mrna = parts[:2] + ["mRNA", parts[3], parts[4], ".", parts[6], ".", f"ID={cid}.t1;Parent={cid}"]
+    cds = parts[:8] + [";".join([f"ID={cid}.cds", f"Parent={cid}.t1"] + rest)]
+    return [gene, mrna, cds]
+
+
 def adjust_gff(in_gff, out_gff, id_map):
     with open(out_gff, "w") as out:
         out.write("##gff-version 3\n")
@@ -120,10 +135,33 @@ def adjust_gff(in_gff, out_gff, id_map):
                     pass
                 parts[0] = chrom
                 parts[8] = prefix_attrs(parts[8], seq_id)
+                if parts[2] == "CDS" and not any(a.startswith("Parent=") for a in parts[8].split(";")):
+                    for row in _with_parents(parts):
+                        out.write("\t".join(row) + "\n")
+                    continue
                 out.write("\t".join(parts) + "\n")
 
 
-def adjust_proteins(in_faa, out_faa, id_map):
+def gene_regions(in_gff):
+    """{gene id: region sequence id} of the gene rows of a predictor's GFF (region-local)."""
+    out = {}
+    if not os.path.exists(in_gff):
+        return out
+    with open(in_gff) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 9 and parts[2] == "gene":
+                gid = next((a.split("=", 1)[1] for a in parts[8].split(";") if a.startswith("ID=")), "")
+                if gid:
+                    out[gid] = parts[0]
+    return out
+
+
+def adjust_proteins(in_faa, out_faa, id_map, gene_region=None):
+    """The predicted proteins with global coordinates and region-prefixed ids. A Prodigal id
+    names its region (``<region>_<n>``); an AUGUSTUS id (``g1``) does not, so its region comes
+    from the gene rows of the GFF (``gene_region``, gene_regions()); before (batch HG-5a) such
+    proteins kept region-local coordinates and the same ids in every region."""
     if not os.path.exists(in_faa) or os.path.getsize(in_faa) == 0:
         open(out_faa, "w").close()
         return
@@ -133,6 +171,9 @@ def adjust_proteins(in_faa, out_faa, id_map):
         if len(parts) >= 4:
             token = parts[0]
             base_seqid = token.rsplit("_", 1)[0]
+            if base_seqid not in id_map and (gene_region or {}).get(token) in id_map:
+                base_seqid = gene_region[token]
+                parts[0] = f"{base_seqid}_{token}"
             mapping = id_map.get(base_seqid)
             if mapping:
                 _, offset, _ = mapping
@@ -227,7 +268,7 @@ def main():
             augustus_species=args.augustus_species,
         )
 
-        adjust_proteins(tmp_faa, args.output_faa, id_map)
+        adjust_proteins(tmp_faa, args.output_faa, id_map, gene_regions(tmp_gff))
         adjust_gff(tmp_gff, args.output_gff, id_map)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

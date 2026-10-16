@@ -329,7 +329,10 @@ Without a home GFF, a substitute annotation is built first: genes are predicted
 around the locus (`prodigal_on_regions.py`, Augustus or Prodigal) and annotations are
 transferred from annotated target genomes (`borrow_annotations.py`). If that yields
 nothing either, `extract_flanking_genes.py` predicts genes within 50 kb of the locus
-and keeps the longest tenth, at least 21.
+and keeps the longest tenth, at least 21. Predictions are written as gene, mRNA and CDS
+rows, and a CDS that belongs to no feature of the merged file still counts as a gene
+(until 2026-10-15 one borrowed gene row made every Prodigal prediction vanish); AUGUSTUS
+proteins carry their region and genome coordinates like Prodigal's.
 
 Each flanking gene is written as its full protein and, with `exon_level_search` (on),
 as one sequence per exon. The FASTA header of a protein carries the gene's home
