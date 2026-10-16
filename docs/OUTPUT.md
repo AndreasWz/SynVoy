@@ -418,7 +418,9 @@ cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 ## Decoy calls (`--decoy_mode`)
 
 With `--decoy_mode true` the search also looks for the reversed home protein and two
-shuffles of it in every window. Their models are in `decoys/<locus>/<genome>.decoy.gff`,
+shuffles of it in every window, and for those of the relative's query where a window has one
+(their calls are filed under the home decoy of the same kind; the `SearchQuery` column names
+the decoy query, e.g. `GOI_x~rev~rel`). Their models are in `decoys/<locus>/<genome>.decoy.gff`,
 one row per call in `<genome>.decoy.tsv` (decoy kind, label, place, `Eeff`, `EeffTblastn`,
 bits, specificity, `SigBlocks`, and `PlaceBp` with the E-value in every nested place that
 holds the call: `EPlaceSlot`, `EPlaceCore`, `EPlaceWindow`, `EPlaceGenome`, before

@@ -820,29 +820,35 @@ DECOY_TAGS = ('~rev', '~shuf1', '~shuf2')
 
 def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
     """Reversed and twice shuffled copies of each HOME GOI protein among a window's
-    queries, ids ``<parent>~rev``, ``~shuf1``, ``~shuf2``. Shuffles are seeded by the id,
-    so a rerun repeats them. A query that is not a home protein gets none: the model of an
-    earlier genome that is a query of its own (a GOI known only from models, such as a
-    seeded tandem copy ``GOI_copy_1|<genome>_b0_l1``) would give ``GOI_copy_1|...~shuf1``,
-    whose hits are filed under the real parent ``GOI_copy_1`` (extract_base_gene_id cuts at
-    the first ``|``) and whose models then count as real. ``home_ids``: the home GOI record
-    ids (args.home_goi_ids); without them a query is a home protein when its id is its
-    parent id."""
+    queries, ids ``<parent>~rev``, ``~shuf1``, ``~shuf2``, and of the relative's query
+    (``<parent>~rel``), ids ``<parent>~rev~rel`` etc. (review fix RF-3, decision of
+    2026-10-15): like the real ``~rel`` candidates, their models are measured against the
+    home decoy of the same kind and filed under it (rebase_relative_candidates), so each
+    decoy case calibrates both paths of the window search. Shuffles are seeded by the id,
+    so a rerun repeats them. A query that is not a home protein or its relative's query
+    gets none: the model of an earlier genome that is a query of its own (a GOI known only
+    from models, such as a seeded tandem copy ``GOI_copy_1|<genome>_b0_l1``) would give
+    ``GOI_copy_1|...~shuf1``, whose hits are filed under the real parent ``GOI_copy_1``
+    (extract_base_gene_id cuts at the first ``|``) and whose models then count as real.
+    ``home_ids``: the home GOI record ids (args.home_goi_ids); without them a query is a
+    home protein when its id is its parent id."""
     import random
     import zlib
     out = []
     for q in queries:
         qid, seq = q.get('id', ''), q.get('seq', '')
         parent = extract_base_gene_id(qid)
-        is_home = (qid in home_ids) if home_ids else (qid == parent)
-        if (not qid or not seq or not is_home or is_decoy_parent(parent)
-                or parent.endswith(RELATIVE_QUERY_TAG)):
+        relative = parent.endswith(RELATIVE_QUERY_TAG) and qid == parent
+        home_parent = parent[:-len(RELATIVE_QUERY_TAG)] if relative else parent
+        is_home = relative or ((qid in home_ids) if home_ids else (qid == parent))
+        if not qid or not seq or not is_home or is_decoy_parent(parent):
             continue
-        out.append({'id': parent + '~rev', 'seq': seq[::-1]})
+        suffix = RELATIVE_QUERY_TAG if relative else ''
+        out.append({'id': home_parent + '~rev' + suffix, 'seq': seq[::-1]})
         for tag in DECOY_TAGS[1:]:
             residues = list(seq)
-            random.Random(zlib.crc32((parent + tag).encode())).shuffle(residues)
-            out.append({'id': parent + tag, 'seq': ''.join(residues)})
+            random.Random(zlib.crc32((home_parent + tag + suffix).encode())).shuffle(residues)
+            out.append({'id': home_parent + tag + suffix, 'seq': ''.join(residues)})
     return out
 
 
@@ -856,6 +862,10 @@ def decoy_cases(candidates) -> List[List[Dict[str, Any]]]:
 
 
 def is_decoy_parent(parent: str) -> bool:
+    """A decoy's parent: ``<home parent>~rev|~shuf1|~shuf2``, with ``~rel`` behind it for a
+    decoy of the relative's query until the rebase files it under the home decoy."""
+    if parent.endswith(RELATIVE_QUERY_TAG):
+        parent = parent[:-len(RELATIVE_QUERY_TAG)]
     return any(parent.endswith(t) for t in DECOY_TAGS)
 
 
@@ -1162,7 +1172,8 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
             fh.write(ln + "\n")
     keys = ['Confidence', 'EvidenceType', 'Place', 'BlockEsyn', 'Eeff', 'EeffTblastn', 'Bits',
             'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage', 'SigBlocks', 'PlaceBp',
-            'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome']
+            'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome',
+            'SearchQuery']      # <parent>~<kind>~rel: found by the decoy of the relative's query
     n = 0
     with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
         fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")

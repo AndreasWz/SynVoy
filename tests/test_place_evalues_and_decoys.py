@@ -47,10 +47,12 @@ def _cand(mid, start, end, seq, parent="GOI_q", score=50.0, role="goi"):
 def test_decoys_are_reversed_and_shuffled_and_repeatable():
     q = _protein(80, 1)
     d = isr.decoy_queries([{"id": "GOI_q", "seq": q}, {"id": "GOI_q~rel", "seq": q}])
-    assert [x["id"] for x in d] == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2"]
+    # the relative's query gets its own three (RF-3, 2026-10-15), filed under ~<kind>~rel
+    assert [x["id"] for x in d] == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2",
+                                    "GOI_q~rev~rel", "GOI_q~shuf1~rel", "GOI_q~shuf2~rel"]
     assert d[0]["seq"] == q[::-1]
     assert sorted(d[1]["seq"]) == sorted(q) and d[1]["seq"] != q and d[1]["seq"] != d[2]["seq"]
-    assert isr.decoy_queries([{"id": "GOI_q", "seq": q}]) == d       # same shuffles on a rerun
+    assert isr.decoy_queries([{"id": "GOI_q", "seq": q}]) == d[:3]   # same shuffles on a rerun
     assert all(isr.is_decoy_parent(x["id"]) for x in d) and not isr.is_decoy_parent("GOI_q~rel")
 
 
@@ -218,9 +220,10 @@ def test_decoys_only_of_the_home_protein_named_by_its_parent():
                {"id": "GOI_copy_1|g_b0_l1", "seq": _protein(25, 4)},
                {"id": "GOI_q~rel", "seq": q}]
     ids = [d["id"] for d in isr.decoy_queries(queries)]
-    assert ids == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2"]
+    rel = ["GOI_q~rev~rel", "GOI_q~shuf1~rel", "GOI_q~shuf2~rel"]     # the relative's query
+    assert ids == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2"] + rel
     assert all(isr.extract_base_gene_id(i) == i for i in ids)
     # with the home ids of the run: a home record whose id carries more than its parent
     with_ids = isr.decoy_queries([{"id": "GOI_q|isoform_2", "seq": q}] + queries[1:],
                                  home_ids={"GOI_q|isoform_2"})
-    assert [d["id"] for d in with_ids] == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2"]
+    assert [d["id"] for d in with_ids] == ["GOI_q~rev", "GOI_q~shuf1", "GOI_q~shuf2"] + rel

@@ -870,9 +870,14 @@ labelled and judged with the same terms, and written to
 `decoys/<locus>/<genome>.decoy.gff` and `.decoy.tsv`. Each decoy case (home gene × decoy
 kind) is chosen among its own candidates: pooled, a call of one kind suppressed an
 overlapping call of another, so the rate was a lower bound (rates from before 2026-10-15
-are not comparable). Each decoy row also carries `PlaceBp=` and its E-value in every nested
-place that holds it (`EPlaceSlot`, `EPlaceCore`, `EPlaceWindow`, `EPlaceGenome`, before
-`SigBlocks`), so a rule can be calibrated in any place. They never seed and never reach the
+are not comparable). A window that also searches the relative's query (`<gene>~rel`)
+searches its reversed and shuffled copies too (`~rev~rel`, `~shuf1~rel`, `~shuf2~rel`, since
+2026-10-15): like a real model of the relative's query, their models are measured against
+the home decoy of the same kind, filed under it (`SearchQuery=` names the decoy query) and
+chosen in its case, so the rates cover both paths of the search. Each decoy row also
+carries `PlaceBp=` and its E-value in every nested place that holds it (`EPlaceSlot`,
+`EPlaceCore`, `EPlaceWindow`, `EPlaceGenome`, before `SigBlocks`), so a rule can be
+calibrated in any place. They never seed and never reach the
 result GFF. Every decoy call is false, so their rate per label and place calibrates the
 labels without a truth set. The window search takes about four times as long. The report
 sums the decoy cases that were searched (home gene × target genome with a search window ×
