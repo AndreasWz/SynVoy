@@ -782,6 +782,9 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
             logger.warning(f"specificity of {cand.get('record', {}).get('id', '')} failed: {exc}")
             continue
         cand['specificity'] = spec
+        cand.setdefault('judge_numbers', {}).update(
+            {'SpecMargin': float(spec['margin']), 'RealCompetitor': bool(spec['real_competitor']),
+             'BestOtherInNeighbourhood': spec.get('in_neighbourhood')})
         cols[8] = f"{cols[8]};{synvoy_specificity.gff_attrs(spec)}"
         gff[0] = '\t'.join(cols)
         n += 1
@@ -1049,6 +1052,8 @@ def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w
         if e_tbn != float('inf'):
             e_tbn *= place_bp / terms['window_len']
         cand['place'] = place
+        cand.setdefault('judge_numbers', {}).update(
+            {'EPlace': e_place, 'EPlaceTblastn': e_tbn, 'BlockEsyn': terms['esyn']})
         cols[8] = (f"{cols[8]};Place={place};BlockEsyn={terms['esyn']:.3g};"
                    f"EPlace={e_place:.3g};EPlaceTblastn={e_tbn:.3g}")
         gff[0] = '\t'.join(cols)
@@ -1066,12 +1071,16 @@ def finalize_place_evalues(gff_lines: List[str], ctx: Dict[str, Any]) -> List[st
         if len(cols) >= 9 and cols[2] in ('mRNA', 'gene') and 'EPlace=' in cols[8]:
             a = _parse_gff_attr_string(cols[8])
             mult = 1 if a.get('Place') == 'genome' else n_sig
+            numbers = (ctx.get('judge_numbers') or {}).get(a.get('ID', ''))
+            n = numbers or {}
             try:
-                e1 = float(a.get('EPlace', 'inf')) * mult
-                e2 = float(a.get('EPlaceTblastn', 'inf')) * mult
-            except ValueError:
+                e1 = float(n.get('EPlace', a.get('EPlace', 'inf'))) * mult
+                e2 = float(n.get('EPlaceTblastn', a.get('EPlaceTblastn', 'inf'))) * mult
+            except (TypeError, ValueError):
                 out.append(line)
                 continue
+            if numbers is not None:
+                numbers['Eeff'], numbers['EeffTblastn'] = e1, e2
             cols[8] = f"{cols[8]};SigBlocks={n_sig};Eeff={e1:.3g};EeffTblastn={e2:.3g}"
             line = '\t'.join(cols)
         out.append(line)
@@ -1263,16 +1272,30 @@ def core_coverage(intervals, seq: str) -> Optional[float]:
     return covered / (last - first + 1)
 
 
-def _judge_attrs(a: Dict[str, str], e_key: str) -> Tuple[str, str]:
+def _judge_attrs(a: Dict[str, str], e_key: str, numbers: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """synvoy_label.judge on a candidate's GFF attributes, with E from ``e_key``. With
-    CORE_COMPLETENESS the coverage is the larger of QueryCoverage and CoreCoverage."""
+    CORE_COMPLETENESS the coverage is the larger of QueryCoverage and CoreCoverage.
+
+    ``numbers``: the full-precision terms of this model under the attribute names (EPlace,
+    Eeff, BlockEsyn, SpecMargin, RealCompetitor, BestOtherInNeighbourhood; judge_numbers),
+    used where present (review fix RF-1f): the GFF holds E with 3 significant digits and the
+    margin at 0.1 bit, and a value next to a bar was judged on its rounding."""
+    n = numbers or {}
+
     def num(key):
+        if n.get(key) is not None:
+            return float(n[key])
         try:
             return float(a[key])
         except (KeyError, ValueError):
             return None
-    real = a.get('RealCompetitor')
-    near = a.get('BestOtherInNeighbourhood')
+    real = n['RealCompetitor'] if n.get('RealCompetitor') is not None else a.get('RealCompetitor')
+    near = (n['BestOtherInNeighbourhood'] if n.get('BestOtherInNeighbourhood') is not None
+            else a.get('BestOtherInNeighbourhood'))
+    if isinstance(real, bool):
+        real = '1' if real else '0'
+    if isinstance(near, bool):
+        near = '1' if near else '0'
     esyn = num('BlockEsyn')
     cov = num('QueryCoverage')
     core = num('CoreCoverage') if CORE_COMPLETENESS else None
@@ -1293,24 +1316,28 @@ def judge_candidates(candidates) -> None:
         gff = cand.get('gff') or []
         cols = gff[0].split('\t') if gff else []
         a = _parse_gff_attr_string(cols[8]) if len(cols) >= 9 else {}
-        conf, _basis = _judge_attrs(a, 'EPlace') if 'EPlace' in a else ('LOW', 'not_significant')
+        numbers = cand.get('judge_numbers') or {}
+        conf, _basis = (_judge_attrs(a, 'EPlace', numbers) if 'EPlace' in a
+                        else ('LOW', 'not_significant'))
         try:
-            e = float(a.get('EPlace', 'inf'))
-            esyn = float(a.get('BlockEsyn', 'inf'))
-        except ValueError:
+            e = float(numbers['EPlace'] if 'EPlace' in numbers else a.get('EPlace', 'inf'))
+            esyn = float(numbers['BlockEsyn'] if 'BlockEsyn' in numbers else a.get('BlockEsyn', 'inf'))
+        except (TypeError, ValueError):
             e, esyn = float('inf'), float('inf')
         cand['rank_key'] = synvoy_label.rank_key(
             conf, e, esyn, cand.get('bits'), int(cand['end']) - int(cand['start']),
             int(cand.get('start', 0) or 0), (cand.get('record') or {}).get('id', ''))
 
 
-def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
+def relabel_goi_lines(gff_lines: List[str],
+                      numbers_by_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Tuple[List[str], Dict[str, int]]:
     """The label of every GOI row with an Eeff (label rework, step 4): synvoy_label.judge
     on Eeff, its place and block, specificity and coverage. Confidence keeps its four
     codes; Basis says why (significant_specific / not_specific / gene_order_only /
     not_significant); GOIClass follows the label (a tandem copy keeps tandem_goi_copy).
     A GOI row without an Eeff keeps its provisional LOW (_provisional_goi_label) and is
-    counted as ``LOW/unjudged`` in the log."""
+    counted as ``LOW/unjudged`` in the log. ``numbers_by_id``: the full-precision terms
+    per model id (judge_numbers; finalize_place_evalues adds Eeff), judged on where present."""
     out, counts = [], defaultdict(int)
     for line in gff_lines:
         cols = line.split('\t')
@@ -1323,7 +1350,7 @@ def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
         if a.get('SynVoyRole') != 'goi':
             out.append(line)
             continue
-        conf, basis = _judge_attrs(a, 'Eeff')
+        conf, basis = _judge_attrs(a, 'Eeff', (numbers_by_id or {}).get(a.get('ID', '')))
         counts[f"{conf}/{basis}"] += 1
         goi_class = ('tandem_goi_copy' if a.get('EvidenceType') == 'tandem_copy'
                      else GOI_CLASS_OF_LABEL[conf])
@@ -5292,6 +5319,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
                                  goi_query_by_parent, args)
         judge_candidates(cands)
+        # The full-precision terms for the genome-end label and the seed rule (RF-1f).
+        _numbers = (args.genome_ctx.setdefault('judge_numbers', {})
+                    if getattr(args, 'genome_ctx', None) is not None else {})
+        for c in cands:
+            _g = c.get('gff') or []
+            _cols = _g[0].split('\t') if _g else []
+            if len(_cols) >= 9 and c.get('judge_numbers'):
+                _numbers[_parse_gff_attr_string(_cols[8]).get('ID', '')] = c['judge_numbers']
         return greedy_select(cands)
 
     if decoy_candidates:
@@ -5589,6 +5624,12 @@ def _safe_float(value, default=None):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _numbers_of(args, model_id: str) -> Dict[str, Any]:
+    """The full-precision judge terms of a model of this genome (judge_numbers), {} when
+    none were kept."""
+    return ((getattr(args, 'genome_ctx', None) or {}).get('judge_numbers') or {}).get(model_id) or {}
 
 
 def _seed_is_specific(meta) -> bool:
@@ -6704,7 +6745,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         feature_meta = {}
 
         all_gff_lines = finalize_place_evalues(all_gff_lines, args.genome_ctx)
-        all_gff_lines, _label_counts = relabel_goi_lines(all_gff_lines)
+        all_gff_lines, _label_counts = relabel_goi_lines(all_gff_lines, args.genome_ctx.get('judge_numbers'))
         if getattr(args, 'report_copies_in_slot', False):
             all_gff_lines = annotate_slot_copies(
                 all_gff_lines, genome_name.replace('.', '_').replace('-', '_').replace(' ', '_'),
@@ -6717,7 +6758,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                            f"this worker failed so far; their candidates were judged with E = inf.")
         if getattr(args, 'decoy_mode', False):
             _decoy_lines, _ = relabel_goi_lines(
-                finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx))
+                finalize_place_evalues(args.genome_ctx.get('decoy_lines', []), args.genome_ctx),
+                args.genome_ctx.get('judge_numbers'))
             n_decoy = write_decoy_outputs(args, prefix, genome_name, _decoy_lines)
             args.genome_ctx['decoy_counts'] = decoy_case_counts(
                 _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
@@ -6765,8 +6807,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "target_product": attrs.get("TargetProduct", ""),
                      "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
-                     "spec_margin": attrs.get("SpecMargin", ""),
-                     "real_competitor": attrs.get("RealCompetitor", ""),
+                     # full precision for the seed bar (RF-1f), the GFF string otherwise
+                     "spec_margin": _numbers_of(args, model_id).get("SpecMargin", attrs.get("SpecMargin", "")),
+                     "real_competitor": _numbers_of(args, model_id).get("RealCompetitor",
+                                                                         attrs.get("RealCompetitor", "")),
                  }
 
              with open(tsv_out, 'w') as tf:

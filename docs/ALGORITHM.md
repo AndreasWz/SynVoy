@@ -704,6 +704,10 @@ coverage:
 - AMBIGUOUS calls ("needs curation") are kept, drawn and reported, never counted. A
   gene-order-only call is offered only in a genome where no home locus and no rescue pass
   produced a counted call of the gene.
+- **Precision.** The judge and the seed bar work on the full-precision values; the GFF
+  holds E-values with 3 significant digits and `SpecMargin` at 0.1 bit, for reading only
+  (review fix RF-1f, 2026-10-15: an E of 1.0004e-6 was read back as 1e-06 and judged HIGH
+  at the bar of 1e-6, a margin of 9.96 bits as 10.0 and allowed to seed).
 - **Ranking among candidates** (`rank_key`): label, then E-value (values below 1e-10
   count as equal), then the block's E_syn, then bits, then the shorter span, then
   position. In a window the label is provisional, on the E-value of the place before the
