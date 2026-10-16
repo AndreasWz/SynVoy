@@ -751,8 +751,8 @@ blastp with composition-based statistics). `BestOtherInNeighbourhood=1` when p* 
 between the outermost flanking genes of the home locus: there, position cannot tell
 the GOI from p*. The search is exhaustive: on the Candida pilot a prefilter (MMseqs2,
 top 15) missed two home paralogs. The proteome and its gene positions reach the search
-inside the home MMseqs2 database folder (`home_proteome.faa`, `home_genes.tsv`). Labels
-do not use these terms yet.
+inside the home MMseqs2 database folder (`home_proteome.faa`, `home_genes.tsv`). The
+label (§7.8) and the seed rule below use these terms.
 
 **Seeds** (`_classify_goi_for_seed_and_tree`), per query in a genome and home locus,
 after all blocks are labelled: the HIGH calls, or the MEDIUM calls when there is no
@@ -763,13 +763,16 @@ AMBIGUOUS, LOW and context-promoted calls never seed. Until 2026-10-14 a call se
 when it was HIGH or MEDIUM of class `confident_goi` or `probable_goi`: a tandem copy
 never did, and a relative's MEDIUM next to a HIGH call in the same genome did (apyrase:
 three genomes, margins of −339 to −363 bits); the opt-in `--seed_on_flanking_support`
-was removed.
+was removed. A seeded single-segment tandem copy is, by default (`tandem_copy_parent
+seed`), recorded as `GOI_copy_<n>` and therefore a gene of its own in the following waves,
+judged against the seed; with `--tandem_copy_parent home` it is a model of the home gene
+and can be its relative query.
 
 The window search keeps the hits of the home protein and of the relative's model apart
 when it removes overlapping hits (since 2026-10-14): pooled, the relative's hit at a
 relative's gene removed the home protein's own hit there.
 
-### 7.13 E-values in the expected place (recorded, not yet used by the labels)
+### 7.13 E-values in the expected place
 
 Since 2026-10-14 (label rework, step 3) every kept GOI model also carries the evidence
 the new label will use (`bin/synvoy_evalue.py`):

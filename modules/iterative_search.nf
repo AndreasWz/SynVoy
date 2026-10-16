@@ -99,6 +99,7 @@ process ITERATIVE_SEARCH {
         --classify_fragment_max_qcov ${settings.classify_fragment_max_qcov} \\
         --classify_complete_min_qcov ${settings.classify_complete_min_qcov} \\
         --goi_family_tokens "${settings.goi_family_tokens}" \\
+        --tandem_copy_parent ${params.tandem_copy_parent} \\
         --gene_predictor ${params.gene_predictor} \\
         --augustus_species ${params.augustus_species} \\
         --enable_plm_search ${params.enable_plm_search} \\

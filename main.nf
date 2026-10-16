@@ -386,6 +386,9 @@ def validateNumericParams(validationErrors, validationWarnings) {
         }
     }
     checkModulesSpec(validationErrors)
+    if (!(params.tandem_copy_parent in ['seed', 'home'])) {
+        validationErrors << "Invalid --tandem_copy_parent '${params.tandem_copy_parent}'. Must be 'seed' or 'home'."
+    }
     GeneticCodes.errors(params).each { e -> validationErrors << e }
     if (!(params.home_locus_mode in ['auto', 'gene_only', 'alignment'])) {
         validationErrors << "Invalid --home_locus_mode '${params.home_locus_mode}'. Must be 'auto', 'gene_only' or 'alignment'."

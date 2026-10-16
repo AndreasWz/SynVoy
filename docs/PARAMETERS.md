@@ -1006,6 +1006,11 @@ The default gap-bridging rule counts the anchored flanking genes on the left of 
 
 Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them) are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs, the report or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data. Costs about four times the window search.
 
+### `tandem_copy_parent`
+**Type:** String (`seed` / `home`) | **Default:** `seed`
+
+Whose model a single-segment tandem copy (a hit where no gene model lies, `EvidenceType=tandem_copy`) is once it seeds the next wave. `seed` (as until 2026-10-15): it is recorded as `GOI_copy_<n>|…`, and in the following waves `GOI_copy_<n>` is a gene of interest of its own, so the models it finds are judged against the seed instead of the home protein (finding 6 of the label rework). `home`: it is recorded under the home gene of interest (`…_tc<n>`), so it can become that gene's relative query and every model it finds is reported and judged against the home protein. `seed` stays the default until the measured switch of the preset plan.
+
 ### `report_nonsyntenic_candidates`
 **Type:** Boolean | **Default:** `true`
 

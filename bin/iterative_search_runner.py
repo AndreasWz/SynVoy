@@ -1127,6 +1127,23 @@ def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
     return out, dict(counts)
 
 
+def tandem_copy_record_id(copy_name: str, parent_id: str, genome_tag: str, block_idx: int,
+                          locus_idx: int, parent_mode: str = 'seed') -> str:
+    """Record id of a single-segment tandem copy (detect_tandem_duplications names it
+    ``GOI_copy_<n>``).
+
+    ``seed`` (until the measured switch): ``GOI_copy_<n>|<genome>_b<block>_l<locus>``. Once
+    such a copy seeds, its base id ``GOI_copy_<n>`` is a GOI of its own in the next wave: its
+    models are judged against the seed, not against the home protein (label rework, REPORT
+    finding 6). ``home``: ``<parent>|<genome>_b<block>_l<locus>_tc<n>``, a model of the home
+    GOI like any other, so a seeded copy can become that GOI's relative query and every
+    model it finds is reported and judged against the home protein."""
+    if parent_mode == 'home':
+        n = copy_name[len('GOI_copy_'):] if copy_name.startswith('GOI_copy_') else copy_name
+        return f"{parent_id}|{genome_tag}_b{block_idx}_l{locus_idx}_tc{n}"
+    return f"{copy_name}|{genome_tag}_b{block_idx}_l{locus_idx}"
+
+
 def context_truncation(block_start: int, block_end: int, pad: int, scaffold_len: int) -> str:
     """'left', 'right', 'both' or '': on which side the search window of a block (block +-
     pad) ran past a scaffold end and was cut there, i.e. where the neighbourhood that was
@@ -4006,7 +4023,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         global_start = w_start + copy['gstart'] + 1
         global_end = w_start + copy['gend']
         strand = copy.get('strand', '+')
-        copy_id = f"{copy['id']}|{clean_gname}_b{block_idx}_l{locus_idx}"
+        copy_id = tandem_copy_record_id(copy['id'], parent_id, clean_gname, block_idx, locus_idx,
+                                        getattr(args, 'tandem_copy_parent', 'seed'))
         # QW2 (docs/TODO_JUN.md): record the copy's TRUE query
         # coverage so a short high-identity local window (e.g. a
         # 23-aa hit on a 70-aa query) can't masquerade as a full
@@ -6952,6 +6970,11 @@ def main():
     parser.add_argument("--min_identity", type=float, default=40.0)
     parser.add_argument("--min_length", type=int, default=50)
     parser.add_argument("--max_intron", type=int, default=20000)
+    parser.add_argument("--tandem_copy_parent", choices=["seed", "home"], default="seed",
+                        help="Whose model a single-segment tandem copy is: 'seed' (default, as "
+                             "until 2026-10-15) names it GOI_copy_<n>, which becomes a GOI of its "
+                             "own once it seeds and is then judged against the seed; 'home' names "
+                             "it under the home GOI, so it is judged against the home protein")
     parser.add_argument("--target_genetic_codes", default="",
                         help="Genetic codes of target genomes, 'genome=table,...' (the genome "
                              "as its file name with or without the extension); others use "
