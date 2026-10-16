@@ -34,6 +34,9 @@ process RESCUE_GOI_HULL {
     // is judged like a candidate of the main search (bin/synvoy_label.py), with its
     // specificity against the other home proteins and the GOI's home neighbourhood.
     path(home_db)
+    // goi_info.json of ANNOTATE_GOI: the home gene the home step took as the query's is its
+    // own gene in the specificity terms, as in the main search (review fix RF-2b).
+    path(goi_info)
 
     output:
     tuple val(locus_id), path("${genome_name}.hull_rescue.gff"), emit: gff
@@ -75,6 +78,7 @@ process RESCUE_GOI_HULL {
         --min_identity ${params.goi_hull_min_identity} \\
         --min_coverage ${params.goi_hull_min_coverage} \\
         --n_flanking_genes ${params.n_flanking_genes} \\
-        --home_db_dir ${home_db} ${GeneticCodes.targetArgs(params)}
+        --home_db_dir ${home_db} \\
+        --goi_info ${goi_info} ${GeneticCodes.targetArgs(params)}
     """
 }

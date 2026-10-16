@@ -59,7 +59,7 @@ def test_the_judge_gets_the_neighbourhood_and_the_span_coverage(monkeypatch):
     monkeypatch.setattr(hull.synvoy_evalue, "blastp_evalue", lambda q, s, sp: (1e-30, 200.0))
     monkeypatch.setattr(hull, "sw_bits", lambda q, x: 200.0)
 
-    def fake_spec(proteome, qid, q, x, bits, hood, n_flanking=0):
+    def fake_spec(proteome, qid, q, x, bits, hood, n_flanking=0, own_gene_id=None):
         seen["hood"], seen["n_flanking"] = hood, n_flanking
         return {"margin": 50.0, "real_competitor": False, "best_other": "", "best_other_in_neighbourhood": None}
     monkeypatch.setattr(hull.synvoy_specificity, "specificity", fake_spec)
@@ -79,6 +79,9 @@ def test_the_hull_process_hands_over_the_home_database_folder():
     root = os.path.join(os.path.dirname(__file__), "..")
     module = open(os.path.join(root, "modules", "rescue_goi_hull.nf")).read()
     assert "--home_db_dir ${home_db}" in module
+    assert "--goi_info ${goi_info}" in module                    # RF-2b: the own home gene
     sub = open(os.path.join(root, "subworkflows", "adjudicate_and_report.nf")).read()
-    assert "RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db)" in sub
+    assert "RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db, goi_info)" in sub
+    main_nf = open(os.path.join(root, "main.nf")).read()
+    assert "RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first()\n        )" in main_nf
     assert "home_db.map { d -> d.resolve('home_proteome.faa') }" in sub

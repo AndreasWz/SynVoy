@@ -780,6 +780,10 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
     proteome, hood = _home_proteome(args)
     if proteome is None:
         return 0
+    # The home gene the home step took as q's names q's own gene (RF-2b), for the home GOI
+    # only: a decoy or a seeded copy (a parent of its own) keeps the identity rule.
+    home_parents = set(home_goi_parents(args))
+    own_id = getattr(args, 'home_goi_gene_id', None)
     n = 0
     for cand in candidates:
         gff = cand.get('gff') or []
@@ -794,7 +798,8 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
         try:
             spec = synvoy_specificity.specificity(proteome, parent, home['seq'], protein,
                                                   float(cand['bits']), hood,
-                                                  int(getattr(args, 'n_flanking_genes', 0) or 0))
+                                                  int(getattr(args, 'n_flanking_genes', 0) or 0),
+                                                  own_gene_id=own_id if parent in home_parents else None)
         except Exception as exc:  # pragma: no cover - defensive: never lose a model over this
             logger.warning(f"specificity of {cand.get('record', {}).get('id', '')} failed: {exc}")
             continue
@@ -7904,6 +7909,12 @@ def main():
                 args.goi_home_span = int(json.load(_fh).get("genomic_span_bp") or 0)
         except (OSError, TypeError, ValueError):
             pass
+    # q's own home gene for the specificity terms: the gene the home step took as q's (review
+    # fix RF-2b); None = the identity rule (no annotated gene, or an ambiguous choice).
+    args.home_goi_gene_id = (synvoy_specificity.own_gene_id_from_goi_info(args.goi_info)
+                             if getattr(args, "goi_info", None) else None)
+    if args.home_goi_gene_id:
+        logger.info(f"Specificity: q's own home gene is {args.home_goi_gene_id} (from the home step).")
 
     # GOI fallback hit-chain max-gap: derived from the home GOI's own largest
     # intron (goi_info.json) x margin, not a hand-set --max_intron. Attached to

@@ -265,13 +265,16 @@ def _genome_length(genome_path: str) -> int:
 
 
 def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome,
-                     label_protein=None, coverage=None, neighbourhood=None, n_flanking=0):
+                     label_protein=None, coverage=None, neighbourhood=None, n_flanking=0,
+                     own_gene_id=None):
     """The label of a rescue model by the search's own judge (synvoy_label, label rework
     2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
     own), computed on ``label_protein`` (hull_label_protein; default ``protein``), its
     specificity against the home proteome (with the GOI's home ``neighbourhood`` when known),
     its completeness ``coverage`` (the query span of the alignment; default CDS aa / query
-    length). Returns (confidence, rank key, GFF attributes)."""
+    length). ``own_gene_id``: the query's own home gene (synvoy_specificity.
+    own_gene_id_from_goi_info; None = the identity rule). Returns (confidence, rank key, GFF
+    attributes)."""
     qlen = len(query_seq)
     # One protein for the three terms (review fix RF-1e): the E-value is the best over the
     # label protein's pieces between stops; Bits= and the specificity use the best piece.
@@ -279,7 +282,7 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     bits, judged_protein = max(((sw_bits(query_seq, s), s) for s in subjects), default=(0.0, ""))
     evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, genome_len))
     spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits,
-                                           neighbourhood, n_flanking)
+                                           neighbourhood, n_flanking, own_gene_id=own_gene_id)
             if proteome is not None and judged_protein else None)
     cov = _cds_coverage(cds_rows, qlen) if coverage is None else coverage
     conf, basis = synvoy_label.judge(
@@ -385,6 +388,10 @@ def main() -> int:
                     help="Flanking genes per side (pipeline param): the specificity's "
                          "neighbourhood also holds q's own home gene and this many home genes "
                          "on each side of it (review fix RF-2)")
+    ap.add_argument("--goi_info",
+                    help="goi_info.json of ANNOTATE_GOI: the home gene the home step took as the "
+                         "query's names the query's own gene in the specificity terms, as in the "
+                         "main search (review fix RF-2b); without it, the identity rule")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=600)
     ap.add_argument("--target_genetic_codes", default="",
@@ -429,6 +436,8 @@ def main() -> int:
     # The GOI's home neighbourhood (review fix RF-1d; it was None): home genes between the
     # outermost anchors of this locus that the search found in the genome.
     neighbourhood = proteome.neighbourhood(flanking_parent_ids(args.region_gff)) if proteome else None
+    own_gene_id = (synvoy_specificity.own_gene_id_from_goi_info(args.goi_info)
+                   if args.goi_info and os.path.exists(args.goi_info) else None)
     genome_len = None
     with tempfile.TemporaryDirectory(prefix="synvoy_hull_") as tmp:
         query_fa = os.path.join(tmp, "query.faa")
@@ -485,7 +494,7 @@ def main() -> int:
                     conf, key, judged, bits = judge_hull_model(
                         query_id, query_seq, prot, cds_rows, genome_len, proteome,
                         label_protein=label_prot, coverage=span_cov, neighbourhood=neighbourhood,
-                        n_flanking=args.n_flanking_genes)
+                        n_flanking=args.n_flanking_genes, own_gene_id=own_gene_id)
                 except RuntimeError:
                     continue
                 if frame_flag:

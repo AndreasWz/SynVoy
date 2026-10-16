@@ -10,7 +10,14 @@ other protein of the home genome explains it as well. Used by iterative_search_r
                  gff_to_faa.py writes the proteome), BLOSUM62, BLAST gaps 11/1. Exhaustive
                  on purpose: on the Candida pilot a prefilter (MMseqs2 top 15) missed two
                  real home paralogs that exhaustive Smith-Waterman found.
-  q's own gene   the one home protein that is q itself (near-identical to q); never p*.
+  q's own gene   the home gene that is q itself; never p*. It is the gene the home step took
+                 as q's (goi_info.json: gene_id, found by name or by position; review fix
+                 RF-2b, own_gene_id_from_goi_info). Without such a gene (a query from another
+                 species that no annotated gene matches, an unannotated ORF) or when the home
+                 step flagged its choice as ambiguous, the home protein near-identical to q
+                 (>= 95 % identity over >= 90 % of q). That identity rule alone failed where
+                 the home annotation of q differs from q (an extra exon, a partial model: the
+                 own gene became p*) and took a >= 95 % paralog for q when q is unannotated.
   margin         bits(q, x) - bits(p*, x).
   real           p* is a real competitor when it aligns to x at E <= 0.01 over the whole
   competitor     proteome, or when it is a home family member of q (q and p* align at
@@ -80,8 +87,8 @@ class HomeProteome:
         self._by_id = dict(self.records)
         self.coords = coords
         self.total_length = sum(len(s) for _r, s in self.records)
-        self._own: Dict[str, Optional[str]] = {}
-        self._own_hood: Dict[Tuple[str, int], Optional[Set[str]]] = {}
+        self._own: Dict[Tuple[str, str], Optional[str]] = {}
+        self._own_hood: Dict[Tuple[str, int, str], Optional[Set[str]]] = {}
         self._family: Dict[Tuple[str, str], float] = {}
 
     @classmethod
@@ -118,19 +125,28 @@ class HomeProteome:
         out.sort(key=lambda t: (-t[0], t[1]))
         return out
 
-    def own_gene(self, q_id: str, q_seq: str) -> Optional[str]:
-        """The home protein that is q itself: the best-scoring one, when it is near-identical
-        to q (>= 95 % identity over >= 90 % of q). None when q is not in the proteome (a
-        query from another species, or an unannotated ORF)."""
-        if q_id not in self._own:
+    def own_gene(self, q_id: str, q_seq: str, gene_id: Optional[str] = None) -> Optional[str]:
+        """The home protein that is q itself. ``gene_id`` (own_gene_id_from_goi_info) names
+        it when the proteome holds that gene. Else the identity rule: the best-scoring home
+        protein, when it is near-identical to q (>= 95 % identity over >= 90 % of q); None
+        when there is none (a query from another species, or an unannotated ORF)."""
+        key = (q_id, gene_id or "")
+        if key not in self._own:
             own = None
-            for _score, rid in self.scores(q_seq)[:3]:
-                aln = sw_align_span(q_seq, self._seq(rid))
-                if aln["identity"] >= OWN_GENE_MIN_IDENTITY and aln["query_cov"] >= OWN_GENE_MIN_COVERAGE:
-                    own = rid
-                    break
-            self._own[q_id] = own
-        return self._own[q_id]
+            if gene_id and gene_id in self._by_id:
+                own = gene_id
+            else:
+                if gene_id:
+                    _warn_once(f"own:{gene_id}",
+                               f"q's home gene {gene_id} is not in the home proteome: q's own "
+                               f"gene is the home protein near-identical to q, if any.")
+                for _score, rid in self.scores(q_seq)[:3]:
+                    aln = sw_align_span(q_seq, self._seq(rid))
+                    if aln["identity"] >= OWN_GENE_MIN_IDENTITY and aln["query_cov"] >= OWN_GENE_MIN_COVERAGE:
+                        own = rid
+                        break
+            self._own[key] = own
+        return self._own[key]
 
     def _seq(self, rid: str) -> str:
         return self._by_id.get(rid, "")
@@ -176,14 +192,16 @@ class HomeProteome:
             lo, hi = min(lo, int(locus_span[0])), max(hi, int(locus_span[1]))
         return {g for g, (c, s, e) in self.coords.items() if c == chrom and e >= lo and s <= hi}
 
-    def own_neighbourhood(self, q_id: str, q_seq: str, n: int) -> Optional[Set[str]]:
-        """q's own home locus: q's own gene and the ``n`` home genes on each side of it on its
-        scaffold (the genes the flanking walk of the primary locus starts from). A run from a
-        secondary home locus knew only its own locus, so a p* next to q's own gene was not in
-        its neighbourhood (review fix RF-2). None when q's own gene is not found."""
-        key = (q_id, int(n))
+    def own_neighbourhood(self, q_id: str, q_seq: str, n: int,
+                          gene_id: Optional[str] = None) -> Optional[Set[str]]:
+        """q's own home locus: q's own gene (own_gene, with ``gene_id``) and the ``n`` home
+        genes on each side of it on its scaffold (the genes the flanking walk of the primary
+        locus starts from). A run from a secondary home locus knew only its own locus, so a p*
+        next to q's own gene was not in its neighbourhood (review fix RF-2). None when q's
+        own gene is not found."""
+        key = (q_id, int(n), gene_id or "")
         if key not in self._own_hood:
-            own = self.own_gene(q_id, q_seq)
+            own = self.own_gene(q_id, q_seq, gene_id)
             hood = None
             if own and own in self.coords and n > 0:
                 chrom = self.coords[own][0]
@@ -195,6 +213,44 @@ class HomeProteome:
 
 
 _WARNED: Set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    if key not in _WARNED:
+        _WARNED.add(key)
+        import logging
+        logging.getLogger(__name__).warning(message)
+
+
+def own_gene_id_from_goi_info(goi_info) -> Optional[str]:
+    """q's own home gene as the home step recorded it (goi_info.json of ANNOTATE_GOI, batch
+    HG-3; a path or the loaded dict): its ``gene_id`` when the gene was found by name or by
+    position. None without one (a miniprot model, no annotated gene, a goi_info.json written
+    before HG-3), and None with a warning when the home step flagged its choice as ambiguous:
+    the gene it took may then be a relative with q's own gene as the runner-up, so the
+    identity rule decides (review fix RF-2b)."""
+    info = goi_info
+    if isinstance(goi_info, str):
+        try:
+            with open(goi_info) as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            return None
+    if not isinstance(info, dict):
+        return None
+    gene_id = info.get("gene_id")
+    if not gene_id or info.get("found_by") not in ("name", "position"):
+        return None
+    if info.get("home_gene_ambiguous"):
+        _warn_once(f"ambiguous:{gene_id}",
+                   f"The home step flagged its gene {gene_id} as ambiguous (runner-up "
+                   f"{info.get('runner_up_gene_id')} at score fraction "
+                   f"{info.get('runner_up_score_fraction')}): q's own gene for the specificity "
+                   f"terms is the home protein near-identical to q, if any.")
+        return None
+    return str(gene_id)
+
+
 # Failed blastp calls of the family test in this process (review fix RF-2): each one is logged,
 # and the pair counts as no family (E = inf), as for the place E-value (synvoy_evalue, RF-1c).
 FAMILY_TEST_FAILURES = {"count": 0}
@@ -271,20 +327,23 @@ def pairwise_evalue(a: str, b: str) -> float:
 
 
 def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_qx: float,
-                neighbourhood: Optional[Set[str]], n_flanking: int = 0) -> Dict[str, object]:
+                neighbourhood: Optional[Set[str]], n_flanking: int = 0,
+                own_gene_id: Optional[str] = None) -> Dict[str, object]:
     """Specificity terms of model x of GOI q (see the module docstring).
 
     ``neighbourhood`` is that of this home locus (HomeProteome.neighbourhood); with
-    ``n_flanking`` > 0 q's own home locus (own_neighbourhood) is added. Returns
+    ``n_flanking`` > 0 q's own home locus (own_neighbourhood) is added. ``own_gene_id``:
+    q's own home gene from the home step (own_gene_id_from_goi_info); None = the identity
+    rule. Returns
     ``best_other`` (p*, "" when no other home protein aligns), ``best_other_bits``,
     ``margin``, ``real_competitor`` (bool), ``in_neighbourhood`` (bool, None without
     coordinates) and ``seed_specific`` (margin >= SEED_MIN_MARGIN_BITS or no real competitor).
     """
     if n_flanking:
-        own_hood = proteome.own_neighbourhood(q_id, q_seq, n_flanking)
+        own_hood = proteome.own_neighbourhood(q_id, q_seq, n_flanking, own_gene_id)
         if own_hood is not None:
             neighbourhood = (neighbourhood or set()) | own_hood
-    own = proteome.own_gene(q_id, q_seq)
+    own = proteome.own_gene(q_id, q_seq, own_gene_id)
     p_id, p_raw = proteome.best_other(x_seq, [own] if own else [])
     p_bits = raw_to_bits(p_raw) if p_id else 0.0
     margin = bits_qx - p_bits

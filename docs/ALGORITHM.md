@@ -813,6 +813,13 @@ A strong GOI hit that fails these conditions is written to
 model's protein x (the protein its `Bits=` come from) is aligned (Smith-Waterman, BLOSUM62, gaps 11/1) to every protein of
 the home proteome (one per gene, the longest isoform). The best one other than the GOI's
 own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
+The GOI's own home gene is the gene the home step took as the query's (`gene_id` in
+`goi_info.json`, found by name or by position, [§5.6](#56-the-home-gene-model)). Without
+one, or when the home step flagged its choice as ambiguous (with a warning: the gene it
+took may be a relative of the query's own gene), it is the home protein near-identical to
+the query (≥ 95 % identity over ≥ 90 % of it). Until 2026-10-16 (review fix RF-2b) only that
+identity rule existed, so where the home annotation differs from the query (an extra exon,
+a partial model) the GOI's own gene was p*.
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
 whole proteome, or when it is a home family member of the GOI (the two align at E ≤ 1e-3,
 blastp with composition-based statistics and SEG, the GOI as the query: in a pairwise run
