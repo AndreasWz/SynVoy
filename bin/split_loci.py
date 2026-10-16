@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sequence_utils import one_copy_score  # noqa: E402
+from sequence_utils import load_home_hits, one_copy_score  # noqa: E402
 from synvoy_scale import FALLBACK_LOCUS_GAP_BP, load_gene_spans  # noqa: E402,F401
 
 def parse_args():
@@ -79,45 +79,9 @@ def _cluster_best_bit(cl):
 
 
 def load_raw_hits(paths, max_evalue):
-    """Hits of the home search as dicts (chrom, start, end, bits), E <= max_evalue, one
-    per stretch of DNA: of hits overlapping by more than half of the shorter one the
-    best-scoring stays (both search programs report every exon)."""
-    hits = []
-    for path in paths or []:
-        if not path or not os.path.exists(path):
-            continue
-        with open(path) as fh:
-            for line in fh:
-                p = line.rstrip('\n').split('\t')
-                if len(p) < 12:
-                    continue
-                try:
-                    a, b = int(p[8]), int(p[9])
-                    evalue, bits = float(p[10]), float(p[11])
-                except ValueError:
-                    continue
-                if evalue > max_evalue:
-                    continue
-                try:
-                    qa, qb = int(p[6]), int(p[7])
-                except ValueError:
-                    continue
-                hits.append({'chrom': p[1], 'start': min(a, b) - 1, 'end': max(a, b), 'bits': bits,
-                             'qstart': min(qa, qb), 'qend': max(qa, qb)})
-    kept = []
-    by_chrom = {}
-    for h in sorted(hits, key=lambda x: (-x['bits'], x['chrom'], x['start'])):
-        length = h['end'] - h['start']
-        clash = False
-        for k in by_chrom.get(h['chrom'], []):
-            overlap = min(h['end'], k['end']) - max(h['start'], k['start'])
-            if overlap > 0.5 * min(length, k['end'] - k['start']):
-                clash = True
-                break
-        if not clash:
-            by_chrom.setdefault(h['chrom'], []).append(h)
-            kept.append(h)
-    return kept
+    """The home hits (sequence_utils.load_home_hits, moved there for the other callers that
+    read them; same rule and order)."""
+    return load_home_hits(paths, max_evalue)
 
 
 def score_clusters_by_hits(clusters, raw_hits):

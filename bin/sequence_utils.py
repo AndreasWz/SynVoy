@@ -942,6 +942,76 @@ def sw_align(query_seq: str, subject_seq: str,
     return score, ident
 
 
+# ---------------------------------------------------------------- home hits (S0)
+# A hit continues the query after another when it starts at most this many residues before
+# the other ends (the overlap one_copy_score tolerates between the hits of one copy).
+QUERY_CONTINUATION_TOL = 10
+
+
+def load_home_hits(paths, max_evalue):
+    """Hits of the home search (12-column BLAST / MMseqs2 tables) with E <= ``max_evalue``,
+    one per stretch of DNA: of hits that overlap by more than half of the shorter one the
+    best-scoring stays, whatever their strands (both search programs report every exon).
+
+    Dicts with ``chrom``, ``start`` (0-based), ``end``, ``strand`` ('+', or '-' when the
+    subject coordinates run backwards), ``evalue``, ``bits``, ``qstart``, ``qend``. Moved from
+    split_loci.load_raw_hits (batch of 2026-10-15, S0) with the same rule and order; strand
+    and E-value are new keys, for the callers that chain hits."""
+    hits = []
+    for path in paths or []:
+        if not path or not os.path.exists(path):
+            continue
+        with open(path) as fh:
+            for line in fh:
+                p = line.rstrip('\n').split('\t')
+                if len(p) < 12:
+                    continue
+                try:
+                    a, b = int(p[8]), int(p[9])
+                    evalue, bits = float(p[10]), float(p[11])
+                except ValueError:
+                    continue
+                if evalue > max_evalue:
+                    continue
+                try:
+                    qa, qb = int(p[6]), int(p[7])
+                except ValueError:
+                    continue
+                hits.append({'chrom': p[1], 'start': min(a, b) - 1, 'end': max(a, b),
+                             'strand': '+' if a <= b else '-', 'evalue': evalue, 'bits': bits,
+                             'qstart': min(qa, qb), 'qend': max(qa, qb)})
+    kept = []
+    by_chrom = {}
+    for h in sorted(hits, key=lambda x: (-x['bits'], x['chrom'], x['start'])):
+        length = h['end'] - h['start']
+        clash = False
+        for k in by_chrom.get(h['chrom'], []):
+            overlap = min(h['end'], k['end']) - max(h['start'], k['start'])
+            if overlap > 0.5 * min(length, k['end'] - k['start']):
+                clash = True
+                break
+        if not clash:
+            by_chrom.setdefault(h['chrom'], []).append(h)
+            kept.append(h)
+    return kept
+
+
+def continues_query(a, b, tol: int = QUERY_CONTINUATION_TOL) -> bool:
+    """Whether hit ``b`` continues the query after hit ``a``, the two taken in coding order
+    (in_coding_order: on the minus strand the later one lies upstream): ``b`` starts at most
+    ``tol`` residues before ``a`` ends, and it ends after ``a``. The end test refuses a hit
+    that lies inside the end of ``a``, which would otherwise extend a chain with up to
+    ``tol + 1`` residues already covered. ``a`` and ``b`` are dicts with ``qstart`` and
+    ``qend`` (query positions, ascending on both strands)."""
+    return b['qstart'] >= a['qend'] - tol and b['qend'] > a['qend']
+
+
+def in_coding_order(hits, strand: str):
+    """``hits`` (dicts with ``start``) in coding order: ascending genomic start on the plus
+    strand, descending on the minus strand, so continues_query can read them pairwise."""
+    return sorted(hits, key=lambda h: (h['start'], h.get('end', 0)), reverse=(strand == '-'))
+
+
 def one_copy_score(hits, max_query_overlap: int = 10) -> float:
     """Best total bit score of hits that together cover the query at most once.
 
