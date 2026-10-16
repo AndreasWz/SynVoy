@@ -48,10 +48,15 @@ def test_a_replaced_parameter_stops_the_run(tmp_path):
 
 def test_a_parameter_without_effect_only_warns(tmp_path):
     code, text = _preview(tmp_path, "--distance_autotune_far_pct", "40",
-                          "--strict_goi_family", "true")
+                          "--strict_goi_family", "true", "--disable_ambiguous_tier", "true",
+                          "--disable_distance_autotune", "true")
     assert code == 0, text[-2000:]
     assert ("--distance_autotune_far_pct no longer exists. It had no effect; remove it "
             "from the command line or config.") in text
     assert ("--strict_goi_family no longer exists. It had no effect (the family-name check "
             "is annotation only now") in text
+    assert ("--disable_ambiguous_tier no longer exists. It had no effect (AMBIGUOUS (needs "
+            "curation, never counted) is part of the one label now") in text
+    assert ("--disable_distance_autotune no longer exists. It had no effect (the per-genome "
+            "relaxation of the identity thresholds went with the thresholds") in text
     assert "All parameters validated" in text

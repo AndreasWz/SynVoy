@@ -333,20 +333,22 @@ def test_removed_parameters_are_not_declared_any_more():
 
 def test_removed_label_parameters_are_classified_as_the_handover_asks():
     """2026-10-15: of the identity-based GOI label's parameters, the ones whose job the
-    judge does now stop the run; the ones that only tuned them warn."""
+    judge does now stop the run; the ones that only tuned them, and the two switches that had
+    lost their effect (disable_ambiguous_tier, disable_distance_autotune; 16 Oct), warn."""
     main_nf = (ROOT / "main.nf").read_text()
     block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
     replaced = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("noEffect:")[0], re.M))
     no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1]))
     assert {"classify_high_min_identity", "classify_medium_min_identity",
             "classify_tandem_min_identity", "classify_tandem_min_qcov",
-            "classify_high_min_collinear", "disable_ambiguous_tier",
-            "disable_distance_autotune"} <= replaced
+            "classify_high_min_collinear"} <= replaced
     assert {"classify_fallback_strong_min_identity_floor", "strict_goi_family",
+            "disable_ambiguous_tier", "disable_distance_autotune",
             "distance_autotune_close_pct", "distance_autotune_far_pct",
             "distance_autotune_max_relax", "distance_autotune_min_flanking",
             "distance_autotune_high_floor", "distance_autotune_medium_floor"} <= no_effect
     assert "goi_family_tokens" not in replaced | no_effect
+    assert not {"disable_ambiguous_tier", "disable_distance_autotune"} & replaced
 
 
 @pytest.mark.parametrize("option", [["--grid_goi_style", "cds"], ["--grid_goi_max_models", "3"]])

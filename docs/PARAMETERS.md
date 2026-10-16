@@ -1084,8 +1084,6 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and conte
 | `classify_context_min_collinear` | Nothing (2026-10-14): the context promotion was removed. A weak match in the slot of a block with significant gene order is labelled AMBIGUOUS with `Basis=gene_order_only` ("needs curation", never counted), always on. The promotion was on by default for one day; reversed and shuffled home proteins met its rule in 30 of 181 Candida decoy cases |
 | `classify_high_min_identity`, `classify_medium_min_identity`, `classify_tandem_min_identity`, `classify_tandem_min_qcov` | Nothing (2026-10-15): one judge labels every GOI call, tandem copies included, from the E-value in the expected place, specificity against the home proteome and completeness ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)); identity does not decide a label. Since step 4 of the label rework (2026-10-14) these thresholds shaped only a provisional label that the judge overwrote |
 | `classify_high_min_collinear` | Nothing (2026-10-15): the order of the anchors enters the label through the block's E_syn (a block is significant at E_syn ≤ 0.1, and only a significant block gives a call its slot or core as the place of its E-value) |
-| `disable_ambiguous_tier` | Nothing (2026-10-15): AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
-| `disable_distance_autotune` | Nothing (2026-10-15): the per-genome relaxation of the identity thresholds (§1g) went with the thresholds. The judge computes each call's E-value in the expected place of its own genome. The median flanking identity it rested on is still logged per genome |
 
 **Had no effect** (declared and accepted, read by nothing)
 
@@ -1107,6 +1105,8 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and conte
 | `classify_fallback_strong_min_identity_floor` | identity floor of the strong-flanking route by which a hit chain reached MEDIUM (2026-10-15; that route went with the identity-based label) |
 | `strict_goi_family` | demotion of hit-chain calls whose target annotation lacks a family name (2026-10-15). The family-name check is annotation only now: `--goi_family_tokens` writes `GoiFamilyConsistent` / `GoiFamilyReason` and changes no label |
 | `distance_autotune_close_pct`, `distance_autotune_far_pct`, `distance_autotune_max_relax`, `distance_autotune_min_flanking`, `distance_autotune_high_floor`, `distance_autotune_medium_floor` | settings of the per-genome relaxation of the identity thresholds (2026-10-15), removed with it |
+| `disable_ambiguous_tier` | the switch that took AMBIGUOUS out of the label (2026-10-15). AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
+| `disable_distance_autotune` | the switch of the per-genome relaxation of the identity thresholds (§1g; 2026-10-15), which went with the thresholds. The judge computes each call's E-value in the expected place of its own genome |
 
 `plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette` (all were parsed and never read) and, since 2026-10-13, `--pub_svg` (its figure was removed). A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`. `plot_synteny_matrix.py` no longer exists.
 

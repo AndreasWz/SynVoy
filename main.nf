@@ -236,8 +236,6 @@ def removedParams() {
             classify_tandem_min_identity: "a tandem copy is labelled by the same judge as every GOI call: the E-value in the expected place, specificity and completeness (docs/ALGORITHM.md 7.8); identity no longer decides it",
             classify_tandem_min_qcov   : "a tandem copy is labelled by the same judge as every GOI call (docs/ALGORITHM.md 7.8); completeness for HIGH is a fixed coverage of 0.7 there",
             classify_high_min_collinear: "the order of the anchors enters the label through the block's E_syn (docs/ALGORITHM.md 7.8 and 7.13); it is no longer a separate gate on HIGH",
-            disable_ambiguous_tier     : "AMBIGUOUS (needs curation, never counted) is part of the one label now, with Basis=not_specific or gene_order_only (docs/ALGORITHM.md 7.8); it cannot be switched off",
-            disable_distance_autotune  : "the per-genome relaxation of the identity thresholds went with the thresholds; the judge computes each call's E-value in the expected place of its own genome (docs/ALGORITHM.md 7.8)",
         ],
         noEffect: [
             'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
@@ -247,12 +245,15 @@ def removedParams() {
             'seed_flanking_min_count', 'seed_flanking_min_qcov',
             'classify_context_min_identity', 'classify_context_min_qcov',
             'classify_fallback_strong_min_identity_floor', 'strict_goi_family',
+            'disable_ambiguous_tier', 'disable_distance_autotune',
             'distance_autotune_close_pct', 'distance_autotune_far_pct', 'distance_autotune_max_relax',
             'distance_autotune_min_flanking', 'distance_autotune_high_floor', 'distance_autotune_medium_floor',
         ],
         // Said in the warning of a noEffect parameter, after "It had no effect".
         noEffectNote: [
             strict_goi_family: "the family-name check is annotation only now: --goi_family_tokens writes GoiFamilyConsistent and GoiFamilyReason on every GOI row and changes no label",
+            disable_ambiguous_tier: "AMBIGUOUS (needs curation, never counted) is part of the one label now, with Basis=not_specific or gene_order_only (docs/ALGORITHM.md 7.8); it cannot be switched off",
+            disable_distance_autotune: "the per-genome relaxation of the identity thresholds went with the thresholds; the judge computes each call's E-value in the expected place of its own genome (docs/ALGORITHM.md 7.8)",
         ],
     ]
 }
