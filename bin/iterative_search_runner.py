@@ -855,17 +855,23 @@ def greedy_select(candidates) -> List[Dict[str, Any]]:
 
 
 def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
-                      collinear_support, flanking_candidates) -> Dict[str, Any]:
+                      collinear_support, flanking_candidates,
+                      hood_len: Optional[int] = None) -> Dict[str, Any]:
     """The places of a block (synvoy_evalue): its E_syn from the run of anchors in home
     order and their genome-wide places, the slot between the nearest found home
     neighbours on either side of the gene (widened by one gene pitch), the core and the
-    window. Records E_syn in ``args.genome_ctx`` for the genome-level multiplier."""
+    window. Records E_syn in ``args.genome_ctx`` for the genome-level multiplier.
+
+    ``hood_len``: the length of the neighbourhood the collinear run was counted in (block
+    +- padding). E_syn is computed for that length (review fix RF-1b): with derived
+    distances the searched window can be smaller, and E_syn for the searched length was
+    too small by about (hood / searched)^(k-1). Default: the window length."""
     ctx = getattr(args, 'genome_ctx', None) or {}
     genome_len = int(ctx.get('genome_len') or 0) or (w_end - w_start)
     neighbours = list((getattr(args, 'home_rank', None) or {}).keys())
     places = ctx.get('places', {})
     esyn = synvoy_evalue.e_syn(int(collinear_support or 0), [places.get(g, 0) for g in neighbours],
-                               max(1, w_end - w_start), genome_len)
+                               max(1, int(hood_len) if hood_len else w_end - w_start), genome_len)
     ctx.setdefault('block_esyn', {})[block_idx] = esyn
     ranks = getattr(args, 'goi_ranks', None) or {}
     best: Dict[int, Tuple[float, Tuple[int, int]]] = {}
@@ -5237,7 +5243,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     if decoy_candidates:
         raw_candidates = [c for c in raw_candidates if not is_decoy_parent(_candidate_parent(c))]
     place_terms = block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
-                                    block_collinear_support, flanking_candidates)
+                                    block_collinear_support, flanking_candidates,
+                                    hood_len=hood_end - hood_start)
     if getattr(args, 'genome_ctx', None) is not None:
         args.genome_ctx.setdefault('block_slot', {})[block_idx] = (place_terms['slot'],
                                                                    place_terms['slot_inverted'])
