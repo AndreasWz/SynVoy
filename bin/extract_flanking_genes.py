@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import itertools
 import sys
 import os
 import subprocess
@@ -11,14 +12,14 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code,
+        sw_pair_evalue, set_genetic_code, load_home_hits,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code,
+        sw_pair_evalue, set_genetic_code, load_home_hits,
     )
 
 try:
@@ -252,6 +253,30 @@ LCS_FALLBACK_THRESHOLD = 35.0   # only used when no aligner is available, see is
 # E-value at or below which the annotated gene at the GOI's own position counts as the
 # GOI itself, whatever --goi_relative_evalue says about the neighbours.
 GOI_SELF_EVALUE = 1e-5
+# The walk's limit per side (batch HG-4, 2026-10-16): it stops only when it has visited more
+# than WALK_GENES_PER_ANCHOR x n_flank genes (the bound before) AND n_flank + R protein-coding
+# genes, R being the protein-coding genes on that side of the scaffold that overlap a home
+# hit of the query (relatives the walk will skip). So it can only get longer than before: a
+# family larger than the old bound no longer ends a side short of anchors.
+WALK_GENES_PER_ANCHOR = 5
+
+
+def side_relatives(chrom_genes, hits, centre, at_locus):
+    """``(R_up, R_down)``: protein-coding genes of ``chrom_genes`` (one scaffold) that overlap
+    a home hit of the query, upstream or downstream of ``centre`` by their own centre; genes
+    at the home locus's own intervals (``at_locus``) are not counted."""
+    up = down = 0
+    for g in chrom_genes:
+        if not g.get('cds_parts') or at_locus(g):
+            continue
+        if not any(h['chrom'] == g['chrom'] and h['start'] < g['end'] and h['end'] > g['start']
+                   for h in hits):
+            continue
+        if (g['start'] + g['end']) / 2 <= centre:
+            up += 1
+        else:
+            down += 1
+    return up, down
 BEST_INTERVAL = 'best_interval'   # split_loci.py's name for the interval a locus walk starts from
 
 
@@ -407,6 +432,13 @@ def main():
     parser.add_argument("--expand_goi_similar_distance", type=int, default=300000,
                         help="Max bp from GOI center for GOI-similar genes to be treated as "
                              "additional GOI queries when --expand_goi_similar is set (default: 300000)")
+    parser.add_argument("--home_hits", action="append", default=[],
+                        help="Raw hit table of the query's home search (12 columns); repeat for "
+                             "several. Relatives with hits raise the walk's limit per side "
+                             "(batch HG-4); without them R = 0")
+    parser.add_argument("--max_evalue", type=float, default=0.01,
+                        help="E-value limit for the hits of --home_hits (the pipeline passes "
+                             "search_evalue; default 0.01)")
     parser.add_argument("--out_bed", required=True, help="Output BED")
     parser.add_argument("--out_faa", required=True, help="Output FASTA")
     
@@ -463,6 +495,16 @@ def main():
     def _at_other_interval(g):
         return any(g['chrom'] == r['chrom'] and g['start'] < r['end'] and g['end'] > r['start']
                    for r in other_regions)
+
+    def _at_locus(g):
+        return any(g['chrom'] == r['chrom'] and g['start'] < r['end'] and g['end'] > r['start']
+                   for r in target_regions)
+
+    for path in args.home_hits:
+        if not os.path.exists(path):
+            print(f"WARNING: --home_hits {path} does not exist: its hits do not raise the walk's "
+                  f"limit.", file=sys.stderr)
+    home_hits = load_home_hits(args.home_hits, args.max_evalue)
 
     genome_seqs = load_genome(args.genome)
 
@@ -678,12 +720,22 @@ def main():
 
                 upstream_all = []   # all non-GOI-similar genes visited (closest→farthest)
                 upstream_slots = 0  # count of protein-coding genes (toward n_flank limit)
-                max_expand = min(len(chrom_genes), args.n_flank * 5)
-                for offset in range(0 if centre_up else 1, max_expand + 1):
+                old_bound = args.n_flank * WALK_GENES_PER_ANCHOR
+                r_up, r_down = side_relatives(chrom_genes, home_hits, reg_center, _at_locus)
+                cap = {'up': args.n_flank + r_up, 'down': args.n_flank + r_down}
+                walked = {side: {'coding': 0, 'relatives': 0, 'noncoding': 0, 'end': ''}
+                          for side in ('up', 'down')}
+                up = walked['up']
+                for offset in itertools.count(0 if centre_up else 1):
                     if upstream_slots >= args.n_flank:
+                        up['end'] = 'anchors found'
                         break
                     idx = center_idx - offset
                     if idx < 0:
+                        up['end'] = 'scaffold end'
+                        break
+                    if offset > old_bound and up['coding'] >= cap['up']:
+                        up['end'] = 'limit'
                         break
                     g = chrom_genes[idx]
                     # Distance cap: chrom_genes is sorted by position; upstream genes
@@ -695,8 +747,14 @@ def main():
                                   f"gene {_preferred_gene_label(g)} is "
                                   f"{abs(gene_center - reg_center)/1000:.0f}kb away "
                                   f"(limit {args.max_flanking_distance/1000:.0f}kb)")
+                            up['end'] = 'max_flanking_distance'
                             break
+                    # The locus's own genes do not count against the limit (batch HG-4).
+                    at_other = _at_other_interval(g)
+                    if not at_other:
+                        up['coding' if g.get('cds_parts') else 'noncoding'] += 1
                     if _is_goi_similar(g):
+                        up['relatives'] += 0 if at_other else 1
                         name = _preferred_gene_label(g)
                         gene_center = (g['start'] + g['end']) / 2
                         if expand_goi_similar and abs(gene_center - reg_center) <= args.expand_goi_similar_distance:
@@ -705,7 +763,7 @@ def main():
                         else:
                             print(f"  [flank-filter] Skipping GOI-similar upstream gene: {name}")
                         continue
-                    if _at_other_interval(g):
+                    if at_other:
                         print(f"  [flank-filter] Skipping upstream gene at another hit interval "
                               f"of this locus: {_preferred_gene_label(g)}")
                         continue
@@ -715,11 +773,17 @@ def main():
 
                 downstream_all = []
                 downstream_slots = 0
-                for offset in range(0 if centre_down else 1, max_expand + 1):
+                down = walked['down']
+                for offset in itertools.count(0 if centre_down else 1):
                     if downstream_slots >= args.n_flank:
+                        down['end'] = 'anchors found'
                         break
                     idx = center_idx + offset
                     if idx >= len(chrom_genes):
+                        down['end'] = 'scaffold end'
+                        break
+                    if offset > old_bound and down['coding'] >= cap['down']:
+                        down['end'] = 'limit'
                         break
                     g = chrom_genes[idx]
                     if args.max_flanking_distance > 0:
@@ -729,8 +793,14 @@ def main():
                                   f"gene {_preferred_gene_label(g)} is "
                                   f"{abs(gene_center - reg_center)/1000:.0f}kb away "
                                   f"(limit {args.max_flanking_distance/1000:.0f}kb)")
+                            down['end'] = 'max_flanking_distance'
                             break
+                    # The locus's own genes do not count against the limit (batch HG-4).
+                    at_other = _at_other_interval(g)
+                    if not at_other:
+                        down['coding' if g.get('cds_parts') else 'noncoding'] += 1
                     if _is_goi_similar(g):
+                        down['relatives'] += 0 if at_other else 1
                         name = _preferred_gene_label(g)
                         gene_center = (g['start'] + g['end']) / 2
                         if expand_goi_similar and abs(gene_center - reg_center) <= args.expand_goi_similar_distance:
@@ -739,7 +809,7 @@ def main():
                         else:
                             print(f"  [flank-filter] Skipping GOI-similar downstream gene: {name}")
                         continue
-                    if _at_other_interval(g):
+                    if at_other:
                         print(f"  [flank-filter] Skipping downstream gene at another hit interval "
                               f"of this locus: {_preferred_gene_label(g)}")
                         continue
@@ -752,8 +822,21 @@ def main():
                     f"  [flank-filter] Selected {upstream_slots} upstream + "
                     f"{downstream_slots} downstream protein-coding flanking genes "
                     f"(+{len(upstream_all)-upstream_slots+len(downstream_all)-downstream_slots} "
-                    f"non-coding neighbours; expanded up to {max_expand} candidates per side)."
+                    f"non-coding neighbours)."
                 )
+                for side, slots, name in (('up', upstream_slots, 'upstream'),
+                                          ('down', downstream_slots, 'downstream')):
+                    w = walked[side]
+                    print(f"  [flank-walk] {name}: {slots} anchor(s); visited {w['coding']} "
+                          f"protein-coding gene(s) ({w['relatives']} relative(s) skipped) and "
+                          f"{w['noncoding']} non-coding; ended: {w['end']} (limit: more than "
+                          f"{old_bound} genes and {cap[side]} protein-coding genes, R = "
+                          f"{cap[side] - args.n_flank})")
+                    if w['end'] == 'limit' and slots < args.n_flank:
+                        print(f"WARNING: the {name} walk reached its limit with {slots} of "
+                              f"{args.n_flank} anchors: more relatives on this side than home "
+                              f"hits show (raise --n_flank, or check the relative test).",
+                              file=sys.stderr)
                 if goi_similar_neighbors:
                     print(f"  [goi-expand] {len(goi_similar_neighbors)} GOI-similar neighbor(s) "
                           f"will be emitted as additional GOI queries in FAA.")

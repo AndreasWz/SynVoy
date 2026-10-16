@@ -1268,6 +1268,8 @@ workflow {
         params.n_flanking_genes,
         params.min_flanking_size,
         normalized_gene_ready_ch.first(),  // GOI protein: its relatives are not used as anchors
+        LOCATE_GENE.out.blast_hits.first(),
+        LOCATE_GENE.out.mmseqs_hits.first(),
         effective_settings_ch              // §1f: resolved preset-affected params
     )
     

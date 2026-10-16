@@ -366,8 +366,16 @@ walk and a GOI marker of its own, so a tandem array of three copies gave three w
 
 1. Take the annotated gene whose centre is closest to the centre of the best interval.
 2. Walk outwards on each side. Collect genes until `n_flanking_genes` (10)
-   protein-coding genes are found on that side, looking at no more than 50 genes per
-   side.
+   protein-coding genes are found on that side. A side stops early only when it has
+   visited more than 5 × `n_flanking_genes` genes (50) **and** `n_flanking_genes` + R
+   protein-coding genes, where R is the number of protein-coding genes on that side of
+   the scaffold that overlap a home hit of the query (relatives the walk will skip;
+   genes at the locus's own intervals are not counted, neither in R nor in the walk).
+   Until 2026-10-16 (batch HG-4) every visited gene counted against the 50, so a family
+   larger than that, or a run of tRNA genes, could end a side short of anchors; the
+   rule only makes walks longer. Each side is logged (`[flank-walk]`: anchors, genes
+   visited, relatives skipped, what ended it), with a warning when the limit ends a side
+   with fewer than `n_flanking_genes` anchors.
 3. Skip a gene that is a relative of the GOI: its protein aligns to the GOI protein
    (Smith-Waterman, BLOSUM62, 11/1) with an E-value at or below `goi_relative_evalue`
    (1e-5), computed for the two sequences alone. Such a gene would match wherever the

@@ -10,6 +10,9 @@ process EXTRACT_FLANKING {
     val n_flank
     val min_size
     path goi_faa
+    // The query's home hits: relatives with hits raise the walk's limit per side (batch HG-4).
+    path home_blast_hits
+    path home_mmseqs_hits
     // §1f: preset-affected params resolved at runtime (see RESOLVE_EFFECTIVE_PARAMS).
     val settings
 
@@ -40,6 +43,9 @@ process EXTRACT_FLANKING {
         $dist_arg \\
         $expand_arg \\
         $gc_arg \\
+        --home_hits ${home_blast_hits} \\
+        --home_hits ${home_mmseqs_hits} \\
+        --max_evalue ${params.search_evalue} \\
         --out_bed synteny_block_${locus_id}.bed \\
         --out_faa flanking_proteins_${locus_id}.faa
     """
