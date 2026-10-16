@@ -476,7 +476,7 @@ multiplies the whole downstream search, so these are the run-time and OOM knobs.
 | `--family_warning_threshold` | `10` | Warn when the *pre-filter* locus count exceeds this — a signal that your query is a large family and the results are candidates, not orthologs. |
 | `--home_goi_gene` | _(empty)_ | Name of the GOI gene in the home annotation, when the name from the query header or UniProt is not the one used there. |
 | `--home_locus_mode` | `auto` | `auto`: the annotated home gene that matches the query is the primary locus, further loci are other places where the query aligns at least half as well. `gene_only`: that locus alone (replaces `--enable_name_locus`). `alignment`: loci from the alignments alone, as before 2026-10-08. |
-| `--locus_gap_genes` / `--locus_gap` | `5` / `auto` | Two places where the query aligns are one home locus when at most this many annotated genes lie between them. `--locus_gap <bp>` uses a distance instead (50000 when the home genome has no annotation). |
+| `--locus_gap_genes` / `--locus_gap` | `auto` / `auto` | Two places where the query aligns are one home locus when at most this many annotated genes lie between them (`auto`: half of `--n_flanking_genes`, 5 at the default). `--locus_gap <bp>` uses a distance instead (50000 when the home genome has no annotation). |
 
 ### Rescue Passes
 

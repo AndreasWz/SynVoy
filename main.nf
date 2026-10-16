@@ -418,10 +418,13 @@ def validateNumericParams(validationErrors, validationWarnings) {
      'dispersed_envelope_margin', 'locus_gap', 'goi_hull_cluster_max_gap',
      'goi_hull_window_pad', 'goi_hull_max_window'].each { name -> checkAutoDistance(name, validationErrors) }
     ['block_gap_genes', 'window_margin_genes', 'goi_margin_genes', 'synteny_bridge_max_gap_genes',
-     'dispersed_envelope_margin_genes', 'locus_gap_genes'].each { name ->
+     'dispersed_envelope_margin_genes'].each { name ->
         if (num.call(name, params[name], 1) < 0) {
             validationErrors << "Invalid --${name} (${params[name]}). Must be >= 0."
         }
+    }
+    if (!LocusGap.isAuto(params) && num.call('locus_gap_genes', params.locus_gap_genes, 5) < 0) {
+        validationErrors << "Invalid --locus_gap_genes (${params.locus_gap_genes}). Must be 'auto' or >= 0."
     }
     def relativeEvalue = num.call('goi_relative_evalue', params.goi_relative_evalue, 0)
     if (relativeEvalue < 0) {

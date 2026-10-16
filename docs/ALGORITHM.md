@@ -146,7 +146,7 @@ the lowest E-value and the highest bit score of its members.
 
 `profile_hits.py` summarises the hits with E ≤ `search_evalue`. Hits that cover the
 same DNA are reduced to the best one (both programs report every exon). Hits with at
-most `locus_gap_genes` (5) annotated genes between them form one locus, as in §5.4. A
+most `locus_gap_genes` (`auto` = ⌊`n_flanking_genes`/2⌋, 5) annotated genes between them form one locus, as in §5.4. A
 locus is scored as **one copy of the gene**: the best total bit score of hits that
 cover the query at most once (`one_copy_score`). A locus is *strong* when its score is
 at least half of the top locus's; `bit_ratio` is the top score divided by the second;
@@ -254,8 +254,8 @@ features; the report copies it as `run_settings`.
 `split_loci.py` runs after the home gene model (§5.6) is built:
 
 1. Sort the merged intervals by position. Two neighbouring intervals on a scaffold
-   belong to one locus when at most `locus_gap_genes` (5) annotated genes lie
-   entirely between them. On a scaffold without annotated genes, and for a home genome
+   belong to one locus when at most `locus_gap_genes` (`auto` = ⌊`n_flanking_genes`/2⌋,
+   5 at the default) annotated genes lie entirely between them. On a scaffold without annotated genes, and for a home genome
    without annotation, the limit is 50 kb. `--locus_gap <bp>` uses a distance
    everywhere.
 2. **Primary locus.** When the home gene model came from the annotation
@@ -1161,7 +1161,7 @@ of 9 without.
 | `mmseqs_sensitivity` | 9.5 | §5.2, §7.1 |
 | `min_query_length` | 20 (warning below 40) | §5.1 |
 | `max_loci` / `locus_min_bit_ratio` | 5 / 0.5 | §5.4 |
-| `locus_gap_genes` / `locus_gap` | 5 / auto | §5.3, §5.4 |
+| `locus_gap_genes` / `locus_gap` | auto (⌊n_flanking_genes/2⌋ = 5) / auto | §5.3, §5.4 |
 | `home_locus_mode` | auto | §5.5 |
 | `n_flanking_genes` | 10 per side | §5.7 |
 | `goi_relative_evalue` | 1e-5 | §5.7 |

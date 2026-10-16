@@ -19,7 +19,7 @@ process SPLIT_LOCI {
     """
     split_loci.py --bed $bed --output_prefix locus \\
         ${gff_arg} \\
-        --locus_gap_genes ${params.locus_gap_genes} \\
+        --locus_gap_genes ${LocusGap.genes(params)} \\
         --locus_gap ${params.locus_gap} \\
         --home_gene_bed ${home_gene_bed} \\
         --home_gene_info ${home_gene_info} \\

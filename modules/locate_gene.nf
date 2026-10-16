@@ -116,7 +116,7 @@ process LOCATE_GENE {
         --query $gene \\
         --max_evalue ${params.search_evalue} \\
         --gff $home_gff \\
-        --locus_gap_genes ${params.locus_gap_genes} \\
+        --locus_gap_genes ${LocusGap.genes(params)} \\
         --locus_gap ${params.locus_gap} \\
         --output hit_profile.json \$LOCATE_RETRY || echo "hit profiling skipped"
     if [ -s hit_profile.json ]; then
