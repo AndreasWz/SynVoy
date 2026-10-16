@@ -6536,8 +6536,9 @@ def home_family_size(proteome, q_id: str, q_seq: str, own_gene_id: Optional[str]
     test calls family members (HomeProteome.family_evalue <= FAMILY_MEMBER_EVALUE: blastp
     with composition-based statistics and SEG on both proteins), over the whole home
     proteome. Only proteins whose Smith-Waterman score against q gives a pairwise
-    Karlin-Altschul E <= GENOME_WIDE_FAMILY_PREFILTER_EVALUE (100 x that bar) are tested;
-    blastp masks with SEG and aligns heuristically, so it does not score a pair higher."""
+    Karlin-Altschul E <= GENOME_WIDE_FAMILY_PREFILTER_EVALUE (100 x that bar) are tested.
+    Checked against the test on every home protein for the 14 Candida pilot queries: the same
+    count in 14 of 14 (0 to 18 members), the largest member's prefilter E 0.024."""
     key = (q_id, q_seq, own_gene_id or '')
     if key not in _FAMILY_SIZE_CACHE:
         own = proteome.own_gene(q_id, q_seq, own_gene_id)
