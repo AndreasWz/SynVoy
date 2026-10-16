@@ -174,9 +174,10 @@ that matches:
 | 5 | otherwise | `preset_single_copy` |
 
 Rule 3 is in effect "at least 2 strong loci": a strong locus scores at least half of the
-top one, so the ratio of the top two is at most 2. More than 5 strong loci, or more than
-10 loci, add a large-family warning. The number of alignment rows decides nothing: a row
-is one exon in one search program.
+top one, so the ratio of the top two is at most 2. When rule 3 or 4 decides, more than 5
+strong loci or more than 10 loci add a large-family warning; the other outcomes and
+`--preset_override` never warn. The number of alignment rows decides nothing: a row is one
+exon in one search program.
 
 What each preset changes (`resolve_effective_params.py` → `PRESET_OVERRIDES`):
 
@@ -556,11 +557,15 @@ ranking off.
   number the whole margin is searched, and the margin is twice the mean gap between
   consecutive hits on that scaffold, limited to `padding_min`–`padding_max`.)
 
-Two numbers describe the block and go into every confidence decision:
+Two numbers describe the block, written on every model of it (`BlockFlankingSupport`,
+`BlockCollinearSupport`):
 
 - **Flanking support** `B`: the number of distinct flanking genes with a genome-wide
   hit in the neighbourhood.
 - **Collinear support**: the collinear run of those genes.
+
+The label reads neither directly: the collinear run enters only through the block's
+E-value of gene order (E_syn, §7.13).
 
 ### 7.6 Search inside the window
 
@@ -571,10 +576,11 @@ Two queries are used per home GOI (`select_goi_queries`):
   earlier waves added, those of the genome added last, and among them the one that
   aligns best to the home protein. A model identical to the home protein adds nothing.
 
-Both queries are searched, but the window's hits are then thinned by place: of hits
-that overlap by more than half, only the one with the higher bit score is kept,
-whichever query it came from. Where the relative's protein aligns better, the gene is
-therefore modelled from the relative alone. Everything reported about a gene model
+Both queries are searched, and the window's hits are thinned by place within each query:
+of hits of one query that overlap by more than half, only the one with the higher bit score
+is kept. The two queries are thinned apart (since 2026-10-14), so where the relative's
+protein aligns better, the home protein still keeps its own hit there. Everything reported
+about a gene model
 refers to the home protein. A model that only the relative's query produced is aligned
 to the home protein again (`rebase_relative_candidates`): its identity (over all
 alignment columns, gaps included, as BLAST counts it; until 2026-10-14 the gap columns
@@ -613,9 +619,9 @@ one that ends on the last residue of a piece is left to the next piece, which ho
 whole.
 
 MMseqs2 runs with E ≤ 10 and tblastn with E ≤ 1000; the limit of 0.1 is applied when
-their output is read. tblastn's cutoff is wide on purpose: it links HSPs by sum statistics
-only among those it keeps, so a cutoff of 10 also changed the E-value of what it
-reported, and a weak true gene could vanish from its output. The hits of the three engines are pooled in order of bit score, and a hit is
+their output is read. tblastn's cutoff is wide on purpose: through its composition-based
+statistics (on by default) the cutoff also changes the E-values tblastn reports, in either
+direction, so with a cutoff of 10 a weak true gene could vanish from its output. The hits of the three engines are pooled in order of bit score, and a hit is
 dropped when more than half of it overlaps a hit already kept. The genome-wide hits
 that lie in the window are then added (GOI hits only for the two queries above).
 
@@ -662,7 +668,8 @@ For each GOI query:
 
    The identity of a chain is the mean over its hits, weighted by alignment length.
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
-   Both are always LOW.
+   Both get an E-value in their place and are judged like every GOI candidate (§7.8); a
+   `raw_hit` needs 60 % query coverage to be written, so it can be HIGH.
 
 Every candidate gets a bit score: the Smith-Waterman score against the home protein,
 BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`, of the best
@@ -671,14 +678,15 @@ stops (the model's translation through the frame guard, or a chain's, copy's or 
 hit's hits translated again with their stops) and its hit regions. The specificity uses
 that same protein (review fix RF-1e, 2026-10-15; before, both used the record protein,
 for a chain the join of its hits with the stops deleted).
-The candidates of a window are ranked by it, then by the shorter span (a chain over two
-copies scores what its better copy scores, and must not win over that copy), then by
-flanking support, start and id; one that overlaps an accepted candidate by more than
-half of its own length is dropped. Until 2026-10-14 they were ranked by identity, longer
-span first, and only hit chains had a bit score (that of their best hit). On the Candida
-pilot, bits picked the model on the curated gene in 29 of the 31 genome pairs with
-several models, identity in 16. The strict fallback on single hits ranks hits by bit
-score too.
+The candidates of a window are judged first and then ranked in the judge's order
+(`synvoy_label.rank_key`, §7.8: label, E-value, the block's E_syn, bits, the shorter span; a
+chain over two copies scores what its better copy scores, and must not win over that copy);
+one that overlaps an accepted candidate by more than half of its own length is dropped.
+Until 2026-10-14 they were ranked by identity, longer span first, and only hit chains had a
+bit score (that of their best hit). The strict fallback on single hits ranks hits by bit
+score too. (The report's dedup chose by bits too since 2026-10-14; on the Candida pilot that
+picked the model on the curated gene in 29 of the 31 genome pairs with several models,
+identity in 16.)
 
 ### 7.8 Confidence
 
@@ -794,9 +802,12 @@ the home proteome (one per gene, the longest isoform). The best one other than t
 own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
 whole proteome, or when it is a home family member of the GOI (the two align at E ≤ 1e-3,
-blastp with composition-based statistics and SEG, the GOI as the query: the test is not
-symmetric, and in 55 of 949 home pairs the two directions disagree at 1e-3 under `-seg no`,
-34 under `-seg yes`; a failed blastp call is logged and counts as no family).
+blastp with composition-based statistics and SEG, the GOI as the query: in a pairwise run
+`-seg yes` masks the low-complexity stretches of the query, and the composition-based
+statistics mask the subject's, so both sides are masked (with `-seg no` only the subject's
+were). The test is not symmetric: in 55 of 949 home pairs the two directions disagree at
+1e-3 under `-seg no`, 34 under `-seg yes`; a failed blastp call is logged and counts as no
+family).
 `BestOtherInNeighbourhood=1` when p* lies between the outermost flanking genes of the home
 locus (the span extended to the locus itself), or among the GOI's own home gene and its
 `n_flanking_genes` neighbours on each side, also in a run from a secondary home locus:
@@ -973,10 +984,11 @@ this order:
 
 1. **Deduplication** (`dedupe_goi_annotations`). HIGH, MEDIUM and AMBIGUOUS calls of
    one genome and scaffold are one gene when they overlap reciprocally by more than
-   80 %. The call with the higher confidence, then the higher bit score against the
-   home protein (identity for a model without one), is kept, with the list of home
-   loci that found it. The figures choose their representative GOI model by the same
-   rule. A model contained in a wider one replaces it when the
+   80 %. The call the judge ranks first is kept (`_record_rank`: label, then
+   `synvoy_label.rank_key`, i.e. E-value in its place, the block's E_syn, bits, span; bits
+   or identity for a record without `Eeff`, from a run before 2026-10-14 or a rescue
+   pass), with the list of home loci that found it. The figures choose their
+   representative GOI model by label, then the same strength. A model contained in a wider one replaces it when the
    wider model is at least twice as long and adds less than 0.15 query coverage.
 2. **Phylogenetic placement** (`phylo_placement_check.py`). Across all calls, sequence
    divergence (1 − identity to the query) is fitted against the taxonomic distance of
@@ -1051,13 +1063,18 @@ Consequences of the rules above that a reader of the results should know.
 
 **Confidence**
 
-- A one-exon model can be HIGH only when the home gene has one exon, and then only
-  with a coverage of at least 0.7. A one-exon model of a gene that has introns at
-  home is MEDIUM at best on the main path.
+- HIGH needs a query coverage of at least 0.7, whatever the number of exons (until
+  2026-10-14 a one-exon model could be HIGH only when the home gene had one exon).
 - The hull rescue's models are judged like the main search's (§7.8). Its 40 % identity
   and 0.5 CDS-coverage gates only decide which models are judged.
-- Flanking support is a property of the window. Every candidate in a window has the
-  same value, also a copy at the edge of the window.
+- Flanking support is a property of the window (every candidate in a window has the
+  same value, also a copy at the edge of the window), and the label does not read it.
+- Two GOI row types are not judged: `relaxed_miniprot_rescue` rows of the strong-synteny
+  rescue (on by default; written LOW, with no `Eeff` and no `Basis`; LOW is never
+  counted) and `structural_discovery` rows (opt-in; HIGH or MEDIUM by TM-score and
+  embedding similarity). Whether to judge them is open.
+- `Place=` is the plan's `SearchSpace=`; it will be renamed (with `PlaceBp` and the
+  `EPlace*` fields), the old names readable for one release.
 - A genome can hold several HIGH models for one home locus: the copies of a tandem
   array, or a relative inside the searched window. All of them are counted in the
   headline as "GOI ortholog annotations"; the pipeline does not say which one is the

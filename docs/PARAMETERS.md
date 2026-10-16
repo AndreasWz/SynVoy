@@ -468,7 +468,7 @@ The factor between the E-value for anchors in the whole genome (`search_evalue`)
 
 Together they set the E-value handed to MMseqs2 for the window: `min(aug_relaxed_evalue_cap, search_evalue × aug_relaxed_evalue_mult)` = 10. Hits between that value and the kept threshold of 0.1 are computed and then discarded, so neither parameter changes the result as long as their product stays above the kept threshold. Lowering them below it would tighten the window search; raising them does nothing.
 
-tblastn does not use them (since 2026-10-14): it always reports to E 1000. For tblastn the cutoff is more than an output filter. It combines HSPs by sum statistics only among the ones it keeps, so with the old cutoff of 10 weak HSPs that would have joined a significant set were thrown away first, and the E-value of what it did report changed with the setting. On the Candida pilot a curated ortholog was absent from tblastn's output in SynVoy's own window at 10 and reported at E 0.005 at 1000. The kept threshold of 0.1 applies to tblastn as before.
+tblastn does not use them (since 2026-10-14): it always reports to E 1000. For tblastn the cutoff is more than an output filter: through tblastn's composition-based statistics (on by default) it also changes the E-values tblastn reports, in either direction, so with the old cutoff of 10 the E-value of what it did report changed with the setting. On the Candida pilot a curated ortholog was absent from tblastn's output in SynVoy's own window at 10 and reported at E 0.005 at 1000. The kept threshold of 0.1 applies to tblastn as before.
 
 ### `aug_relaxed_identity_min`
 **Type:** Float (%) | **Default:** `15.0` | **Range:** 5–50

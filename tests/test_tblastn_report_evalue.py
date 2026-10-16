@@ -1,8 +1,8 @@
 """tblastn in a search window reports to E 1000 (iterative_search_runner.TBLASTN_REPORT_EVALUE).
 
-The cutoff is not only an output filter: tblastn links HSPs by sum statistics only among
-the ones it keeps, so the old cutoff of 10 (min(aug_relaxed_evalue_cap, search_evalue x
-aug_relaxed_evalue_mult)) also changed the E-value of what it reported. The kept threshold
+The cutoff is not only an output filter: through tblastn's composition-based statistics
+(on by default) the old cutoff of 10 (min(aug_relaxed_evalue_cap, search_evalue x
+aug_relaxed_evalue_mult)) also changed the E-values it reported, in either direction. The kept threshold
 of the window search (E <= search_evalue x aug_relaxed_parse_evalue_mult = 0.1, identity
 >= 15 %) is applied when the output is read, as before.
 """

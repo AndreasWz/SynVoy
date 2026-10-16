@@ -450,7 +450,7 @@ These control per-process resource allocation. Override them for your hardware.
 | `--compute_tree_memory` | `4 GB` | RAM for COMPUTE_TREE. |
 | `--default_cpus` | `1` | CPUs for every process without its own override. |
 | `--default_memory` | `2 GB` | RAM for every process without its own override. |
-| `--default_time` | `4h` | Wall-clock limit for every process without its own override (matters on SLURM). |
+| `--default_time` | `4h` | Wall-clock limit for every process without its own override. Every executor enforces it, the local one too: a task is killed at its limit (and the 3-4 h limits of the search steps apply to every run), so give a long run a `-c` config with its own `process { time = ... }`. |
 | `--gpu_partition` | _(empty)_ | SLURM partition for the GPU-requiring steps (PLM / structural search). Only used by the SLURM profiles. |
 | `--gpu_cluster_options` | `--gres=gpu:1` | Extra `sbatch` options for those steps. A GPU job without a `--gres` request sits permanently pending. |
 | `--allow_missing_smith_waterman` | `false` | Proceed with Smith-Waterman disabled when parasail is unavailable, instead of failing loud. Degrades divergent-GOI recall — see [§8 parasail](#parasail-import-error-on-startup). |

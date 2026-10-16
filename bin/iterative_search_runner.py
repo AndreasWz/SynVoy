@@ -709,9 +709,9 @@ def score_goi_candidates(raw_candidates, by_parent) -> int:
     Kept as ``cand['bits']`` for the choice among overlapping candidates and written as
     ``Bits=`` on the candidate's mRNA/gene row; that protein is ``cand['judged_protein']``,
     on which the specificity is computed too. Until 2026-10-14 only hit chains carried a bit score
-    (that of their best single hit) and the choice went by identity; on the Candida pilot
-    bits picked the model on the curated gene in 29 of 31 genome pairs with several
-    models, identity in 16. Run after rebase_relative_candidates, so every candidate's
+    (that of their best single hit) and the choice went by identity (in the report's dedup
+    on the Candida pilot, bits picked the model on the curated gene in 29 of 31 genome pairs
+    with several models, identity in 16). Run after rebase_relative_candidates, so every candidate's
     parent is its home GOI. Returns how many candidates were scored.
     """
     n = 0
@@ -3375,8 +3375,8 @@ def run_augmented_mmseqs_with_retries(
     return False, last_details or "unknown augmented MMseqs failure"
 
 # E-value handed to tblastn in a search window, whatever the window search's own settings.
-# Not only an output filter: tblastn links HSPs by sum statistics only among those it keeps,
-# so its cutoff also changes the E-value of what it reports. With the old cutoff of 10
+# Not only an output filter: through tblastn's composition-based statistics (on by default)
+# its cutoff also changes the E-values it reports, in either direction. With the old cutoff of 10
 # (min(aug_relaxed_evalue_cap, search_evalue x aug_relaxed_evalue_mult)) the curated
 # ortholog of one hidden pair of the Candida pilot (2026-10-14) was absent from tblastn's
 # output in SynVoy's own 43-kb window and reported at E 0.005 with 1000. The kept threshold
