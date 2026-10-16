@@ -89,6 +89,7 @@ process ITERATIVE_SEARCH {
         --goi_chain_query_aware ${params.goi_chain_query_aware} \\
         --tandem_query_restart ${params.tandem_query_restart} \\
         --goi_first_exon_guard ${params.goi_first_exon_guard} \\
+        --goi_join_leftover_hits ${params.goi_join_leftover_hits} \\
         --goi_max_models_per_locus ${params.goi_max_models_per_locus} \\
         --goi_candidate_regions_per_query ${settings.goi_candidate_regions_per_query} \\
         --report_copies_in_slot ${settings.report_copies_in_slot} \\

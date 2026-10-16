@@ -780,6 +780,18 @@ For each GOI query:
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
    Both get an E-value in their place and are judged like every GOI candidate (§7.8); a
    `raw_hit` needs 60 % query coverage to be written, so it can be HIGH.
+   With `goi_join_leftover_hits` (off by default, batch G3B) a `rescued_exon` hit is first
+   offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM
+   (the home query or its decoy, not the relative's query): the hit must lie outside the
+   model on its strand and continue the query from the model's first or last CDS by the
+   rule of `goi_chain_query_aware` (at most 10 residues of overlap, the skipped residues
+   fit into the gap, within the GOI's intron bound), with no CDS of another gene model or
+   tandem copy in between. miniprot then runs again over the model and the hit (± 1 kb),
+   and the new model, judged like every candidate, replaces the old one only when its CDS
+   cover the hit and the judge's order (`rank_key`) puts it strictly first. It keeps the
+   old model's id and lists the joined hits (`JoinedHits=`); the `rescued_exon` rows of
+   the hits it covers are dropped. The join is tried after the window's judge, not inside
+   the model loop, because the label needs the window's place terms.
 
 Every candidate gets a bit score: the Smith-Waterman score against the home protein,
 BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`, of the best

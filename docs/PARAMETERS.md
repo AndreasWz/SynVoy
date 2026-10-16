@@ -516,6 +516,11 @@ How tandem copies of the GOI are found among its hits in a search window. Off (t
 
 A GOI gene model from miniprot is extended to its own start and stop codon (`refine_model_termini`). The search's hits cannot see an exon below about 10 to 15 aa, and miniprot rarely places a first exon of 5 to 16 aa, so a model often begins at the second exon; the walk upstream then reaches an ATG in the intron. With this switch (batch G3A, 2026-10-16) the walk is skipped when the home gene has two or more exons, its first exon is at most 30 aa, and the query residues missing before the model's first CDS are within 5 aa of that exon's length; the model then carries `FirstExon=missing` and `MissingQueryStart=1-<n>`. The same holds at the stop end (`LastExon=missing`, `MissingQueryEnd`). Labels do not read these attributes. Applies to the home query and its decoys only.
 
+### `goi_join_leftover_hits`
+**Type:** Boolean | **Default:** `false`
+
+A GOI hit that no gene model of its locus covers is written as a `rescued_exon` call, even when it is an exon miniprot left out of a model next to it. With this switch (batch G3B, 2026-10-16) such a hit is first offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM (the home query or its decoy): it must lie outside the model on its strand, continue the model's query from its first or last CDS (the rule of `goi_chain_query_aware`), lie within the GOI's intron bound (`goi_fallback_max_gap`), and no CDS of another gene model or tandem copy may lie in between. miniprot then models both again (± 1 kb); the new model replaces the old one only when it covers the hit and the label's order ranks it strictly first. It keeps the old model's id and lists the joined hits in `JoinedHits=`. Models found with the relative's query are not joined.
+
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
 

@@ -1443,6 +1443,7 @@ def judge_candidates(candidates) -> None:
         numbers = cand.get('judge_numbers') or {}
         conf, _basis = (_judge_attrs(a, 'EPlace', numbers) if 'EPlace' in a
                         else ('LOW', 'not_significant'))
+        cand['window_label'] = conf
         try:
             e = float(numbers['EPlace'] if 'EPlace' in numbers else a.get('EPlace', 'inf'))
             esyn = float(numbers['BlockEsyn'] if 'BlockEsyn' in numbers else a.get('BlockEsyn', 'inf'))
@@ -2439,6 +2440,112 @@ def merge_one_exon_pieces(chain: List[Dict[str, Any]], strand: str) -> List[Tupl
 def chain_query_attr(chain: List[Dict[str, Any]]) -> str:
     """``ChainQuery=`` of a hit chain: each hit's query interval, in query order."""
     return "ChainQuery=" + ",".join(f"{qs}-{qe}" for qs, qe in sorted(_hit_query_span(h) for h in chain))
+
+
+# A leftover hit joined into a confident gene model (batch G3B, --goi_join_leftover_hits, off
+# by default): miniprot runs again over the model and the hit, this far on each side.
+LEFTOVER_JOIN_PAD_BP = 1000
+
+
+def leftover_join_side(model_cds: List[Dict[str, Any]], hit: Dict[str, Any], strand: str,
+                       max_gap: Optional[int]) -> Optional[str]:
+    """``'before'`` / ``'after'`` when ``hit`` lies outside a gene model on the model's strand
+    and continues the query from the model's genomically first / last CDS by G1's rule
+    (_query_chain_link: no query restart, the skipped residues fit, at most ``max_gap``
+    away); None otherwise. ``model_cds`` and ``hit`` carry gstart, gend, qstart, qend in
+    one coordinate system (batch G3B)."""
+    if not model_cds or hit.get('strand', '+') != strand:
+        return None
+    ordered = sorted(model_cds, key=lambda c: int(c['gstart']))
+    first, last = ordered[0], ordered[-1]
+    if int(hit['gstart']) < int(first['gstart']) and int(hit['gend']) <= int(first['gend']):
+        return 'before' if _query_chain_link(hit, first, strand, max_gap)[0] else None
+    if int(hit['gend']) > int(last['gend']) and int(hit['gstart']) >= int(last['gstart']):
+        return 'after' if _query_chain_link(last, hit, strand, max_gap)[0] else None
+    return None
+
+
+def leftover_join_eligible(cand: Dict[str, Any], home_parents) -> bool:
+    """A gene model a leftover hit may join (batch G3B): judged HIGH or MEDIUM in the window,
+    of the home query or its decoy; never a model found with the relative's query."""
+    parent = cand.get('model_parent', '') or ''
+    return (cand.get('window_label') in ('HIGH', 'MEDIUM') and not parent.endswith(RELATIVE_QUERY_TAG)
+            and (parent in home_parents or is_decoy_parent(parent)))
+
+
+def join_crosses_other_model(gap: Tuple[int, int], others: List[Tuple[int, int]]) -> bool:
+    """True when an interval of ``others`` (the CDS of another gene model or a tandem copy)
+    lies in the gap between a leftover hit and the model it would join (batch G3B)."""
+    lo, hi = gap
+    return any(min(hi, e) - max(lo, b) > 0 for b, e in others)
+
+
+def _covers_hit(cds: List[Tuple[int, int]], hit: Dict[str, Any]) -> bool:
+    """More than half of the hit lies on the CDS (the rescued-exon loop's coverage rule)."""
+    h0, h1 = int(hit['gstart']), int(hit['gend'])
+    return sum(max(0, min(h1, e) - max(h0, b)) for b, e in cds) > 0.5 * max(1, h1 - h0)
+
+
+def _model_intervals(cand: Dict[str, Any]) -> List[Tuple[int, int]]:
+    """The CDS of a gene model or the pieces of a tandem copy, window coordinates."""
+    if cand.get('model_exons'):
+        return [(int(e['gstart']), int(e['gend'])) for e in cand['model_exons']]
+    return list(cand.get('copy_intervals') or [])
+
+
+def join_leftover_hits(cands: List[Dict[str, Any]], max_gap: Optional[int], eligible,
+                       rebuild) -> Tuple[List[Dict[str, Any]], int]:
+    """Join leftover hits into confident gene models of a judged window (batch G3B).
+
+    A leftover hit is a GOI hit that no model of its locus covered (its ``rescued_exon``
+    candidate carries ``leftover_hit`` and ``leftover_parent``). For each gene model that
+    ``eligible`` accepts (HIGH or MEDIUM, the home query or its decoy), best first, each
+    leftover hit of the same query parent, strongest first, that leftover_join_side links to
+    it and whose gap holds no CDS of another gene model or tandem copy is offered to
+    ``rebuild(model, hit)``: miniprot again over both, the joined model emitted and judged
+    like any model (None when there is none). It replaces the model only when its CDS cover
+    the hit and the judge's order (rank_key) puts it strictly first; the rescued_exon
+    candidates of the leftover hits it covers are dropped, and later hits are offered to the
+    joined model. Returns the new candidate list and the number of joins."""
+    out = list(cands)
+    if not any(c.get('leftover_hit') for c in out):
+        return out, 0
+    joins = 0
+    models = sorted((c for c in out if c.get('model_exons') and eligible(c)),
+                    key=lambda c: c.get('rank_key', ()))
+    for current in models:
+        if not any(current is c for c in out):
+            continue
+        parent = current.get('model_parent')
+        pool = sorted((c for c in out if c.get('leftover_hit') and c.get('leftover_parent') == parent),
+                      key=lambda c: (-float(c['leftover_hit'].get('bits', 0) or 0),
+                                     int(c['leftover_hit']['gstart']), int(c['leftover_hit']['gend'])))
+        for lc in pool:
+            if not any(lc is c for c in out):
+                continue
+            hit = lc['leftover_hit']
+            cds = current['model_exons']
+            side = leftover_join_side(cds, hit, current.get('model_strand', '+'), max_gap)
+            if side is None:
+                continue
+            near = (min(int(c['gstart']) for c in cds) if side == 'before'
+                    else max(int(c['gend']) for c in cds))
+            gap = (int(hit['gend']), near) if side == 'before' else (near, int(hit['gstart']))
+            others = [iv for c in out if c is not current for iv in _model_intervals(c)]
+            if join_crosses_other_model(gap, others):
+                continue
+            joined = rebuild(current, hit)
+            if joined is None:
+                continue
+            joined_cds = _model_intervals(joined)
+            if not _covers_hit(joined_cds, hit) or not joined.get('rank_key', ()) < current.get('rank_key', ()):
+                continue
+            out = [joined if c is current else c for c in out
+                   if not (c.get('leftover_hit') and c.get('leftover_parent') == parent
+                           and _covers_hit(joined_cds, c['leftover_hit']))]
+            current = joined
+            joins += 1
+    return out, joins
 
 
 def _query_union_coverage(hits: List[Dict[str, Any]], query_len: int) -> float:
@@ -4515,10 +4622,12 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         )
         return _compose_gff_attrs(base_attrs, native)
 
-    def _emit_exon_model(parent_id, parent_query_seq, exons, model_protein, tag):
+    def _emit_exon_model(parent_id, parent_query_seq, exons, model_protein, tag, sink=None):
         """One miniprot gene model as a GOI candidate. ``tag`` names it inside the block
         (``l1`` for the first model of locus 1, ``l1m2`` for a second gene found in the
-        same locus). Returns the model's exon intervals in window coordinates."""
+        same locus). Returns the model's exon intervals in window coordinates. ``sink``: the
+        list the candidate goes to (the window's candidates by default); the candidate keeps
+        its exons, parent, tag and strand for a later join (batch G3B)."""
         exons.sort(key=lambda e: e.get('qstart', 0))
         # miniprot's own translation of the model (in frame across
         # every intron phase and modelled frameshift); see
@@ -4565,7 +4674,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 f"{chrom}\texon_annotation\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t{exon_phase}\t{attrs}"
             )
 
-        raw_candidates.append({
+        (raw_candidates if sink is None else sink).append({
             'start': global_start,
             'end': global_end,
             'score': avg_pident,
@@ -4578,7 +4687,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     f"identity:{avg_pident:.1f}"
                 )
             },
-            'gff': cand_gff
+            'gff': cand_gff,
+            'model_exons': exons, 'model_parent': parent_id, 'model_tag': tag, 'model_strand': strand,
         })
         return [(e['gstart'], e['gend']) for e in exons]
 
@@ -4615,6 +4725,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             raw_candidates.append({
                 'start': global_start, 'end': global_end, 'score': copy.get('pident', 0),
                 'hit_based': True,
+                'copy_intervals': [(int(h['gstart']), int(h['gend'])) for h in copy_hits],
                 'record': {'id': copy_id, 'seq': copy['seq'],
                            'description': (f"coords:{global_start}-{global_end} parent:{parent_id} "
                                            f"tandem_copy identity:{copy.get('pident', 0):.1f}")},
@@ -4625,6 +4736,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             'start': global_start,
             'end': global_end,
             'score': copy.get('pident', 0),
+            'copy_intervals': [(int(copy['gstart']), int(copy['gend']))],
             'record': {
                 'id': copy_id,
                 'seq': copy['seq'],
@@ -5060,6 +5172,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                         'start': gs,
                                         'end': ge,
                                         'score': hit.get('pident', 0),
+                                        # A hit no model of the locus covers (batch G3B joins
+                                        # it into a confident model of its own query).
+                                        'leftover_hit': hit,
+                                        'leftover_parent': parent_id,
                                         'record': {
                                             'id': raw_id,
                                             'seq': hit_prot,
@@ -5621,7 +5737,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     if getattr(args, 'genome_ctx', None) is not None:
         args.genome_ctx.setdefault('block_slot', {})[block_idx] = (place_terms['slot'],
                                                                    place_terms['slot_inverted'])
-    def _judge_window(cands):
+    def _judge_all(cands):
         """Every candidate judged (label rework, step 4) before the choice among them.
         Specificity (an exhaustive search of the home proteome) only where it can matter:
         a candidate whose E-value in its place is above 1 is LOW whatever its specificity,
@@ -5636,6 +5752,49 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
                                  goi_query_by_parent, args)
         judge_candidates(cands)
+
+    join_parents = set(home_goi_parents(args))
+
+    def _rebuild_joined(model, hit):
+        """The model and a leftover hit modelled again (batch G3B): one miniprot run over both,
+        LEFTOVER_JOIN_PAD_BP on each side, emitted like the model (its id, with JoinedHits=)
+        and judged like every candidate; None without a model."""
+        parent = model['model_parent']
+        query = (goi_query_by_parent.get(parent) or {}).get('seq', '')
+        if not query:
+            return None
+        pieces = [{'gstart': int(e['gstart']), 'gend': int(e['gend'])} for e in model['model_exons']]
+        try:
+            with maybe_quiet_streams(args.quiet_subtools):
+                models = annotate_models_from_hit_list(
+                    pieces + [hit], query, subseq, chrom,
+                    home_structure=first_exon_guard_structure(args, parent),
+                    gap_search_window=LEFTOVER_JOIN_PAD_BP, sensitive=True, max_models=1)
+        except Exception as exc:  # pragma: no cover - defensive: the old model stays
+            logger.warning(f"[{genome_name}] leftover join for {model['record']['id']} failed: {exc}")
+            return None
+        if not models:
+            return None
+        exons, protein = models[0]
+        sink = []
+        _emit_exon_model(parent, query, exons, protein, model['model_tag'], sink=sink)
+        joined = sink[0]
+        joined['joined_hits'] = sorted(model.get('joined_hits', []) + [_hit_query_span(hit)])
+        joined['gff'][0] += ";JoinedHits=" + ",".join(f"{a}-{b}" for a, b in joined['joined_hits'])
+        _judge_all([joined])
+        return joined
+
+    def _judge_window(cands):
+        """The judged candidates (_judge_all), with --goi_join_leftover_hits (batch G3B) the
+        leftover hits joined into confident models, then the choice among them."""
+        _judge_all(cands)
+        if getattr(args, 'goi_join_leftover_hits', False):
+            cands, n_joined = join_leftover_hits(
+                cands, getattr(args, 'goi_fallback_max_gap', args.max_intron),
+                lambda c: leftover_join_eligible(c, join_parents), _rebuild_joined)
+            if n_joined:
+                logger.info(f"[{genome_name}] block {block_idx}: {n_joined} leftover hit(s) joined "
+                            f"into gene models (--goi_join_leftover_hits)")
         # The full-precision terms for the genome-end label and the seed rule (RF-1f).
         _numbers = (args.genome_ctx.setdefault('judge_numbers', {})
                     if getattr(args, 'genome_ctx', None) is not None else {})
@@ -7746,6 +7905,12 @@ def main():
                              "the missing query residues within 5 aa of it), do not walk to an ATG "
                              "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
                              "instead. Home GOI and decoys only (batch G3A; off by default)")
+    parser.add_argument("--goi_join_leftover_hits", type=str2bool, default=False,
+                        help="Join a GOI hit that no gene model covers into a confident (HIGH or "
+                             "MEDIUM) model of the home query or its decoy when it continues the "
+                             "model's query on its strand, within goi_fallback_max_gap and with no "
+                             "other model in between: miniprot again over both, kept only when the "
+                             "judge ranks the joined model strictly first (batch G3B; off by default)")
     parser.add_argument("--tandem_query_restart", type=str2bool, default=False,
                         help="Tandem copies of the GOI are query restarts: copies built per strand "
                              "from hits that continue the query, counted at >= 0.35 union "
