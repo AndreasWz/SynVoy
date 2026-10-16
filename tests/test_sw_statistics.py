@@ -111,7 +111,7 @@ def test_pieces_cover_the_frame_and_overlap_by_twice_the_query():
         assert any(s <= start and start + 2 * qlen <= s + len(p) for s, p in pieces)
 
 
-def _run_main(tmp_path, monkeypatch, query, window, name, max_cells=None):
+def _run_main(tmp_path, monkeypatch, query, window, name, max_cells=None, extra=()):
     q, t, o = tmp_path / f"{name}.faa", tmp_path / f"{name}.fna", tmp_path / f"{name}.m8"
     q.write_text(f">GOI_q\n{query}\n")
     t.write_text(f">region_seq\n{window}\n")
@@ -119,7 +119,7 @@ def _run_main(tmp_path, monkeypatch, query, window, name, max_cells=None):
         monkeypatch.setattr(sws, "SW_MAX_CELLS", max_cells)
     monkeypatch.setattr(sys, "argv", ["smith_waterman_search.py", "--query", str(q), "--target", str(t),
                                       "--output", str(o), "--min_score", "20", "--min_identity", "10.0",
-                                      "--method", "parasail"])
+                                      "--method", "parasail", *extra])
     sws.main()
     return [line.rstrip("\n").split("\t") for line in o.read_text().splitlines() if line.strip()]
 
@@ -162,3 +162,65 @@ def test_a_query_too_long_for_the_traceback_is_skipped_with_a_message(tmp_path, 
     assert "Smith-Waterman skipped for GOI_q: 70 aa" in capsys.readouterr().err
     monkeypatch.setattr(sws, "SW_MAX_QUERY_LEN", 10_000)
     assert _run_main(tmp_path, monkeypatch, QUERY, dna[:1_500] + gene + dna[1_500:], "ok")
+
+
+# ---------------------------------------------------------------- several alignments per piece
+def _gene(protein):
+    return ''.join(CODON[a] for a in protein)
+
+
+def test_two_copies_in_one_frame_are_both_reported_with_three_alignments(tmp_path, monkeypatch):
+    """The best alignment of a piece hides a second copy in the same frame: at the default
+    one of the two is reported, at 3 both, each at its own coordinates."""
+    rng = random.Random(41)
+    dna = ''.join(rng.choice("ACGT") for _ in range(9_000))
+    gene = _gene(QUERY)
+    first, second = 2_400, 2_400 + len(gene) + 900          # same frame: 900 is a multiple of 3
+    window = dna[:first] + gene + dna[first:first + 900] + gene + dna[first + 900:]
+    copies = {(first + 1, first + len(gene)), (second + 1, second + len(gene))}
+
+    def strong(rows):
+        return {(int(r[8]), int(r[9])) for r in rows if float(r[10]) < 1e-10}
+
+    assert len(strong(_run_main(tmp_path, monkeypatch, QUERY, window, "one"))) == 1
+    three = _run_main(tmp_path, monkeypatch, QUERY, window, "three",
+                      extra=("--max_alignments_per_piece", "3"))
+    assert strong(three) == copies
+
+
+def test_three_alignments_add_nothing_without_a_real_hit(tmp_path, monkeypatch):
+    """Without an alignment at E <= 1 a piece gives its best alignment only, as at 1."""
+    window = ''.join(random.Random(43).choice("ACGT") for _ in range(30_000))
+    one = _run_main(tmp_path, monkeypatch, QUERY, window, "one")
+    three = _run_main(tmp_path, monkeypatch, QUERY, window, "three",
+                      extra=("--max_alignments_per_piece", "3"))
+    assert all(float(r[10]) > 1 for r in one)
+    assert three == one
+
+
+# Pieces of 1,400 residues overlapping by 140: at these positions half of the copy lies in
+# the last 35 residues of a piece (frame residues 1,365-1,434 or 2,625-2,694).
+@pytest.mark.parametrize("strand,position", [("+", 4_095), ("-", 55_905), ("+", 7_875)])
+def test_a_copy_across_a_piece_border_is_reported_once_and_whole(tmp_path, monkeypatch, position, strand):
+    """Overlapping pieces see the same copy, one of them cut at its edge. At 3 the copy is
+    reported once, with the coordinates of the undivided run; without the edge rule it came
+    back as two halves (a part of it scores E <= 1; chance alignments of the other frames
+    over the same DNA do not)."""
+    rng = random.Random(23)
+    dna = ''.join(rng.choice("ACGT") for _ in range(60_000))
+    gene = _gene(QUERY)
+    if strand == "-":
+        gene = gene[::-1].translate(str.maketrans("ACGT", "TGCA"))
+    window = dna[:position] + gene + dna[position:]
+    rows = _run_main(tmp_path, monkeypatch, QUERY, window, "pieces", max_cells=len(QUERY) * 1_400,
+                     extra=("--max_alignments_per_piece", "3"))
+    at_gene = [r for r in rows if float(r[10]) <= 1
+               and min(int(r[8]), int(r[9])) <= position + len(gene) and max(int(r[8]), int(r[9])) > position]
+    assert len(at_gene) == 1
+    assert sorted((int(at_gene[0][8]), int(at_gene[0][9]))) == [position + 1, position + len(gene)]
+    assert float(at_gene[0][10]) < 1e-10
+
+
+def test_the_option_must_be_positive(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _run_main(tmp_path, monkeypatch, QUERY, "ACGT" * 100, "zero", extra=("--max_alignments_per_piece", "0"))

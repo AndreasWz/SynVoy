@@ -591,6 +591,13 @@ piece is returned; up to 1.1 Mb of window for a 550-aa query nothing changes. A 
 longer than 10,000 aa is not searched with Smith-Waterman (a warning says so): the
 memory of one piece grows with the square of the query length. A missing
 Smith-Waterman backend stops the run (`allow_missing_smith_waterman = false`).
+With `sw_max_alignments_per_piece` above 1 (default 1), a piece is aligned again after
+each alignment, with the residues of that alignment masked in the frame (`*`), and
+further alignments are returned while their E-value is at most 1, up to that number per
+piece: a second exon or a second copy of the gene in the same frame is otherwise hidden
+behind the best alignment. An alignment that runs through a masked span ends the piece;
+one that ends on the last residue of a piece is left to the next piece, which holds it
+whole.
 
 MMseqs2 runs with E ≤ 10 and tblastn with E ≤ 1000; the limit of 0.1 is applied when
 their output is read. tblastn's cutoff is wide on purpose: it links HSPs by sum statistics

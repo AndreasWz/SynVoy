@@ -186,6 +186,104 @@ def smith_waterman_parasail(query_seq, target_seq, matrix_name='BLOSUM62',
     }
 
 
+# A reported alignment is masked with this residue before the piece is aligned again.
+# '*' scores -4 against every residue in BLOSUM62, so no alignment starts or ends on a
+# masked residue; 'X' scores 0 against A, S and T, and an alignment could end on a masked
+# residue and be refused as an overlap.
+MASK_RESIDUE = '*'
+
+
+def several_alignments(query_seq, frame_seq, max_alignments, evalue_of, matrix_name='BLOSUM62',
+                       gap_open=11, gap_extend=1, max_cells=None):
+    """Up to ``max_alignments`` local alignments of the query in each piece of one translated
+    frame, as [(result, piece_start)] with ``result`` as smith_waterman_parasail returns it.
+
+    The first alignment of a piece is the one the single-alignment loop reports, unless an
+    earlier piece masked part of it. After each alignment its residues are masked in FRAME
+    coordinates, so a later piece that overlaps this one does not find it again, and the
+    piece is aligned again: a score-only pass first, and a traceback only when the E-value of
+    that score (``evalue_of``) is at most 1. A piece stops after ``max_alignments``
+    alignments, at a further alignment with E > 1, after a first alignment with E > 1 (no
+    later one can score higher), or when an alignment runs through a masked span (not
+    reported; counted in the second return value). An alignment that ends on the last residue
+    of a piece with a successor is masked in this piece only: the next piece holds it whole.
+    """
+    if max_cells is None:
+        max_cells = SW_MAX_CELLS
+    matrix = parasail.blosum62 if matrix_name == 'BLOSUM62' else parasail.pam100
+    p_open, p_extend = to_parasail_gaps(gap_open, gap_extend)
+    masked = bytearray(len(frame_seq))
+    found, refused = [], 0
+    pieces = protein_chunks(frame_seq, len(query_seq), max_cells)
+    for idx, (piece_start, piece) in enumerate(pieces):
+        has_next = idx < len(pieces) - 1
+        local_mask = bytearray(masked[piece_start:piece_start + len(piece)])
+        residues = [MASK_RESIDUE if m else aa for aa, m in zip(piece, local_mask)]
+        kept, deferred = 0, False
+        while kept < max_alignments:
+            text = ''.join(residues)
+            if kept or deferred:
+                score = parasail.sw_striped_32(query_seq, text, p_open, p_extend, matrix).score
+                if score <= 0 or evalue_of(score) > 1:
+                    break
+            result = smith_waterman_parasail(query_seq, text, matrix_name, gap_open, gap_extend)
+            if result['score'] <= 0:
+                break
+            end = result['end_ref']
+            start = end - result['ref_consumed'] + 1
+            if any(local_mask[start:end + 1]):
+                refused += 1
+                break
+            for i in range(start, end + 1):
+                local_mask[i] = 1
+                residues[i] = MASK_RESIDUE
+            if has_next and end == len(piece) - 1 and not deferred:
+                deferred = True
+                continue
+            masked[piece_start + start:piece_start + end + 1] = b'\x01' * (end - start + 1)
+            found.append((result, piece_start))
+            kept += 1
+            if evalue_of(result['score']) > 1:
+                break
+    return found, refused
+
+
+def sw_hit(q_id, t_id, result, piece_start, frame_id, offset, target_len,
+           query_len, search_space_len, args):
+    """One m8 record of a parasail result in a piece of a translated frame."""
+    end_ref = result['end_ref'] + piece_start
+    start_ref = end_ref - result['ref_consumed'] + 1
+    start_query = result['end_query'] - result['query_consumed'] + 1
+    if frame_id.startswith('+'):
+        # Forward frame: protein pos p -> DNA pos offset + p*3
+        dna_start = offset + start_ref * 3 + 1  # 1-based
+        dna_end = offset + (end_ref + 1) * 3  # 1-based inclusive
+    else:
+        # Reverse frame: positions are in reverse-complement space
+        # Convert back to forward strand coordinates.
+        # BLAST m8 convention: tstart > tend signals minus strand.
+        rc_start = offset + start_ref * 3
+        rc_end = offset + (end_ref + 1) * 3 - 1
+        dna_start = target_len - rc_start     # larger coord (1-based)
+        dna_end = target_len - rc_end         # smaller coord (1-based)
+    bits, evalue = karlin_altschul(result['score'], query_len, search_space_len,
+                                   args.gap_open, args.gap_extend, args.matrix)
+    return {
+        'query': q_id,
+        'target': t_id,
+        'pident': result['identity'],
+        'alnlen': result['length'],
+        'mismatch': result['mismatch'],
+        'gapopen': result['gapopen'],
+        'qstart': start_query + 1,
+        'qend': result['end_query'] + 1,
+        'tstart': dna_start,
+        'tend': dna_end,
+        'evalue': evalue,
+        'bits': bits,
+    }
+
+
 def smith_waterman_ssearch(query_faa, target_fna, output_tsv, threads=1):
     """
     Perform iterative Smith-Waterman search using Parasail (if available) or ssearch36.
@@ -559,9 +657,17 @@ def main():
     parser.add_argument("--genetic_code", type=int, default=1,
                         help="NCBI genetic code of the target DNA, for the six-frame "
                              "translation (default 1, the standard code)")
-    
+    parser.add_argument("--max_alignments_per_piece", type=int, default=1,
+                        help="Local alignments reported per piece of a translated frame "
+                             "(parasail only). 1 (default): the best one. Above 1: after each "
+                             "alignment its residues are masked and the piece is aligned again, "
+                             "while the E-value stays at most 1 (several exons or copies in one "
+                             "frame)")
+
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    if args.max_alignments_per_piece < 1:
+        parser.error("--max_alignments_per_piece must be at least 1")
     
     # Decide method
     method = args.method
@@ -571,6 +677,9 @@ def main():
     print(f"Using Smith-Waterman implementation: {method}", file=sys.stderr)
     
     if method == "ssearch36":
+        if args.max_alignments_per_piece > 1:
+            print("Warning: --max_alignments_per_piece applies to the parasail path only; "
+                  "ssearch36 reports its own alignments.", file=sys.stderr)
         # Use external ssearch36 program
         smith_waterman_ssearch(args.query, args.target, args.output, args.threads)
     
@@ -588,6 +697,7 @@ def main():
         targets = list(parse_fasta(args.target))
         
         hits = []
+        refused_total = 0
         # Validate the statistics up front (fails loud on an unsupported matrix/gap pair).
         karlin_altschul(0, 1, 1, args.gap_open, args.gap_extend, args.matrix)
         target_frames = [(t_id, t_seq, translate_in_six_frames(t_seq))
@@ -606,6 +716,24 @@ def main():
 
             for t_id, t_seq, frames in target_frames:
                 for frame_id, prot_seq, offset in frames:
+                    if args.max_alignments_per_piece > 1:
+                        try:
+                            found, refused = several_alignments(
+                                q_seq, prot_seq, args.max_alignments_per_piece,
+                                lambda score: karlin_altschul(
+                                    score, len(q_seq), search_space_len,
+                                    args.gap_open, args.gap_extend, args.matrix)[1],
+                                args.matrix, args.gap_open, args.gap_extend)
+                        except Exception as e:
+                            print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
+                                  file=sys.stderr)
+                            continue
+                        refused_total += refused
+                        for result, piece_start in found:
+                            if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
+                                hits.append(sw_hit(q_id, t_id, result, piece_start, frame_id, offset,
+                                                   len(t_seq), len(q_seq), search_space_len, args))
+                        continue
                     for piece_start, piece in protein_chunks(prot_seq, len(q_seq), SW_MAX_CELLS):
                         # Run Smith-Waterman
                         try:
@@ -616,51 +744,19 @@ def main():
 
                             # Filter by thresholds
                             if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
-                                # Convert protein coordinates back to DNA coordinates
-                                end_ref = result['end_ref'] + piece_start
-                                start_ref = end_ref - result['ref_consumed'] + 1
-                                start_query = result['end_query'] - result['query_consumed'] + 1
-
-                                if frame_id.startswith('+'):
-                                    # Forward frame: protein pos p -> DNA pos offset + p*3
-                                    dna_start = offset + start_ref * 3 + 1  # 1-based
-                                    dna_end = offset + (end_ref + 1) * 3  # 1-based inclusive
-                                else:
-                                    # Reverse frame: positions are in reverse-complement space
-                                    # Convert back to forward strand coordinates.
-                                    # BLAST m8 convention: tstart > tend signals minus strand.
-                                    L = len(t_seq)
-                                    rc_start = offset + start_ref * 3
-                                    rc_end = offset + (end_ref + 1) * 3 - 1
-                                    dna_start = L - rc_start     # larger coord (1-based)
-                                    dna_end = L - rc_end         # smaller coord (1-based)
-
-                                if (t_id, dna_start, dna_end) in seen:
+                                hit = sw_hit(q_id, t_id, result, piece_start, frame_id, offset,
+                                             len(t_seq), len(q_seq), search_space_len, args)
+                                if (t_id, hit['tstart'], hit['tend']) in seen:
                                     continue
-                                seen.add((t_id, dna_start, dna_end))
-
-                                bits, evalue = karlin_altschul(
-                                    result['score'], len(q_seq), search_space_len,
-                                    args.gap_open, args.gap_extend, args.matrix)
-                                # BLAST m8 format output
-                                hits.append({
-                                    'query': q_id,
-                                    'target': t_id,
-                                    'pident': result['identity'],
-                                    'alnlen': result['length'],
-                                    'mismatch': result['mismatch'],
-                                    'gapopen': result['gapopen'],
-                                    'qstart': start_query + 1,
-                                    'qend': result['end_query'] + 1,
-                                    'tstart': dna_start,
-                                    'tend': dna_end,
-                                    'evalue': evalue,
-                                    'bits': bits,
-                                })
+                                seen.add((t_id, hit['tstart'], hit['tend']))
+                                hits.append(hit)
                         except Exception as e:
                             print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
                                   file=sys.stderr)
                             continue
+        if refused_total:
+            print(f"Smith-Waterman: {refused_total} further alignment(s) ran through an already "
+                  f"reported one; those pieces were searched no further.", file=sys.stderr)
 
         # Write output
         with open(args.output, 'w') as f:

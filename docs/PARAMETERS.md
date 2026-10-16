@@ -414,6 +414,11 @@ A floor on the identity of a Smith-Waterman hit, applied together with `sw_min_s
 
 The maximum time in seconds allowed for a single Smith-Waterman search invocation. SW alignment is O(m*n) where m is the query length and n is the target region length; for large regions (>1 Mb) or large query proteins (>1000 aa), this can take several minutes even with SIMD-accelerated parasail. The timeout prevents a single pathological case (e.g., a highly repetitive region) from stalling the entire pipeline. When the timeout is hit, the SW search for that specific region is aborted and the pipeline proceeds with whatever tblastn and miniprot hits were found. The default of 300 seconds (5 minutes) is sufficient for most cases. Increase this for very large query proteins or when running on slow hardware; decrease it if you prioritize throughput over exhaustive sensitivity. The timeout applies per-region, not per-genome.
 
+### `sw_max_alignments_per_piece`
+**Type:** Integer | **Default:** `1` | **Range:** 1–10
+
+How many Smith-Waterman alignments are returned per piece of a translated reading frame (a frame is one piece unless query length × frame length exceeds 200 million cells). At 1 the best alignment of each piece is returned, as before. Above 1, the residues of each alignment are masked and the piece is aligned again; further alignments are returned while their E-value is at most 1 (the filter the search applies to Smith-Waterman hits anyway), up to this number. Two copies of the gene, or two exons, in the same frame of a window are otherwise reported as one: the second is hidden behind the best alignment. A piece without an alignment at E ≤ 1 costs the same as at 1; each further alignment costs one score-only pass and one traceback, which counts against `sw_timeout_seconds`. Applies to the parasail backend only.
+
 ---
 
 ## 7. Augmented / Relaxed Search

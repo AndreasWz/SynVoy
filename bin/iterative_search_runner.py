@@ -3204,6 +3204,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     "--threads", str(threads),
                     "--method", str(args.sw_method)
                 ] + genetic_code_flag("synvoy")
+                if args.sw_max_alignments_per_piece > 1:
+                    sw_cmd += ["--max_alignments_per_piece", str(args.sw_max_alignments_per_piece)]
                 
                 result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=args.sw_timeout_seconds)
                 
@@ -7058,6 +7060,10 @@ def main():
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=300)
+    parser.add_argument("--sw_max_alignments_per_piece", type=int, default=1,
+                        help="Smith-Waterman alignments reported per piece of a translated frame: "
+                             "1 = the best one; above 1, further ones while E <= 1 (several "
+                             "exons or copies in one frame)")
     parser.add_argument("--aug_relaxed_evalue_mult", type=float, default=1000.0)
     parser.add_argument("--aug_relaxed_evalue_cap", type=float, default=10.0)
     parser.add_argument("--aug_relaxed_parse_evalue_mult", type=float, default=10.0)
@@ -7505,6 +7511,9 @@ def main():
         sys.exit(1)
     if args.sw_timeout_seconds < 1:
         logger.error(f"sw_timeout_seconds must be >= 1 (got {args.sw_timeout_seconds})")
+        sys.exit(1)
+    if args.sw_max_alignments_per_piece < 1:
+        logger.error(f"sw_max_alignments_per_piece must be >= 1 (got {args.sw_max_alignments_per_piece})")
         sys.exit(1)
 
     # SW is the load-bearing tier for divergent GOI recovery (e.g. re-finding a 26-40 %

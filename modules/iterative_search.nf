@@ -64,6 +64,7 @@ process ITERATIVE_SEARCH {
         --sw_min_score ${settings.sw_min_score} \\
         --sw_min_identity ${settings.sw_min_identity} \\
         --sw_timeout_seconds ${params.sw_timeout_seconds} \\
+        --sw_max_alignments_per_piece ${params.sw_max_alignments_per_piece} \\
         --aug_relaxed_evalue_mult ${params.aug_relaxed_evalue_mult} \\
         --aug_relaxed_evalue_cap ${params.aug_relaxed_evalue_cap} \\
         --aug_relaxed_parse_evalue_mult ${params.aug_relaxed_parse_evalue_mult} \\

@@ -314,6 +314,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--sw_min_score` | `20` | Minimum SW alignment score to report a hit |
 | `--sw_min_identity` | `10.0` | Minimum identity (%) for SW hits |
 | `--sw_timeout_seconds` | `300` | Timeout per SW search invocation |
+| `--sw_max_alignments_per_piece` | `1` | SW alignments per piece of a frame; above 1, further exons or copies in the same frame while E ≤ 1 |
 
 ### Window search thresholds
 
