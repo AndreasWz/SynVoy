@@ -146,7 +146,7 @@ Supply your own query FASTA, reference genome, and target genome files. Works of
 > what you are on with `./run_synvoy.sh --check-only` (it prints the version banner and
 > warns when you are behind the remote), then `git pull`.
 >
-> **What it buys you:** matched target models gain `TargetGene` / `TargetProduct` / `TargetID` attributes in the output GFF and the `target_gene` / `target_product` report columns — i.e. you can see *which annotated gene* a call landed on. This is read-out evidence, not a scoring input: annotations do not move synteny blocks, region scores, or confidence. The only mechanism that acts on them is the family-consistency gate (`--strict_goi_family`, default `false`), which can **demote** a weak call whose target gene name disagrees with `--goi_family_tokens`. If you enable it, set `--goi_family_tokens` for your gene explicitly — the automatic derivation does not work (see PARAMETERS.md), and without tokens the gate switches itself off. `preset_paralog_discrimination` turns the gate on but, since 2026-10-05, no longer supplies tokens of its own (it used to carry the TP53 family names into every large-family query it was auto-applied to).
+> **What it buys you:** matched target models gain `TargetGene` / `TargetProduct` / `TargetID` attributes in the output GFF and the `target_gene` / `target_product` report columns — i.e. you can see *which annotated gene* a call landed on. This is read-out evidence, not a scoring input: annotations do not move synteny blocks, region scores, or confidence. With `--goi_family_tokens` (your gene's family names), every GOI row also records whether its target gene name carries one of them (`GoiFamilyConsistent`); that is annotation only since 2026-10-15, when the strict gate that demoted calls by name (`--strict_goi_family`) was removed.
 
 ---
 
@@ -206,12 +206,12 @@ Trade-off: tighter tiers are slower (more MMseqs splits, less parallelism) and s
 
 | Profile | Use for |
 |---|---|
-| `preset_short_peptide` | Queries shorter than 100 aa: identity thresholds 40 / 30, coverage bands 0.5 / 0.3, single-segment tandem copies from 40 %. |
-| `preset_paralog_discrimination` | The query aligns well at two or more places of the home genome (a family on several chromosomes): fewer candidate regions per genome in the figures. Add `--goi_family_tokens` to name the relatives. |
+| `preset_short_peptide` | Queries shorter than 100 aa: coverage bands of the model status 0.5 / 0.3. |
+| `preset_paralog_discrimination` | The query aligns well at two or more places of the home genome (a family on several chromosomes): fewer candidate regions per genome in the figures. |
 | `preset_tandem_family` | The home locus itself holds more than one copy of the gene: distant family members are not used as anchors either. |
-| `preset_single_copy` | Everything else. Equal to the defaults unless `--goi_family_tokens` is given. |
+| `preset_single_copy` | Everything else. Equal to the defaults. |
 
-Each preset holds only the values that have a reason for that kind of query; the table of values and the measurements behind them are in [PARAMETERS.md](PARAMETERS.md#quick-start-pick-a-preset).
+Each preset holds only the values that have a reason for that kind of query; the table of values and the measurements behind them are in [PARAMETERS.md](PARAMETERS.md#quick-start-pick-a-preset). No preset moves the label of a GOI call: one judge sets it for every query ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)).
 
 > **Auto-apply (since 2026-05-29, default ON):** if you don't pick a preset, SynVoy picks one for you after `LOCATE_GENE` from the hit distribution and applies it at runtime to `EXTRACT_FLANKING` / `ITERATIVE_SEARCH` / `CLUSTER_REGIONS` via a value channel — no restart needed. The chosen preset is logged as `[INFO] §1f preset applied: …` and dumped to `intermediate/locate_gene/effective_params.json`. Pin one with `--preset_override preset_X`, opt out with `--auto_apply_preset false`. **A value you set yourself wins over the preset**: any preset-covered parameter that differs from the shipped default — set on the command line, in a params file, a `-c` config or a `-profile` — is kept, and `effective_params.json` lists it under `user_set_kept` (before 2026-10-05 the preset silently overwrote it). The one case this cannot see is passing the shipped default explicitly; use `--auto_apply_preset false` to pin that. The other caveat: `NORMALIZE_QUERY.min_query_length` is resolved before LOCATE_GENE runs, so short queries (< 30 aa) still need `--min_query_length 20` or `-profile preset_short_peptide` set at launch. See [docs/PARAMETERS.md §19](PARAMETERS.md#19-auto-apply-preset-self-consistency--rescue) for the full toggle list.
 
@@ -358,19 +358,11 @@ One search per window (the names date from a design with several relaxed rounds)
 
 ### Gene Model Classification
 
-Controls the confidence labels (HIGH / MEDIUM / AMBIGUOUS / LOW) and model status labels (complete/partial/fragment) assigned to gene models in GFF output.
+The confidence label (HIGH / MEDIUM / AMBIGUOUS / LOW, with `Basis`) of a GOI call has no parameters: one judge sets it from the E-value in the expected place, specificity against the home proteome and completeness ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)); the identity thresholds of the earlier label were removed on 2026-10-15 ([PARAMETERS.md § 20](PARAMETERS.md#20-removed-parameters)). The parameters below set the model status labels (complete/partial/fragment) and the report's coverage rule.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--classify_high_min_identity` | `50.0` | Min identity (%) for a HIGH gene model. HIGH also needs two exons, or one exon when the home gene has one. No preset raises it any more (two used 55). |
-| `--classify_medium_min_identity` | `40.0` | Min identity (%) for a MEDIUM gene model (35 before; of 60 benchmark models below 40 % none was on a curated gene). `preset_short_peptide`: 30. |
-| `--classify_high_min_collinear` | `3` | Once a block has ≥3 flanking genes, HIGH additionally requires a collinear run of home-ordered flanking at least this long — a scrambled paralog neighbourhood is capped at MEDIUM even at high identity. `0` restores the legacy count-only behaviour. |
-| `--strict_goi_family` | `false` | Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated `TargetGene`/`TargetProduct` does not contain a family token. Useful for multi-paralog queries (e.g. TP53 family). |
-| `--goi_family_tokens` | _(empty)_ | Comma-separated family name tokens for `--strict_goi_family`. **Set it explicitly**: the automatic derivation from the query header does not work in practice, and with no tokens the gate disables itself (a warning in the `ITERATIVE_SEARCH` log). |
-| `--classify_tandem_min_identity` | `50.0` | Min identity (%) for a MEDIUM single-segment tandem copy (40 before; `preset_short_peptide`: 40). Below this the row is LOW. |
-| `--classify_tandem_min_qcov` | `0.35` | Min query coverage for a MEDIUM tandem copy. A high-identity but short local window (its true low coverage now recorded) is demoted to LOW — stops a 7–20 aa micro-window from masquerading as a full tandem copy. Since 2026-09 a tandem copy also needs context for MEDIUM: either strong flanking support in its block or query coverage ≥ 0.65; otherwise it is LOW (`goi_tandem_copy_weak_context`). |
-| `--classify_fallback_strong_min_identity_floor` | `30.0` | Identity floor for the "many flanking genes" route to MEDIUM for hit-chain calls. Without it any hit in a flanking-rich block reached MEDIUM at any identity. `0` = legacy. |
-| `--disable_ambiguous_tier` | `false` | `true` restores the pre-2026-08-31 behaviour, where a candidate promoted only by flanking support was `MEDIUM`. By default it is `AMBIGUOUS` (`syntenic_candidate_unconfirmed`): named in the report and drawn in the plots, but not counted as an ortholog. |
+| `--goi_family_tokens` | _(empty)_ | Comma-separated family names. Every GOI row then records whether the target's own annotation of the gene carries one (`GoiFamilyConsistent`, `GoiFamilyReason`). Annotation only: no label changes. |
 | `--identity_decoupled_min_identity` | `50.0` | With the next row: a call at or above this identity … |
 | `--identity_decoupled_max_qcov` | `0.35` | … whose *recorded* query coverage is below this is relabelled `identity_coverage_decoupled` and dropped from the headline counts (a 10 aa window at 100 % is not an ortholog). |
 | `--disable_coverage_demotion` | `false` | `true` keeps that rule advisory only (a flag in `self_consistency`, no demotion). |
@@ -536,21 +528,6 @@ treat it as a hint.
 | `--phylo_placement_min_calls` | `4` | Species with calls needed before the fit is attempted. |
 | `--phylo_placement_z_threshold` | `2.0` | Residual z-score at or above which a call is `phylo_discordant`. |
 | `--phylo_placement_promote` | `false` | Promote an `AMBIGUOUS` call that is `phylo_concordant` to `MEDIUM`. Not recommended yet. |
-
-### Distance Auto-Tuning
-
-Relaxes the HIGH/MEDIUM identity bars for distant targets, using the observed flanking
-identity as the divergence estimate.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `--disable_distance_autotune` | `false` | Keep one global stringency for every target instead. |
-| `--distance_autotune_close_pct` | `70.0` | Median flanking identity ≥ this → no relaxation. |
-| `--distance_autotune_far_pct` | `40.0` | Median flanking identity ≤ this → full relaxation, and calls are tagged `manual_review`. |
-| `--distance_autotune_max_relax` | `10.0` | Max identity-points subtracted from the HIGH/MEDIUM bars. |
-| `--distance_autotune_min_flanking` | `3` | Minimum flanking genes needed before the estimate is trusted. |
-| `--distance_autotune_high_floor` | `45.0` | The relaxation never lowers the HIGH identity threshold below this; a threshold already at or below it (short peptides: 40) is not relaxed. `0` = no floor. |
-| `--distance_autotune_medium_floor` | `30.0` | The same for the MEDIUM threshold (short peptides: 30). |
 
 ### Structural Discovery (experimental, GPU)
 

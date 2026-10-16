@@ -35,13 +35,9 @@ DEFAULTS = {
     "sw_min_identity": 30.0,
     "min_hit_identity": 25,
     "min_hit_length": 20,
-    "classify_high_min_identity": 50.0,
-    "classify_medium_min_identity": 40.0,
-    "classify_tandem_min_identity": 40.0,
     "classify_fragment_max_qcov": 0.4,
     "classify_complete_min_qcov": 0.7,
     "expand_goi_similar": True,
-    "strict_goi_family": False,
     "goi_family_tokens": "",
     "goi_relative_evalue": 1e-5,
     "adaptive_score_floor_frac": 0.3,
@@ -67,15 +63,12 @@ def test_auto_preset_applies_overrides_and_traces_source():
     # Spot-check the key overrides land.
     assert res["settings"]["adaptive_score_floor_frac"] == 0.45
     assert res["settings"]["adaptive_max_regions"] == 4
-    assert res["settings"]["strict_goi_family"] is True
-    # Unaffected keys keep defaults. Since 2026-10-08 that includes the HIGH / MEDIUM
-    # identity thresholds, which this preset used to raise to 55 / 40.
+    # Unaffected keys keep defaults.
     assert res["settings"]["sw_min_score"] == DEFAULTS["sw_min_score"]
-    assert res["settings"]["classify_high_min_identity"] == DEFAULTS["classify_high_min_identity"]
-    assert res["settings"]["classify_medium_min_identity"] == DEFAULTS["classify_medium_min_identity"]
+    assert res["settings"]["classify_complete_min_qcov"] == DEFAULTS["classify_complete_min_qcov"]
     # Source trace marks the touched keys.
     assert res["source"]["adaptive_max_regions"].startswith("preset:")
-    assert res["source"]["classify_tandem_min_identity"] == "default"
+    assert res["source"]["goi_relative_evalue"] == "default"
     assert res["source"]["sw_min_score"] == "default"
 
 
@@ -84,10 +77,8 @@ def test_explicit_override_beats_auto_preset():
     auto = {"preset": "preset_short_peptide"}
     res = rep.resolve(DEFAULTS, auto_preset=auto, preset_override="preset_single_copy")
     assert res["preset_applied"] == "preset_single_copy"
-    assert res["settings"]["strict_goi_family"] is True
-    assert res["settings"]["classify_high_min_identity"] == DEFAULTS["classify_high_min_identity"]
-    # Short-peptide-only key remains at the default (single_copy doesn't touch it).
-    assert res["settings"]["sw_min_score"] == DEFAULTS["sw_min_score"]
+    # single_copy sets nothing since 2026-10-15; the short-peptide values stay out.
+    assert res["settings"] == DEFAULTS
     assert "user pinned" in res["apply_reason"]
 
 
@@ -102,13 +93,13 @@ def test_disable_auto_apply_bypasses_everything():
 
 def test_user_cli_overrides_beat_preset():
     """Explicit user CLI values must take precedence over preset overrides."""
-    auto = {"preset": "preset_single_copy"}
-    user = {"classify_high_min_identity": 99.9}
+    auto = {"preset": "preset_short_peptide"}
+    user = {"classify_complete_min_qcov": 0.99}
     res = rep.resolve(DEFAULTS, auto_preset=auto, user_overrides=user)
-    assert res["settings"]["classify_high_min_identity"] == 99.9
-    assert res["source"]["classify_high_min_identity"] == "user_cli"
+    assert res["settings"]["classify_complete_min_qcov"] == 0.99
+    assert res["source"]["classify_complete_min_qcov"] == "user_cli"
     # Other preset overrides still apply.
-    assert res["settings"]["strict_goi_family"] is True
+    assert res["settings"]["classify_fragment_max_qcov"] == 0.3
 
 
 def test_unknown_preset_in_auto_preset_falls_back_to_defaults():
@@ -184,15 +175,15 @@ def test_cli_typed_user_override_via_defaults(tmp_path: Path):
     result = _run_cli(
         "--auto_preset", str(auto),
         "--defaults", str(defaults_path),
-        "--user_override", "classify_high_min_identity=42.5",
+        "--user_override", "classify_complete_min_qcov=0.65",
         "--user_override", "adaptive_max_regions=12",
-        "--user_override", "strict_goi_family=false",
+        "--user_override", "expand_goi_similar=false",
         "--output", str(tmp_path / "out.json"),
         cwd=tmp_path,
     )
-    assert result["settings"]["classify_high_min_identity"] == 42.5  # float
-    assert result["settings"]["adaptive_max_regions"] == 12         # int
-    assert result["settings"]["strict_goi_family"] is False         # bool
+    assert result["settings"]["classify_complete_min_qcov"] == 0.65  # float
+    assert result["settings"]["adaptive_max_regions"] == 12          # int
+    assert result["settings"]["expand_goi_similar"] is False         # bool
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -294,14 +285,14 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     """If nextflow.config changes shape and a key stops being parsed, user-set
     detection silently stops working for it. Fail here instead."""
     keys = _preset_default_keys_from_main_nf()
-    assert len(keys) >= 16
+    assert len(keys) == 13
     shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
     assert sorted(shipped) == sorted(keys), sorted(set(keys) - set(shipped))
     # Spot-check literals and that trailing comments/quotes are stripped.
-    assert rep._norm(shipped["classify_high_min_identity"]) == ("num", 50.0)
-    assert rep._norm(shipped["strict_goi_family"]) == ("bool", False)
+    assert rep._norm(shipped["classify_fragment_max_qcov"]) == ("num", 0.4)
+    assert rep._norm(shipped["expand_goi_similar"]) == ("bool", False)
     assert shipped["goi_family_tokens"] == ""
-    assert rep._norm(shipped["classify_medium_min_identity"]) == ("num", 40.0)
+    assert rep._norm(shipped["classify_complete_min_qcov"]) == ("num", 0.7)
     assert rep._norm(shipped["goi_relative_evalue"]) == ("num", 1e-5)
 
 
@@ -325,21 +316,21 @@ def test_detect_user_set_is_type_tolerant():
 
 
 def test_user_set_value_beats_auto_preset_and_is_reported():
-    defaults = dict(DEFAULTS, classify_high_min_identity="35")   # user typed 35
+    defaults = dict(DEFAULTS, classify_complete_min_qcov="0.6")   # user typed 0.6
     res = rep.resolve(defaults, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"classify_high_min_identity": "35"})
-    assert res["settings"]["classify_high_min_identity"] == "35"
-    assert res["source"]["classify_high_min_identity"] == "user_set"
-    assert res["user_set_kept"] == ["classify_high_min_identity"]
+                      user_set={"classify_complete_min_qcov": "0.6"})
+    assert res["settings"]["classify_complete_min_qcov"] == "0.6"
+    assert res["source"]["classify_complete_min_qcov"] == "user_set"
+    assert res["user_set_kept"] == ["classify_complete_min_qcov"]
     # Keys the user did not touch still take the preset's value.
-    assert res["settings"]["classify_medium_min_identity"] == 30.0
-    assert res["source"]["classify_medium_min_identity"] == "preset:preset_short_peptide"
+    assert res["settings"]["classify_fragment_max_qcov"] == 0.3
+    assert res["source"]["classify_fragment_max_qcov"] == "preset:preset_short_peptide"
 
 
 def test_user_set_equal_to_preset_value_is_not_reported_as_kept():
     res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"classify_high_min_identity": 40})
-    assert res["settings"]["classify_high_min_identity"] == 40
+                      user_set={"classify_complete_min_qcov": 0.5})
+    assert res["settings"]["classify_complete_min_qcov"] == 0.5
     assert res["user_set_kept"] == []
 
 
@@ -356,7 +347,7 @@ def test_cli_keeps_a_value_the_user_set(tmp_path: Path):
     keys = _preset_default_keys_from_main_nf()
     shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
     defaults = dict(shipped)
-    defaults["classify_medium_min_identity"] = "20"       # as typed on the CLI
+    defaults["classify_fragment_max_qcov"] = "0.2"        # as typed on the CLI
     (tmp_path / "defaults.json").write_text(json.dumps(defaults))
     (tmp_path / "auto.json").write_text(json.dumps({"preset": "preset_short_peptide"}))
     out = tmp_path / "eff.json"
@@ -370,15 +361,15 @@ def test_cli_keeps_a_value_the_user_set(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     res = json.loads(out.read_text())
     assert res["preset_applied"] == "preset_short_peptide"
-    assert res["settings"]["classify_medium_min_identity"] == "20"
-    assert res["user_set_kept"] == ["classify_medium_min_identity"]
+    assert res["settings"]["classify_fragment_max_qcov"] == "0.2"
+    assert res["user_set_kept"] == ["classify_fragment_max_qcov"]
     assert "kept 1 user-set value(s)" in proc.stdout
     # An untouched key takes the preset.
-    assert res["settings"]["classify_high_min_identity"] == 40.0
+    assert res["settings"]["classify_complete_min_qcov"] == 0.5
 
 
 def test_cli_without_shipped_config_keeps_the_old_behaviour(tmp_path: Path):
-    defaults = dict(DEFAULTS, classify_medium_min_identity="20")
+    defaults = dict(DEFAULTS, classify_fragment_max_qcov="0.2")
     (tmp_path / "defaults.json").write_text(json.dumps(defaults))
     (tmp_path / "auto.json").write_text(json.dumps({"preset": "preset_short_peptide"}))
     out = tmp_path / "eff.json"
@@ -388,7 +379,7 @@ def test_cli_without_shipped_config_keeps_the_old_behaviour(tmp_path: Path):
          "--defaults", str(tmp_path / "defaults.json"), "--output", str(out)],
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(out.read_text())["settings"]["classify_medium_min_identity"] == 30.0
+    assert json.loads(out.read_text())["settings"]["classify_fragment_max_qcov"] == 0.3
 
 
 def test_unreadable_shipped_config_warns_and_falls_back(tmp_path: Path):
@@ -422,28 +413,49 @@ def test_no_preset_carries_gene_specific_family_tokens():
         assert "goi_family_tokens" not in code, cfg.name
 
 
-def test_presets_no_longer_move_the_identity_thresholds_of_long_queries():
-    """Revised 2026-10-08. Two presets raised HIGH / MEDIUM to 55 / 40 for every query of
-    100 aa or more whatever the chooser decided; the third lowered MEDIUM to 30. On five
-    benchmark families no gene model below 40 % identity lay on a curated gene and models
-    at 50-55 % were right as often as models at 55-60 %: MEDIUM 40 is the default now,
-    HIGH stays at 50, and only the short-peptide preset has thresholds of its own."""
-    for name in ("preset_single_copy", "preset_tandem_family", "preset_paralog_discrimination"):
-        assert "classify_high_min_identity" not in rep.PRESET_OVERRIDES[name], name
-        assert "classify_medium_min_identity" not in rep.PRESET_OVERRIDES[name], name
-    short = rep.PRESET_OVERRIDES["preset_short_peptide"]
-    assert (short["classify_high_min_identity"], short["classify_medium_min_identity"]) == (40.0, 30.0)
-    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"),
-                                        ["classify_high_min_identity", "classify_medium_min_identity"])
-    assert rep._norm(shipped["classify_high_min_identity"]) == ("num", 50.0)
-    assert rep._norm(shipped["classify_medium_min_identity"]) == ("num", 40.0)
+# The parameters of the identity-based GOI label, removed on 2026-10-15 (main.nf removedParams).
+REMOVED_LABEL_PARAMS = (
+    "classify_high_min_identity", "classify_medium_min_identity", "classify_tandem_min_identity",
+    "classify_tandem_min_qcov", "classify_high_min_collinear",
+    "classify_fallback_strong_min_identity_floor", "disable_ambiguous_tier", "strict_goi_family",
+    "disable_distance_autotune", "distance_autotune_close_pct", "distance_autotune_far_pct",
+    "distance_autotune_max_relax", "distance_autotune_min_flanking",
+    "distance_autotune_high_floor", "distance_autotune_medium_floor",
+)
+
+
+def test_presets_hold_only_what_still_acts():
+    """2026-10-15: one judge labels every GOI call (bin/synvoy_label.py), so a preset may
+    not move a label threshold. What is left: the model-status coverage pair for short
+    peptides, the anchor filter for tandem families, the region floors for paralog families."""
+    assert rep.PRESET_OVERRIDES == {
+        "preset_short_peptide": {"classify_complete_min_qcov": 0.5, "classify_fragment_max_qcov": 0.3},
+        "preset_tandem_family": {"goi_relative_evalue": 1e-3},
+        "preset_single_copy": {},
+        "preset_paralog_discrimination": {"adaptive_score_floor_frac": 0.45,
+                                          "adaptive_score_floor_abs": 0.08,
+                                          "adaptive_max_regions": 4},
+    }
+
+
+def test_removed_label_parameters_are_set_nowhere():
+    keys = set(_preset_default_keys_from_main_nf())
+    configs = sorted((ROOT / "conf").rglob("*.config"))
+    for name in REMOVED_LABEL_PARAMS:
+        assert name not in keys, name
+        for overrides in rep.PRESET_OVERRIDES.values():
+            assert name not in overrides, name
+        for cfg in configs:
+            code = "\n".join(l.split("//", 1)[0] for l in cfg.read_text().splitlines())
+            assert not re.search(rf"\b{name}\s*=", code), (cfg.name, name)
 
 
 def test_no_preset_sets_a_parameter_that_does_nothing():
     """`min_query_length` is checked before a preset can be chosen, `auto_params` cannot
     change after launch, `multi_profile` was never implemented."""
     for name, overrides in rep.PRESET_OVERRIDES.items():
-        for dead in ("min_query_length", "auto_params", "multi_profile", "max_flanking_goi_similarity"):
+        for dead in ("min_query_length", "auto_params", "multi_profile",
+                     "max_flanking_goi_similarity") + REMOVED_LABEL_PARAMS:
             assert dead not in overrides, (name, dead)
 
 
@@ -478,15 +490,7 @@ def test_short_peptide_preset_no_longer_lowers_floors_that_do_not_bind():
         assert max(num["aug_relaxed_length_min"], length // num["aug_relaxed_length_div"]) == 15
 
 
-def test_tandem_copy_identity_is_50_by_default_and_40_for_short_peptides():
-    """2026-10-09. The preset chooser used to give half of all queries the paralog preset,
-    which set 50; counting places instead of rows moved most of them to presets without
-    that entry, so the value would have dropped to 40 for them. Measured on four benchmark
-    families: 92 single-segment tandem rows, none on a curated gene, 35 of them at
-    40-50 % identity. 50 is the default now; short peptides keep 40."""
-    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), ["classify_tandem_min_identity"])
-    assert rep._norm(shipped["classify_tandem_min_identity"]) == ("num", 50.0)
-    assert rep.PRESET_OVERRIDES["preset_short_peptide"]["classify_tandem_min_identity"] == 40.0
-    for name in ("preset_single_copy", "preset_tandem_family", "preset_paralog_discrimination"):
-        assert "classify_tandem_min_identity" not in rep.PRESET_OVERRIDES[name], name
+def test_paralog_preset_leaves_the_fragment_limit_alone():
+    """classify_fragment_max_qcov 0.35 left the paralog preset on 2026-10-09: in 2,651 GOI
+    rows of three benchmark families no gene model lay between 0.35 and 0.40 coverage."""
     assert "classify_fragment_max_qcov" not in rep.PRESET_OVERRIDES["preset_paralog_discrimination"]

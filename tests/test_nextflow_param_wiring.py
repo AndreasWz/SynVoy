@@ -220,8 +220,6 @@ def test_settings_keys_read_by_modules_are_provided_by_main_nf():
 
 
 @pytest.mark.parametrize("param,module,flag,script", [
-    ("disable_ambiguous_tier", "iterative_search.nf", "--disable_ambiguous_tier",
-     "iterative_search_runner.py"),
     ("disable_distant_synteny_rescue", "cluster_regions.nf",
      "--disable_distant_synteny_rescue", "cluster_grs.py"),
     ("legacy_strand_score", "cluster_regions.nf", "--legacy_strand_score", "cluster_grs.py"),
@@ -310,15 +308,37 @@ def test_scripts_read_every_option_they_accept(script):
 
 def test_removed_parameters_are_not_declared_any_more():
     """A removed parameter is named in main.nf (the run stops or warns when one is
-    still set) and nowhere in the shipped config."""
+    still set) and nowhere in the shipped configs (nextflow.config, conf/): a profile that
+    still set one would stop or warn every run that uses it."""
     main_nf = (ROOT / "main.nf").read_text()
-    config = (ROOT / "nextflow.config").read_text()
     block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
     names = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block, re.M)) | set(re.findall(r"'([a-z_]+)'", block))
     assert {"max_flanking_goi_similarity", "enable_name_locus", "min_gene_identity",
-            "prefer_large_genes", "keep_intermediate", "multi_profile"} <= names
-    for name in names:
-        assert not re.search(rf"^\s*(params\.)?{name}\s*=", config, re.M), name
+            "prefer_large_genes", "keep_intermediate", "multi_profile",
+            "classify_high_min_identity", "disable_distance_autotune", "strict_goi_family",
+            "distance_autotune_medium_floor"} <= names
+    for cfg in [CONFIG] + sorted((ROOT / "conf").rglob("*.config")):
+        config = "\n".join(_code(cfg))
+        for name in names:
+            assert not re.search(rf"^\s*(params\.)?{name}\s*=", config, re.M), (cfg.name, name)
+
+
+def test_removed_label_parameters_are_classified_as_the_handover_asks():
+    """2026-10-15: of the identity-based GOI label's parameters, the ones whose job the
+    judge does now stop the run; the ones that only tuned them warn."""
+    main_nf = (ROOT / "main.nf").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    replaced = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("noEffect:")[0], re.M))
+    no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1]))
+    assert {"classify_high_min_identity", "classify_medium_min_identity",
+            "classify_tandem_min_identity", "classify_tandem_min_qcov",
+            "classify_high_min_collinear", "disable_ambiguous_tier",
+            "disable_distance_autotune"} <= replaced
+    assert {"classify_fallback_strong_min_identity_floor", "strict_goi_family",
+            "distance_autotune_close_pct", "distance_autotune_far_pct",
+            "distance_autotune_max_relax", "distance_autotune_min_flanking",
+            "distance_autotune_high_floor", "distance_autotune_medium_floor"} <= no_effect
+    assert "goi_family_tokens" not in replaced | no_effect
 
 
 @pytest.mark.parametrize("option", [["--grid_goi_style", "cds"], ["--grid_goi_max_models", "3"]])

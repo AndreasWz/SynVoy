@@ -4,8 +4,7 @@
 * the home protein is always a query, the latest relative's model a second one, and
   what is reported always refers to the home protein (`select_goi_queries`,
   `rebase_relative_candidates`);
-* distances per target genome (`genome_scale_args`, `bp_or_auto`, `_gene_limit`);
-* a gene without introns at home can be HIGH as a one-exon model.
+* distances per target genome (`genome_scale_args`, `bp_or_auto`, `_gene_limit`).
 """
 import argparse
 import os
@@ -21,17 +20,6 @@ import iterative_search_runner as isr  # noqa: E402
 import synvoy_scale  # noqa: E402
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
-
-
-@pytest.fixture(autouse=True)
-def shipped_thresholds(monkeypatch):
-    """The classifier reads a module-level table that other test files change; every test
-    here starts from the shipped values."""
-    for key, value in {"high_min_exons": 2, "high_min_identity": 50.0, "high_min_flanking": 2,
-                       "high_min_collinear": 3, "medium_min_identity": 40.0,
-                       "medium_min_flanking": 1, "medium_min_qcov": 0.65}.items():
-        monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, key, value)
-    monkeypatch.delitem(isr.CLASSIFY_THRESHOLDS, "high_single_exon_min_qcov", raising=False)
 
 
 def _protein(n, seed):
@@ -333,18 +321,20 @@ def test_relative_only_model_is_reported_against_the_home_protein(relative_setup
     assert rel_model["record"]["id"].startswith("GOI_X~rel|")       # the input is not edited
 
 
-def test_confidence_of_a_relative_only_model_follows_the_home_identity(relative_setup, monkeypatch):
-    """95 % to the relative would be HIGH; against the home protein it is far below."""
+def test_a_relative_only_model_is_judged_against_the_home_protein(relative_setup):
+    """95 % to the relative; against the home protein it is far below, and that is what is
+    reported. Its label is provisional until the judge labels it, which aligns the HOME
+    protein against the model (annotate_place_evalues runs on the rebased candidate)."""
     relative, by_parent = relative_setup
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_min_identity", 50.0)
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "medium_min_identity", 40.0)
     distant_relative = _mutate(HOME, 0.75, 42)
     by_parent["GOI_X~rel"]["seq"] = distant_relative
     rel_model = _candidate("GOI_X~rel", "GenB_fna_b3_l2_exon_ann", 9000, 12000,
                            _mutate(distant_relative, 0.05, 43), 95.0)
     (out,) = isr.rebase_relative_candidates([rel_model], ["GOI_X~rel"], by_parent)
     a = _attrs(out)
-    assert float(a["Identity"]) < 40 and a["Confidence"] != "HIGH"
+    assert float(a["Identity"]) < 40
+    assert (a["Confidence"], a["InferenceReason"]) == ("LOW", "awaiting_label")
+    assert a["SynVoy_Parent"] == "GOI_X"
 
 
 def test_relative_model_next_to_a_home_model_is_kept(relative_setup):
@@ -514,46 +504,6 @@ def test_exons_of_a_long_gene_stay_one_occurrence_in_the_block_step():
         gene_gap_limit=lambda gene: 120_000 if gene == "gene-A" else 20_000)
     assert len(by_gene) == 1
     assert (by_gene[0]["start"], by_gene[0]["end"], by_gene[0]["loci_count"]) == (100_000, 193_000, 2)
-
-
-# ============================================================== exon rule for HIGH
-
-def _classify(**kw):
-    base = dict(evidence_type="exon_annotation", identity=70.0, exon_count=1,
-                query_cov=0.95, flanking_support=6, collinear_support=6)
-    base.update(kw)
-    return isr._classify_goi_evidence(**base)
-
-
-def test_one_exon_model_is_not_high_when_the_home_gene_has_introns():
-    assert isr.CLASSIFY_THRESHOLDS["high_min_exons"] == 2
-    conf, _cls, _reason = _classify()
-    assert conf == "MEDIUM"
-
-
-def test_one_exon_model_is_high_when_the_home_gene_has_one_exon(monkeypatch):
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_min_exons", 1)
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_single_exon_min_qcov", 0.6)
-    conf, cls, reason = _classify()
-    assert (conf, cls) == ("HIGH", "confident_goi")
-    assert reason == "single_exon_model_as_at_home_with_flanking_support"
-
-
-def test_one_exon_model_must_cover_the_query_like_a_complete_gene(monkeypatch):
-    """One exon is also what a single chance alignment looks like."""
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_min_exons", 1)
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_single_exon_min_qcov", 0.6)
-    assert _classify(query_cov=0.45)[0] != "HIGH"
-    assert _classify(identity=30.0)[0] != "HIGH"
-    assert _classify(flanking_support=0, collinear_support=0)[0] != "HIGH"
-
-
-def test_multi_exon_models_are_unchanged_by_the_exon_rule(monkeypatch):
-    before = _classify(exon_count=3, query_cov=0.45)
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_min_exons", 1)
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_single_exon_min_qcov", 0.6)
-    assert _classify(exon_count=3, query_cov=0.45) == before
-    assert before[2] == "multi_exon_model_with_flanking_support"
 
 
 # ============================================== anchors limited to their best places (opt-in)

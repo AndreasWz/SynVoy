@@ -57,12 +57,6 @@ tandem array). A model of the report's paralog check (`paralog_not_goi`) or of
 high identity over a short slice of the query (`identity_coverage_decoupled`) is not
 counted either. Docs: ALGORITHM.md §7.8.
 
----|---|
-| `HIGH` | A gene model at ≥ 50 % identity in a neighbourhood with conserved, collinear flanking genes. The model has at least two exons, or one exon when the home gene has one and the model covers the query like a complete gene. |
-| `MEDIUM` | A real but weaker case: lower identity, a single exon, or a hit chain with strong support. |
-| `AMBIGUOUS` | A candidate in a conserved neighbourhood whose **own** sequence evidence does not show it is the gene (`syntenic_candidate_unconfirmed`), or a call that matches a home *paralog* better than the query (`paralog_not_goi`). Named in the report, drawn in the plots, **not counted as an ortholog**. A gene lost from a conserved locus leaves the neighbourhood intact, so flanking support alone cannot tell "present" from "lost". |
-| `LOW` | A lead: a fragment, a weak hit, a chance alignment. Never cite without manual review. |
-
 ---
 
 ## "I just want the orthologs"

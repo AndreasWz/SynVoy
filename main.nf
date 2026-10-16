@@ -231,6 +231,13 @@ def removedParams() {
             enable_matrix_plot         : "the matrix figure was removed; the anchor grid (*_anchor_grid.svg) shows the same and more",
             seed_on_flanking_support   : "seeding follows one rule now: per query and genome the HIGH calls, else the MEDIUM calls, when no other home protein competes for them (docs/ALGORITHM.md, seeds)",
             classify_context_min_collinear: "the context promotion was removed: a weak match in the slot of a significant block is labelled AMBIGUOUS (Basis=gene_order_only, needs curation), always on and never counted",
+            classify_high_min_identity : "a GOI call's label comes from one judge: the E-value in the expected place, specificity against the home proteome and completeness (docs/ALGORITHM.md 7.8); identity no longer decides it",
+            classify_medium_min_identity: "a GOI call's label comes from one judge: the E-value in the expected place, specificity against the home proteome and completeness (docs/ALGORITHM.md 7.8); identity no longer decides it",
+            classify_tandem_min_identity: "a tandem copy is labelled by the same judge as every GOI call: the E-value in the expected place, specificity and completeness (docs/ALGORITHM.md 7.8); identity no longer decides it",
+            classify_tandem_min_qcov   : "a tandem copy is labelled by the same judge as every GOI call (docs/ALGORITHM.md 7.8); completeness for HIGH is a fixed coverage of 0.7 there",
+            classify_high_min_collinear: "the order of the anchors enters the label through the block's E_syn (docs/ALGORITHM.md 7.8 and 7.13); it is no longer a separate gate on HIGH",
+            disable_ambiguous_tier     : "AMBIGUOUS (needs curation, never counted) is part of the one label now, with Basis=not_specific or gene_order_only (docs/ALGORITHM.md 7.8); it cannot be switched off",
+            disable_distance_autotune  : "the per-genome relaxation of the identity thresholds went with the thresholds; the judge computes each call's E-value in the expected place of its own genome (docs/ALGORITHM.md 7.8)",
         ],
         noEffect: [
             'prefer_large_genes', 'min_gene_identity', 'aug_dedup_bin_bp',
@@ -239,6 +246,13 @@ def removedParams() {
             'locus_ownership_synteny_window', 'pub_width_mm', 'pub_palette', 'min_exon_query_cov',
             'seed_flanking_min_count', 'seed_flanking_min_qcov',
             'classify_context_min_identity', 'classify_context_min_qcov',
+            'classify_fallback_strong_min_identity_floor', 'strict_goi_family',
+            'distance_autotune_close_pct', 'distance_autotune_far_pct', 'distance_autotune_max_relax',
+            'distance_autotune_min_flanking', 'distance_autotune_high_floor', 'distance_autotune_medium_floor',
+        ],
+        // Said in the warning of a noEffect parameter, after "It had no effect".
+        noEffectNote: [
+            strict_goi_family: "the family-name check is annotation only now: --goi_family_tokens writes GoiFamilyConsistent and GoiFamilyReason on every GOI row and changes no label",
         ],
     ]
 }
@@ -311,7 +325,8 @@ def validateNumericParams(validationErrors, validationWarnings) {
     }
     removed.noEffect.each { name ->
         if (params.containsKey(name)) {
-            validationWarnings << "--${name} no longer exists. It had no effect; remove it from the command line or config."
+            def note = removed.noEffectNote[name] ? " (${removed.noEffectNote[name]})" : ''
+            validationWarnings << "--${name} no longer exists. It had no effect${note}; remove it from the command line or config."
         }
     }
     if (!(params.home_locus_mode in ['auto', 'gene_only', 'alignment'])) {
@@ -399,19 +414,7 @@ def validateNumericParams(validationErrors, validationWarnings) {
         validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
     }
 
-    // Classification thresholds
-    def classifyHigh = num.call('classify_high_min_identity', params.classify_high_min_identity, 0)
-    if (classifyHigh < 0 || classifyHigh > 100) {
-        validationErrors << "Invalid --classify_high_min_identity (${params.classify_high_min_identity}). Must be between 0 and 100."
-    }
-    def classifyMedium = num.call('classify_medium_min_identity', params.classify_medium_min_identity, 0)
-    if (classifyMedium < 0 || classifyMedium > 100) {
-        validationErrors << "Invalid --classify_medium_min_identity (${params.classify_medium_min_identity}). Must be between 0 and 100."
-    }
-    def classifyTandem = num.call('classify_tandem_min_identity', params.classify_tandem_min_identity, 0)
-    if (classifyTandem < 0 || classifyTandem > 100) {
-        validationErrors << "Invalid --classify_tandem_min_identity (${params.classify_tandem_min_identity}). Must be between 0 and 100."
-    }
+    // Model-status thresholds (ModelStatus = fragment / partial / complete)
     def fragmentMaxQcov = num.call('classify_fragment_max_qcov', params.classify_fragment_max_qcov, 0)
     if (fragmentMaxQcov < 0 || fragmentMaxQcov > 1) {
         validationErrors << "Invalid --classify_fragment_max_qcov (${params.classify_fragment_max_qcov}). Must be between 0 and 1."
@@ -1077,9 +1080,8 @@ workflow {
     def preset_default_keys = [
         'sw_min_score','sw_min_identity',
         'min_hit_identity','min_hit_length',
-        'classify_high_min_identity','classify_medium_min_identity','classify_tandem_min_identity',
         'classify_fragment_max_qcov','classify_complete_min_qcov',
-        'expand_goi_similar','strict_goi_family','goi_family_tokens',
+        'expand_goi_similar','goi_family_tokens',
         'goi_relative_evalue',
         'adaptive_score_floor_frac','adaptive_score_floor_abs',
         'adaptive_max_regions','adaptive_unique_gene_floor',

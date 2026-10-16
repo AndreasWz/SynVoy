@@ -1,66 +1,25 @@
-"""Tests for §1 synteny-ORDER confidence gating in _classify_goi_evidence.
+"""Where synteny ORDER enters a GOI call's label since 2026-10-15.
 
-Synteny already entered confidence as flanking_support (a COUNT). §1 adds the ORDER
-dimension: a GOI in a SCRAMBLED paralog neighbourhood (enough flanking, but not in
-conserved home order — the biglycan-as-decorin signature) is demoted from HIGH to
-MEDIUM, while small ordered blocks (melittin/LY6) and the no-collinearity path are
-untouched.
+Until then a separate gate in the identity-based classifier demoted a HIGH call to MEDIUM
+when its block's flanking genes were not in home order (classify_high_min_collinear, the
+biglycan-as-decorin signature). The label is synvoy_label.judge's now, and order enters it
+through the block's E_syn: the longest run of anchors in home order decides whether a block
+is significant (E_syn <= 0.1), and only a significant block gives a call its slot or core
+as the place of its E-value. A scrambled paralog neighbourhood is therefore not a place
+that predicts the gene. Rewritten from the collinear-gate tests on 2026-10-15.
 """
 import importlib.util
 import os
+import sys
 
 BIN = os.path.join(os.path.dirname(__file__), os.pardir, "bin")
+sys.path.insert(0, BIN)
 spec = importlib.util.spec_from_file_location(
     "iterative_search_runner", os.path.join(BIN, "iterative_search_runner.py"))
 isr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(isr)
 
-
-def classify(**kw):
-    base = dict(evidence_type="exon_annotation", identity=80.0, exon_count=3,
-                query_cov=0.8, flanking_support=6)
-    base.update(kw)
-    return isr._classify_goi_evidence(**base)
-
-
-def test_collinear_none_is_legacy_high():
-    # No collinearity info (home_rank unavailable) → order gate waived → HIGH on count.
-    conf, cls, _ = classify(collinear_support=None)
-    assert conf == "HIGH" and cls == "confident_goi"
-
-
-def test_ordered_neighbourhood_stays_high():
-    # 6 flanking, all collinear (run 6) → true ortholog locus → HIGH.
-    conf, cls, _ = classify(flanking_support=6, collinear_support=6)
-    assert conf == "HIGH" and cls == "confident_goi"
-
-
-def test_scrambled_neighbourhood_demoted_to_medium():
-    # 6 flanking but longest collinear run is only 2 (< high_min_collinear=3) → paralog
-    # neighbourhood → demote to MEDIUM, don't crown HIGH on identity+count alone.
-    conf, cls, reason = classify(flanking_support=6, collinear_support=2)
-    assert conf == "MEDIUM" and cls == "probable_goi"
-    assert reason == "high_identity_but_flanking_not_collinear"
-
-
-def test_small_ordered_block_never_gated():
-    # 2 flanking (< high_min_collinear) → can't judge order → waived → HIGH preserved.
-    # This is the melittin/LY6 single-copy safety case.
-    conf, cls, _ = classify(flanking_support=2, collinear_support=1)
-    assert conf == "HIGH" and cls == "confident_goi"
-
-
-def test_gate_only_touches_high_not_medium_path():
-    # Below HIGH identity: the MEDIUM path is unchanged regardless of collinearity.
-    conf, cls, _ = classify(identity=40.0, flanking_support=6, collinear_support=1)
-    assert conf == "MEDIUM"  # medium_min_identity path, not the collinear demotion
-
-
-def test_disable_via_huge_threshold_is_count_only(monkeypatch):
-    # classify_high_min_collinear=0 maps to a huge threshold → order gate never fires.
-    monkeypatch.setitem(isr.CLASSIFY_THRESHOLDS, "high_min_collinear", 10 ** 9)
-    conf, cls, _ = classify(flanking_support=6, collinear_support=1)
-    assert conf == "HIGH"
+import synvoy_evalue  # noqa: E402
 
 
 def test_longest_collinear_run_helper():
@@ -70,33 +29,34 @@ def test_longest_collinear_run_helper():
     assert isr._longest_collinear_run([5, 1, 4, 2, 3])[0] <= 3     # scrambled
 
 
-# --- family benchmark 2026-09-11: flanking does not lift a FRAGMENT to MEDIUM ---------- #
-def test_fragment_model_with_flanking_only_is_low():
-    # HYAL Probolomyrmex: 1 exon, 46 %, qcov 0.094, 2 flanking -> was MEDIUM, off-truth.
-    conf, cls, reason = classify(identity=46.4, exon_count=1, query_cov=0.094,
-                                 flanking_support=2)
-    assert (conf, cls, reason) == ("LOW", "ambiguous_goi_family_member",
-                                   "fragment_model_with_flanking_only")
+def test_order_decides_whether_a_block_is_significant():
+    """Twenty single-place anchors, a 300-kb window in a 12-Mb genome: six of them in home
+    order are a significant block, the same six scrambled (longest run 2) are not."""
+    places = [1] * 20
+    ordered = synvoy_evalue.e_syn(isr._longest_collinear_run([1, 2, 3, 4, 5, 6])[0],
+                                  places, 300_000, 12_000_000)
+    scrambled = synvoy_evalue.e_syn(isr._longest_collinear_run([3, 1, 6, 2, 5, 4])[0],
+                                    places, 300_000, 12_000_000)
+    assert ordered <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN < scrambled
 
 
-def test_partial_model_with_flanking_stays_medium():
-    # Above fragment_max_qcov the flanking arm is unchanged.
-    fmq = isr.CLASSIFY_THRESHOLDS["fragment_max_qcov"]
-    conf, cls, _ = classify(identity=46.4, exon_count=1, query_cov=fmq, flanking_support=2)
-    assert (conf, cls) == ("MEDIUM", "probable_goi")
+def test_every_goi_row_waits_for_the_judge():
+    """The label written when a model is built is provisional; relabel_goi_lines replaces
+    it with the judge's. A row the judge cannot label stays LOW (never counted)."""
+    for evidence in ("exon_annotation", "fallback_hit_span", "rescued_exon", "raw_hit"):
+        assert isr._provisional_goi_label(evidence) == (
+            "LOW", "ambiguous_goi_family_member", "awaiting_label")
+    assert isr._provisional_goi_label("tandem_copy") == ("LOW", "tandem_goi_copy", "awaiting_label")
+    attrs = isr._goi_feature_attrs({"ID": "m1"}, evidence_type="exon_annotation", identity=95.0,
+                                   exon_count=4, query_cov=0.98, flanking_support=9,
+                                   collinear_support=9)
+    assert (attrs["Confidence"], attrs["InferenceReason"]) == ("LOW", "awaiting_label")
+    assert (attrs["ModelStatus"], attrs["BlockCollinearSupport"]) == ("complete", "9")
 
 
-def test_unknown_coverage_is_not_a_fragment():
-    conf, _, _ = classify(identity=46.4, exon_count=1, query_cov=None, flanking_support=2)
-    assert conf == "MEDIUM"
-
-
-def test_fragment_is_not_high_either():
-    # Bug hunt 2026-10-13 (A4): HIGH had no coverage arm, so a 3-exon model over 10 % of the
-    # query at 80 % was HIGH and seeded the next wave. The fragment floor now gates HIGH too.
-    conf, cls, reason = classify(identity=80.0, exon_count=3, query_cov=0.1, flanking_support=6)
-    assert (conf, cls, reason) == ("LOW", "ambiguous_goi_family_member",
-                                   "fragment_model_with_flanking_only")
-    fmq = isr.CLASSIFY_THRESHOLDS["fragment_max_qcov"]
-    assert classify(identity=80.0, exon_count=3, query_cov=fmq, flanking_support=6)[0] == "HIGH"
-    assert classify(identity=80.0, exon_count=3, query_cov=None, flanking_support=6)[0] == "HIGH"
+def test_a_row_without_eeff_is_counted_as_unjudged():
+    row = ("chr1\tSynVoy\tmRNA\t1\t900\t.\t+\t.\t"
+           "ID=GOI_x|G_b0_l1;SynVoyRole=goi;Confidence=LOW;GOIClass=ambiguous_goi_family_member;"
+           "InferenceReason=awaiting_label")
+    out, counts = isr.relabel_goi_lines([row])
+    assert out == [row] and counts == {"LOW/unjudged": 1}

@@ -209,88 +209,36 @@ except Exception as _gpu_aug_err:  # optional deps; mirror the guards above
 # Flip to True only for reference/experiments on a CUDA-free (CPU) device.
 GPU_IN_WORKER = False
 
-# Classification thresholds for GOI confidence assignment.  Populated from
-# CLI args in main() so that they can be tuned per-run via nextflow.config.
+# Thresholds of the model status (fragment / partial / complete) and of the ML rescoring
+# of a GOI row the judge did not label (_ml_relabel). Populated from CLI args in main().
+# The label of a GOI call is synvoy_label.judge's (relabel_goi_lines); the identity
+# thresholds of the old label were removed on 2026-10-15.
 CLASSIFY_THRESHOLDS = {
-    # exon_annotation -> HIGH
-    "high_min_exons": 2,
-    "high_min_identity": 50.0,
-    "high_min_flanking": 2,
-    # §1 (2026-07-01): synteny ORDER, not just count. When the block has >= this many
-    # flanking genes, HIGH additionally requires the longest collinear run of home-ordered
-    # flanking to reach it — so a GOI in a SCRAMBLED paralog neighbourhood (same flanking
-    # count, wrong order — the biglycan-as-decorin signature) is demoted to MEDIUM instead
-    # of crowned HIGH on identity+count alone. Waived when there are fewer than this many
-    # flanking (can't judge order) or when collinearity is unavailable (no home_rank).
-    "high_min_collinear": 3,
-    # exon_annotation -> MEDIUM
-    "medium_min_identity": 40.0,
-    "medium_min_flanking": 1,
-    "medium_min_qcov": 0.65,
-    # fallback_hit_span -> MEDIUM (flanking-supported)
-    "fallback_med_min_flanking": 2,
-    "fallback_med_min_qcov": 0.75,
-    "fallback_med_min_identity": 60.0,
-    # fallback_hit_span -> MEDIUM (strong flanking context)
-    "fallback_strong_min_flanking": 5,
-    "fallback_strong_min_qcov": 0.25,
-    "fallback_strong_min_identity": 35.0,
-    # §1v / F6 — ABSOLUTE identity floor for the strong-flanking fallback clause.
-    # That clause is (flanking >= 5) AND (qcov >= 0.25 OR identity >= 35): the qcov
-    # arm has no identity requirement at all, so a hit at ANY identity reached MEDIUM
-    # as long as it sat in a flanking-rich block. Because flanking_support is a
-    # property of the BLOCK, every junk hit anywhere inside that block inherited it —
-    # this is the mechanism behind the yeast STE2 run's 32 MEDIUM calls at 21-27 %
-    # identity against 3 real orthologs, and Drosophila Defensin's 170 GOI calls for 3.
-    #
-    # Calibrated, not guessed: the real Tetramorium melittin call that this clause
-    # legitimately rescues sits at 34.7 % (fallback_span_with_strong_flanking_support,
-    # BlockFlankingSupport=7, QueryCoverage=0.686), while the yeast false positives run
-    # 21-27 %. A floor of 30 keeps the former and rejects the latter with margin on
-    # both sides. Set 0 to restore the old un-floored behaviour.
-    "fallback_strong_min_identity_floor": 30.0,
-    # tandem_copy -> MEDIUM vs LOW (50 since 2026-10-09; the short-peptide preset: 40)
-    "tandem_min_identity": 50.0,
-    # A2 (TODO_JUN): a tandem copy needs real query coverage too, not just a
-    # high local-window identity (QW2 surfaces the true coverage).
-    "tandem_min_qcov": 0.35,
     # model_status thresholds
     "fragment_max_qcov": 0.4,
     "complete_min_qcov": 0.7,
+    # ML rescoring: flanking genes a block needs before an ML score may lift MEDIUM to HIGH
+    "high_min_flanking": 2,
 }
 
-# Family-consistency config (Change A in TP53_IMPLEMENTATION_FIX_PLAN.md).
-# `tokens` is a set of uppercase-alphanum tokens derived from the query gene name.
-# When populated, every GOI annotation receives a GoiFamilyConsistent attribute.
-# When `strict` is True, family-inconsistent fallback/rescued_exon/raw_hit calls
-# are downgraded to LOW/ambiguous so they do not masquerade as probable GOI.
+# Family-name annotation (Change A in TP53_IMPLEMENTATION_FIX_PLAN.md). `tokens` is a set of
+# uppercase-alphanum family names from --goi_family_tokens. When populated, every GOI row
+# receives GoiFamilyConsistent / GoiFamilyReason. Annotation only: the strict mode that
+# demoted family-inconsistent calls went with the identity-based label (2026-10-15).
 FAMILY_CONFIG: Dict[str, Any] = {
-    "strict": False,
     "tokens": set(),
-    "strict_evidence_types": {"fallback_hit_span", "rescued_exon", "raw_hit"},
-}
-
-# Weak-GOI emission filter. Drops LOW-confidence fallback/rescued_exon/raw_hit
-# calls whose (identity/100)*qcov is below `min_id_x_qcov`. Motivated by TP53
-# runs where ~70% of LOW fallback rows had id*qcov < 0.10 (pure noise) while
-# genuine MEDIUM/probable melittin fallback hits never fall below 0.12.
-# Default 0.05 drops obvious garbage without touching any validated toxin call.
-# Set to 0.0 to disable entirely.
-EMISSION_CONFIG: Dict[str, Any] = {
-    "min_id_x_qcov": 0.0,
-    "weak_evidence_types": {"fallback_hit_span", "rescued_exon", "raw_hit"},
-    "_dropped_counter": 0,
 }
 
 
 def _median_best_flanking_identity(flanking_hits: List[Dict[str, Any]]) -> Tuple[Optional[float], int]:
-    """§1g distance proxy: median of the best %identity per flanking gene.
+    """Distance proxy of a target genome: median of the best %identity per flanking gene.
 
     `flanking_hits` are the non-GOI (flanking-anchor) MMseqs hits for one target
     genome. We collapse to one value per flanking gene (its strongest hit) so a
     multi-HSP gene doesn't dominate, then take the median. High median => the
     target is a close relative (flanking genes align well); low median => distant.
-    Returns (median_identity_or_None, n_flanking_genes).
+    Returns (median_identity_or_None, n_flanking_genes). Recorded only: until 2026-10-15
+    it relaxed the identity thresholds of the old GOI label for distant targets (§1g).
 
     Keyed on the base gene id: with exon-level search (the default) every exon is its own
     query record (``gene|exon_N``), and keying on the record made this a median over exons,
@@ -311,137 +259,6 @@ def _median_best_flanking_identity(flanking_hits: List[Dict[str, Any]]) -> Tuple
     n = len(vals)
     median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
     return median, n
-
-
-def _apply_distance_adaptive_thresholds(
-    args, flanking_hits: List[Dict[str, Any]], genome_name: str
-) -> Dict[str, Any]:
-    """§1g: relax the GOI classify identity bars for phylogenetically distant targets.
-
-    Mutates the module-global CLASSIFY_THRESHOLDS for the current genome. This is
-    safe under the ProcessPoolExecutor model: genomes run in separate worker
-    processes (no shared mutable state across genomes), and even when a worker is
-    reused for the next genome this function re-derives both adapted keys from the
-    immutable `args` baseline first, so there is no cross-genome drift. The only
-    keys touched are high_min_identity / medium_min_identity.
-
-    By construction the 'close' tier is a pure no-op (thresholds == baseline), so
-    well-conserved targets — and therefore the close-relative calls in existing
-    benchmarks — are unaffected. Returns a per-genome decision dict (for logging).
-    """
-    base_high = float(args.classify_high_min_identity)
-    base_med = float(args.classify_medium_min_identity)
-    # Reset to baseline first (idempotent across worker reuse).
-    CLASSIFY_THRESHOLDS["high_min_identity"] = base_high
-    CLASSIFY_THRESHOLDS["medium_min_identity"] = base_med
-
-    info: Dict[str, Any] = {
-        "median_flank_identity": None,
-        "n_flanking": 0,
-        "tier": "disabled" if getattr(args, "disable_distance_autotune", False) else "baseline",
-        "relax": 0.0,
-        "high_min_identity": base_high,
-        "medium_min_identity": base_med,
-        "manual_review": False,
-    }
-    if getattr(args, "disable_distance_autotune", False):
-        return info
-
-    median, n = _median_best_flanking_identity(flanking_hits)
-    info["median_flank_identity"] = median
-    info["n_flanking"] = n
-
-    min_flank = int(getattr(args, "distance_autotune_min_flanking", 3))
-    if median is None or n < min_flank:
-        logger.info(
-            f"[{genome_name}] §1g distance auto-tune: only {n} flanking gene(s) "
-            f"(< {min_flank}); keeping baseline thresholds "
-            f"(HIGH {base_high:.0f}, MEDIUM {base_med:.0f})."
-        )
-        info["tier"] = "insufficient_evidence"
-        return info
-
-    close_p = float(getattr(args, "distance_autotune_close_pct", 70.0))
-    far_p = float(getattr(args, "distance_autotune_far_pct", 40.0))
-    max_relax = float(getattr(args, "distance_autotune_max_relax", 10.0))
-
-    if median >= close_p:
-        relax, tier = 0.0, "close"
-    elif median <= far_p:
-        relax, tier = max_relax, "far"
-    else:
-        relax = max_relax * (close_p - median) / max(close_p - far_p, 1e-6)
-        tier = "mid"
-
-    # Floors: the relaxation never takes a threshold below its floor, and a baseline that is
-    # already at or below the floor (short peptides: 40 / 30) is not relaxed at all.
-    high_floor = float(getattr(args, "distance_autotune_high_floor", 45.0))
-    med_floor = float(getattr(args, "distance_autotune_medium_floor", 30.0))
-    high_adj = max(base_high - relax, min(base_high, high_floor), 1.0)
-    med_adj = max(base_med - relax, min(base_med, med_floor), 1.0)
-    CLASSIFY_THRESHOLDS["high_min_identity"] = high_adj
-    CLASSIFY_THRESHOLDS["medium_min_identity"] = med_adj
-    info.update(
-        tier=tier, relax=relax, high_min_identity=high_adj,
-        medium_min_identity=med_adj, manual_review=(tier == "far"),
-    )
-
-    if relax > 0:
-        _held = [name for name, base, adj in (("HIGH", base_high, high_adj), ("MEDIUM", base_med, med_adj))
-                 if adj > base - relax + 1e-9]
-        logger.info(
-            f"[{genome_name}] §1g distance auto-tune: median flanking identity "
-            f"{median:.1f}% over {n} genes -> tier={tier}, relax={relax:.1f} pts "
-            f"(HIGH {base_high:.0f}->{high_adj:.0f}, MEDIUM {base_med:.0f}->{med_adj:.0f})"
-            + (f"  [{' and '.join(_held)} held at the floor]" if _held else "")
-            + ("  [manual_review]" if tier == "far" else "")
-        )
-    else:
-        logger.info(
-            f"[{genome_name}] §1g distance auto-tune: median flanking identity "
-            f"{median:.1f}% over {n} genes -> tier=close; thresholds unchanged "
-            f"(HIGH {base_high:.0f}, MEDIUM {base_med:.0f})."
-        )
-    return info
-
-
-def _should_skip_weak_goi_emission(
-    evidence_type: str,
-    identity: float,
-    query_cov: Optional[float],
-    flanking_support: int = 0,
-    embedding_similarity: Optional[float] = None,
-    structural_similarity: Optional[float] = None,
-) -> bool:
-    """Return True if this GOI emission is weak enough to drop before GFF write.
-
-    Only fires on LOW-confidence fallback/rescued_exon/raw_hit. A hit that
-    would classify as MEDIUM/HIGH (strong flanking, PLM rescue, structural
-    rescue, or adequate qcov+identity) is always kept.
-    """
-    threshold = float(EMISSION_CONFIG.get("min_id_x_qcov") or 0.0)
-    if threshold <= 0.0:
-        return False
-    if evidence_type not in EMISSION_CONFIG.get("weak_evidence_types", set()):
-        return False
-    qcov = float(query_cov or 0.0)
-    ident = float(identity or 0.0)
-    # Safety: if qcov is missing (0), the emission lacks coverage info — keep.
-    # Prevents accidentally dropping tandem-copy-like rows that slip through.
-    if qcov <= 0.0 or ident <= 0.0:
-        return False
-    conf, _cls, _reason = _classify_goi_evidence(
-        evidence_type=evidence_type,
-        identity=ident,
-        exon_count=1,
-        query_cov=qcov,
-        flanking_support=flanking_support,
-        embedding_similarity=embedding_similarity,
-        structural_similarity=structural_similarity,
-    )
-    if conf != "LOW":
-        return False
-    return (ident / 100.0) * qcov < threshold
 
 
 def _normalize_family_token(value: Any) -> str:
@@ -931,7 +748,8 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
     minus bits against the best other home protein), RealCompetitor and, with home gene
     coordinates, BestOtherInNeighbourhood, appended to the candidate's mRNA/gene row and
     kept as ``cand['specificity']``. Needs ``cand['bits']`` (score_goi_candidates).
-    Labels do not use it yet; the seed rule does (_classify_goi_for_seed_and_tree)."""
+    The judge (synvoy_label, step 4) and the seed rule (_classify_goi_for_seed_and_tree)
+    use it."""
     proteome, hood = _home_proteome(args)
     if proteome is None:
         return 0
@@ -1268,11 +1086,15 @@ def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
     """The label of every GOI row with an Eeff (label rework, step 4): synvoy_label.judge
     on Eeff, its place and block, specificity and coverage. Confidence keeps its four
     codes; Basis says why (significant_specific / not_specific / gene_order_only /
-    not_significant); GOIClass follows the label (a tandem copy keeps tandem_goi_copy)."""
+    not_significant); GOIClass follows the label (a tandem copy keeps tandem_goi_copy).
+    A GOI row without an Eeff keeps its provisional LOW (_provisional_goi_label) and is
+    counted as ``LOW/unjudged`` in the log."""
     out, counts = [], defaultdict(int)
     for line in gff_lines:
         cols = line.split('\t')
         if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'Eeff=' not in cols[8]:
+            if len(cols) >= 9 and cols[2] in ('mRNA', 'gene') and 'SynVoyRole=goi' in cols[8]:
+                counts["LOW/unjudged"] += 1
             out.append(line)
             continue
         a = _parse_gff_attr_string(cols[8])
@@ -1551,21 +1373,6 @@ def _compose_gff_attrs(base_attrs: Dict[str, Any],
         consistent, reason = _check_family_consistency(label, product)
         merged["GoiFamilyConsistent"] = "true" if consistent else "false"
         merged["GoiFamilyReason"] = reason
-        # Strict downgrade only fires on informative mismatches (annotated locus
-        # whose name disagrees with family tokens). Unannotated regions — common
-        # for novel toxin/venom discovery where orthologs are de novo — are NOT
-        # downgraded: synteny + sequence evidence must stand on their own there.
-        if (FAMILY_CONFIG.get("strict")
-                and not consistent
-                and reason == "no_family_match"):
-            ev = base_attrs.get("EvidenceType") or base_attrs.get("Type") or ""
-            if ev in FAMILY_CONFIG.get("strict_evidence_types", set()):
-                merged["Confidence"] = "LOW"
-                merged["GOIClass"] = "ambiguous_goi_family_member"
-                prev = merged.get("InferenceReason", "")
-                merged["InferenceReason"] = (
-                    f"{prev}|strict_family_downgrade" if prev else "strict_family_downgrade"
-                )
 
     return ";".join(f"{k}={v}" for k, v in merged.items())
 
@@ -1617,223 +1424,83 @@ def _model_status(
     return "partial"
 
 
-def _classify_goi_evidence(
+def _provisional_goi_label(evidence_type: str) -> Tuple[str, str, str]:
+    """(Confidence, GOIClass, InferenceReason) a GOI row carries until the judge labels it.
+
+    Every GOI candidate of a window is judged before the window's choice (judge_candidates)
+    and every GOI row is labelled at the end of its genome (relabel_goi_lines:
+    synvoy_label.judge on the E-value in the expected place, specificity against the home
+    proteome and completeness), which overwrites this label. A row the judge cannot label
+    (no Eeff) keeps it, so such a row is LOW: never counted, never a seed.
+
+    Until 2026-10-15 the label written here came from identity thresholds
+    (classify_high_min_identity and its kin, the tandem and collinearity gates, the
+    AMBIGUOUS tier of the strong-flanking hit chains, the per-genome relaxation of §1g).
+    After the judge was wired in (label rework, step 4) they shaped nothing that was kept.
+    """
+    goi_class = "tandem_goi_copy" if evidence_type == "tandem_copy" else "ambiguous_goi_family_member"
+    return "LOW", goi_class, "awaiting_label"
+
+
+# Prefix of the InferenceReason an ML score writes when it lifts a row (_ml_relabel).
+_ML_RESCUE_PREFIX = {
+    "exon_annotation": "modeled_goi",
+    "fallback_hit_span": "fallback_span",
+    "rescued_exon": "rescued_exon",
+}
+
+
+def _ml_relabel(
+    confidence: str,
     evidence_type: str,
-    identity: float = 0.0,
-    exon_count: int = 1,
-    query_cov: Optional[float] = None,
     flanking_support: int = 0,
     embedding_similarity: Optional[float] = None,
     structural_similarity: Optional[float] = None,
-    collinear_support: Optional[int] = None,
-    ambiguous_tier_enabled: bool = True,
-) -> Tuple[str, str, str]:
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Label of a GOI row after its ML scores: (confidence, goi_class, reason).
+
+    The embedding similarity (ProtT5 cosine, 0-1) and the TM-score (ESMFold + Foldseek, 0-1)
+    only ever raise a label, by one step:
+
+      LOW -> MEDIUM   gene models, hit chains and rescued exons, when the embedding
+                      similarity reaches plm_medium_threshold or the TM-score
+                      structural_medium_threshold, in a block with at least one flanking gene;
+      MEDIUM -> HIGH  gene models, at plm_high_threshold / structural_high_threshold, in a
+                      block with at least high_min_flanking flanking genes.
+
+    Returns the input confidence and (None, None) when nothing changes. Used only on rows
+    the judge has not labelled (no Basis): a judged row keeps the judge's label, whose
+    evidence (an E-value in the expected place, specificity) the scores do not add to.
     """
-    Assign a conservative confidence/class label to GOI-derived candidates.
-
-    The goal is not to prove orthology here, but to prevent fallback-heavy
-    output from masquerading as confident GOI evidence downstream.
-
-    embedding_similarity (0-1 cosine) from ProtT5 can BOOST confidence when
-    the structural/functional signal is strong even if sequence identity is low.
-    structural_similarity (0-1 TM-score) from ESMFold+Foldseek can BOOST
-    confidence when 3D structure matches despite extreme sequence divergence.
-    Neither signal ever reduces confidence — sequence methods already confirmed
-    a match.
-
-    ambiguous_tier_enabled adds a fourth verdict, AMBIGUOUS, for candidates promoted
-    only by flanking support (see the fallback_hit_span branch). Pass False to restore
-    the pre-2026-08-31 behaviour where those were labelled MEDIUM/probable_goi.
-    """
-    identity = float(identity or 0.0)
-    exon_count = max(1, int(exon_count or 1))
-    qcov = float(query_cov or 0.0)
-    context = _synteny_context_label(flanking_support)
-
     ct = CLASSIFY_THRESHOLDS
-    if ambiguous_tier_enabled is None:
-        # Routed through CLASSIFY_THRESHOLDS rather than a call argument: that dict is
-        # already the mechanism carrying classifier settings into every
-        # ProcessPoolExecutor worker, so all five call sites pick it up unchanged.
-        ambiguous_tier_enabled = bool(ct.get("ambiguous_tier_enabled", True))
-
-    # §1 synteny-ORDER gate: the flanking are collinear enough to trust the neighbourhood as
-    # this GOI's true (orthologous) locus, not a scrambled paralog neighbourhood. Waived when
-    # collinearity is unavailable (collinear_support is None → no home_rank / feature off) or
-    # when the block has too few flanking to judge order (< high_min_collinear).
-    collinear_ok = (
-        collinear_support is None
-        or flanking_support < ct["high_min_collinear"]
-        or collinear_support >= ct["high_min_collinear"]
-    )
-
-    if evidence_type == "tandem_copy":
-        # A2 (TODO_JUN): MEDIUM requires BOTH identity AND real query coverage.
-        # A short high-identity local window (e.g. a 7-aa micro-window or a 23-aa
-        # hit on a 70-aa query — Vollenhovia/Polistes "79%"/"71%" overcalls) now
-        # carries its true low qcov (QW2) and is demoted to LOW. Missing/zero
-        # coverage is treated as failing the floor.
-        if identity < ct["tandem_min_identity"]:
-            return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_identity"
-        if qcov < ct.get("tandem_min_qcov", 0.0):
-            return "LOW", "tandem_goi_copy", "goi_tandem_copy_low_coverage"
-        # Context, like every other evidence type: MEDIUM needs the sequence to carry
-        # the call (exon_annotation's qcov arm) or a strongly supported block (the
-        # strong-flanking fallback bar). Tandem detection runs on raw window hits, and
-        # a short query's best chance alignment in a window (~25-35 aa at 40-50 %) clears
-        # 40 % / 0.35 by itself. Family benchmark 2026-09-11: 77 such MEDIUM calls in
-        # the SECP and SPIN runs, all off-truth, all 16-33 bits, qcov <= 0.59, block
-        # flanking 1-4 in 71 of them; the real tandem copies (KAZA, melittin bees) sit
-        # at flanking 7-13 or qcov >= 0.6.
-        if (flanking_support >= ct["fallback_strong_min_flanking"]
-                or qcov >= ct["medium_min_qcov"]):
-            return "MEDIUM", "tandem_goi_copy", "goi_tandem_copy_detected"
-        return "LOW", "tandem_goi_copy", "goi_tandem_copy_weak_context"
-
-    if evidence_type == "exon_annotation":
-        # A model of one exon can be HIGH only where the home gene itself has one exon
-        # (high_min_exons is then 1), and then it has to cover the query like a complete
-        # gene: one exon is also what a single chance alignment looks like.
-        one_exon_ok = exon_count >= 2 or qcov >= ct.get("high_single_exon_min_qcov", 0.0)
-        # The flanking arm does not lift a model this pipeline itself calls a FRAGMENT
-        # (ModelStatus, qcov < fragment_max_qcov): family benchmark 2026-09-11, single-exon
-        # 6-9 %-coverage models in 2-flanking blocks were the MEDIUM calls left off-truth,
-        # while every on-truth call had qcov >= 0.5. Unknown coverage is not low coverage:
-        # the floor only applies when it was measured. The same holds for HIGH: a two-exon
-        # model over 8 % of the query at 60 % was HIGH and seeded the next wave while the
-        # same model at 45 % was LOW (bug hunt 2026-10-13, A4; once in about 380 HIGH rows).
-        fragment = query_cov is not None and qcov < ct["fragment_max_qcov"]
-        if (exon_count >= ct["high_min_exons"]
-                and one_exon_ok
-                and not fragment
-                and identity >= ct["high_min_identity"]
-                and flanking_support >= ct["high_min_flanking"]):
-            if collinear_ok:
-                if exon_count < 2:
-                    return "HIGH", "confident_goi", "single_exon_model_as_at_home_with_flanking_support"
-                return "HIGH", "confident_goi", "multi_exon_model_with_flanking_support"
-            # §1: HIGH-quality model + enough flanking, but the flanking are NOT in conserved
-            # home order → likely a paralog neighbourhood, not the true ortholog locus. Demote
-            # to MEDIUM (still a probable GOI) rather than assert HIGH on identity+count alone.
-            return "MEDIUM", "probable_goi", "high_identity_but_flanking_not_collinear"
-        if identity >= ct["medium_min_identity"] and (
-                (flanking_support >= ct["medium_min_flanking"] and not fragment)
-                or qcov >= ct["medium_min_qcov"]):
-            confidence = "MEDIUM"
-            reason = "modeled_goi_with_partial_support"
-            # PLM boost: MEDIUM → HIGH when embedding strongly agrees
-            if (embedding_similarity is not None
-                    and embedding_similarity >= ct.get("plm_high_threshold", 0.85)
-                    and flanking_support >= ct["high_min_flanking"]):
-                confidence = "HIGH"
-                reason += "_plm_boosted"
-            # Structural boost: MEDIUM → HIGH when TM-score strongly agrees
-            if (confidence == "MEDIUM"
-                    and structural_similarity is not None
-                    and structural_similarity >= ct.get("structural_high_threshold", 0.7)
-                    and flanking_support >= ct["high_min_flanking"]):
-                confidence = "HIGH"
-                reason += "_structural_boosted"
-            return confidence, "probable_goi", reason
-        # LOW from sequence — but PLM may rescue
-        confidence = "LOW"
-        goi_class = "ambiguous_goi_family_member"
-        reason = ("fragment_model_with_flanking_only"
-                  if fragment and identity >= ct["medium_min_identity"]
-                  and flanking_support >= ct["medium_min_flanking"]
-                  else "modeled_goi_but_family_context_is_weak")
-        if (embedding_similarity is not None
-                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
-                and flanking_support >= 1):
-            confidence = "MEDIUM"
-            goi_class = "probable_goi"
-            reason = "modeled_goi_plm_rescued"
-        # Structural rescue: LOW → MEDIUM when TM-score confirms structural match
-        if (confidence == "LOW"
-                and structural_similarity is not None
-                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
-                and flanking_support >= 1):
-            confidence = "MEDIUM"
-            goi_class = "probable_goi"
-            reason = "modeled_goi_structural_rescued"
-        return confidence, goi_class, reason
-
-    if evidence_type == "fallback_hit_span":
-        if (flanking_support >= ct["fallback_med_min_flanking"]
-                and qcov >= ct["fallback_med_min_qcov"]
-                and identity >= ct["fallback_med_min_identity"]):
-            return "MEDIUM", "probable_goi", "fallback_span_supported_by_flanking_context"
-        # Strong syntenic evidence upgrades even low-qcov hits.
-        # Short secreted peptides (e.g. melittin, ~70 aa) can only reach ~45% qcov
-        # because the signal peptide exon is too diverged to align; the flanking
-        # gene context provides orthology evidence beyond per-alignment statistics.
-        if (flanking_support >= ct["fallback_strong_min_flanking"]
-                and identity >= ct.get("fallback_strong_min_identity_floor", 0.0)
-                and (qcov >= ct["fallback_strong_min_qcov"]
-                     or identity >= ct["fallback_strong_min_identity"])):
-            # AMBIGUOUS, not MEDIUM, unless the sequence itself carries the call.
-            #
-            # This branch promotes on FLANKING SUPPORT, and flanking support cannot
-            # distinguish "the gene is here" from "the gene was LOST from a locus whose
-            # neighbourhood is still conserved" -- the second is exactly what gene loss
-            # looks like. Measured on the 2026-08-31 benchmark (19 species, per-call
-            # evidence dumped from the run):
-            #
-            #   gene PRESENT   identity 84.3 73.5 63.5 59.8 54.5 30.2   flanking 6-10
-            #   gene LOST      identity 93.8 57.7 37.0 31.9 30.4 30.2   flanking 7-8
-            #
-            # The distributions overlap completely, the single highest-identity call in
-            # the benchmark (93.8%, Bombus terrestris) is a FALSE POSITIVE, and flanking
-            # support is 6-10 on BOTH sides. No threshold on this evidence separates them,
-            # so asserting "probable_goi" here is asserting more than the data supports.
-            #
-            # AMBIGUOUS says the defensible thing instead: a candidate sits in the right
-            # neighbourhood, and the sequence evidence does not establish that it is the
-            # gene. It stays in the output and in the plots; it is excluded from the
-            # ortholog counts. Independent confirmation (RBH against the home paralog
-            # panel, PLM/structural rescue below, or curation) is what promotes it.
-            if ambiguous_tier_enabled:
-                return ("AMBIGUOUS", "syntenic_candidate_unconfirmed",
-                        "fallback_span_with_strong_flanking_support")
-            return "MEDIUM", "probable_goi", "fallback_span_with_strong_flanking_support"
-        # PLM rescue for fallback hits
-        if (embedding_similarity is not None
-                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
-                and flanking_support >= 1):
-            return "MEDIUM", "probable_goi", "fallback_span_plm_rescued"
-        # Structural rescue for fallback hits
-        if (structural_similarity is not None
-                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
-                and flanking_support >= 1):
-            return "MEDIUM", "probable_goi", "fallback_span_structural_rescued"
-        return "LOW", "ambiguous_goi_family_member", "fallback_span_only"
-
-    if evidence_type == "rescued_exon":
-        # PLM can rescue isolated exons when embedding strongly matches
-        if (embedding_similarity is not None
-                and embedding_similarity >= ct.get("plm_medium_threshold", 0.7)
-                and flanking_support >= 1):
-            return "MEDIUM", "probable_goi", "rescued_exon_plm_boosted"
-        # Structural rescue for isolated exons
-        if (structural_similarity is not None
-                and structural_similarity >= ct.get("structural_medium_threshold", 0.5)
-                and flanking_support >= 1):
-            return "MEDIUM", "probable_goi", "rescued_exon_structural_boosted"
-        return "LOW", "ambiguous_goi_family_member", "isolated_rescued_exon"
-
-    if evidence_type == "raw_hit":
-        return "LOW", "ambiguous_goi_family_member", "single_raw_hit_only"
-
-    return "LOW", "ambiguous_goi_family_member", f"unclassified_{evidence_type or 'goi'}"
+    flanking = max(0, int(flanking_support or 0))
+    emb = embedding_similarity
+    tm = structural_similarity
+    prefix = _ML_RESCUE_PREFIX.get(evidence_type)
+    if prefix is None:
+        return confidence, None, None
+    if confidence == "LOW" and flanking >= 1:
+        if emb is not None and emb >= ct.get("plm_medium_threshold", 0.7):
+            suffix = "plm_boosted" if evidence_type == "rescued_exon" else "plm_rescued"
+            return "MEDIUM", "probable_goi", f"{prefix}_{suffix}"
+        if tm is not None and tm >= ct.get("structural_medium_threshold", 0.5):
+            suffix = "structural_boosted" if evidence_type == "rescued_exon" else "structural_rescued"
+            return "MEDIUM", "probable_goi", f"{prefix}_{suffix}"
+    if (confidence == "MEDIUM" and evidence_type == "exon_annotation"
+            and flanking >= ct.get("high_min_flanking", 2)):
+        if emb is not None and emb >= ct.get("plm_high_threshold", 0.85):
+            return "HIGH", "confident_goi", f"{prefix}_plm_boosted"
+        if tm is not None and tm >= ct.get("structural_high_threshold", 0.7):
+            return "HIGH", "confident_goi", f"{prefix}_structural_boosted"
+    return confidence, None, None
 
 
 # Methods whose per-hit pident / bits / qcov are SYNTHETIC proxies (ProtT5 cosine
 # or Foldseek fident/TM-score scaled to look like alignment statistics) rather
-# than real sequence-alignment values. Feeding those into the identity/coverage
-# branches of _classify_goi_evidence conflates embedding/structural similarity
-# with sequence identity, which can manufacture a confident GOI call for a
-# same-fold non-homolog. Such hits are routed through the dedicated embedding/
-# structural rescue branches instead (which additionally require flanking support).
+# than real sequence-alignment values. Treating those as sequence identity would
+# manufacture a confident GOI call for a same-fold non-homolog: a locus found only by
+# such hits carries identity 0 and no query coverage, and its ML score is recorded
+# as EmbeddingSimilarity / StructuralSimilarity instead.
 ML_DISCOVERY_METHODS = frozenset({"plm_embedding", "foldseek_structural"})
 
 
@@ -1932,16 +1599,7 @@ def _goi_feature_attrs(
     collinear_support: Optional[int] = None,
     exons: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    confidence, goi_class, reason = _classify_goi_evidence(
-        evidence_type=evidence_type,
-        identity=identity,
-        exon_count=exon_count,
-        query_cov=query_cov,
-        flanking_support=flanking_support,
-        embedding_similarity=embedding_similarity,
-        structural_similarity=structural_similarity,
-        collinear_support=collinear_support,
-    )
+    confidence, goi_class, reason = _provisional_goi_label(evidence_type)
     attrs = dict(base_attrs)
     attrs.setdefault("Identity", f"{float(identity or 0.0):.1f}")
     attrs["SynVoyRole"] = "goi"
@@ -4131,9 +3789,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     })
     # §1 synteny ORDER: longest collinear run of the block's flanking genes in home order
     # (one representative position per flanking gene, sorted by TARGET position → home ranks
-    # → LIS). Feeds _classify_goi_evidence so a scrambled paralog neighbourhood can't reach
-    # HIGH on flanking COUNT alone. None when collinearity is unavailable (no home_rank /
-    # --disable_synteny_collinearity) → the classifier waives the order gate (legacy behaviour).
+    # → LIS). It sets the block's E_syn (block_place_terms), so a scrambled paralog
+    # neighbourhood is not a significant block, and is written as BlockCollinearSupport.
+    # None when collinearity is unavailable (no home_rank / --disable_synteny_collinearity).
     home_rank = getattr(args, 'home_rank', None)
     if home_rank:
         flank_first_pos: Dict[str, int] = {}
@@ -5122,31 +4780,13 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         old_conf = attr_kv.get('Confidence', '')
                         ev_type = attr_kv.get('EvidenceType', '')
                         try:
-                            ident = float(attr_kv.get('Identity', 0))
-                        except (ValueError, TypeError):
-                            ident = 0.0
-                        try:
-                            exons = int(attr_kv.get('Exons', 1))
-                        except (ValueError, TypeError):
-                            exons = 1
-                        try:
-                            qcov = float(attr_kv.get('QueryCoverage', 0))
-                        except (ValueError, TypeError):
-                            qcov = None
-                        try:
                             fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
                         except (ValueError, TypeError):
                             fl_sup = 0
 
-                        # Re-classify with embedding similarity
-                        new_conf, new_class, new_reason = _classify_goi_evidence(
-                            evidence_type=ev_type,
-                            identity=ident,
-                            exon_count=exons,
-                            query_cov=qcov,
-                            flanking_support=fl_sup,
-                            embedding_similarity=sim,
-                        )
+                        # Lift the label with the embedding similarity
+                        new_conf, new_class, new_reason = _ml_relabel(
+                            old_conf, ev_type, fl_sup, embedding_similarity=sim)
 
                         # Update GFF attrs if confidence was boosted
                         updated_attrs = attrs_str + f";EmbeddingSimilarity={sim:.3f}"
@@ -5236,18 +4876,6 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         old_conf = attr_kv.get('Confidence', '')
                         ev_type = attr_kv.get('EvidenceType', '')
                         try:
-                            ident = float(attr_kv.get('Identity', 0))
-                        except (ValueError, TypeError):
-                            ident = 0.0
-                        try:
-                            exons = int(attr_kv.get('Exons', 1))
-                        except (ValueError, TypeError):
-                            exons = 1
-                        try:
-                            qcov = float(attr_kv.get('QueryCoverage', 0))
-                        except (ValueError, TypeError):
-                            qcov = None
-                        try:
                             fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
                         except (ValueError, TypeError):
                             fl_sup = 0
@@ -5256,15 +4884,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         except (ValueError, TypeError):
                             emb_sim = None
 
-                        new_conf, new_class, new_reason = _classify_goi_evidence(
-                            evidence_type=ev_type,
-                            identity=ident,
-                            exon_count=exons,
-                            query_cov=qcov,
-                            flanking_support=fl_sup,
+                        new_conf, new_class, new_reason = _ml_relabel(
+                            old_conf, ev_type, fl_sup,
                             embedding_similarity=emb_sim if emb_sim else None,
-                            structural_similarity=tm,
-                        )
+                            structural_similarity=tm)
 
                         updated_attrs = attrs_str + f";StructuralSimilarity={tm:.3f}"
                         if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM'):
@@ -6096,11 +5719,13 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     f"envelope as rescue seed(s) (scatter={_rscore:.2f}, "
                     f"id>={getattr(args, 'dispersed_goi_min_identity', 40.0)}).")
 
-        # §1g: estimate this target's phylogenetic distance from the median identity
-        # of its flanking-gene matches and relax the GOI classify identity bars for
-        # distant targets (no-op for close relatives). Must run before any GOI
-        # classification for this genome (process_region_block below).
-        _dist_info = _apply_distance_adaptive_thresholds(args, flanking_seed_hits, genome_name)
+        # The target's distance from the home genome, as the median identity of its
+        # flanking-gene matches: recorded, it changes nothing (until 2026-10-15 it relaxed
+        # the identity thresholds of the old GOI label, §1g).
+        _flank_median, _flank_n = _median_best_flanking_identity(flanking_seed_hits)
+        if _flank_median is not None:
+            logger.info(f"[{genome_name}] Median flanking identity: {_flank_median:.1f}% "
+                        f"over {_flank_n} flanking gene(s).")
 
         synteny_blocks = identify_synteny_blocks(
             seed_hits,
@@ -6797,8 +6422,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 # already wrote to regions/<genome>.gff + regions/<genome>.faa. gpu_augment
 # loads ProtT5 then ESMFold sequentially (freeing each) and folds with
 # domain-preserving windows, then Foldseek-compares — producing an
-# embedding_similarity / structural_similarity per candidate, which we feed back
-# through _classify_goi_evidence to boost/rescue confidence in the GFF.
+# embedding_similarity / structural_similarity per candidate, which we record on
+# the GFF row (and which lifts the label of a row the judge did not label, _ml_relabel).
 # ---------------------------------------------------------------------------
 
 def _select_goi_candidates_from_region(gff_path, faa_path):
@@ -6830,7 +6455,8 @@ def _select_goi_candidates_from_region(gff_path, faa_path):
 
 
 def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_similarity):
-    """Attach ML scores to a candidate mRNA GFF line and re-classify confidence.
+    """Attach ML scores to a candidate mRNA GFF line; on a row the judge did not label,
+    let them lift its label (_ml_relabel).
 
     Mirrors the legacy in-worker re-rank (a strict superset of it): ML signals
     only ever *raise* confidence (LOW/MEDIUM → higher). Idempotent — will not
@@ -6849,31 +6475,14 @@ def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_si
     old_conf = attr_kv.get('Confidence', '')
     ev_type = attr_kv.get('EvidenceType', '')
     try:
-        ident = float(attr_kv.get('Identity', 0))
-    except (ValueError, TypeError):
-        ident = 0.0
-    try:
-        exons = int(attr_kv.get('Exons', 1))
-    except (ValueError, TypeError):
-        exons = 1
-    try:
-        qcov = float(attr_kv.get('QueryCoverage', 0))
-    except (ValueError, TypeError):
-        qcov = None
-    try:
         fl_sup = int(attr_kv.get('BlockFlankingSupport', 0))
     except (ValueError, TypeError):
         fl_sup = 0
 
-    new_conf, new_class, new_reason = _classify_goi_evidence(
-        evidence_type=ev_type,
-        identity=ident,
-        exon_count=exons,
-        query_cov=qcov,
-        flanking_support=fl_sup,
+    new_conf, new_class, new_reason = _ml_relabel(
+        old_conf, ev_type, fl_sup,
         embedding_similarity=embedding_similarity,
-        structural_similarity=structural_similarity,
-    )
+        structural_similarity=structural_similarity)
 
     updated = attrs_str
     if embedding_similarity is not None and 'EmbeddingSimilarity=' not in attrs_str:
@@ -6883,8 +6492,8 @@ def _apply_ml_scores_to_mrna_line(mRNA_line, embedding_similarity, structural_si
 
     boosted = 0
     # A row labelled by synvoy_label (Basis=, since 2026-10-14) keeps its label: its
-    # evidence is an E-value in the expected place and specificity, which the identity-
-    # based classifier re-run here does not see. The ML scores are recorded on it.
+    # evidence is an E-value in the expected place and specificity, which the ML scores
+    # do not add to. The ML scores are recorded on it.
     judged = 'Basis' in attr_kv
     if new_conf != old_conf and old_conf in ('LOW', 'MEDIUM') and not judged:
         updated = updated.replace(f"Confidence={old_conf}", f"Confidence={new_conf}")
@@ -7393,21 +7002,6 @@ def main():
     parser.add_argument("--prefix", default="", help="Prefix for output files (e.g. locus ID)")
     parser.add_argument("--resume", action="store_true", help="Resume from previous checkpoint if available")
 
-    # Classification thresholds (GOI confidence / model status)
-    parser.add_argument("--classify_high_min_identity", type=float, default=50.0,
-                        help="Min identity for HIGH confidence exon_annotation "
-                             "(lowered from 60 to accommodate cross-vertebrate orthologs)")
-    parser.add_argument("--classify_medium_min_identity", type=float, default=40.0,
-                        help="Min identity for MEDIUM confidence exon_annotation (40: in five "
-                             "benchmark families no gene model below 40 %% identity lay on a "
-                             "curated gene)")
-    parser.add_argument("--classify_tandem_min_identity", type=float, default=50.0,
-                        help="Min identity for MEDIUM confidence tandem_copy (below = LOW)")
-    parser.add_argument("--classify_high_min_collinear", type=int, default=3,
-                        help="§1: HIGH also requires the longest collinear run of home-ordered "
-                             "flanking to reach this, once a block has >= this many flanking "
-                             "genes — so a scrambled paralog neighbourhood is demoted to MEDIUM. "
-                             "Set 0 to disable the order gate (count-only, legacy).")
     parser.add_argument("--decoy_mode", type=str2bool, default=False,
                         help="Also search the reversed home protein and two shuffles of it in "
                              "every window, model and label them like the real query, and write "
@@ -7418,17 +7012,6 @@ def main():
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
                              "so the report can distinguish 'no ortholog found' from "
                              "'found one, could not place it syntenically'. Default on.")
-    parser.add_argument("--classify_fallback_strong_min_identity_floor", type=float,
-                        default=30.0,
-                        help="§1v: absolute identity floor for the strong-flanking "
-                             "fallback->MEDIUM clause. Its qcov arm has no identity "
-                             "requirement, so without this a hit at any identity reached "
-                             "MEDIUM inside a flanking-rich block (yeast STE2: 32 MEDIUM "
-                             "at 21-27%%). Default 30 keeps the 34.7%% ant-melittin call "
-                             "and rejects the 21-27%% false positives. 0 = legacy.")
-    parser.add_argument("--classify_tandem_min_qcov", type=float, default=0.35,
-                        help="§A2: min query coverage for MEDIUM tandem_copy; a high-identity "
-                             "but short local window (true low qcov) is demoted to LOW.")
     # §A4 (TODO_JUN) — rank/quantile wave binning (opt-in). The phylo-distance
     # metric saturates for tight clades (all bees → dist≈0.99 after max-norm),
     # collapsing absolute-threshold binning into ~4 undifferentiated waves with
@@ -7450,30 +7033,22 @@ def main():
     # run has ever demonstrated that it changes the result. Comparing rank-vs-legacy
     # binning cannot answer that (both still iterate); the control is NO iteration at
     # all — every genome searched with the initial DB only. This flag provides it.
-    parser.add_argument("--disable_ambiguous_tier", type=str2bool, default=False,
-                        help="Restore the pre-2026-08-31 behaviour where a candidate "
-                             "promoted only by flanking support was labelled "
-                             "MEDIUM/probable_goi. By default such a call is AMBIGUOUS: "
-                             "measured on the melittin benchmark, identity and flanking "
-                             "support are indistinguishable between species that HAVE the "
-                             "gene and species that LOST it, so 'probable ortholog' "
-                             "asserts more than the evidence supports.")
     parser.add_argument("--disable_wavefront", type=str2bool, default=False,
                         help="F4 control arm: place ALL genomes in ONE parallel wave, so "
                              "no genome is ever searched with a nearer relative's recovered "
                              "ortholog (the expanding database never expands). This is the "
                              "measurement baseline for 'does the wavefront earn its place'; "
                              "it is not a performance option. Overrides --rank_wave_binning.")
+    # Model status (ModelStatus = fragment / partial / complete); the label is synvoy_label's.
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
     parser.add_argument("--classify_complete_min_qcov", type=float, default=0.7,
                         help="Query coverage above this (with multi-exon) marks model as complete")
-    parser.add_argument("--strict_goi_family", type=str2bool, default=False,
-                        help="Downgrade fallback/rescued_exon/raw_hit GOI calls whose annotated "
-                             "TargetGene/TargetProduct does not match the family tokens")
     parser.add_argument("--goi_family_tokens", type=str, default="",
-                        help="Comma-separated family name tokens for strict mode; "
-                             "without them the family-name check is off")
+                        help="Comma-separated family names. With them every GOI row records "
+                             "whether the target's own annotation of the gene carries one "
+                             "(GoiFamilyConsistent, GoiFamilyReason); annotation only, no "
+                             "label changes. Without them the check is off")
 
     # PLM (Protein Language Model) embedding search
     parser.add_argument("--enable_plm_search", type=str2bool, default=False,
@@ -7578,49 +7153,9 @@ def main():
                         help="§1o: pad the flanking envelope by this many bp on each side. "
                              "'auto' (default) = derive it from --dispersed_envelope_margin_genes")
 
-    # §1g: per-target phylogenetic-distance auto-tune of the GOI classify bars.
-    parser.add_argument("--disable_distance_autotune", type=str2bool, default=False,
-                        help="§1g: disable per-target stringency auto-tune (keep one global stringency)")
-    parser.add_argument("--distance_autotune_close_pct", type=float, default=70.0,
-                        help="§1g: median flanking identity (pct) >= this -> no relaxation (close relative)")
-    parser.add_argument("--distance_autotune_far_pct", type=float, default=40.0,
-                        help="§1g: median flanking identity (pct) <= this -> full relaxation + manual_review")
-    parser.add_argument("--distance_autotune_max_relax", type=float, default=10.0,
-                        help="§1g: max identity-points subtracted from the HIGH/MEDIUM bars for distant targets")
-    parser.add_argument("--distance_autotune_min_flanking", type=int, default=3,
-                        help="§1g: minimum flanking genes needed to trust the distance estimate")
-    parser.add_argument("--distance_autotune_high_floor", type=float, default=45.0,
-                        help="§1g: the relaxation never takes the HIGH identity threshold below this "
-                             "(a baseline at or below it is not relaxed); 0 = no floor")
-    parser.add_argument("--distance_autotune_medium_floor", type=float, default=30.0,
-                        help="§1g: the same for the MEDIUM identity threshold; 0 = no floor")
-
     args = parser.parse_args()
 
-    # Populate classification thresholds from CLI args
-    CLASSIFY_THRESHOLDS["ambiguous_tier_enabled"] = not args.disable_ambiguous_tier
-    # "At least two exons" for HIGH follows the home gene: a gene without introns at home
-    # is expected without introns in the target, and could otherwise never be HIGH.
-    args.goi_home_exons = None
-    if getattr(args, "goi_info", None):
-        try:
-            with open(args.goi_info) as _fh:
-                args.goi_home_exons = int(json.load(_fh).get("num_exons") or 0) or None
-        except (OSError, TypeError, ValueError):
-            args.goi_home_exons = None
-    if args.goi_home_exons == 1:
-        CLASSIFY_THRESHOLDS["high_min_exons"] = 1
-        CLASSIFY_THRESHOLDS["high_single_exon_min_qcov"] = args.classify_complete_min_qcov
-    CLASSIFY_THRESHOLDS["high_min_identity"] = args.classify_high_min_identity
-    CLASSIFY_THRESHOLDS["medium_min_identity"] = args.classify_medium_min_identity
-    CLASSIFY_THRESHOLDS["tandem_min_identity"] = args.classify_tandem_min_identity
-    CLASSIFY_THRESHOLDS["tandem_min_qcov"] = args.classify_tandem_min_qcov
-    # §1: 0 disables the order gate. Use a value larger than any real block so the
-    # `flanking_support < high_min_collinear` waiver always fires (→ order never gates).
-    CLASSIFY_THRESHOLDS["high_min_collinear"] = (
-        args.classify_high_min_collinear if args.classify_high_min_collinear > 0 else 10 ** 9)
-    CLASSIFY_THRESHOLDS["fallback_strong_min_identity_floor"] = (
-        args.classify_fallback_strong_min_identity_floor)
+    # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
     CLASSIFY_THRESHOLDS["complete_min_qcov"] = args.classify_complete_min_qcov
     CLASSIFY_THRESHOLDS["plm_medium_threshold"] = args.plm_medium_threshold
@@ -7628,25 +7163,16 @@ def main():
     CLASSIFY_THRESHOLDS["structural_medium_threshold"] = args.structural_medium_threshold
     CLASSIFY_THRESHOLDS["structural_high_threshold"] = args.structural_high_threshold
 
-    # Family-consistency config (strict GOI mode)
-    FAMILY_CONFIG["strict"] = bool(args.strict_goi_family)
-    override_tokens = {
-        _normalize_family_token(t) for t in (args.goi_family_tokens or "").split(",")
-    }
-    override_tokens.discard("")
+    # Family-name annotation (GoiFamilyConsistent / GoiFamilyReason on every GOI row).
     # The names come from --goi_family_tokens only. (Until 2026-10-09 they were also
     # "derived" from the first header of the query set, which is a flanking exon record
-    # written by the pipeline itself, so nothing was ever derived.) Three presets set
-    # strict_goi_family; without names that is a plain no-op, not a problem to warn about.
-    FAMILY_CONFIG["tokens"] = override_tokens
-    if FAMILY_CONFIG["strict"] and not FAMILY_CONFIG["tokens"]:
-        logger.info("Family-name check: off (no --goi_family_tokens given).")
-        FAMILY_CONFIG["strict"] = False
+    # written by the pipeline itself, so nothing was ever derived.)
+    FAMILY_CONFIG["tokens"] = {
+        _normalize_family_token(t) for t in (args.goi_family_tokens or "").split(",")
+    }
+    FAMILY_CONFIG["tokens"].discard("")
     if FAMILY_CONFIG["tokens"]:
-        logger.info(
-            f"GOI family tokens: {sorted(FAMILY_CONFIG['tokens'])} "
-            f"(strict={FAMILY_CONFIG['strict']})"
-        )
+        logger.info(f"GOI family tokens: {sorted(FAMILY_CONFIG['tokens'])} (annotation only)")
 
     # INPUT VALIDATION
     # 1. Validate required files exist
@@ -7792,12 +7318,7 @@ def main():
         logger.error("aug_relaxed_length_div must be > 0")
         sys.exit(1)
 
-    # Classification threshold validation
-    for name in ['classify_high_min_identity', 'classify_medium_min_identity', 'classify_tandem_min_identity']:
-        val = getattr(args, name)
-        if val < 0 or val > 100:
-            logger.error(f"{name} must be between 0 and 100 (got {val})")
-            sys.exit(1)
+    # Model-status threshold validation
     for name in ['classify_fragment_max_qcov', 'classify_complete_min_qcov']:
         val = getattr(args, name)
         if val < 0 or val > 1:

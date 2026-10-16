@@ -1381,10 +1381,11 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "high_flanking_count": flank_n,
                 "high_goi_count": 0,
                 "advice": (
-                    "Strong synteny but no HIGH-confidence GOI call — try a lower "
-                    "--classify_high_min_identity / --classify_medium_min_identity, or "
-                    "inspect this block manually (the orthologous neighbourhood likely "
-                    "exists but the GOI is too divergent for current thresholds)."
+                    "Strong synteny but no HIGH-confidence GOI call — inspect this block: "
+                    "the orthologous neighbourhood is there, but no gene model in it is "
+                    "significant, specific and complete enough for HIGH. Look at the "
+                    "AMBIGUOUS (needs curation) and LOW calls of this genome; the gene may "
+                    "be too divergent, broken in the assembly, or lost."
                 ),
             })
 

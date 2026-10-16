@@ -162,15 +162,17 @@ What each preset changes (`resolve_effective_params.py` → `PRESET_OVERRIDES`):
 
 | Preset | Changes from the defaults |
 |---|---|
-| `preset_short_peptide` | HIGH ≥ 40 % identity, MEDIUM ≥ 30 %; fragment below 0.3 coverage, complete from 0.5; single-segment tandem copies from 40 % |
-| `preset_paralog_discrimination` | at most 4 regions per genome with a higher score floor (figures); family gate on |
-| `preset_tandem_family` | a neighbour is a relative of the GOI up to E = 1e-3 (§5.7); family gate on |
-| `preset_single_copy` | family gate on |
+| `preset_short_peptide` | model status: fragment below 0.3 coverage, complete from 0.5 |
+| `preset_paralog_discrimination` | at most 4 regions per genome with a higher score floor (figures) |
+| `preset_tandem_family` | a neighbour is a relative of the GOI up to E = 1e-3 (§5.7) |
+| `preset_single_copy` | nothing |
 
-The family gate (`strict_goi_family`) acts only when `--goi_family_tokens` names the
-family, so `preset_single_copy` without tokens equals the defaults.
+No preset moves the label of a GOI call (§7.8). Until 2026-10-15 the short-peptide preset
+also lowered the identity thresholds of the earlier label (HIGH 40, MEDIUM 30, tandem
+copies 40) and three presets switched on a family-name gate (`strict_goi_family`); both
+went with the identity-based label.
 
-The chosen values travel to the later steps as a `settings` map of 17 parameters. A
+The chosen values travel to the later steps as a `settings` map of 13 parameters. A
 value the user changed at launch is kept over the preset. `--auto_apply_preset false`
 leaves the defaults in place; `--preset_override` picks a preset by hand.
 
@@ -621,44 +623,30 @@ coverage:
   (`FrameFixed=1`), else only the model's hit regions are judged (`FrameBroken=1`).
 - The hull rescue judges its models with the same function; it has no block E-value, so
   its place is the whole genome.
-- The identity-based classifier (`_classify_goi_evidence`) still writes a provisional
-  label when a model is built; every GOI row with an E-value is relabelled at the end of
-  its genome, so that label does not reach the output. Until 2026-10-14 it was the label:
-  HIGH at ≥ 50 % identity with two exons and two flanking genes in home order, MEDIUM at
-  ≥ 40 %, AMBIGUOUS for hit chains in blocks of ≥ 5 flanking genes, and a context
-  promotion (one day on by default, removed) lifted weak models on gene order alone.
+- A model carries a provisional LOW (`InferenceReason=awaiting_label`) from the moment it
+  is built; every GOI row with an E-value is relabelled at the end of its genome. A GOI
+  row the judge cannot label (no Eeff) keeps the LOW, never counts and never seeds, and
+  is counted in the log as `LOW/unjudged`. Until 2026-10-14 the label came from identity
+  thresholds: HIGH at ≥ 50 % identity with two exons and two flanking genes in home
+  order, MEDIUM at ≥ 40 %, AMBIGUOUS for hit chains in blocks of ≥ 5 flanking genes, and
+  a context promotion (one day on by default, removed) lifted weak models on gene order
+  alone. Its parameters (`classify_high_min_identity` and its kin) were removed on
+  2026-10-15.
+- ML scores (`--enable_plm_search`, `--enable_structural_search`) are recorded on the
+  rows (`EmbeddingSimilarity`, `StructuralSimilarity`); they lift a label by one step only
+  on a row the judge did not label (`_ml_relabel`).
 - A model also gets a status that does not depend on confidence: `fragment` below
   0.4 coverage, `complete` from 0.7 coverage with at least 2 exons, else `partial`.
 
-### 7.9 Thresholds relaxed for distant targets
+### 7.9 Thresholds relaxed for distant targets (removed)
 
-Before classification, `_apply_distance_adaptive_thresholds` takes the best identity
-of each flanking gene in this genome and computes the median `m`. (Per gene: until
-2026-10-14 each exon record of the exon-level search counted as a gene, so long genes
-weighed by their exon count.) With at least 3 flanking genes, the HIGH and MEDIUM
-identity thresholds are lowered by
-
-```
-relax = 0                               if m ≥ 70
-relax = 10 · (70 − m) / (70 − 40)       if 40 < m < 70
-relax = 10                              if m ≤ 40
-```
-
-percentage points, down to a floor: HIGH is never lowered below 45 % and MEDIUM never
-below 30 % (`distance_autotune_high_floor`, `distance_autotune_medium_floor`), and a
-threshold that is already at or below its floor (the short-peptide thresholds of 40 and
-30) is not lowered at all. Targets with `m ≤ 40` are marked for manual review.
-
-The 70 and 40 are identities of the *flanking* genes, not limits for the GOI. With
-the default thresholds, the lowest GOI identity that can still be HIGH is 45 %, and
-MEDIUM 30 %.
-
-The floors are there because the relaxation dates from a time when most queries ran
-with a HIGH threshold of 55. With 50, the relaxed threshold was 43 % in a test without
-an ortholog (firefly luciferase against fruit fly and mosquito), where relatives of the
-gene are modelled at 42 %; and a short peptide could have become HIGH at 30 %. In the
-curated families ([§7.8](#78-confidence)) nothing supports HIGH below 45 %: between 40
-and 45 % two models lay on a curated gene and three on none, between 45 and 50 % 27 and 4.
+Until 2026-10-15 the HIGH and MEDIUM identity thresholds of the earlier label were lowered
+for a genome whose flanking genes matched poorly (the §1g distance auto-tune: up to 10
+points below a median flanking identity of 70 %, down to floors of 45 and 30 %). The
+judge of §7.8 has no identity threshold, and its E-value is computed in the expected place
+of each genome, so the relaxation went with the thresholds. The median of the best
+identity of each flanking gene is still computed and logged per genome
+(`Median flanking identity: … over N flanking gene(s)`); it changes nothing.
 
 ### 7.10 Flanking gene models
 
@@ -1031,13 +1019,7 @@ of 9 without.
 | `sw_min_score` / `sw_min_identity` | 20 / 10 | §7.6 |
 | `goi_fallback_intron_margin` / `_floor` | 5 / 10,000 | §7.7 |
 | `fallback_short_query_len` / `_min_aln_aa` / `_min_bits` | 150 / 15 / 30 | §7.7 |
-| `classify_high_min_identity` / `classify_medium_min_identity` | 50 / 40 | §7.8 |
-| `classify_high_min_collinear` | 3 | §7.8 |
-| `classify_tandem_min_identity` / `_min_qcov` | 50 / 0.35 | §7.8 |
-| `classify_fallback_strong_min_identity_floor` | 30 | §7.8 |
 | `classify_fragment_max_qcov` / `classify_complete_min_qcov` | 0.4 / 0.7 | §7.8 |
-| `distance_autotune_close_pct` / `_far_pct` / `_max_relax` | 70 / 40 / 10 | §7.9 |
-| `distance_autotune_high_floor` / `_medium_floor` | 45 / 30 | §7.9 |
 | `dispersed_goi_min_identity` / `_max_evalue` / `_min_alnlen` | 40 / 1e-10 / 50 | §7.11 |
 | `dispersed_envelope_margin_genes` / `dispersed_envelope_margin` | 9 pitches / auto | §7.11 |
 | `synteny_weight_base` / `_consistency` / `_strand` | 0.4 / 0.3 / 0.3 | §8 |

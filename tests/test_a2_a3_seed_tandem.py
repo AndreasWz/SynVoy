@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-A2 + A3 regression tests (TODO_JUN).
+A3 regression tests (TODO_JUN): the seed rule.
 
-A2 — coverage-aware tandem classification: a tandem_copy reaches MEDIUM only when
-identity AND real query coverage clear their floors; a short high-identity local
-window (the Vollenhovia/Polistes "79%"/"71%" overcalls, now carrying their true
-low qcov via QW2) is demoted to LOW.
+The opt-in flanking-supported seeding was replaced on 2026-10-14 by one seed rule (label
+rework, step 2): per query and genome the HIGH calls, else the MEDIUM calls, each only when
+specific against the home proteome. Its tests are TestSeedRule below.
 
-A3 — the opt-in flanking-supported seeding was replaced on 2026-10-14 by one seed
-rule (label rework, step 2): per query and genome the HIGH calls, else the MEDIUM calls,
-each only when specific against the home proteome. Its tests are TestSeedRule below.
+The A2 tests (a tandem copy reached MEDIUM only with identity AND coverage, and with
+context) were removed on 2026-10-15 with the identity-based label: a tandem copy is
+labelled by synvoy_label.judge like every GOI call.
 """
 
 import os
@@ -19,11 +18,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bin'))
 
 import iterative_search_runner as isr
-from iterative_search_runner import (
-    _classify_goi_evidence,
-    _classify_goi_for_seed_and_tree,
-    CLASSIFY_THRESHOLDS,
-)
+from iterative_search_runner import _classify_goi_for_seed_and_tree
 
 
 def _gene(gid, seq="MKT"):
@@ -32,96 +27,6 @@ def _gene(gid, seq="MKT"):
 
 def _is_goi(gid):
     return gid.startswith("GOI_")
-
-
-class TestA2TandemCoverage(unittest.TestCase):
-    """A2: tandem_copy MEDIUM needs identity AND coverage."""
-
-    def setUp(self):
-        # Pin thresholds to defaults in case another test mutated the global dict.
-        self._saved = dict(CLASSIFY_THRESHOLDS)
-        CLASSIFY_THRESHOLDS["tandem_min_identity"] = 40.0
-        CLASSIFY_THRESHOLDS["tandem_min_qcov"] = 0.35
-
-    def tearDown(self):
-        CLASSIFY_THRESHOLDS.clear()
-        CLASSIFY_THRESHOLDS.update(self._saved)
-
-    def _conf(self, identity, qcov, flanking=8):
-        # Default: a strongly supported block, so these tests isolate identity/coverage.
-        return _classify_goi_evidence("tandem_copy", identity=identity, query_cov=qcov,
-                                      flanking_support=flanking)
-
-    def test_high_identity_low_coverage_demoted(self):
-        """Vollenhovia: 79% identity but qcov 0.30 → LOW (low coverage)."""
-        conf, cls, reason = self._conf(79.0, 0.30)
-        self.assertEqual(conf, "LOW")
-        self.assertEqual(cls, "tandem_goi_copy")
-        self.assertEqual(reason, "goi_tandem_copy_low_coverage")
-
-    def test_missing_coverage_demoted(self):
-        """query_cov None (unknown) → LOW, not MEDIUM."""
-        conf, _cls, reason = self._conf(100.0, None)
-        self.assertEqual(conf, "LOW")
-        self.assertEqual(reason, "goi_tandem_copy_low_coverage")
-
-    def test_identity_and_coverage_pass(self):
-        """Real full-length tandem copy: 79% / 0.5 → MEDIUM."""
-        conf, cls, reason = self._conf(79.0, 0.5)
-        self.assertEqual(conf, "MEDIUM")
-        self.assertEqual(cls, "tandem_goi_copy")
-        self.assertEqual(reason, "goi_tandem_copy_detected")
-
-    def test_low_identity_still_low_identity_reason(self):
-        """Low identity keeps the identity reason even if coverage is fine."""
-        conf, _cls, reason = self._conf(30.0, 0.9)
-        self.assertEqual(conf, "LOW")
-        self.assertEqual(reason, "goi_tandem_copy_low_identity")
-
-    def test_exactly_on_floors_passes(self):
-        conf, _cls, _r = self._conf(40.0, 0.35)
-        self.assertEqual(conf, "MEDIUM")
-
-
-class TestTandemContext(unittest.TestCase):
-    """Family benchmark 2026-09-11: a tandem copy needs context, like every other
-    evidence type -- strong block flanking, or the sequence covering the query."""
-
-    def setUp(self):
-        self._saved = dict(CLASSIFY_THRESHOLDS)
-        CLASSIFY_THRESHOLDS.update(tandem_min_identity=40.0, tandem_min_qcov=0.35,
-                                   fallback_strong_min_flanking=5, medium_min_qcov=0.65)
-
-    def tearDown(self):
-        CLASSIFY_THRESHOLDS.clear()
-        CLASSIFY_THRESHOLDS.update(self._saved)
-
-    def _conf(self, identity, qcov, flanking):
-        return _classify_goi_evidence("tandem_copy", identity=identity, query_cov=qcov,
-                                      flanking_support=flanking)
-
-    def test_chance_window_hit_in_weak_block_is_low(self):
-        """SECP junk: 50 % over 0.39 of a 77-aa query, block flanking 4 -> LOW."""
-        conf, cls, reason = self._conf(50.0, 0.39, 4)
-        self.assertEqual((conf, cls, reason),
-                         ("LOW", "tandem_goi_copy", "goi_tandem_copy_weak_context"))
-
-    def test_strong_block_keeps_partial_copy(self):
-        """Melittin bee copy: 57 % over ~0.5, block flanking 8 -> MEDIUM."""
-        self.assertEqual(self._conf(57.0, 0.5, 8)[0], "MEDIUM")
-
-    def test_full_length_copy_needs_no_flanking(self):
-        """KAZA copy in a 2-flanking block: 87 % over 0.87 -> MEDIUM on sequence alone."""
-        self.assertEqual(self._conf(87.4, 0.869, 2)[0], "MEDIUM")
-
-    def test_context_bars_are_inclusive(self):
-        self.assertEqual(self._conf(40.0, 0.35, 5)[0], "MEDIUM")
-        self.assertEqual(self._conf(40.0, 0.65, 0)[0], "MEDIUM")
-        self.assertEqual(self._conf(40.0, 0.64, 4)[0], "LOW")
-
-    def test_identity_and_coverage_floors_still_come_first(self):
-        self.assertEqual(self._conf(39.9, 0.9, 10)[2], "goi_tandem_copy_low_identity")
-        self.assertEqual(self._conf(90.0, 0.30, 10)[2], "goi_tandem_copy_low_coverage")
 
 
 class TestSeedRule(unittest.TestCase):

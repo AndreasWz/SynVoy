@@ -85,7 +85,10 @@ class TestStrongSyntenyNoGoiFlag(unittest.TestCase):
         self.assertEqual(flags[0]["locus"], "locus_1")
         self.assertEqual(flags[0]["chrom"], "chrA")
         self.assertEqual(flags[0]["high_flanking_count"], 25)
-        self.assertIn("classify", flags[0]["advice"].lower())
+        # The advice points at the calls to inspect, not at thresholds (since 2026-10-15
+        # the label has none to lower).
+        self.assertIn("needs curation", flags[0]["advice"].lower())
+        self.assertNotIn("--classify", flags[0]["advice"])
         self.assertEqual(report["summary"]["strong_synteny_no_goi_flags"], 1)
 
     def test_no_flag_when_high_goi_present(self):

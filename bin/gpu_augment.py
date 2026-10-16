@@ -35,8 +35,9 @@ producing empty results (the old failure mode).
 TWO PRODUCTS
 ------------
   * re-rank scores   {candidate_id: {embedding_similarity, structural_similarity}}
-    fed back into _classify_goi_evidence by iterative_search_runner to
-    boost/rescue confidence of already-modelled GOI candidates.
+    recorded by iterative_search_runner on already-modelled GOI candidates
+    (EmbeddingSimilarity / StructuralSimilarity); they lift the label only of a
+    row the judge did not label (_ml_relabel).
   * discovery hits   ORFs that are structurally/embedding-similar to the GOI but
     invisible to sequence search.
 

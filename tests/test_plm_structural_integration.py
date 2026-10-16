@@ -79,63 +79,42 @@ def test_resolve_signals_takes_best_ml_signal():
 
 
 # ---------------------------------------------------------------------------
-# Classifier gating: synthetic identity alone can't reach MEDIUM; the ML rescue
-# path requires real similarity AND flanking (synteny) corroboration.
+# ML relabel (rows the judge did not label): synthetic identity alone can't reach
+# MEDIUM; the ML rescue requires real similarity AND flanking (synteny) corroboration.
 # ---------------------------------------------------------------------------
 
-def test_ml_only_high_identity_does_not_reach_medium_via_identity():
-    """The whole point of the fix: identity is forced to 0 for an ML-only locus,
-    so even a strong synthetic 'identity' cannot trip the identity branch."""
-    conf, _, reason = isr._classify_goi_evidence(
-        "fallback_hit_span", identity=0.0, query_cov=None,
-        flanking_support=10, embedding_similarity=None,
-    )
-    assert conf == "LOW"
-    assert reason == "fallback_span_only"
+def test_ml_only_locus_without_a_score_stays_low():
+    """An ML-only locus carries identity 0 and no coverage; without an ML score above the
+    threshold nothing lifts its provisional LOW."""
+    assert isr._provisional_goi_label("fallback_hit_span")[0] == "LOW"
+    assert isr._ml_relabel("LOW", "fallback_hit_span", flanking_support=10) == ("LOW", None, None)
 
 
 def test_ml_rescue_requires_flanking():
-    isr.CLASSIFY_THRESHOLDS.setdefault("plm_medium_threshold", 0.7)
     # similarity over threshold but no flanking -> stays LOW
-    conf, _, _ = isr._classify_goi_evidence(
-        "fallback_hit_span", identity=0.0, query_cov=None,
-        flanking_support=0, embedding_similarity=0.75,
-    )
-    assert conf == "LOW"
-    # similarity over threshold + flanking -> MEDIUM via principled rescue
-    conf, _, reason = isr._classify_goi_evidence(
-        "fallback_hit_span", identity=0.0, query_cov=None,
-        flanking_support=2, embedding_similarity=0.75,
-    )
-    assert conf == "MEDIUM"
-    assert reason == "fallback_span_plm_rescued"
+    assert isr._ml_relabel("LOW", "fallback_hit_span", 0, embedding_similarity=0.75)[0] == "LOW"
+    # similarity over threshold + flanking -> MEDIUM via the rescue
+    conf, cls, reason = isr._ml_relabel("LOW", "fallback_hit_span", 2, embedding_similarity=0.75)
+    assert (conf, cls, reason) == ("MEDIUM", "probable_goi", "fallback_span_plm_rescued")
 
 
 def test_structural_rescue_path():
-    isr.CLASSIFY_THRESHOLDS.setdefault("structural_medium_threshold", 0.5)
-    conf, _, reason = isr._classify_goi_evidence(
-        "fallback_hit_span", identity=0.0, query_cov=None,
-        flanking_support=2, embedding_similarity=None, structural_similarity=0.55,
-    )
+    conf, _, reason = isr._ml_relabel("LOW", "fallback_hit_span", 2, structural_similarity=0.55)
     assert conf == "MEDIUM"
     assert reason == "fallback_span_structural_rescued"
 
 
 def test_boost_never_lowers_confidence():
-    """ML signals only ever raise confidence; a strong real model with no ML
-    signal classifies the same as with a weak one."""
-    isr.CLASSIFY_THRESHOLDS.setdefault("plm_high_threshold", 0.85)
-    base = isr._classify_goi_evidence(
-        "exon_annotation", identity=90.0, exon_count=3,
-        flanking_support=isr.CLASSIFY_THRESHOLDS.get("high_min_flanking", 3),
-    )
-    boosted = isr._classify_goi_evidence(
-        "exon_annotation", identity=90.0, exon_count=3,
-        flanking_support=isr.CLASSIFY_THRESHOLDS.get("high_min_flanking", 3),
-        embedding_similarity=0.95,
-    )
-    # already HIGH; boost can't go higher and must not regress
-    assert base[0] == boosted[0]
+    """ML signals only ever raise confidence, by one step; only a gene model goes from
+    MEDIUM to HIGH, and only in a block with enough flanking genes."""
+    assert isr._ml_relabel("HIGH", "exon_annotation", 3, embedding_similarity=0.95)[0] == "HIGH"
+    assert isr._ml_relabel("MEDIUM", "exon_annotation", 3, embedding_similarity=0.1)[0] == "MEDIUM"
+    assert isr._ml_relabel("MEDIUM", "exon_annotation", 2, embedding_similarity=0.9) == (
+        "HIGH", "confident_goi", "modeled_goi_plm_boosted")
+    assert isr._ml_relabel("MEDIUM", "exon_annotation", 1, embedding_similarity=0.9)[0] == "MEDIUM"
+    assert isr._ml_relabel("MEDIUM", "fallback_hit_span", 5, embedding_similarity=0.99)[0] == "MEDIUM"
+    assert isr._ml_relabel("LOW", "exon_annotation", 5, embedding_similarity=0.99)[0] == "MEDIUM"
+    assert isr._ml_relabel("LOW", "raw_hit", 5, embedding_similarity=0.99)[0] == "LOW"
 
 
 # ---------------------------------------------------------------------------
