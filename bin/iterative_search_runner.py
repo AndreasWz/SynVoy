@@ -604,7 +604,7 @@ def _parse_gff_attr_string(text: str) -> Dict[str, str]:
     return out
 
 
-def rebase_relative_candidates(raw_candidates, cand_parents, by_parent):
+def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bool = False):
     """Report every gene model found with a relative's model against the HOME protein.
 
     ``cand_parents[i]`` is the parent id (home parent, or its ``~rel`` alias) under which
@@ -613,7 +613,8 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent):
     query coverage are measured again by aligning its protein to the home protein, it is
     classified with those numbers, and it gets the home parent's id. The relative that
     found it and the identity to that relative stay on the record as ``SearchQuery`` and
-    ``SearchQueryIdentity``.
+    ``SearchQueryIdentity``. With ``core`` a gene model also gets CoreCoverage, from the
+    aligned part of the home protein.
     """
     real_models = {'exon_annotation', 'tandem_copy', 'fallback_hit_span'}
     home_spans = defaultdict(list)
@@ -667,6 +668,8 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent):
             query_cov=aln['query_cov'],
             flanking_support=int(float(old.get('BlockFlankingSupport', 0) or 0)),
             collinear_support=int(float(collinear)) if collinear not in (None, '') else None,
+            core_cov=(core_coverage([(aln['q_start'], aln['q_end'])], home.get('seq', ''))
+                      if core and evidence == 'exon_annotation' and aln['q_end'] else None),
         )
         attrs['SearchQuery'] = relative.get('model_id', parent)
         attrs['SearchQueryIdentity'] = old.get('Identity', '')
@@ -1154,8 +1157,47 @@ def _place_evalue(cand) -> float:
         return float('inf')
 
 
+# --core_completeness (preset plan PR-10, the signal_anchor module): the judge's
+# completeness is measured on the core of the home protein as well, the protein without its
+# signal peptide and GPI tail, which are often the least conserved or not modelled. Set per
+# genome task from the option (process_single_genome).
+CORE_COMPLETENESS = False
+_QUERY_CORE: Dict[str, Tuple[int, int]] = {}
+
+
+def query_core(seq: str) -> Tuple[int, int]:
+    """(first, last), 1-based inclusive: the residues of ``seq`` without its signal peptide
+    and GPI tail (query_features.signal_peptide, gpi_signal); the whole sequence when
+    neither is found or nothing would be left."""
+    if seq not in _QUERY_CORE:
+        from query_features import gpi_signal, signal_peptide
+        has_sp, sp_len = signal_peptide(seq)
+        has_gpi, gpi_len = gpi_signal(seq)
+        first = (int(sp_len) if has_sp else 0) + 1
+        last = len(seq) - (int(gpi_len) if has_gpi else 0)
+        _QUERY_CORE[seq] = (first, last) if last >= first else (1, len(seq))
+    return _QUERY_CORE[seq]
+
+
+def core_coverage(intervals, seq: str) -> Optional[float]:
+    """Share of the core of ``seq`` (query_core) covered by the union of ``intervals``
+    (1-based inclusive query positions), each clipped to the core. None without a sequence."""
+    if not seq:
+        return None
+    first, last = query_core(seq)
+    clipped = sorted((max(int(a), first), min(int(b), last)) for a, b in intervals
+                     if min(int(b), last) >= max(int(a), first))
+    covered, end = 0, first - 1
+    for a, b in clipped:
+        if b > end:
+            covered += b - max(a, end + 1) + 1
+            end = b
+    return covered / (last - first + 1)
+
+
 def _judge_attrs(a: Dict[str, str], e_key: str) -> Tuple[str, str]:
-    """synvoy_label.judge on a candidate's GFF attributes, with E from ``e_key``."""
+    """synvoy_label.judge on a candidate's GFF attributes, with E from ``e_key``. With
+    CORE_COMPLETENESS the coverage is the larger of QueryCoverage and CoreCoverage."""
     def num(key):
         try:
             return float(a[key])
@@ -1164,11 +1206,15 @@ def _judge_attrs(a: Dict[str, str], e_key: str) -> Tuple[str, str]:
     real = a.get('RealCompetitor')
     near = a.get('BestOtherInNeighbourhood')
     esyn = num('BlockEsyn')
+    cov = num('QueryCoverage')
+    core = num('CoreCoverage') if CORE_COMPLETENESS else None
+    if core is not None:
+        cov = core if cov is None else max(cov, core)
     return synvoy_label.judge(
         num(e_key), a.get('Place', 'genome'),
         esyn is not None and esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN,
         num('SpecMargin'), None if real in (None, '') else real == '1',
-        None if near in (None, '') else near == '1', num('QueryCoverage'))
+        None if near in (None, '') else near == '1', cov)
 
 
 def judge_candidates(candidates) -> None:
@@ -1779,6 +1825,7 @@ def _goi_feature_attrs(
     structural_similarity: Optional[float] = None,
     collinear_support: Optional[int] = None,
     exons: Optional[List[Dict[str, Any]]] = None,
+    core_cov: Optional[float] = None,
 ) -> Dict[str, Any]:
     confidence, goi_class, reason = _provisional_goi_label(evidence_type)
     attrs = dict(base_attrs)
@@ -1802,6 +1849,8 @@ def _goi_feature_attrs(
     attrs["InferenceReason"] = reason
     if query_cov is not None:
         attrs["QueryCoverage"] = _format_attr_float(query_cov)
+    if core_cov is not None:
+        attrs["CoreCoverage"] = _format_attr_float(core_cov)
     if exon_count:
         attrs.setdefault("Exons", str(int(exon_count)))
     if embedding_similarity is not None:
@@ -4108,10 +4157,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         strand = exons[0].get('strand', '+')
         avg_pident = sum(e.get('pident', 0) for e in exons) / len(exons)
         model_qcov = None
+        model_core_cov = None
         if parent_query_seq:
             qmin_model = min(e.get('qstart', 1) for e in exons)
             qmax_model = max(e.get('qend', 1) for e in exons)
             model_qcov = (qmax_model - qmin_model + 1) / max(1, len(parent_query_seq))
+            if getattr(args, 'core_completeness', False):
+                model_core_cov = core_coverage([(e.get('qstart', 1), e.get('qend', 1)) for e in exons],
+                                               parent_query_seq)
 
         global_start = w_start + min(e['gstart'] for e in exons) + 1
         global_end = w_start + max(e['gend'] for e in exons)
@@ -4121,7 +4174,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             (
                 f"{chrom}\texon_annotation\tmRNA\t{global_start}\t{global_end}\t"
                 f"{avg_pident:.1f}\t{strand}\t.\t"
-                f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons), global_start, global_end, strand)}"
+                f"{_mRNA_attrs(_goi_feature_attrs({'ID': new_id, 'Name': parent_id, 'SynVoy_Parent': parent_id}, evidence_type='exon_annotation', identity=avg_pident, exon_count=len(exons), query_cov=model_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support, exons=exons, core_cov=model_core_cov), global_start, global_end, strand)}"
             )
         ]
         for eidx, exon in enumerate(exons, 1):
@@ -4681,7 +4734,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     mark_idx += 1
                 cand_parents.append(cand_marks[mark_idx][1] if cand_marks else '')
             raw_candidates[:] = rebase_relative_candidates(
-                raw_candidates, cand_parents, goi_query_by_parent)
+                raw_candidates, cand_parents, goi_query_by_parent,
+                core=bool(getattr(args, 'core_completeness', False)))
 
         # Flanking gene annotation pass (kept separate from GOI logic).
         flanking_parent_ids = {
@@ -5833,6 +5887,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     # raises it); a module setting of annotate_goi_exons, set for this worker task.
     import annotate_goi_exons as _age
     _age.MINIPROT_SHORT_ORF_MAX_LEN = int(getattr(args, 'miniprot_short_orf_max_len', 60))
+    global CORE_COMPLETENESS
+    CORE_COMPLETENESS = bool(getattr(args, 'core_completeness', False))
     
     unique_id = uuid.uuid4().hex
     hits_file = f"{args.output_dir}/hits/{prefix}{genome_name}.m8"
@@ -7235,6 +7291,10 @@ def main():
     parser.add_argument("--goi_candidate_regions_per_query", type=int, default=2,
                         help="GOI loci kept per query in a search window, the strongest by "
                              "query coverage, then bits (the local_family module raises it)")
+    parser.add_argument("--core_completeness", type=str2bool, default=False,
+                        help="Completeness for HIGH also on the core of the home protein (without "
+                             "its signal peptide and GPI tail): CoreCoverage on gene models, and "
+                             "the judge reads the larger of QueryCoverage and CoreCoverage")
     parser.add_argument("--report_low_complexity", type=str2bool, default=False,
                         help="Write LowComplexity (low-complexity share of the model protein) on "
                              "the GOI models (advisory)")

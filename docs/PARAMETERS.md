@@ -1041,6 +1041,11 @@ The default gap-bridging rule counts the anchored flanking genes on the left of 
 
 Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them) are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data; the report gives it as `decoy_rate`: the decoy cases that were searched (home gene × target genome with a search window × decoy kind; the home genome is never searched) and, per label, the calls and the upper end of the exact (Clopper–Pearson) 95 % interval. Costs about four times the window search. A run-level option: no preset module sets it (the `low_complexity` module, for one, fires on 47 % of the Candida development genes).
 
+### `core_completeness`
+**Type:** Boolean | **Default:** `false`
+
+HIGH needs a call that covers at least 0.7 of the home protein (a constant of the label). For a secreted or GPI-anchored protein, the signal peptide and the GPI tail are often the parts a model misses or that are least conserved, so a model of the whole mature protein can fall below 0.7 of the precursor. With this switch a gene model also carries `CoreCoverage=` (the share of the protein without its signal peptide and GPI tail covered by the model's exons) and the label reads the larger of `QueryCoverage` and `CoreCoverage`. MEDIUM needs no completeness and is unaffected; the hull rescue keeps full coverage. The `signal_anchor` preset module (B3) turns it on. Note: in conotoxins, three-finger toxins and PLA2s the signal peptide is the most conserved part. Settings key.
+
 ### `report_low_complexity`
 **Type:** Boolean | **Default:** `false`
 

@@ -62,7 +62,7 @@ LEGACY_ALIAS = {
 #   model_status    one module only (ModelStatus coverage bounds)
 #   report          on when any module turns it on (attributes that decide nothing)
 #   specificity_guard  the stricter value (STRICTER_ORDER)
-# A later PR adds completeness_basis.
+#   completeness_basis one module only (B3: completeness on the core of the protein)
 KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "goi_relative_evalue": ("anchor_hygiene", "max"),
     "goi_candidate_regions_per_query": ("search_breadth", "max"),
@@ -78,6 +78,7 @@ KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "report_copies_in_slot": ("report", "any"),
     "report_low_complexity": ("report", "any"),
     "goi_relative_statistic": ("specificity_guard", "stricter"),
+    "core_completeness": ("completeness_basis", "single"),
 }
 # specificity_guard: the stricter value wins; booleans: on when any module turns them on,
 # other keys by this order (last = strictest).
@@ -273,7 +274,8 @@ MODULES: List[Module] = [
            "preset_short_peptide"),
     Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity,
            lambda f: {"goi_relative_statistic": "blastp_cbs", "report_low_complexity": True}),
-    Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor, _none),
+    Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor,
+           lambda f: {"core_completeness": True}),
     Module("B4", "cys_framework", "sequence signal", "now (advisory)", _t_cys_framework, _none),
     Module("C1", "exon_structure", "structure and locus at home", "now (advisory)",
            _t_exon_structure, _none),

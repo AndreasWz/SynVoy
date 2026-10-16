@@ -208,7 +208,7 @@ distance to the scaffold end).
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
 | B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
 | B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | stricter only: the relative test of the flank walk with blastp and composition-based statistics (`goi_relative_statistic blastp_cbs`); `LowComplexity=` on GOI models |
-| B3 | `signal_anchor` | a signal peptide or a GPI tail | nothing yet (a flag) |
+| B3 | `signal_anchor` | a signal peptide or a GPI tail | completeness for HIGH also on the core of the home protein (`core_completeness`: `CoreCoverage=` on gene models, the judge reads the larger of the two coverages; §7.8) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
 | C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | nothing (advisory) |
 | C2 | `home_context` | the home gene < 40 kb from the end of a scaffold of ≥ 1 Mb | nothing (advisory) |
@@ -242,7 +242,7 @@ retry follows the `--modules` value itself: `auto` (unless it removes `short_que
 list that names it; never `legacy` or `none`. A run without home hits stops today, so the
 retry can only rescue a run.
 
-The chosen values travel to the later steps as a `settings` map of 21 parameters
+The chosen values travel to the later steps as a `settings` map of 22 parameters
 (`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
@@ -687,6 +687,11 @@ coverage:
 | AMBIGUOUS | `gene_order_only` | 1e-3 < Eeff ≤ 1, in the slot of a block with E_syn ≤ 0.1, and specific |
 | LOW | `not_significant` | everything else |
 
+- **Coverage** is `QueryCoverage`, the share of the home protein the model covers. With
+  `core_completeness` (the `signal_anchor` module) a gene model also carries
+  `CoreCoverage`, the share of the protein's core (without the signal peptide and the GPI
+  tail found by `query_features.py`) covered by its exons' query intervals, and the judge
+  reads the larger of the two; 0.7 stays the bar. The hull rescue keeps full coverage.
 - **Specific**: no real competitor, or a margin of at least 3.3 bits over the best other
   home protein. Within ±3.3 bits a model in the slot or core of a significant block is
   decided for the gene (positional tie-break), unless that protein lies in the gene's own

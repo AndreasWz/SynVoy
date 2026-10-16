@@ -303,6 +303,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--decoy_mode` | `false` | Calibration: also search the reversed home protein and two shuffles of it in every window; their calls go to `<outdir>/decoys/` (never seeded or counted), the report gives the decoy calls of the searched cases. About four times the window search. |
 | `--goi_relative_statistic` | `sw` | Statistic of the relative test of the flank walk: `sw` or `blastp_cbs` (composition-based; `low_complexity` module). |
 | `--report_low_complexity` | `false` | `LowComplexity=` on GOI models (`low_complexity` module). |
+| `--core_completeness` | `false` | HIGH's completeness also on the protein without signal peptide and GPI tail (`CoreCoverage`; `signal_anchor` module). |
 | `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before. |
 | `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 10). |
 | `--report_copies_in_slot` | `false` | `CopiesInSlot` / `SlotRank` on GOI models and home : target copies per genome in the report (on with `local_family`). |

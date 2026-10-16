@@ -102,6 +102,7 @@ process ITERATIVE_SEARCH {
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --decoy_mode ${params.decoy_mode} \\
         --report_low_complexity ${settings.report_low_complexity} \\
+        --core_completeness ${settings.core_completeness} \\
         --report_nonsyntenic_candidates ${params.report_nonsyntenic_candidates} \\
         --rank_wave_binning ${params.rank_wave_binning} \\
         --disable_wavefront ${params.disable_wavefront} \\
