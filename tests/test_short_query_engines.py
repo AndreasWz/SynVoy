@@ -117,7 +117,7 @@ def test_the_hit_profile_records_the_retry(tmp_path, monkeypatch):
 
 def _retry_block():
     text = (ROOT / "modules" / "locate_gene.nf").read_text()
-    block = text[text.index("    LOCATE_RETRY=\"\""):text.index("    # 3. Combine and convert to BED")]
+    block = text[text.index("    LOCATE_RETRY=\"\""):text.index("    # 3. The hits, one row per gene copy")]
     # Groovy -> shell: \$ is $, \\ is \
     return block.replace("\\$", "$").replace("\\\\", "\\")
 

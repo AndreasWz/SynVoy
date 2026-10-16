@@ -52,6 +52,7 @@ relative is added to the query set for the more distant ones.
 | **Gene pitch** | The mean step from one flanking gene of a home locus to the next: the span of the flanking genes divided by their number minus one. The unit of the search's distances. |
 | **Expansion** | How much larger or smaller the home neighbourhood is in one target genome ([Distances](#distances-in-gene-units)). |
 | **Hit** | One local alignment of a query protein to genomic DNA. |
+| **Hit interval** | The query's hits at home that form one copy of its gene: chained while each continues the query, within the intron bound and one annotated gene ([§5.2](#52-locating-the-query)). |
 | **Block** | A run of flanking-gene hits on one target scaffold: a candidate neighbourhood. |
 | **Collinear run** | The longest subsequence of a block's flanking genes whose home ranks only rise or only fall along the target scaffold. |
 | **Model** | A gene structure (exons, protein) built in a target genome. |
@@ -137,10 +138,32 @@ significant on its own in another genome and a call then rests on the neighbourh
 - MMseqs2 `easy-search`, translated search, sensitivity 9.5, E ≤ 0.01;
 - `tblastn` with default settings.
 
-`merge_hits.py` keeps hits with E ≤ `search_evalue` (0.01), sorts them by position
-and merges a hit into the previous one when both are on the same scaffold and strand
-and it starts less than 1 kb after the previous one ends. A merged interval carries
-the lowest E-value and the highest bit score of its members.
+`merge_hits.py` chains the hits into **hit intervals**, one per copy of the gene. It
+keeps hits with E ≤ `search_evalue` (0.01), one per stretch of DNA (of two hits that
+overlap by more than half of the shorter one the higher bit score stays: both programs
+report every exon), and reads them per scaffold and strand in coding order. A hit
+continues a chain when
+
+- it continues the query: it starts at most 20 residues before the chain's last hit
+  ends, and ends after it. An exon's alignment often runs into the intron before it,
+  whose translation matches the end of the previous exon's part of the query (up to 19
+  residues between hits inside one annotated gene in the test data); a second copy of
+  the gene repeats the query (43 residues or more there) and starts a chain of its own,
+  however close it lies;
+- it lies at most `home_chain_max_intron` after that hit. `auto` is the largest intron
+  of the annotated genes the hits overlap × `goi_fallback_intron_margin` (5), at least
+  `goi_fallback_intron_floor` (10 kb) and at most 1.1 Mb; the floor without an
+  annotation (the home gene model's intron, which the search uses, is not known yet);
+- the two are not in two different annotated genes, and no annotated gene lies
+  entirely between them (genes nested in an intron of the gene do not stop it).
+
+A hit that several chains could take goes to the one whose last query end is closest
+to its query start. A hit interval covers its hits and the other program's hits of the
+same exons and carries their lowest E-value and highest bit score. Until 2026-10-16
+(batch HG-1A) hits were merged when the next began less than 1 kb after the previous
+one, whatever their query coordinates: two copies 500 bp apart became one interval
+(fly *Adh* and *Adhr*), and the exons of a gene with introns over 1 kb stayed apart
+(honeybee DPP4: 15 intervals).
 
 ### 5.3 Parameter preset and preset modules
 
@@ -254,7 +277,7 @@ features; the report copies it as `run_settings`.
 
 `split_loci.py` runs after the home gene model (§5.6) is built:
 
-1. Sort the merged intervals by position. Two neighbouring intervals on a scaffold
+1. Sort the hit intervals by position. Two neighbouring intervals on a scaffold
    belong to one locus when at most `locus_gap_genes` (`auto` = ⌊`n_flanking_genes`/2⌋,
    5 at the default) annotated genes lie entirely between them. On a scaffold without annotated genes, and for a home genome
    without annotation, the limit is 50 kb. `--locus_gap <bp>` uses a distance

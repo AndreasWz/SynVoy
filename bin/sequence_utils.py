@@ -948,7 +948,7 @@ def sw_align(query_seq: str, subject_seq: str,
 QUERY_CONTINUATION_TOL = 10
 
 
-def load_home_hits(paths, max_evalue):
+def load_home_hits(paths, max_evalue, with_duplicates: bool = False):
     """Hits of the home search (12-column BLAST / MMseqs2 tables) with E <= ``max_evalue``,
     one per stretch of DNA: of hits that overlap by more than half of the shorter one the
     best-scoring stays, whatever their strands (both search programs report every exon).
@@ -956,7 +956,11 @@ def load_home_hits(paths, max_evalue):
     Dicts with ``chrom``, ``start`` (0-based), ``end``, ``strand`` ('+', or '-' when the
     subject coordinates run backwards), ``evalue``, ``bits``, ``qstart``, ``qend``. Moved from
     split_loci.load_raw_hits (batch of 2026-10-15, S0) with the same rule and order; strand
-    and E-value are new keys, for the callers that chain hits."""
+    and E-value are new keys, for the callers that chain hits. ``with_duplicates``: each kept
+    hit also carries ``duplicates``, the hits it replaced (the first kept hit that a dropped
+    one overlaps), so a caller can report the whole stretch they cover and their best E-value
+    (the two programs' E-values are not on one scale: the best-scoring hit need not have the
+    best E-value)."""
     hits = []
     for path in paths or []:
         if not path or not os.path.exists(path):
@@ -984,15 +988,19 @@ def load_home_hits(paths, max_evalue):
     by_chrom = {}
     for h in sorted(hits, key=lambda x: (-x['bits'], x['chrom'], x['start'])):
         length = h['end'] - h['start']
-        clash = False
+        clash = None
         for k in by_chrom.get(h['chrom'], []):
             overlap = min(h['end'], k['end']) - max(h['start'], k['start'])
             if overlap > 0.5 * min(length, k['end'] - k['start']):
-                clash = True
+                clash = k
                 break
-        if not clash:
+        if clash is None:
+            if with_duplicates:
+                h['duplicates'] = []
             by_chrom.setdefault(h['chrom'], []).append(h)
             kept.append(h)
+        elif with_duplicates:
+            clash['duplicates'].append(h)
     return kept
 
 

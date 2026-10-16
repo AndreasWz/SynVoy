@@ -416,7 +416,8 @@ def validateNumericParams(validationErrors, validationWarnings) {
     }
     ['cluster_distance', 'region_padding', 'goi_margin', 'synteny_bridge_max_gap',
      'dispersed_envelope_margin', 'locus_gap', 'goi_hull_cluster_max_gap',
-     'goi_hull_window_pad', 'goi_hull_max_window'].each { name -> checkAutoDistance(name, validationErrors) }
+     'goi_hull_window_pad', 'goi_hull_max_window',
+     'home_chain_max_intron'].each { name -> checkAutoDistance(name, validationErrors) }
     ['block_gap_genes', 'window_margin_genes', 'goi_margin_genes', 'synteny_bridge_max_gap_genes',
      'dispersed_envelope_margin_genes'].each { name ->
         if (num.call(name, params[name], 1) < 0) {
@@ -1151,7 +1152,7 @@ workflow {
         def lines = bed.readLines().findAll { it.trim() && !it.startsWith('#') }
         if (lines) {
             def loci = lines.collect { l -> def f = l.split('\t'); "${f[0]}:${f[1]}-${f[2]}" }.join(', ')
-            "${c.green}[OK  ]${c.reset} ${c.white}${'LOCATE_GENE'.padRight(24)}${c.reset} ${lines.size()} hit(s) → ${loci}"
+            "${c.green}[OK  ]${c.reset} ${c.white}${'LOCATE_GENE'.padRight(24)}${c.reset} ${lines.size()} gene cop${lines.size() == 1 ? 'y' : 'ies'} → ${loci}"
         } else {
             "${c.red}[WARN]${c.reset} ${c.white}${'LOCATE_GENE'.padRight(24)}${c.reset} No hits found — gene absent or below e-value threshold (${params.search_evalue}). Pipeline will abort with a diagnostic."
         }

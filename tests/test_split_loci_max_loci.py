@@ -11,8 +11,9 @@ The fix ranks secondary loci by best_bit / primary_bit (bit scores do not satura
 caps the result at --max_loci. The two real luciferase loci (Luc1 on VVIM01000001.1 and
 Luc2 on VVIM01000009.1) rank 1st and 2nd by bit score, so they must always survive.
 
-These tests drive the real LOCATE_GENE chain: the awk transform from locate_gene.nf, then
-merge_hits.py, then split_loci.py, using the real hits_blast.txt captured from that run.
+These tests drive the real LOCATE_GENE chain: merge_hits.py on the raw hit table (it reads the
+12-column tables itself since 2026-10-15, batch HG-1A; locate_gene.nf converted them to BED
+with awk before), then split_loci.py, using the real hits_blast.txt captured from that run.
 """
 import os
 import subprocess
@@ -32,40 +33,20 @@ LUC2_CHROM, LUC2_COORD = "VVIM01000009.1", 30175000   # PPYR_00002, "diffuse exp
 PARALOG_CHROM, PARALOG_COORD = "VVIM01000005.1", 33530000
 
 
-def _awk_to_bed(hits_blast_path, out_path, with_bit=True):
-    """Replicate the locate_gene.nf awk that turns BLAST outfmt 6 into bed-like rows.
-
-    outfmt 6 cols (1-based): 2=sseqid 9=sstart 10=send 11=evalue 12=bitscore.
-    Emits: chrom, start(0-based), end, "blast", evalue, strand[, bitscore].
-    """
-    with open(hits_blast_path) as fin, open(out_path, "w") as fout:
-        for line in fin:
-            p = line.rstrip("\n").split("\t")
-            if len(p) < 12:
-                continue
-            chrom, s, e = p[1], int(p[8]), int(p[9])
-            strand = "+"
-            if s > e:
-                s, e, strand = e, s, "-"
-            cols = [chrom, str(s - 1), str(e), "blast", p[10], strand]
-            if with_bit:
-                cols.append(p[11])
-            fout.write("\t".join(cols) + "\n")
-
-
 def _run_split(tmpdir, hits_blast_path, with_bit=True, extra_args=None):
-    """Run awk -> merge_hits.py -> split_loci.py; return (loci, stdout, stderr)."""
-    blast_bed = os.path.join(tmpdir, "blast.bed")
-    mmseqs_bed = os.path.join(tmpdir, "mmseqs.bed")
+    """Run merge_hits.py -> split_loci.py; return (loci, stdout, stderr). ``with_bit=False``
+    cuts the merged rows to six columns, as BEDs without a bit score were."""
     home_bed = os.path.join(tmpdir, "home_gene_location.bed")
-    open(mmseqs_bed, "w").close()
-    _awk_to_bed(hits_blast_path, blast_bed, with_bit=with_bit)
-
     subprocess.run(
-        [sys.executable, MERGE_HITS, "--mmseqs", mmseqs_bed, "--blast", blast_bed,
+        [sys.executable, MERGE_HITS, "--hits", hits_blast_path,
          "--max_evalue", "0.01", "--output", home_bed],
         check=True, capture_output=True, text=True,
     )
+    if not with_bit:
+        with open(home_bed) as fh:
+            rows = ["\t".join(line.rstrip("\n").split("\t")[:6]) for line in fh if line.strip()]
+        with open(home_bed, "w") as fh:
+            fh.write("".join(r + "\n" for r in rows))
     proc = subprocess.run(
         [sys.executable, SPLIT_LOCI, "--bed", home_bed, "--output_prefix",
          os.path.join(tmpdir, "locus")] + (extra_args or []),

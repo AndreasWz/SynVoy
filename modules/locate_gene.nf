@@ -77,33 +77,17 @@ process LOCATE_GENE {
         fi
     fi
 
-    # 3. Combine and convert to BED for merging
-    
-    # Process MMseqs results
-    touch mmseqs.bed
-    if [ -s hits_mmseqs.m8 ]; then
-        awk -v OFS="\\t" '{
-            s=\$9; e=\$10;
-            if(s>e){t=s; s=e; e=t; str="-"} else {str="+"}
-            print \$2, s-1, e, "mmseqs", \$11, str, \$12
-        }' hits_mmseqs.m8 > mmseqs.bed
-    fi
-
-    # Process BLAST results
-    touch blast.bed
-    if [ -s hits_blast.txt ]; then
-        awk -v OFS="\\t" '{
-            s=\$9; e=\$10;
-            if(s>e){t=s; s=e; e=t; str="-"} else {str="+"}
-            print \$2, s-1, e, "blast", \$11, str, \$12
-        }' hits_blast.txt > blast.bed
-    fi
-
-    # Run Python Merge Script
+    # 3. The hits, one row per gene copy (batch HG-1A): a hit continues a chain when it
+    # continues the query, lies within the intron bound and is not in another annotated
+    # gene; a row covers its hits and their duplicates from the other program.
     merge_hits.py \\
-        --mmseqs mmseqs.bed \\
-        --blast blast.bed \\
+        --hits hits_blast.txt \\
+        --hits hits_mmseqs.m8 \\
         --max_evalue ${params.search_evalue} \\
+        --gff $home_gff \\
+        --max_intron ${params.home_chain_max_intron} \\
+        --intron_margin ${params.goi_fallback_intron_margin} \\
+        --intron_floor ${params.goi_fallback_intron_floor} \\
         --output home_gene_location.bed
 
     # §1f: profile the hit distribution and recommend a query-type preset (advisory).

@@ -283,6 +283,11 @@ A neighbour is "GOI-like" by the same test as for anchors (`goi_relative_evalue`
 
 The maximum distance in base pairs from the GOI within which to search for GOI-similar neighbor genes for expansion (see `expand_goi_similar`). Genes beyond this distance that happen to resemble the GOI are not emitted as additional queries. The default of 300 kb covers most tandem gene arrays, which typically span 50–500 kb in eukaryotic genomes. For very large tandem arrays (e.g., olfactory receptor clusters in vertebrates, which can span several megabases), you may need to increase this value. For compact genomes (bacteria, fungi), a smaller value (50–100 kb) is more appropriate to avoid picking up unrelated genes that coincidentally share sequence similarity. Each additional GOI-similar neighbor adds a full search pass across all target genomes, so expanding this distance excessively can significantly increase runtime without improving results.
 
+### `home_chain_max_intron`
+**Type:** `auto` or Integer (bp) | **Default:** `auto`
+
+The query's hits at home are chained into one **hit interval** per copy of its gene (`merge_hits.py`, since 2026-10-16): a hit continues a chain when it continues the query (it starts at most 20 residues before the chain's last hit ends, and ends after it), lies at most this far after that hit, and the two are not in two different annotated genes. `auto` takes the largest intron of the annotated genes the hits overlap, times `goi_fallback_intron_margin` (5), at least `goi_fallback_intron_floor` (10,000) and at most 1.1 Mb; without a home annotation the floor. A number sets the bound directly (no cap). Before 2026-10-16 hits were merged when less than 1 kb apart, whatever their query coordinates.
+
 ### `locus_gap_genes` / `locus_gap`
 **Type:** `auto` or Integer (genes) / `auto` or Integer (bp) | **Defaults:** `auto` / `auto`
 
