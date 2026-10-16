@@ -300,6 +300,9 @@ def _process_gffs_unified(gff_files):
                             "eeff": (attrs.get("Eeff", "") or "").strip(),
                             "place": (attrs.get("Place", "") or "").strip(),
                             "block_esyn": (attrs.get("BlockEsyn", "") or "").strip(),
+                            # --report_copies_in_slot (preset plan PR-6): "" otherwise.
+                            "copies_in_slot": (attrs.get("CopiesInSlot", "") or "").strip(),
+                            "slot_rank": (attrs.get("SlotRank", "") or "").strip(),
                         })
 
                     elif role == "flanking" and confidence == "HIGH":
@@ -937,6 +940,9 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Join key for the F9 phylo-placement verdicts, which are computed from
                 # goi_for_tree.faa and so are keyed by model id, not coordinates.
                 "mrna_id": rep.get("mrna_id", ""),
+                # Only in a run with --report_copies_in_slot (preset plan PR-6).
+                **({"copies_in_slot": rep["copies_in_slot"], "slot_rank": rep.get("slot_rank", "")}
+                   if rep.get("copies_in_slot") else {}),
             })
 
     # A weak match where the gene should be (Basis=gene_order_only) is only offered for
@@ -1952,7 +1958,35 @@ def format_empty_staging_message(diagnostics):
 
 RUN_SETTINGS_KEYS = ("modules_mode", "modules_applied", "modules_would_fire", "preset_applied",
                      "apply_reason", "legacy_preset", "user_set_kept", "settings", "source",
-                     "features")
+                     "features", "home_copies")
+
+
+def copies_in_slot_by_genome(records, home_copies):
+    """Per genome, the copies of the gene family at home and in the target's slot (preset
+    plan of 2026-10-15, PR-6; only with --report_copies_in_slot, whose CopiesInSlot
+    attribute this reads): the slot is the one of the block that holds the genome's best
+    record with a slot (the judge's order). {} when no record carries the attribute."""
+    by_genome = {}
+    for r in records:
+        if str(r.get("copies_in_slot") or "").strip():
+            by_genome.setdefault(r.get("genome"), []).append(r)
+    out = {}
+    for genome in sorted(g for g in by_genome if g):
+        best = min(by_genome[genome], key=_record_rank)
+        try:
+            m = int(str(best["copies_in_slot"]).strip())
+        except ValueError:
+            continue
+        n = home_copies if isinstance(home_copies, int) else None
+        out[genome] = {
+            "home_copies": n,
+            "copies_in_slot": m,
+            "unit": f"{n if n is not None else '?'}:{m}",
+            "slot_of": {"chrom": best.get("chrom"), "start": best.get("start"),
+                        "end": best.get("end"), "confidence": best.get("confidence"),
+                        "slot_rank": best.get("slot_rank") or None},
+        }
+    return out
 
 
 def load_run_settings(path):
@@ -2054,6 +2088,10 @@ def main():
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
     )
     report["run_settings"] = load_run_settings(args.effective_params)
+    slot_units = copies_in_slot_by_genome(report.get("goi_dedup", {}).get("records", []),
+                                          (report["run_settings"] or {}).get("home_copies"))
+    if slot_units:
+        report["copies_in_slot"] = slot_units
     with open(args.output, "w") as fh:
         json.dump(report, fh, indent=2)
     print(f"Report generated: {args.output}")

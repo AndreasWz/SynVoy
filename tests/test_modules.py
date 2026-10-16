@@ -142,12 +142,19 @@ def test_merge_does_not_depend_on_the_order_of_the_modules():
         assert sm.merge(list(perm), f) == first
 
 
+# Keys the old presets never had (added by later PRs of the plan); --modules legacy keeps
+# applying PRESET_OVERRIDES alone, so a legacy run never sees them.
+KEYS_AFTER_V1 = {"goi_candidate_regions_per_query", "report_copies_in_slot"}
+
+
 def test_the_old_presets_are_module_sets_with_the_same_values():
     by_id = {m.id: m for m in sm.MODULES}
     f = sm.flat_features(_profile(), None, None)
     for preset, ids in sm.LEGACY_ALIAS.items():
         settings, _src = sm.merge([by_id[i] for i in ids], f)
-        assert settings == rep.PRESET_OVERRIDES[preset], preset
+        old = rep.PRESET_OVERRIDES[preset]
+        assert {k: settings[k] for k in old} == old, preset
+        assert set(settings) - set(old) <= KEYS_AFTER_V1, preset
     assert set(sm.LEGACY_ALIAS) == set(rep.PRESET_OVERRIDES)
 
 

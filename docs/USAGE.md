@@ -302,6 +302,8 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--disable_relative_query` | `false` | A window is searched with the home protein and, in addition, the gene model of the genome searched most recently; identity, coverage and confidence always refer to the home protein. `true` = home protein only. |
 | `--decoy_mode` | `false` | Calibration: also search the reversed home protein and two shuffles of it in every window; their calls go to `<outdir>/decoys/` and nowhere else (never seeded or counted). About four times the window search. |
 | `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before. |
+| `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 10). |
+| `--report_copies_in_slot` | `false` | `CopiesInSlot` / `SlotRank` on GOI models and home : target copies per genome in the report (on with `local_family`). |
 | `--synteny_bridge_max_rank_gap` | `5` | Max home-rank jump still treated as a collinear continuation when bridging. |
 | `--synteny_bridge_min_anchors` | `2` | Min anchored flanking genes a block needs before it may bridge a gap (3 until 2026-10-14). |
 

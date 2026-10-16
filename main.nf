@@ -267,7 +267,7 @@ def presetDefaultKeys() {
         'min_hit_identity', 'min_hit_length',
         'classify_fragment_max_qcov', 'classify_complete_min_qcov',
         'expand_goi_similar', 'goi_family_tokens',
-        'goi_relative_evalue',
+        'goi_relative_evalue', 'goi_candidate_regions_per_query', 'report_copies_in_slot',
         'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
         'adaptive_max_regions', 'adaptive_unique_gene_floor',
     ]

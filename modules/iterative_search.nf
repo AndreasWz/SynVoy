@@ -85,6 +85,8 @@ process ITERATIVE_SEARCH {
         --anchor_max_places ${params.anchor_max_places} \\
         --disable_relative_query ${params.disable_relative_query} \\
         --goi_max_models_per_locus ${params.goi_max_models_per_locus} \\
+        --goi_candidate_regions_per_query ${settings.goi_candidate_regions_per_query} \\
+        --report_copies_in_slot ${settings.report_copies_in_slot} \\
         --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
         --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\

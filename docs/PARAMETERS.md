@@ -539,6 +539,16 @@ DNA added on each side of the hits of one candidate before miniprot builds its g
 
 Gene models kept per candidate locus. miniprot reports every place where the query aligns in the stretch of DNA; until 2026-10-08 the first model was used and the rest dropped, so a tandem array gave one model, and which copy it was depended on a score difference of under one per cent. Now every model is kept whose coding sequence overlaps the coding sequence of a better model by less than half. Where hits of the window search remain on no model, the coding exons found so far are masked and miniprot runs again (with a long allowed intron it does not report a diverged neighbouring copy in the first run: of two copies 2 kb apart the one at 80 % identity is missing from 10 kb on). A further model must reach 30 % of the best score, the limit miniprot applies itself. Further models carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are classified like any other model.
 
+### `goi_candidate_regions_per_query`
+**Type:** Integer | **Default:** `2` | **Range:** 1–10 (modules cap it at 10)
+
+GOI loci kept per query in a search window. The hits of a query in a window are split into loci (hits less than 40 kb apart, more for a home gene with long introns), ranked by the share of the query they cover, then the best bit score, then the number of hits, and this many are modelled; the rest are dropped. Until 2026-10-15 the 2 was fixed in the code. The `local_family` preset module (A1) sets it to the home copies + 1 (the larger of the query's coverage at its home locus, rounded half up, and 1 + the family members among the neighbours of the home gene), between 2 and 10, so a tandem array with more copies than two gets each copy modelled. A settings key: a value you set yourself is kept.
+
+### `report_copies_in_slot`
+**Type:** Boolean | **Default:** `false`
+
+Writes `CopiesInSlot=` and `SlotRank=` on the GOI models and, in the report, `copies_in_slot`: per genome the home copies against the copies in the slot of the best call (`2:3`). A copy is a GOI model between the nearest found home neighbours of the gene (`Place=slot`) with a label of AMBIGUOUS or better; the rank is counted from the home neighbour on the left. Advisory only. The `local_family` module (A1) turns it on.
+
 ### `gap_min_identity`
 **Type:** Float (%) | **Default:** `15.0`
 

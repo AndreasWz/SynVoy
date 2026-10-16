@@ -56,19 +56,23 @@ LEGACY_ALIAS = {
 
 # Keys a module may write, with the class that decides how two modules' values merge.
 #   anchor_hygiene  the largest E (excludes the most relatives from the anchors)
+#   search_breadth  the most permissive value, then RESOURCE_CAPS
 #   figure_regions  one module only (the region caps of the figures)
 #   model_status    one module only (ModelStatus coverage bounds)
-# Later PRs add search_breadth (most permissive, then RESOURCE_CAPS), specificity_guard
-# (the stricter value) and completeness_basis.
+#   report          on when any module turns it on (attributes that decide nothing)
+# Later PRs add specificity_guard (the stricter value) and completeness_basis.
 KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "goi_relative_evalue": ("anchor_hygiene", "max"),
+    "goi_candidate_regions_per_query": ("search_breadth", "max"),
     "adaptive_score_floor_frac": ("figure_regions", "single"),
     "adaptive_score_floor_abs": ("figure_regions", "single"),
     "adaptive_max_regions": ("figure_regions", "single"),
     "classify_complete_min_qcov": ("model_status", "single"),
     "classify_fragment_max_qcov": ("model_status", "single"),
+    "report_copies_in_slot": ("report", "any"),
 }
-RESOURCE_CAPS: Dict[str, float] = {}
+# Upper bounds of search_breadth keys, whatever the modules want.
+RESOURCE_CAPS: Dict[str, float] = {"goi_candidate_regions_per_query": 10}
 # Keys that change the home side (anchors, home loci) or that a measurement banned.
 # expand_goi_similar: with it on, LY6 scaffold recall fell from 8/9 to 0/9.
 FORBIDDEN_FOR_MODULES = frozenset({"n_flanking_genes", "expand_goi_similar"})
@@ -133,6 +137,22 @@ def short_query_headroom(f: Dict[str, Any]) -> Optional[float]:
         return None
     needed = math.log2(n * (TYPICAL_WINDOW_BP // 3) / HEADROOM_EVALUE)
     return round(bits / needed, 2)
+
+
+def home_copies(f: Dict[str, Any]) -> Optional[int]:
+    """Copies of the gene family at the home locus: the times the query is covered at its
+    strongest home locus (rounded half up), or the home gene plus its family members within
+    the flank walk, whichever is more. None when neither is known (no hits, no GFF)."""
+    copies, rel = f.get("primary_copies"), f.get("relatives_nearby")
+    if copies is None and rel is None:
+        return None
+    return max(int(math.floor(float(copies or 1) + 0.5)), 1 + len(rel or []))
+
+
+def family_candidate_regions(f: Dict[str, Any]) -> int:
+    """A1: GOI loci kept per query in a search window, home copies + 1, between 2 and
+    RESOURCE_CAPS (merge applies the cap)."""
+    return max(2, (home_copies(f) or 1) + 1)
 
 
 # ----------------------------------------------------------------------------- triggers
@@ -223,7 +243,9 @@ def _none(_f):
 
 MODULES: List[Module] = [
     Module("A1", "local_family", "copy architecture", "after benchmark", _t_local_family,
-           lambda f: {"goi_relative_evalue": 1e-3}, "preset_tandem_family"),
+           lambda f: {"goi_relative_evalue": 1e-3,
+                      "goi_candidate_regions_per_query": family_candidate_regions(f),
+                      "report_copies_in_slot": True}, "preset_tandem_family"),
     Module("A2", "dispersed_family", "copy architecture", "now", _t_dispersed_family,
            lambda f: {"adaptive_score_floor_frac": 0.45, "adaptive_score_floor_abs": 0.08,
                       "adaptive_max_regions": 4}, "preset_paralog_discrimination"),
@@ -307,6 +329,8 @@ def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], 
             if len({json.dumps(v) for _m, v in vals}) > 1:
                 raise ValueError(f"key {k} is written by {[m for m, _ in vals]} with different values")
             mid, v = vals[0]
+        elif rule == "any":
+            v = any(bool(x) for _m, x in vals)
         else:  # pragma: no cover - a rule without code is a registry error
             raise ValueError(f"key {k}: unknown merge rule {rule}")
         if k in RESOURCE_CAPS:

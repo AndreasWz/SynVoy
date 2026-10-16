@@ -285,7 +285,7 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     """If nextflow.config changes shape and a key stops being parsed, user-set
     detection silently stops working for it. Fail here instead."""
     keys = _preset_default_keys_from_main_nf()
-    assert len(keys) == 13
+    assert len(keys) == 15
     shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
     assert sorted(shipped) == sorted(keys), sorted(set(keys) - set(shipped))
     # Spot-check literals and that trailing comments/quotes are stripped.
@@ -294,6 +294,8 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     assert shipped["goi_family_tokens"] == ""
     assert rep._norm(shipped["classify_complete_min_qcov"]) == ("num", 0.7)
     assert rep._norm(shipped["goi_relative_evalue"]) == ("num", 1e-5)
+    assert rep._norm(shipped["goi_candidate_regions_per_query"]) == ("num", 2)
+    assert rep._norm(shipped["report_copies_in_slot"]) == ("bool", False)
 
 
 def test_every_preset_key_is_fed_by_main_nf():

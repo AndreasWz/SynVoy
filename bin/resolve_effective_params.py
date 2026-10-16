@@ -272,6 +272,7 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
         "modules_would_fire": fired,
         "legacy_preset": legacy_pick,
         "features": feats,
+        "home_copies": select_modules.home_copies(feats),
     }
 
 

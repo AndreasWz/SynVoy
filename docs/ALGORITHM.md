@@ -203,7 +203,7 @@ distance to the scaffold end).
 
 | Id | Module | Trigger | What it changes (today) |
 |---|---|---|---|
-| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`) |
+| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 10, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; `report_copies_in_slot` on (§7.13) |
 | A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
 | B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`) |
@@ -221,7 +221,9 @@ hold for every module:
   judge's significance levels (§7.8) are constants, not parameters.
 - **Every key belongs to a class with a merge rule** (`KEY_CLASS`), so the order of the
   modules never matters: the anchor filter `goi_relative_evalue` takes the largest E (it
-  keeps the most relatives out of the anchors); the region caps and the model-status
+  keeps the most relatives out of the anchors); a search-breadth key takes the most
+  permissive value and then a fixed cap (`goi_candidate_regions_per_query` ≤ 10); a
+  report switch is on when any module turns it on; the region caps and the model-status
   bounds may be written by one module only. `n_flanking_genes` and `expand_goi_similar`
   are forbidden to modules.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
@@ -233,9 +235,10 @@ applies the chooser's preset exactly as before and only records which triggers f
 `auto` applies every module whose trigger fires; `none` applies nothing; a list
 (`short_query,local_family`) applies exactly those modules; deltas
 (`auto,-dispersed_family,+cys_framework`) edit `auto`. The old preset names are the
-module sets {B1}, {A1}, {A2} and {}, with the same values.
+module sets {B1}, {A1}, {A2} and {}, with the same values (A1 adds the two keys above,
+which `legacy` never applies).
 
-The chosen values travel to the later steps as a `settings` map of 13 parameters
+The chosen values travel to the later steps as a `settings` map of 15 parameters
 (`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
@@ -611,8 +614,9 @@ that lie in the window are then added (GOI hits only for the two queries above).
 For each GOI query:
 
 1. **Loci.** Hits less than 40 kb apart form a locus (more when the home gene has
-   long introns: 5 × its largest intron). The two best loci are kept, ranked by query
-   coverage, then best bit score, then number of hits.
+   long introns: 5 × its largest intron). The best `goi_candidate_regions_per_query`
+   loci are kept (2; the `local_family` module raises it to the home copies + 1, at most
+   10), ranked by query coverage, then best bit score, then number of hits.
 2. **Gene models** (`annotate_models_from_hit_list` → `miniprot_gene_models`). miniprot
    aligns the query to the locus ± `gap_search_window` (50 kb; at least the home
    gene's span × expansion), with a maximum intron of that stretch (at least 20 kb)
@@ -806,6 +810,15 @@ the new label will use (`bin/synvoy_evalue.py`):
 - **`Eeff`**, **`EeffTblastn`**: the two multiplied by `SigBlocks`, the number of
   significant blocks searched in this genome (each is one predicted place); a model in
   the genome-wide place is not multiplied.
+
+**Copies in the slot** (`--report_copies_in_slot`, off; the `local_family` module turns it
+on). After the genome's final labels, every GOI model of a block that has a slot gets
+`CopiesInSlot=`: the GOI models with `Place=slot` and a label of AMBIGUOUS or better in that
+slot. Each of them gets `SlotRank=`, counted from the copy nearest the home neighbour on
+the left (the slot's orientation comes from its two neighbours). The report pairs the home
+copies (`home_copies` of `run_settings`) with the copies in the slot of each genome's best
+call (`copies_in_slot`, e.g. `2:3`). Both decide nothing: equal rank is not positional
+orthology (Dewey 2011), since each gain or loss in an array shifts every rank behind it.
 
 **Decoy mode** (`--decoy_mode`, off): in every window the reversed home protein and two
 shuffles of it (seeded by the query id) are searched like the home protein, modelled,

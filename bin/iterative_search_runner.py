@@ -875,10 +875,80 @@ def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
             best[rank] = (score, (int(cand['start']), int(cand['end'])))
     geometry = getattr(args, 'home_geometry', None) or {}
     pitch = float(geometry.get('pitch', 0) or 0) * float(getattr(args, 'expansion', 1.0) or 1.0)
-    slot = synvoy_evalue.slot_span({r: span for r, (_s, span) in best.items()}, pitch)
+    placed = {r: span for r, (_s, span) in best.items()}
+    slot = synvoy_evalue.slot_span(placed, pitch)
     return {'esyn': esyn, 'significant': esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN,
-            'slot': slot, 'core': (core_start, core_end), 'window': (w_start, w_end),
+            'slot': slot, 'slot_inverted': slot_inverted(placed) if slot else None,
+            'core': (core_start, core_end), 'window': (w_start, w_end),
             'genome_len': genome_len, 'window_len': max(1, w_end - w_start)}
+
+
+def slot_inverted(placed: Dict[int, Tuple[int, int]]) -> Optional[bool]:
+    """True when the nearest found home neighbour on the right (rank +1, +2, ...) lies
+    before the one on the left in the target (the neighbourhood is inverted), False when
+    after, None when they overlap or a side has none (as synvoy_evalue.slot_span)."""
+    lefts = [r for r in placed if r < 0]
+    rights = [r for r in placed if r > 0]
+    if not lefts or not rights:
+        return None
+    (ls, le), (rs, re_) = placed[max(lefts)], placed[min(rights)]
+    if le <= rs:
+        return False
+    if re_ <= ls:
+        return True
+    return None
+
+
+SLOT_COPY_LABELS = ('HIGH', 'MEDIUM', 'AMBIGUOUS')
+
+
+def annotate_slot_copies(gff_lines: List[str], genome_tag: str,
+                         block_slots: Dict[int, Tuple[Tuple[int, int], Optional[bool]]]) -> List[str]:
+    """CopiesInSlot and SlotRank of the GOI models (preset plan of 2026-10-15, PR-6; with
+    --report_copies_in_slot). A copy is a GOI model with Place=slot and a label of
+    AMBIGUOUS or better, after the genome's final labels. Every GOI model of a block that
+    has a slot gets CopiesInSlot=<copies in that slot>; each copy gets SlotRank=<k>, counted
+    from the copy nearest the home neighbour on the left (SlotRank=1). A report attribute,
+    never a gate: equal rank is not positional orthology (Dewey 2011)."""
+    prefix = f"{genome_tag}_b"
+
+    def block_of(attrs):
+        rest = (attrs.get('ID') or '').split('|', 1)
+        if len(rest) < 2 or not rest[1].startswith(prefix):
+            return None
+        digits = rest[1][len(prefix):].split('_', 1)[0]
+        return int(digits) if digits.isdigit() else None
+
+    rows = []
+    for i, line in enumerate(gff_lines):
+        cols = line.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'SynVoyRole=goi' not in cols[8]:
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        b = block_of(a)
+        if b is None or (block_slots.get(b) or (None, None))[0] is None:
+            continue
+        is_copy = a.get('Place') == 'slot' and a.get('Confidence') in SLOT_COPY_LABELS
+        rows.append((b, i, int(cols[3]), is_copy))
+    by_block: Dict[int, List[Tuple[int, int, bool]]] = defaultdict(list)
+    for b, i, start, is_copy in rows:
+        by_block[b].append((i, start, is_copy))
+    extra: Dict[int, str] = {}
+    for b, members in by_block.items():
+        copies = sorted((start, i) for i, start, is_copy in members if is_copy)
+        if block_slots[b][1]:
+            copies.reverse()
+        rank = {i: k for k, (_start, i) in enumerate(copies, start=1)}
+        for i, _start, _is_copy in members:
+            extra[i] = f";CopiesInSlot={len(copies)}" + (f";SlotRank={rank[i]}" if i in rank else "")
+    if not extra:
+        return gff_lines
+    out = list(gff_lines)
+    for i, text in extra.items():
+        cols = out[i].split('\t')
+        cols[8] = cols[8] + text
+        out[i] = '\t'.join(cols)
+    return out
 
 
 def clip_hit_in_frame(hs: int, he: int, strand: str, lo: int, hi: int):
@@ -4201,8 +4271,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     best_bits = max(h.get('bits', 0) for h in locus_hits)
                     return (qcov, best_bits, len(locus_hits))
 
-                # Keep only the strongest loci per parent to avoid noisy paralog floods.
-                parent_loci = sorted(parent_loci, key=_locus_rank, reverse=True)[:2]
+                # Keep only the strongest loci per parent to avoid noisy paralog floods
+                # (2; the local_family module raises it for a family with home copies).
+                parent_loci = sorted(parent_loci, key=_locus_rank, reverse=True)[
+                    :max(1, int(getattr(args, 'goi_candidate_regions_per_query', 2) or 2))]
 
                 for locus_idx, gene_hits in enumerate(parent_loci, start=1):
                     work_hits = gene_hits
@@ -5011,6 +5083,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         raw_candidates = [c for c in raw_candidates if not is_decoy_parent(_candidate_parent(c))]
     place_terms = block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
                                     block_collinear_support, flanking_candidates)
+    if getattr(args, 'genome_ctx', None) is not None:
+        args.genome_ctx.setdefault('block_slot', {})[block_idx] = (place_terms['slot'],
+                                                                   place_terms['slot_inverted'])
     def _judge_window(cands):
         """Every candidate judged (label rework, step 4) before the choice among them.
         Specificity (an exhaustive search of the home proteome) only where it can matter:
@@ -6425,6 +6500,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         all_gff_lines = finalize_place_evalues(all_gff_lines, args.genome_ctx)
         all_gff_lines, _label_counts = relabel_goi_lines(all_gff_lines)
+        if getattr(args, 'report_copies_in_slot', False):
+            all_gff_lines = annotate_slot_copies(
+                all_gff_lines, genome_name.replace('.', '_').replace('-', '_').replace(' ', '_'),
+                args.genome_ctx.get('block_slot', {}))
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
         if _label_counts:
             logger.info(f"[{genome_name}] GOI labels: "
@@ -7060,6 +7139,11 @@ def main():
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=300)
+    parser.add_argument("--goi_candidate_regions_per_query", type=int, default=2,
+                        help="GOI loci kept per query in a search window, the strongest by "
+                             "query coverage, then bits (the local_family module raises it)")
+    parser.add_argument("--report_copies_in_slot", type=str2bool, default=False,
+                        help="Write CopiesInSlot / SlotRank on the GOI models (advisory)")
     parser.add_argument("--sw_max_alignments_per_piece", type=int, default=1,
                         help="Smith-Waterman alignments reported per piece of a translated frame: "
                              "1 = the best one; above 1, further ones while E <= 1 (several "
@@ -7511,6 +7595,9 @@ def main():
         sys.exit(1)
     if args.sw_timeout_seconds < 1:
         logger.error(f"sw_timeout_seconds must be >= 1 (got {args.sw_timeout_seconds})")
+        sys.exit(1)
+    if args.goi_candidate_regions_per_query < 1:
+        logger.error(f"goi_candidate_regions_per_query must be >= 1 (got {args.goi_candidate_regions_per_query})")
         sys.exit(1)
     if args.sw_max_alignments_per_piece < 1:
         logger.error(f"sw_max_alignments_per_piece must be >= 1 (got {args.sw_max_alignments_per_piece})")
