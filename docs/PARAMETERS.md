@@ -506,6 +506,11 @@ The minimum number of flanking gene hits required in a candidate syntenic block 
 
 How the GOI's hits in a search window are chained into a gene when miniprot builds no model (`fallback_hit_span`). Off (the default, as before): the chain with the most hits whose query centres rise along the strand. On (batch G1, 2026-10-16): a hit continues the chain only when it continues the query (it starts at most 10 residues before the previous hit ends and ends after it), the residues it skips fit into the genomic gap, and a gap under 40 bp joins only two pieces of one exon, written as one CDS row; the chain with the most bits wins. It stops a repeat of the same query part, or a short hit inside a longer one, from being read as a next exon. The label is computed on the hits themselves either way, and the chain carries the bits of its best single hit (the short-query gate of 30 bits is not met by three 12-bit hits). Every chain lists its hits' query intervals as `ChainQuery=` on the mRNA row.
 
+### `tandem_query_restart`
+**Type:** Boolean | **Default:** `false`
+
+How tandem copies of the GOI are found among its hits in a search window. Off (the default, as before): any two hits that each cover at least 35 % of the query make a tandem, and each copy is the single span of its hits. On (batch G2, 2026-10-16): copies are built per strand from hits that continue the query (as `goi_chain_query_aware` chains them), a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits (both for a query under 150 aa), copies sharing genome are one, and a tandem needs two counted copies that overlap in the query by more than half; each copy is written as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or two programs' hits of one exon, no longer make a tandem. Works with both `tandem_copy_parent` settings.
+
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
 

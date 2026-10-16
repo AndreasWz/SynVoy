@@ -1277,7 +1277,9 @@ def prepare_label_proteins(candidates, subseq, w_start) -> None:
             continue
         cand['label_protein'] = (cand.get('record') or {}).get('seq', '')
         evidence = _parse_gff_attr_string(cols[8]).get('EvidenceType')
-        if evidence in HIT_EVIDENCE_TYPES:
+        if evidence in HIT_EVIDENCE_TYPES or cand.get('hit_based'):
+            # hit_based: a tandem copy built from its hits (--tandem_query_restart, batch G2);
+            # a default copy (one span) keeps its record protein.
             cand['label_protein'] = (hit_label_protein(cand.get('label_rows') or gff[1:], subseq, w_start)
                                      or cand['label_protein'])
             continue
@@ -4539,6 +4541,29 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         copy_qcov = None
         if _qlen and _qs is not None and _qe is not None:
             copy_qcov = max(0.0, min(1.0, (int(_qe) - int(_qs) + 1) / _qlen))
+        copy_hits = copy.get('hits')
+        if copy_hits:
+            # A copy built from its hits (--tandem_query_restart, batch G2): one mRNA row and
+            # one CDS per hit, the union query coverage; the judge reads the hits with their
+            # stops (prepare_label_proteins).
+            copy_qcov = float(copy.get('qcov') or 0.0)
+            rows = [
+                f"{chrom}\ttandem_copy\tmRNA\t{global_start}\t{global_end}\t"
+                f"{copy.get('pident', 0):.1f}\t{strand}\t.\t"
+                f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': copy['id'], 'SynVoy_Parent': parent_id, 'Type': 'tandem_copy'}, evidence_type='tandem_copy', identity=copy.get('pident', 0), exon_count=len(copy_hits), query_cov=copy_qcov, flanking_support=block_flanking_support, collinear_support=block_collinear_support), global_start, global_end, strand)}"
+            ]
+            for i, h in enumerate(sorted(copy_hits, key=lambda x: x['gstart']), 1):
+                rows.append(f"{chrom}\ttandem_copy\tCDS\t{w_start + h['gstart'] + 1}\t{w_start + h['gend']}\t.\t"
+                            f"{strand}\t0\tID={copy_id}_CDS{i};Parent={copy_id}")
+            raw_candidates.append({
+                'start': global_start, 'end': global_end, 'score': copy.get('pident', 0),
+                'hit_based': True,
+                'record': {'id': copy_id, 'seq': copy['seq'],
+                           'description': (f"coords:{global_start}-{global_end} parent:{parent_id} "
+                                           f"tandem_copy identity:{copy.get('pident', 0):.1f}")},
+                'gff': rows,
+            })
+            return [(copy['gstart'], copy['gend'])]
         raw_candidates.append({
             'start': global_start,
             'end': global_end,
@@ -4729,7 +4754,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         if is_goi_parent:
                             from annotate_goi_exons import detect_tandem_duplications
                             is_tandem, tandem_copies = detect_tandem_duplications(
-                                work_hits, parent_query_seq, subseq, chrom
+                                work_hits, parent_query_seq, subseq, chrom,
+                                query_restart=bool(getattr(args, 'tandem_query_restart', False)),
+                                max_gap=getattr(args, 'goi_fallback_max_gap', args.max_intron),
                             )
 
                         # Every gene model of the locus, not only the best: in a tandem
@@ -7656,6 +7683,11 @@ def main():
     parser.add_argument("--report_low_complexity", type=str2bool, default=False,
                         help="Write LowComplexity (low-complexity share of the model protein) on "
                              "the GOI models (advisory)")
+    parser.add_argument("--tandem_query_restart", type=str2bool, default=False,
+                        help="Tandem copies of the GOI are query restarts: copies built per strand "
+                             "from hits that continue the query, counted at >= 0.35 union "
+                             "coverage, a tandem when two counted copies overlap in the query; each "
+                             "copy one mRNA with one CDS per hit (batch G2; off by default)")
     parser.add_argument("--goi_chain_query_aware", type=str2bool, default=False,
                         help="The GOI's hit chain follows the query: a hit must continue the "
                              "query, the skipped residues must fit the gap, a gap under 40 bp "

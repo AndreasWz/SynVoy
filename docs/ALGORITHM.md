@@ -729,6 +729,16 @@ For each GOI query:
    at least 35 % of the query (or three or more hits mostly cover the same part of
    it), each such hit that lies on no model is written as a one-segment copy
    (`tandem_copy`). When miniprot returns no model, all of them are.
+   With `tandem_query_restart` (off by default, batch G2) copies are built the way the
+   hit chain is: per strand, in coding order, a hit extends a copy when it continues the
+   query (10 residues of overlap at most) within the GOI's intron bound. A copy counts at
+   a union query coverage of ≥ 0.35 with a best hit of ≥ 20 aligned residues or ≥ 30 bits
+   (both for a query under 150 aa); copies that share genome are one (a second program's
+   hit of the same exon cannot fake a copy); it is a tandem when two counted copies overlap
+   in the query by more than half of the shorter one (an inverted copy counts). Each copy
+   is one mRNA row with one CDS per hit and the union coverage, and is judged on its hits
+   with their stops. Without the switch two exons of one gene that each cover 35 % of the
+   query were a tandem.
 4. **Start and stop** (`refine_model_termini`). miniprot reports the aligned part
    only. The first exon is extended upstream, in frame, to the nearest `ATG`, and the
    last exon downstream to the first stop codon. The walk covers at most the number

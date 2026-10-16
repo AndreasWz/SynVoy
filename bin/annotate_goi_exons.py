@@ -34,14 +34,16 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
-        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons
+        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
+        continues_query
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
-        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons
+        parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
+        continues_query
     )
 
 
@@ -1051,9 +1053,143 @@ def _deduplicate_hits(hits, overlap_threshold=0.8):
     return kept
 
 
+# Tandem copies as query restarts (batch G1/G2, --tandem_query_restart, off by default).
+TANDEM_MIN_COPY_QCOV = 0.35        # union query coverage of a copy (today's 0.35, now per copy)
+TANDEM_COPY_MIN_ALN_AA = 20        # the copy's best hit: this many residues aligned ...
+TANDEM_COPY_MIN_BITS = 30.0        # ... or this many bits (both for a query under 150 aa)
+TANDEM_SHORT_QUERY_LEN = 150
+TANDEM_QUERY_TOL = 10              # a hit continues a copy (sequence_utils.continues_query)
+
+
+def _hit_aa(h):
+    return int(h['qend']) - int(h['qstart']) + 1
+
+
+def _union_residues(spans):
+    covered, cur = 0, None
+    for s, e in sorted(spans):
+        if cur is None or s > cur[1] + 1:
+            if cur:
+                covered += cur[1] - cur[0] + 1
+            cur = [s, e]
+        else:
+            cur[1] = max(cur[1], e)
+    if cur:
+        covered += cur[1] - cur[0] + 1
+    return covered
+
+
+def _copy_counts(copy_hits, query_len):
+    """Whether a copy counts as one (batch G2): its union query coverage is at least
+    TANDEM_MIN_COPY_QCOV and its best hit has TANDEM_COPY_MIN_ALN_AA residues aligned or
+    TANDEM_COPY_MIN_BITS bits (both for a query shorter than TANDEM_SHORT_QUERY_LEN)."""
+    qcov = _union_residues([(int(h['qstart']), int(h['qend'])) for h in copy_hits]) / max(1, query_len)
+    if qcov < TANDEM_MIN_COPY_QCOV:
+        return False
+    best_aa = max(_hit_aa(h) for h in copy_hits)
+    best_bits = max(float(h.get('bits', 0.0) or 0.0) for h in copy_hits)
+    if query_len < TANDEM_SHORT_QUERY_LEN:
+        return best_aa >= TANDEM_COPY_MIN_ALN_AA and best_bits >= TANDEM_COPY_MIN_BITS
+    return best_aa >= TANDEM_COPY_MIN_ALN_AA or best_bits >= TANDEM_COPY_MIN_BITS
+
+
+def _copy_query_span(copy_hits):
+    return min(int(h['qstart']) for h in copy_hits), max(int(h['qend']) for h in copy_hits)
+
+
+def tandem_copies_by_query_restart(hits, query_seq, chrom_seq, chrom_name, max_gap=None):
+    """Tandem copies built the way the GOI's hit chain is (batch G2): per strand, in coding
+    order, a hit extends an open copy when it continues the query (continues_query, 10 aa
+    tolerance) within ``max_gap`` bp; of several such copies the one whose last query end is
+    closest to the hit's query start takes it; otherwise the hit opens a copy. A copy counts
+    by _copy_counts; counted copies that share genome are one copy (the better by bits stays:
+    a duplicate hit must not fake a tandem). It is a tandem when two counted copies overlap in
+    the query by more than half of the shorter one's query span (strands may differ: an
+    inverted copy). Returns ``(is_tandem, copies)`` like detect_tandem_duplications, each copy
+    with its ``hits`` (one CDS each) and ``qcov`` (the union)."""
+    if not hits or len(hits) < 2 or not query_seq:
+        return False, []
+    query_len = len(query_seq)
+    hits = _deduplicate_hits(hits, overlap_threshold=0.8)
+    copies = []
+    for strand in ('+', '-'):
+        open_copies = []
+        # Coding order (in_coding_order reads 'start'; these hits carry window coordinates).
+        for h in sorted((x for x in hits if x.get('strand', '+') == strand),
+                        key=lambda x: (x['gstart'], x['gend']), reverse=(strand == '-')):
+            best = None
+            for k, c in enumerate(open_copies):
+                a = c[-1]
+                gap = (h['gstart'] - a['gend']) if strand == '+' else (a['gstart'] - h['gend'])
+                if max_gap is not None and gap > max_gap:
+                    continue
+                if gap < -30 or not continues_query(a, h, TANDEM_QUERY_TOL):
+                    continue
+                key = (abs(int(h['qstart']) - int(a['qend'])), max(gap, 0), k)
+                if best is None or key < best[0]:
+                    best = (key, c)
+            if best is None:
+                open_copies.append([h])
+            else:
+                best[1].append(h)
+        copies.extend((strand, c) for c in open_copies)
+    counted = [(strand, c) for strand, c in copies if _copy_counts(c, query_len)]
+    counted.sort(key=lambda sc: -sum(float(h.get('bits', 0.0) or 0.0) for h in sc[1]))
+    kept = []
+    for strand, c in counted:
+        lo, hi = min(h['gstart'] for h in c), max(h['gend'] for h in c)
+        if any(lo < max(h['gend'] for h in k) and hi > min(h['gstart'] for h in k) for _s, k in kept):
+            continue
+        kept.append((strand, c))
+    kept.sort(key=lambda sc: min(h['gstart'] for h in sc[1]))
+    tandem = False
+    for i in range(len(kept)):
+        for j in range(i + 1, len(kept)):
+            (a0, a1), (b0, b1) = _copy_query_span(kept[i][1]), _copy_query_span(kept[j][1])
+            ov = min(a1, b1) - max(a0, b0) + 1
+            if ov > 0.5 * min(a1 - a0 + 1, b1 - b0 + 1):
+                tandem = True
+    if not tandem:
+        return False, []
+    out = []
+    for n, (strand, c) in enumerate(kept, start=1):
+        pieces = []
+        for h in sorted(c, key=lambda x: x['gstart'], reverse=(strand == '-')):
+            dna = chrom_seq[h['gstart']:h['gend']]
+            if strand == '-':
+                dna = reverse_complement(dna)
+            dna = dna[:len(dna) - len(dna) % 3]
+            pieces.append(translate(dna).replace('*', '') if dna else '')
+        qs, qe = _copy_query_span(c)
+        aln = sum(_hit_aa(h) for h in c)
+        out.append({
+            'id': f"GOI_copy_{n}",
+            'seq': ''.join(pieces),
+            'chrom': chrom_name,
+            'gstart': min(h['gstart'] for h in c),
+            'gend': max(h['gend'] for h in c),
+            'strand': strand,
+            'pident': sum(float(h.get('pident', 0)) * _hit_aa(h) for h in c) / max(1, aln),
+            'evalue': min(float(h.get('evalue', 1.0)) for h in c),
+            'qstart': qs,
+            'qend': qe,
+            'qcov': _union_residues([(int(h['qstart']), int(h['qend'])) for h in c]) / query_len,
+            'hits': sorted(c, key=lambda x: x['gstart']),
+            'exon_num': n,
+            'has_start_codon': False,
+            'has_stop_codon': False,
+            'splice_donor': None,
+            'splice_acceptor': None,
+            'coords': (min(h['gstart'] for h in c), max(h['gend'] for h in c)),
+        })
+    print(f"[Tandem] {len(out)} copies that restart the query on {chrom_name} (query restart)")
+    return True, out
+
+
 def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
-                                max_intergenic_distance=50000):
-    """
+                                max_intergenic_distance=50000, query_restart=False, max_gap=None):
+    """With ``query_restart`` (--tandem_query_restart, batch G2): tandem_copies_by_query_restart.
+    Otherwise, as before:
     Detect tandem duplications among search hits.
     
     Distinguishes between:
@@ -1072,6 +1208,8 @@ def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
         {'id', 'seq', 'chrom', 'gstart', 'gend', 'strand', 'pident', 'qstart', 'qend'}
         Returns (False, []) if not tandem duplication.
     """
+    if query_restart:
+        return tandem_copies_by_query_restart(hits, query_seq, chrom_seq, chrom_name, max_gap)
     if not hits or len(hits) < 2:
         return False, []
     
