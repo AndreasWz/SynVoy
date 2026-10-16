@@ -2956,6 +2956,19 @@ def _gene_limit(args, gene_id, floor_bp):
                                        float(getattr(args, 'expansion', 1.0) or 1.0), floor_bp)
 
 
+def window_tblastn_finding_options(args) -> List[str]:
+    """tblastn options of the window search that differ from tblastn's defaults (word size
+    3, composition-based statistics 2): [] at the defaults."""
+    opts = []
+    word = int(getattr(args, 'window_tblastn_word_size', 3))
+    stats = int(getattr(args, 'window_tblastn_comp_stats', 2))
+    if word != 3:
+        opts += ["-word_size", str(word)]
+    if stats != 2:
+        opts += ["-comp_based_stats", str(stats)]
+    return opts
+
+
 def run_augmented_mmseqs_with_retries(
     variants_fasta: str,
     region_fasta: str,
@@ -3052,6 +3065,8 @@ def run_augmented_mmseqs_with_retries(
             "--split-memory-limit", str(attempt["split"]),
             "-v", str(args.mmseqs_verbosity),
         ] + genetic_code_flag("mmseqs")
+        if int(getattr(args, 'window_mmseqs_min_length', 30)) != 30:
+            search_cmd += ["--min-length", str(int(args.window_mmseqs_min_length))]
 
         proc = subprocess.run(
             search_cmd,
@@ -3212,23 +3227,33 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 check=True,
                 capture_output=True, text=True
             )
+            tblastn_cmd = [
+                "tblastn",
+                "-query", query_fasta,
+                "-db", blast_db_prefix,
+                "-evalue", str(TBLASTN_REPORT_EVALUE),
+                "-seg", "no",
+                "-max_target_seqs", "5000",
+                "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
+            ]
             tblastn_result = subprocess.run(
-                [
-                    "tblastn",
-                    "-query", query_fasta,
-                    "-db", blast_db_prefix,
-                    "-evalue", str(TBLASTN_REPORT_EVALUE),
-                    "-seg", "no",
-                    "-max_target_seqs", "5000",
-                    "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
-                    "-out", tblastn_hits_file
-                ] + genetic_code_flag("tblastn"),
+                tblastn_cmd + ["-out", tblastn_hits_file] + genetic_code_flag("tblastn"),
                 check=True,
                 capture_output=True, text=True
             )
+            # With other word size / composition statistics (the short_query module) a second
+            # run finds; the run with tblastn's defaults stays the label's second E source
+            # (EeffTblastn), so that what decides between the two E sources is unchanged.
+            finding_opts = window_tblastn_finding_options(args)
+            tblastn_finding_file = tblastn_hits_file
+            if finding_opts:
+                tblastn_finding_file = f"{tblastn_hits_file}.finding"
+                subprocess.run(
+                    tblastn_cmd + ["-out", tblastn_finding_file] + genetic_code_flag("tblastn") + finding_opts,
+                    check=True, capture_output=True, text=True)
 
             tblastn_hits = parse_hits(
-                tblastn_hits_file,
+                tblastn_finding_file,
                 relaxed_identity,
                 relaxed_length,
                 args.evalue * args.aug_relaxed_parse_evalue_mult,
@@ -3411,7 +3436,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         files_to_remove = [variants_fasta, query_fasta, aug_hits_file]
         if 'sw_hits_file' in locals():
              files_to_remove.append(sw_hits_file)
-        files_to_remove.append(tblastn_hits_file)
+        files_to_remove += [tblastn_hits_file, f"{tblastn_hits_file}.finding"]
             
         for f in files_to_remove:
             if os.path.exists(f):
@@ -5754,6 +5779,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                                       getattr(args, 'default_target_genetic_code', 1)))
     if get_genetic_code() != 1:
         logger.info(f"[{genome_name}] Genetic code: NCBI table {get_genetic_code()}.")
+    # miniprot's short-peptide mode (-L 10) below this query length (the short_query module
+    # raises it); a module setting of annotate_goi_exons, set for this worker task.
+    import annotate_goi_exons as _age
+    _age.MINIPROT_SHORT_ORF_MAX_LEN = int(getattr(args, 'miniprot_short_orf_max_len', 60))
     
     unique_id = uuid.uuid4().hex
     hits_file = f"{args.output_dir}/hits/{prefix}{genome_name}.m8"
@@ -7139,6 +7168,18 @@ def main():
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=300)
+    parser.add_argument("--window_tblastn_word_size", type=int, default=3,
+                        help="tblastn -word_size of the window search (3 = tblastn's default)")
+    parser.add_argument("--window_tblastn_comp_stats", type=int, default=2, choices=[0, 1, 2, 3],
+                        help="tblastn -comp_based_stats of the window search (2 = tblastn's "
+                             "default). When this or the word size differs from the default, a "
+                             "second tblastn run with the defaults gives EeffTblastn")
+    parser.add_argument("--window_mmseqs_min_length", type=int, default=30,
+                        help="MMseqs2 --min-length (codons of a target ORF) of the window search "
+                             "(30 = MMseqs2's default); the genome-wide search is not affected")
+    parser.add_argument("--miniprot_short_orf_max_len", type=int, default=60,
+                        help="Queries shorter than this (aa) are aligned with miniprot -L 10 "
+                             "(ORFs from 10 aa) in the windows")
     parser.add_argument("--goi_candidate_regions_per_query", type=int, default=2,
                         help="GOI loci kept per query in a search window, the strongest by "
                              "query coverage, then bits (the local_family module raises it)")
@@ -7595,6 +7636,12 @@ def main():
         sys.exit(1)
     if args.sw_timeout_seconds < 1:
         logger.error(f"sw_timeout_seconds must be >= 1 (got {args.sw_timeout_seconds})")
+        sys.exit(1)
+    if args.window_tblastn_word_size < 2:
+        logger.error(f"window_tblastn_word_size must be >= 2 (got {args.window_tblastn_word_size})")
+        sys.exit(1)
+    if args.window_mmseqs_min_length < 1:
+        logger.error(f"window_mmseqs_min_length must be >= 1 (got {args.window_mmseqs_min_length})")
         sys.exit(1)
     if args.goi_candidate_regions_per_query < 1:
         logger.error(f"goi_candidate_regions_per_query must be >= 1 (got {args.goi_candidate_regions_per_query})")

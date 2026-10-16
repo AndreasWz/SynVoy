@@ -7,6 +7,7 @@ process LOCATE_GENE {
     path gene
     path home_genome
     path home_gff
+    val seg_no_retry    // the short_query module is selected (main.nf: modulesSelect)
 
     output:
     path "home_gene_location.bed", emit: bed
@@ -62,6 +63,20 @@ process LOCATE_GENE {
         blastn -query $gene -db $home_genome -out hits_blast.txt -outfmt 6
     fi
 
+    # 2b. A short query without a hit, when --modules selects short_query (preset plan,
+    # PR-7): tblastn once more without its low-complexity filter. Only a run that would
+    # stop for lack of hits gets here; the hit profile records the retry (run_settings).
+    LOCATE_RETRY=""
+    if [ "${seg_no_retry}" = "true" ] && [ "\$BLAST_CMD" = "tblastn" ]; then
+        n_ok=\$(cat hits_blast.txt hits_mmseqs.m8 2>/dev/null | awk -v e=${params.search_evalue} '\$11 <= e' | wc -l)
+        qlen=\$(grep -v "^>" $gene | tr -d ' \\n\\r*' | wc -c)
+        if [ "\$n_ok" -eq 0 ] && [ "\$qlen" -lt 100 ]; then
+            echo "[INFO] LOCATE_GENE: no hit at E <= ${params.search_evalue} for a \$qlen-aa query and the short_query module is selected: tblastn again with -seg no"
+            tblastn -query $gene -db $home_genome -out hits_blast.txt -outfmt 6 -seg no ${tbn_gc}
+            LOCATE_RETRY="--locate_retry tblastn_seg_no"
+        fi
+    fi
+
     # 3. Combine and convert to BED for merging
     
     # Process MMseqs results
@@ -103,7 +118,7 @@ process LOCATE_GENE {
         --gff $home_gff \\
         --locus_gap_genes ${params.locus_gap_genes} \\
         --locus_gap ${params.locus_gap} \\
-        --output hit_profile.json || echo "hit profiling skipped"
+        --output hit_profile.json \$LOCATE_RETRY || echo "hit profiling skipped"
     if [ -s hit_profile.json ]; then
         auto_select_preset.py \\
             --hit_profile hit_profile.json \\

@@ -1105,6 +1105,10 @@ def _check_miniprot():
         return False
 
 MINIPROT_AVAILABLE = _check_miniprot()
+# Queries shorter than this are aligned with miniprot -L 10 (ORFs from 10 aa, default 30).
+# The search sets it per run (iterative_search_runner --miniprot_short_orf_max_len; the
+# short_query preset module raises it to 100); the home gene model always uses 60.
+MINIPROT_SHORT_ORF_MAX_LEN = 60
 _MINIPROT_T_OK = None
 
 
@@ -1395,7 +1399,7 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
                 "--outs=0.3",           # Output if >= 30% of best score
             ])
 
-        if query_len < 60:
+        if query_len < MINIPROT_SHORT_ORF_MAX_LEN:
             # Short peptide mode (e.g., toxins)
             cmd.extend([
                 "-L", "10",             # Min ORF length 10aa (default 30)

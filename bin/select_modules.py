@@ -56,7 +56,8 @@ LEGACY_ALIAS = {
 
 # Keys a module may write, with the class that decides how two modules' values merge.
 #   anchor_hygiene  the largest E (excludes the most relatives from the anchors)
-#   search_breadth  the most permissive value, then RESOURCE_CAPS
+#   search_breadth  the most permissive value (per key: the larger or the smaller one),
+#                   then RESOURCE_CAPS
 #   figure_regions  one module only (the region caps of the figures)
 #   model_status    one module only (ModelStatus coverage bounds)
 #   report          on when any module turns it on (attributes that decide nothing)
@@ -64,6 +65,10 @@ LEGACY_ALIAS = {
 KEY_CLASS: Dict[str, Tuple[str, str]] = {
     "goi_relative_evalue": ("anchor_hygiene", "max"),
     "goi_candidate_regions_per_query": ("search_breadth", "max"),
+    "window_tblastn_word_size": ("search_breadth", "min"),
+    "window_tblastn_comp_stats": ("search_breadth", "min"),
+    "window_mmseqs_min_length": ("search_breadth", "min"),
+    "miniprot_short_orf_max_len": ("search_breadth", "max"),
     "adaptive_score_floor_frac": ("figure_regions", "single"),
     "adaptive_score_floor_abs": ("figure_regions", "single"),
     "adaptive_max_regions": ("figure_regions", "single"),
@@ -101,6 +106,7 @@ def flat_features(hit_profile: Optional[dict], goi_info: Optional[dict],
         "secondary_full_length": hp.get("secondary_full_length"),
         "shared_domain_only": hp.get("shared_domain_only"),
         "loci": hp.get("loci"),
+        "locate_retry": hp.get("locate_retry"),
         # the query (query_features.py)
         "query_len": qf.get("query_len", hp.get("query_len")),
         "self_bits": qf.get("self_bits"),
@@ -251,7 +257,10 @@ MODULES: List[Module] = [
                       "adaptive_max_regions": 4}, "preset_paralog_discrimination"),
     Module("A3", "shared_domain", "copy architecture", "now", _t_shared_domain, _none),
     Module("B1", "short_query", "sequence signal", "after benchmark", _t_short_query,
-           lambda f: {"classify_complete_min_qcov": 0.5, "classify_fragment_max_qcov": 0.3},
+           lambda f: {"classify_complete_min_qcov": 0.5, "classify_fragment_max_qcov": 0.3,
+                      # finding only: the judge's own blastp is untouched
+                      "window_tblastn_word_size": 2, "window_tblastn_comp_stats": 0,
+                      "window_mmseqs_min_length": 10, "miniprot_short_orf_max_len": 100},
            "preset_short_peptide"),
     Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity, _none),
     Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor, _none),

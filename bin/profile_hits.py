@@ -270,6 +270,9 @@ def main():
                     help="Only hits at or below this E-value are profiled (default 0.01, the "
                          "limit the home step applies to the hits it uses)")
     ap.add_argument("--output", required=True, help="Output hit_profile.json")
+    ap.add_argument("--locate_retry", default="",
+                    help="How LOCATE_GENE searched again after finding no hit (e.g. "
+                         "tblastn_seg_no, the short_query module); written as locate_retry")
     args = ap.parse_args()
 
     hits = parse_hits([args.blast, args.mmseqs])
@@ -283,6 +286,8 @@ def main():
                             gap_genes=args.locus_gap_genes, query_seq=query_seq)
     profile["locus_unit"] = ("bp" if gap_bp is not None else
                              "genes" if gene_spans else "bp (no annotation)")
+    if args.locate_retry:
+        profile["locate_retry"] = args.locate_retry
     with open(args.output, "w") as fh:
         json.dump(profile, fh, indent=2)
     print(

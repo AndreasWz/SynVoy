@@ -443,7 +443,7 @@ Two files are worth knowing on a healthy run:
 
 | File | Why |
 |---|---|
-| `locate_gene/hit_profile.json` | The hit distribution SynVoy read off the home genome — how many loci, how strong, how much of the query each locus covers — and the query's own features (`query_features`: length, low complexity, signal peptide, GPI tail, cysteines). |
+| `locate_gene/hit_profile.json` | The hit distribution SynVoy read off the home genome — how many loci, how strong, how much of the query each locus covers — and the query's own features (`query_features`: length, low complexity, signal peptide, GPI tail, cysteines). `locate_retry` (only when it happened): the home genome was searched once more, `tblastn_seg_no` = tblastn without its low-complexity filter for a short query without hits (`short_query` module). |
 | `locate_gene/home_context.json` | The home gene's neighbourhood: family members of the query among the genes next to it (`relatives_nearby`, tested with the label's family test), and its distance to the scaffold end. |
 | `locate_gene/effective_params.json` | Which preset or preset modules were applied and the parameter values the search actually ran with. `source` says, per parameter, whether a value is the default, a module's (`module:A1`), a preset's, or yours (`user_set`); `user_set_kept` lists values of yours that were kept although a preset or module wanted something else; `modules_would_fire` lists every module whose trigger fires, also under `--modules legacy`. Look here first when a parameter seems ignored. |
 

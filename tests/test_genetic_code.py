@@ -107,7 +107,7 @@ def test_miniprot_gets_the_table_of_the_process():
 def test_every_engine_call_of_the_search_carries_the_code_option():
     src = (ROOT / "bin" / "iterative_search_runner.py").read_text()
     assert src.count('+ genetic_code_flag("mmseqs")') == 2           # window and genome-wide
-    assert src.count('+ genetic_code_flag("tblastn")') == 1
+    assert src.count('+ genetic_code_flag("tblastn")') == 2           # + the finding run (B1)
     assert src.count('+ genetic_code_flag("synvoy")') == 1           # Smith-Waterman
     assert "set_genetic_code(genetic_code_for(genome_path" in src
     rescue = (ROOT / "bin" / "rescue_strong_synteny.py").read_text()

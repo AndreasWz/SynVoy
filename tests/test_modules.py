@@ -144,7 +144,9 @@ def test_merge_does_not_depend_on_the_order_of_the_modules():
 
 # Keys the old presets never had (added by later PRs of the plan); --modules legacy keeps
 # applying PRESET_OVERRIDES alone, so a legacy run never sees them.
-KEYS_AFTER_V1 = {"goi_candidate_regions_per_query", "report_copies_in_slot"}
+KEYS_AFTER_V1 = {"goi_candidate_regions_per_query", "report_copies_in_slot",
+                 "window_tblastn_word_size", "window_tblastn_comp_stats",
+                 "window_mmseqs_min_length", "miniprot_short_orf_max_len"}
 
 
 def test_the_old_presets_are_module_sets_with_the_same_values():

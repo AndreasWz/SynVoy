@@ -206,7 +206,7 @@ distance to the scaffold end).
 | A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 10, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; `report_copies_in_slot` on (§7.13) |
 | A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
-| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`) |
+| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
 | B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | nothing yet (a flag) |
 | B3 | `signal_anchor` | a signal peptide or a GPI tail | nothing yet (a flag) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
@@ -235,10 +235,13 @@ applies the chooser's preset exactly as before and only records which triggers f
 `auto` applies every module whose trigger fires; `none` applies nothing; a list
 (`short_query,local_family`) applies exactly those modules; deltas
 (`auto,-dispersed_family,+cys_framework`) edit `auto`. The old preset names are the
-module sets {B1}, {A1}, {A2} and {}, with the same values (A1 adds the two keys above,
-which `legacy` never applies).
+module sets {B1}, {A1}, {A2} and {}, with the same values (A1 and B1 add the keys above,
+which `legacy` never applies). LOCATE_GENE runs before the modules are resolved, so its
+retry follows the `--modules` value itself: `auto` (unless it removes `short_query`) or a
+list that names it; never `legacy` or `none`. A run without home hits stops today, so the
+retry can only rescue a run.
 
-The chosen values travel to the later steps as a `settings` map of 15 parameters
+The chosen values travel to the later steps as a `settings` map of 19 parameters
 (`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,

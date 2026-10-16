@@ -304,6 +304,9 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before. |
 | `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 10). |
 | `--report_copies_in_slot` | `false` | `CopiesInSlot` / `SlotRank` on GOI models and home : target copies per genome in the report (on with `local_family`). |
+| `--window_tblastn_word_size` / `--window_tblastn_comp_stats` | `3` / `2` | tblastn options of the window search (finding only; the `short_query` module sets 2 / 0). |
+| `--window_mmseqs_min_length` | `30` | MMseqs2 ORF floor (codons) of the window search (`short_query`: 10). |
+| `--miniprot_short_orf_max_len` | `60` | Queries below this length get miniprot `-L 10` in the windows (`short_query`: 100). |
 | `--synteny_bridge_max_rank_gap` | `5` | Max home-rank jump still treated as a collinear continuation when bridging. |
 | `--synteny_bridge_min_anchors` | `2` | Min anchored flanking genes a block needs before it may bridge a gap (3 until 2026-10-14). |
 

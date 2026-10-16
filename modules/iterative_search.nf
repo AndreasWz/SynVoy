@@ -87,6 +87,10 @@ process ITERATIVE_SEARCH {
         --goi_max_models_per_locus ${params.goi_max_models_per_locus} \\
         --goi_candidate_regions_per_query ${settings.goi_candidate_regions_per_query} \\
         --report_copies_in_slot ${settings.report_copies_in_slot} \\
+        --window_tblastn_word_size ${settings.window_tblastn_word_size} \\
+        --window_tblastn_comp_stats ${settings.window_tblastn_comp_stats} \\
+        --window_mmseqs_min_length ${settings.window_mmseqs_min_length} \\
+        --miniprot_short_orf_max_len ${settings.miniprot_short_orf_max_len} \\
         --synteny_bridge_max_rank_gap ${params.synteny_bridge_max_rank_gap} \\
         --synteny_bridge_min_anchors ${params.synteny_bridge_min_anchors} \\
         --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\

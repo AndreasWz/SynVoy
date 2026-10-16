@@ -268,6 +268,8 @@ def presetDefaultKeys() {
         'classify_fragment_max_qcov', 'classify_complete_min_qcov',
         'expand_goi_similar', 'goi_family_tokens',
         'goi_relative_evalue', 'goi_candidate_regions_per_query', 'report_copies_in_slot',
+        'window_tblastn_word_size', 'window_tblastn_comp_stats', 'window_mmseqs_min_length',
+        'miniprot_short_orf_max_len',
         'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
         'adaptive_max_regions', 'adaptive_unique_gene_floor',
     ]
@@ -311,6 +313,23 @@ def checkModulesSpec(validationErrors) {
             validationErrors << "--modules: '${p}' removes a module, which only follows 'auto'."
         }
     }
+}
+
+// Whether --modules selects a preset module (its name or id) for a step that runs before
+// the modules are resolved (LOCATE_GENE's short-query retry): 'auto' unless it removes the
+// module, or a list that names it. Never 'legacy' or 'none' alone.
+def modulesSelect(String module) {
+    def ids = presetModules().findAll { id, name -> id == module || name == module }
+        .collectMany { id, name -> [id.toLowerCase(), name] } as Set
+    def parts = modulesSpec().split(',').collect { p -> p.trim().toLowerCase() }.findAll { p -> p }
+    if (!parts || parts[0] == 'legacy') {
+        return false
+    }
+    if (parts[0] == 'auto') {
+        return !parts.drop(1).any { p -> p.startsWith('-') && p.substring(1) in ids }
+    }
+    def named = parts[0] == 'none' ? parts.drop(1) : parts
+    return named.any { p -> !p.startsWith('-') && p.replaceFirst(/^\+/, '') in ids }
 }
 
 // A distance that is derived unless a number fixes it: 'auto' or a number >= 0.
@@ -1121,7 +1140,7 @@ workflow {
     uiPhase(1, 'Gene Localization in Home Genome')
     
     uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
-    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch, home_gff_ch)
+    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch, home_gff_ch, modulesSelect('short_query'))
 
     LOCATE_GENE.out.bed.view { bed ->
         def lines = bed.readLines().findAll { it.trim() && !it.startsWith('#') }

@@ -539,6 +539,21 @@ DNA added on each side of the hits of one candidate before miniprot builds its g
 
 Gene models kept per candidate locus. miniprot reports every place where the query aligns in the stretch of DNA; until 2026-10-08 the first model was used and the rest dropped, so a tandem array gave one model, and which copy it was depended on a score difference of under one per cent. Now every model is kept whose coding sequence overlaps the coding sequence of a better model by less than half. Where hits of the window search remain on no model, the coding exons found so far are masked and miniprot runs again (with a long allowed intron it does not report a diverged neighbouring copy in the first run: of two copies 2 kb apart the one at 80 % identity is missing from 10 kb on). A further model must reach 30 % of the best score, the limit miniprot applies itself. Further models carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are classified like any other model.
 
+### `window_tblastn_word_size`, `window_tblastn_comp_stats`
+**Type:** Integer | **Defaults:** `3`, `2` (tblastn's own)
+
+`-word_size` and `-comp_based_stats` of the tblastn search inside each window (finding only). With a value other than tblastn's defaults, tblastn runs twice per window: the run with these values adds hits, and the run with the defaults still gives `EeffTblastn`, the second E source the label is compared on. The `short_query` preset module (B1) sets 2 and 0: a short query has few words of 3 and loses score to the composition adjustment. The label's own E-value (blastp, `Eeff`) is not affected. Settings keys: a value you set yourself is kept.
+
+### `window_mmseqs_min_length`
+**Type:** Integer (codons) | **Default:** `30` (MMseqs2's own)
+
+MMseqs2 `--min-length` of the window search: open reading frames of the target shorter than this many codons are not searched. The `short_query` module (B1) sets 10, so an exon of a short peptide between two stop codons can be found. The genome-wide search for the anchors is not affected. Settings key.
+
+### `miniprot_short_orf_max_len`
+**Type:** Integer (aa) | **Default:** `60`
+
+Queries shorter than this are aligned by miniprot with `-L 10` (open reading frames from 10 aa; miniprot's default is 30) when the gene models of a window are built. The `short_query` module (B1) sets 100. The home gene model is built before the modules are resolved and always uses 60; the rescue passes use `-L 10` for every query. Settings key.
+
 ### `goi_candidate_regions_per_query`
 **Type:** Integer | **Default:** `2` | **Range:** 1–10 (modules cap it at 10)
 
@@ -907,7 +922,7 @@ Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-paramete
 | `short_query,local_family` | exactly these modules, whether their trigger fires or not (names or ids, e.g. `B1,A1`) |
 | `auto,-dispersed_family,+cys_framework` | `auto` without one module and with another |
 
-Put a value that contains a minus sign in quotes: `--modules 'auto,-dispersed_family'`. A value you set yourself for any of the settings keys wins over every module. Unknown names stop the run at the start. The console shows the modules after `[INFO] modules (...)`; `intermediate/locate_gene/home_context.json` holds the home neighbourhood the triggers read.
+LOCATE_GENE runs before the modules are resolved: when the value selects `short_query` (`auto` without `-short_query`, or a list that names it) and a query shorter than 100 aa has no home hit at E ≤ `search_evalue`, tblastn searches the home genome once more with `-seg no`; the hit profile records it (`locate_retry`, in `run_settings.features`). Put a value that contains a minus sign in quotes: `--modules 'auto,-dispersed_family'`. A value you set yourself for any of the settings keys wins over every module. Unknown names stop the run at the start. The console shows the modules after `[INFO] modules (...)`; `intermediate/locate_gene/home_context.json` holds the home neighbourhood the triggers read.
 
 ### `allow_unknown_species`
 **Type:** Boolean | **Default:** `false`
