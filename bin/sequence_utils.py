@@ -1237,3 +1237,30 @@ def stream_fasta_lengths(filepath: str) -> Dict[str, int]:
             elif name is not None:
                 lengths[name] += len(line.strip())
     return lengths
+
+
+def sw_aligned_pairs(query_seq: str, subject_seq: str) -> List[Tuple[int, int]]:
+    """0-based (query position, subject position) of every column of the best local
+    alignment of two proteins that holds a residue of both sequences (BLOSUM62, BLAST gap
+    costs 11/1). [] for an empty sequence; raises RuntimeError without parasail."""
+    if not query_seq or not subject_seq:
+        return []
+    try:
+        import parasail  # type: ignore
+    except ImportError as exc:  # pragma: no cover - exercised only without parasail
+        raise RuntimeError("parasail-python is required for Smith-Waterman alignment") from exc
+    res = parasail.sw_trace_striped_32(query_seq, subject_seq, 12, 1, parasail.blosum62)
+    cigar = res.cigar
+    q, s = int(cigar.beg_query), int(cigar.beg_ref)
+    pairs: List[Tuple[int, int]] = []
+    for op in cigar.seq:
+        length, code = int(op >> 4), int(op & 0xF)
+        if code in (0, 7, 8):          # M, =, X: a residue of both
+            pairs.extend((q + k, s + k) for k in range(length))
+            q += length
+            s += length
+        elif code == 1:                # I: query only
+            q += length
+        elif code == 2:                # D: subject only
+            s += length
+    return pairs

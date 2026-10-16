@@ -502,6 +502,70 @@ def _dir_diagnostics(dir_path, patterns, sample_size=5):
 
 NONSYNTENIC_SUFFIX = ".nonsyntenic.tsv"
 NOT_SEARCHED_SUFFIX = ".not_searched.tsv"
+TARGET_POLICY_SUFFIX = ".target_policy.tsv"
+_CONTEXT_ORDER = {"complete": 0, "left": 1, "right": 1, "both": 1, "NA": 2}
+
+
+def collect_target_policy(paths):
+    """{genome: row} of the per-genome tables the search writes
+    (iterative_search_runner._write_target_policy): median flanking identity, blocks,
+    significant blocks, the best block's E_syn and window context. With several home loci a
+    genome has one row per locus; the row kept is the one with the most informative
+    context (complete over truncated over no block), then the most significant block."""
+    out = {}
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    genome = canonical_genome_id(
+                        row.get("genome") or os.path.basename(path).split(TARGET_POLICY_SUFFIX)[0])
+                    row = {k: v for k, v in row.items() if k}
+                    row["genome"] = genome
+                    key = (_CONTEXT_ORDER.get(row.get("best_block_context") or "NA", 2),
+                           _safe_float(row.get("best_block_esyn")) if row.get("best_block_esyn") not in (None, "", "NA") else float("inf"))
+                    old = out.get(genome)
+                    if old is None or key < old[0]:
+                        out[genome] = (key, row)
+        except (OSError, csv.Error):
+            continue
+    return {g: row for g, (_key, row) in sorted(out.items())}
+
+
+def genome_absence_categories(records, target_policy, demoted_classes):
+    """What a genome without a counted call means (preset plan PR-2):
+
+      nearest_paralog_only        its best GOI record (the judge's order) is AMBIGUOUS
+                                  with Basis=not_specific: only a model that another
+                                  home gene explains as well
+      absent_context_complete     the best block (smallest E_syn) was searched with its
+                                  whole window inside the scaffold
+      unknown_context_truncated   that window ran past a scaffold end: the place where
+                                  the gene should sit is partly missing from the assembly
+      absent_no_block             the search found no block in this genome
+    The first is a property of the calls, the other three of the search; a genome can be
+    nearest_paralog_only and one of the three."""
+    counted = {r.get("genome") for r in records
+               if r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in demoted_classes}
+    by_genome = {}
+    for r in records:
+        by_genome.setdefault(r.get("genome"), []).append(r)
+    genomes = sorted((set(target_policy) | set(by_genome)) - counted - {None})
+    out = {"nearest_paralog_only": [], "absent_context_complete": [],
+           "unknown_context_truncated": [], "absent_no_block": []}
+    for g in genomes:
+        recs = by_genome.get(g, [])
+        if recs:
+            best = min(recs, key=_record_rank)
+            if best.get("confidence") == "AMBIGUOUS" and best.get("basis") == "not_specific":
+                out["nearest_paralog_only"].append(g)
+        ctx = (target_policy.get(g) or {}).get("best_block_context") or "NA"
+        if ctx == "complete":
+            out["absent_context_complete"].append(g)
+        elif ctx in ("left", "right", "both"):
+            out["unknown_context_truncated"].append(g)
+        else:
+            out["absent_no_block"].append(g)
+    return out
 
 
 def collect_not_searched(paths):
@@ -1569,8 +1633,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # so they need no channel of their own.
     hits_scan = scan_dir_by_suffix(
         hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,),
-                   "not_searched": (NOT_SEARCHED_SUFFIX,)})
+                   "not_searched": (NOT_SEARCHED_SUFFIX,),
+                   "target_policy": (TARGET_POLICY_SUFFIX,)})
     not_searched = collect_not_searched(hits_scan["not_searched"])
+    target_policy = collect_target_policy(hits_scan["target_policy"])
     fasta_files = regions_scan["fasta"]
     gff_files = regions_scan["gff"]
     score_files = scores_scan["scores"]
@@ -1697,6 +1763,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     )
 
     _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
+    absence = genome_absence_categories(goi_dedup.get("records", []), target_policy,
+                                        _DEMOTED_CLASSES)
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
     _own_recs = goi_dedup.get("records", [])
     dedup_high = sum(1 for r in _own_recs
@@ -1766,6 +1834,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         # §1x — the run's known false negatives: strong GOI hits it refused on synteny
         # grounds and used to discard in silence.
         "rejected_candidates": nonsyntenic_block,
+        # Per target genome: the median flanking identity, the blocks searched and whether
+        # the best block's window ran past a scaffold end (hits/<genome>.target_policy.tsv).
+        "target_policy": target_policy,
         "self_consistency": self_consistency,
         "staging_diagnostics": staging_diagnostics,
         "summary": {
@@ -1834,6 +1905,15 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             # Genomes the search skipped (e.g. MMseqs resource failure): no result at all.
             "genomes_not_searched": {g: r for g, r in sorted(not_searched.items())},
+            # Genomes without a counted call, by what the search saw there
+            # (genome_absence_categories): the best block complete, its window cut at a
+            # scaffold end ("unknown", not "absent"), or no block at all; and genomes whose
+            # best call is a model another home gene explains as well.
+            "absent_context_complete": absence["absent_context_complete"],
+            "unknown_context_truncated": absence["unknown_context_truncated"],
+            "absent_no_block": absence["absent_no_block"],
+            "nearest_paralog_only": absence["nearest_paralog_only"],
+            "nearest_paralog_only_genomes": len(absence["nearest_paralog_only"]),
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
             "low_quality_genomes_searched": low_quality_ids,
@@ -1894,6 +1974,18 @@ def load_run_settings(path):
     out["modules_mode"] = out["modules_mode"] or "legacy"
     out["modules_applied"] = out["modules_applied"] or []
     out["modules_would_fire"] = out["modules_would_fire"] or []
+    # What the module triggers say about the query and its home (reporting only; the
+    # trigger is the one definition, select_modules.py).
+    feats = out.get("features") or {}
+    fired = {d.get("id") for d in out["modules_would_fire"]}
+    contig_end = "C2" in fired
+    out["flags"] = {
+        "domain_shared": "A3" in fired,
+        "dispersed_family_loci": (feats.get("loci") or []) if "A2" in fired else [],
+        "home_contig_end": contig_end,
+        "home_subtelomeric": contig_end and bool(feats.get("telomeric_repeat_at_end")),
+        "dist_to_scaffold_end": feats.get("dist_to_scaffold_end"),
+    }
     return out
 
 

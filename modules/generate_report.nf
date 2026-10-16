@@ -55,13 +55,14 @@ process GENERATE_REPORT {
     done
 
     # Stage the per-genome tables the search writes into its hits/ folder: the §1x
-    # non-syntenic candidates and the genomes it could not search. Each hits/ folder
-    # arrives as hits/<n>/hits/<file>, one level deeper than the old loops looked, so none
-    # of them ever reached the report (bug hunt 2026-10-13). Their names carry the locus,
+    # non-syntenic candidates, the genomes it could not search, and each genome's target
+    # policy (median flanking identity, blocks, window cut at a scaffold end). Each hits/
+    # folder arrives as hits/<n>/hits/<file>, one level deeper than the old loops looked, so
+    # none of them ever reached the report (bug hunt 2026-10-13). Their names carry the locus,
     # so one flat folder is safe. The raw .m8 hits are not staged: they are large and the
     # old copies of them were never read.
-    find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\) \\
-        -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
+    find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\
+        -o -name '*.target_policy.tsv' \\) -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
 
     # Stage structured region scores
     for f in \$(find -L scores -type f 2>/dev/null); do

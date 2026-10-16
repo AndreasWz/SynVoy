@@ -104,7 +104,7 @@ try:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_bits,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -121,7 +121,7 @@ except ImportError:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_bits,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -1121,6 +1121,53 @@ def relabel_goi_lines(gff_lines: List[str]) -> Tuple[List[str], Dict[str, int]]:
         cols[8] = ';'.join(pairs)
         out.append('\t'.join(cols))
     return out, dict(counts)
+
+
+def context_truncation(block_start: int, block_end: int, pad: int, scaffold_len: int) -> str:
+    """'left', 'right', 'both' or '': on which side the search window of a block (block +-
+    pad) ran past a scaffold end and was cut there, i.e. where the neighbourhood that was
+    meant to be searched is missing from the assembly."""
+    left = block_start - pad < 0
+    right = block_end + pad > scaffold_len
+    return 'both' if left and right else 'left' if left else 'right' if right else ''
+
+
+def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], truncated: str) -> None:
+    """Advisory attributes of the GOI candidates of a window; no label reads them (preset
+    plan of 2026-10-15, PR-2):
+
+      ContextTruncated  left / right / both: the window ran past a scaffold end there
+      ExonsKept         gene models: exons of the model / exons of the home gene (counted
+                        without its tandem copies; absent when that is not known)
+      CysKept           gene models: cysteines of the home protein aligned to a cysteine of
+                        the model protein / cysteines of the home protein (absent without any)
+    """
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9:
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        extra = []
+        if truncated:
+            extra.append(f"ContextTruncated={truncated}")
+        if a.get('EvidenceType') == 'exon_annotation':
+            if home_exons and a.get('Exons'):
+                extra.append(f"ExonsKept={a['Exons']}/{home_exons}")
+            home = ((by_parent.get(a.get('SynVoy_Parent', '')) or {}).get('seq', '') or '').upper()
+            protein = (cand.get('label_protein') or (cand.get('record') or {}).get('seq', '') or '').upper()
+            n_cys = home.count('C')
+            if n_cys and protein:
+                try:
+                    pairs = sw_aligned_pairs(home, protein)
+                except RuntimeError:
+                    pairs = None
+                if pairs is not None:
+                    kept = sum(1 for i, j in pairs if home[i] == 'C' and protein[j] == 'C')
+                    extra.append(f"CysKept={kept}/{n_cys}")
+        if extra:
+            cols[8] = cols[8] + ';' + ';'.join(extra)
+            gff[0] = '\t'.join(cols)
 
 
 def goi_candidate_order(cand) -> Tuple[float, int, int, int, str]:
@@ -3764,6 +3811,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     w_start = max(0, block['start'] - search_pad)
     w_end = min(slen, block['end'] + search_pad)
     subseq = genome_seqs[chrom][w_start:w_end]
+    # Where the window ran past a scaffold end (ContextTruncated; target_policy.tsv).
+    window_truncated = context_truncation(block['start'], block['end'], search_pad, slen)
+    if getattr(args, 'genome_ctx', None) is not None:
+        args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
     # Keep final GOI calls anchored near the flanking-defined block.
     core_margin = getattr(args, 'goi_margin', None) or args.gap_search_window
     core_start = max(0, block['start'] - core_margin)
@@ -4945,6 +4996,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         score_goi_candidates(cands, goi_query_by_parent)
         annotate_place_evalues(cands, goi_query_by_parent, hits_by_gene, place_terms,
                                subseq, w_start, tblastn_raw)
+        annotate_model_extras(cands, goi_query_by_parent, getattr(args, 'home_goi_exons', None),
+                              window_truncated)
         annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
                                  goi_query_by_parent, args)
         judge_candidates(cands)
@@ -5407,6 +5460,44 @@ def _write_not_searched(args, prefix, genome_name, reason, details=''):
         logger.warning(f"[{genome_name}] could not record the skipped search: {exc}")
 
 
+TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 'blocks_searched',
+                         'significant_blocks', 'best_block_esyn', 'best_block_context',
+                         'truncated_blocks']
+
+
+def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None):
+    """hits/<genome>.target_policy.tsv: what this genome's search was like (preset plan
+    PR-2, T2/T4). One row: the median identity of the best hit of each flanking gene (a
+    distance proxy; it changes nothing), the blocks searched, how many are significant
+    (E_syn <= 0.1), the best block's E_syn and whether its window ran past a scaffold end
+    (left/right/both, '' = complete), and how many windows did. Written as soon as the
+    median is known and again when the genome is done, so it exists for every genome the
+    search reached, also one without a model."""
+    path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.target_policy.tsv")
+    ctx = ctx or {}
+    esyn = ctx.get('block_esyn') or {}
+    trunc = ctx.get('block_context') or {}
+    best = min(esyn, key=lambda i: (esyn[i], i)) if esyn else None
+    row = {
+        'genome': genome_name,
+        'median_flank_identity': f"{median:.1f}" if median is not None else 'NA',
+        'n_flanking_genes': int(n_flanking or 0),
+        'blocks_searched': len(trunc) if trunc else 0,
+        'significant_blocks': sum(1 for e in esyn.values() if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN),
+        'best_block_esyn': f"{esyn[best]:.3g}" if best is not None else 'NA',
+        'best_block_context': (trunc.get(best) or 'complete') if best is not None else 'NA',
+        'truncated_blocks': sum(1 for t in trunc.values() if t),
+    }
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=TARGET_POLICY_COLUMNS, delimiter='\t')
+            w.writeheader()
+            w.writerow(row)
+    except OSError as exc:
+        logger.warning(f"[{genome_name}] could not write the target policy: {exc}")
+
+
 def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
     """§1x: write the refused-but-strong GOI candidates next to the raw hits.
 
@@ -5648,6 +5739,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         )
         if not hits:
             logger.info(f"[{genome_name}] No hits found in MMseqs output.")
+            _write_target_policy(args, prefix, genome_name, None, 0)
             return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
@@ -5726,6 +5818,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if _flank_median is not None:
             logger.info(f"[{genome_name}] Median flanking identity: {_flank_median:.1f}% "
                         f"over {_flank_n} flanking gene(s).")
+        _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n)
 
         synteny_blocks = identify_synteny_blocks(
             seed_hits,
@@ -6300,6 +6393,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
         all_gff_lines = finalize_place_evalues(all_gff_lines, args.genome_ctx)
         all_gff_lines, _label_counts = relabel_goi_lines(all_gff_lines)
+        _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
         if _label_counts:
             logger.info(f"[{genome_name}] GOI labels: "
                         + ", ".join(f"{k} {v}" for k, v in sorted(_label_counts.items())))
@@ -7154,6 +7248,20 @@ def main():
                              "'auto' (default) = derive it from --dispersed_envelope_margin_genes")
 
     args = parser.parse_args()
+
+    # Exons of the home gene, without tandem copies of the home model (ExonsKept); unknown
+    # when ANNOTATE_GOI built no gene model (tandem_duplication / full_protein_only).
+    args.home_goi_exons = None
+    if getattr(args, "goi_info", None):
+        try:
+            with open(args.goi_info) as _fh:
+                _gi = json.load(_fh)
+            if _gi.get("method") not in ("tandem_duplication", "full_protein_only"):
+                _n = sum(1 for _e in (_gi.get("exons") or [])
+                         if not str(_e.get("id", "")).startswith("GOI_copy_"))
+                args.home_goi_exons = _n or None
+        except (OSError, TypeError, ValueError):
+            args.home_goi_exons = None
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov
