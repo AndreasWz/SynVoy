@@ -70,7 +70,7 @@ def test_the_runner_wires_the_engine_keys():
     src = (ROOT / "bin" / "iterative_search_runner.py").read_text()
     # EeffTblastn keeps the run with tblastn's defaults; the other run finds
     i = src.index("finding_opts = window_tblastn_finding_options(args)")
-    block = src[i - 1500:i + 1600]
+    block = src[i - 1500:src.index("# ========== 3. Smith-Waterman Search", i)]
     assert "parse_hits(\n                tblastn_finding_file" in block
     assert "parse_hits(tblastn_hits_file, 0.0, 1, float('inf')" in block
     assert 'search_cmd += ["--min-length", str(int(args.window_mmseqs_min_length))]' in src

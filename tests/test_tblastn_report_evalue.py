@@ -14,6 +14,12 @@ REPO = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(REPO, "bin"))
 import iterative_search_runner as isr  # noqa: E402
 
+def _tabular(cmd):
+    """A tblastn or blast_formatter call that writes tabular output (-outfmt 6 ...)."""
+    return ("-outfmt" in cmd and str(cmd[cmd.index("-outfmt") + 1]).startswith("6")
+            and os.path.basename(str(cmd[0])) in ("tblastn", "blast_formatter"))
+
+
 
 def _args(tmp_path, **over):
     a = dict(output_dir=str(tmp_path), evalue=0.01, aug_relaxed_evalue_mult=1000.0,
@@ -33,6 +39,9 @@ def _run(tmp_path, monkeypatch, args):
     def fake_run(cmd, *a, **k):
         if cmd[0] == "tblastn":
             seen["tblastn"] = list(cmd)
+        # The rows go wherever tabular output is written: by tblastn itself, or by
+        # blast_formatter from tblastn's archive (review fix RF-3, F4, with BLAST+ on PATH).
+        if _tabular(cmd):
             out = cmd[cmd.index("-out") + 1]
             with open(out, "w") as fh:
                 # qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore

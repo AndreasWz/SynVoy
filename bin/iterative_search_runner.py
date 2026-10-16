@@ -696,6 +696,9 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
     return kept
 
 
+_SW_BITS_FAILED = [False]       # warned once per process that sw_bits is unavailable
+
+
 def score_goi_candidates(raw_candidates, by_parent) -> int:
     """Bit score of every GOI candidate against the HOME protein of its GOI.
 
@@ -725,7 +728,17 @@ def score_goi_candidates(raw_candidates, by_parent) -> int:
             continue
         try:
             bits, protein = max((sw_bits(home['seq'], s), s) for s in subjects)
-        except RuntimeError:
+        except RuntimeError as err:
+            # Without parasail every candidate type falls back alike, to the best bit score
+            # of its own search hits (prepare_label_subjects); no Bits= is written. Until
+            # review fix RF-3 (S01-11) hit chains kept the bits of their best hit and every
+            # other type had 0, so a chain won every choice.
+            cand['bits'] = float(cand.get('hit_bits', 0.0) or 0.0)
+            cand['bits_from_hits'] = True
+            if not _SW_BITS_FAILED[0]:
+                _SW_BITS_FAILED[0] = True
+                logger.warning(f"{err}: GOI candidates get no Bits=, are ordered by the best bit "
+                               "score of their own search hits, and get no specificity terms")
             continue
         cand['bits'] = bits
         cand['judged_protein'] = protein
@@ -768,7 +781,7 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
     for cand in candidates:
         gff = cand.get('gff') or []
         cols = gff[0].split('\t') if gff else []
-        if len(cols) < 9 or cand.get('bits') is None:
+        if len(cols) < 9 or cand.get('bits') is None or cand.get('bits_from_hits'):
             continue
         parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
         home = by_parent.get(parent) or {}
@@ -827,6 +840,15 @@ def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
             random.Random(zlib.crc32((parent + tag).encode())).shuffle(residues)
             out.append({'id': parent + tag, 'seq': ''.join(residues)})
     return out
+
+
+def decoy_cases(candidates) -> List[List[Dict[str, Any]]]:
+    """Decoy candidates grouped by decoy case (their parent: home GOI x decoy kind), in a
+    fixed order: each case is judged and chosen among its own candidates (RF-3, F3)."""
+    cases: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for c in candidates:
+        cases[_candidate_parent(c)].append(c)
+    return [cases[k] for k in sorted(cases)]
 
 
 def is_decoy_parent(parent: str) -> bool:
@@ -979,28 +1001,36 @@ def clip_hit_in_frame(hs: int, he: int, strand: str, lo: int, hi: int):
     return (s, e) if e - s >= 15 else None
 
 
+def span_hits(cand, parent, hits_by_gene, w_start) -> List[Tuple[Dict[str, Any], Tuple[int, int]]]:
+    """The window hits of the candidate's parent (and of the parent's relative query) in its
+    span, each with its part inside the span in the hit's frame (clip_hit_in_frame)."""
+    g0, g1 = int(cand['start']), int(cand['end'])
+    out = []
+    for key in (parent, parent + RELATIVE_QUERY_TAG):
+        for h in hits_by_gene.get(key, []):
+            region = clip_hit_in_frame(int(h.get('gstart', 0)), int(h.get('gend', 0)),
+                                       h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)
+            if region is not None:
+                out.append((h, region))
+    return out
+
+
 def label_subjects(cand, parent, hits_by_gene, subseq, w_start) -> List[str]:
     """The proteins a candidate is judged on (plan 3.1-3.2): its label protein in pieces
     between stops, and the part of each window hit of its parent (and of the parent's
     relative query) inside the candidate's span, in the hit's frame, in pieces between
     stops. The place E-value is the best over them; Bits= and the specificity are computed
     on the best of them (review fix RF-1e: they used the record protein)."""
-    g0, g1 = int(cand['start']), int(cand['end'])
     protein = cand.get('label_protein')
     if protein is None:
         protein = (cand.get('record') or {}).get('seq', '')
     subjects = synvoy_evalue.split_at_stops(protein)
-    for key in (parent, parent + RELATIVE_QUERY_TAG):
-        for h in hits_by_gene.get(key, []):
-            region = clip_hit_in_frame(int(h.get('gstart', 0)), int(h.get('gend', 0)),
-                                       h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)
-            if region is None:
-                continue
-            dna = subseq[region[0]:region[1]]
-            if h.get('strand', '+') == '-':
-                dna = reverse_complement(dna)
-            dna = dna[:len(dna) - len(dna) % 3]
-            subjects += synvoy_evalue.split_at_stops(translate(dna))
+    for h, region in span_hits(cand, parent, hits_by_gene, w_start):
+        dna = subseq[region[0]:region[1]]
+        if h.get('strand', '+') == '-':
+            dna = reverse_complement(dna)
+        dna = dna[:len(dna) - len(dna) % 3]
+        subjects += synvoy_evalue.split_at_stops(translate(dna))
     return subjects
 
 
@@ -1014,6 +1044,11 @@ def prepare_label_subjects(candidates, hits_by_gene, subseq, w_start) -> None:
             continue
         parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
         cand['label_subjects'] = label_subjects(cand, parent, hits_by_gene, subseq, w_start)
+        # What every candidate type is ordered by when parasail is missing (review fix RF-3,
+        # S01-11): the best bit score of its own search hits.
+        cand['hit_bits'] = max((float(h.get('bits', 0) or 0)
+                                for h, _ in span_hits(cand, parent, hits_by_gene, w_start)),
+                               default=0.0)
 
 
 def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w_start,
@@ -1044,9 +1079,12 @@ def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w
             subjects = label_subjects(cand, parent, hits_by_gene, subseq, w_start)
         e_tbn = float('inf')
         for h in tblastn_raw or []:
+            # A tblastn row counts when at least 15 bp of it, in its frame, lie inside the
+            # candidate, as for the hit regions of EPlace (review fix RF-3, F5; it had to lie
+            # wholly inside). Its E is tblastn's own for the whole HSP.
             hs, he = int(h.get('start', 0)), int(h.get('end', 0))
             if (extract_base_gene_id(h.get('query', '')) == parent
-                    and w_start + hs + 1 >= g0 and w_start + he <= g1):
+                    and clip_hit_in_frame(hs, he, h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)):
                 e_tbn = min(e_tbn, float(h.get('evalue', float('inf'))))
         e_place, _bits = synvoy_evalue.blastp_evalue(q, subjects, synvoy_evalue.search_space(len(q), place_bp))
         if e_tbn != float('inf'):
@@ -1056,7 +1094,30 @@ def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w
             {'EPlace': e_place, 'EPlaceTblastn': e_tbn, 'BlockEsyn': terms['esyn']})
         cols[8] = (f"{cols[8]};Place={place};BlockEsyn={terms['esyn']:.3g};"
                    f"EPlace={e_place:.3g};EPlaceTblastn={e_tbn:.3g}")
+        if is_decoy_parent(parent):
+            cols[8] += decoy_place_attrs((g0, g1), place_bp, e_place, len(q), terms)
         gff[0] = '\t'.join(cols)
+
+
+def decoy_place_attrs(span: Tuple[int, int], place_bp: int, e_place: float, qlen: int,
+                      terms: Dict[str, Any]) -> str:
+    """For a decoy row (review fix RF-3, F6): the length of its place (PlaceBp) and its
+    E-value in every nested place that holds it (EPlaceSlot, EPlaceCore, EPlaceWindow,
+    EPlaceGenome; slot, core and window only in a significant block), so that a rule can be
+    calibrated in any place. The E-value of one alignment scales with the search space
+    blastp is given (-searchsp = |q| x floor(place / 3)); like EPlace, before the genome's
+    multiplier (SigBlocks)."""
+    s, e = span
+    base = synvoy_evalue.search_space(qlen, place_bp)
+    out = f";PlaceBp={int(place_bp)}"
+    bounds = [("Slot", terms.get('slot')), ("Core", terms.get('core')), ("Window", terms.get('window'))]
+    for name, b in bounds:
+        if terms.get('significant') and b and b[0] <= s and e <= b[1]:
+            bp = max(1, int(b[1] - b[0]))
+            out += f";EPlace{name}={e_place * synvoy_evalue.search_space(qlen, bp) / base:.3g}"
+    genome_bp = max(1, int(terms.get('genome_len') or place_bp))
+    out += f";EPlaceGenome={e_place * synvoy_evalue.search_space(qlen, genome_bp) / base:.3g}"
+    return out
 
 
 def finalize_place_evalues(gff_lines: List[str], ctx: Dict[str, Any]) -> List[str]:
@@ -1096,7 +1157,8 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
         for ln in lines:
             fh.write(ln + "\n")
     keys = ['Confidence', 'EvidenceType', 'Place', 'BlockEsyn', 'Eeff', 'EeffTblastn', 'Bits',
-            'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage']
+            'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage', 'SigBlocks', 'PlaceBp',
+            'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome']
     n = 0
     with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
         fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")
@@ -3305,6 +3367,34 @@ def run_augmented_mmseqs_with_retries(
 # output in SynVoy's own 43-kb window and reported at E 0.005 with 1000. The kept threshold
 # (E <= 0.1, identity >= 15 %, length >= 15) is applied when the output is read, as before.
 TBLASTN_REPORT_EVALUE = 1000.0
+TBLASTN_TABULAR = "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
+
+
+def run_tblastn_tabular_and_json(cmd: List[str], tabular_path: str) -> Optional[str]:
+    """Run a window tblastn (``cmd`` without -outfmt and -out) once into an ASN.1 archive and
+    write, with blast_formatter, its tabular output (TBLASTN_TABULAR) to ``tabular_path`` and
+    its JSON output next to it; return the JSON path. The tabular file is byte-identical to a
+    direct run's (checked on 182 Candida windows, 32,692 rows, with genetic codes 1 and 12),
+    so what the search finds is unchanged; the JSON carries the E-values at full precision
+    for the label's tblastn E source (review fix RF-3, F4). Without blast_formatter, or when
+    the archive path fails: one direct tabular run, and None."""
+    formatter = shutil.which("blast_formatter")
+    if formatter:
+        archive, json_path = f"{tabular_path}.asn", f"{tabular_path}.json"
+        try:
+            subprocess.run(cmd + ["-outfmt", "11", "-out", archive],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([formatter, "-archive", archive, "-outfmt", TBLASTN_TABULAR,
+                            "-out", tabular_path], check=True, capture_output=True, text=True)
+            subprocess.run([formatter, "-archive", archive, "-outfmt", "15", "-out", json_path],
+                           check=True, capture_output=True, text=True)
+            return json_path
+        except subprocess.CalledProcessError as err:
+            logger.warning(f"tblastn archive or blast_formatter failed (exit {err.returncode}); "
+                           f"direct tabular run, tblastn E-values with tabular precision")
+    subprocess.run(cmd + ["-outfmt", TBLASTN_TABULAR, "-out", tabular_path],
+                   check=True, capture_output=True, text=True)
+    return None
 
 
 def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
@@ -3421,13 +3511,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 "-evalue", str(TBLASTN_REPORT_EVALUE),
                 "-seg", "no",
                 "-max_target_seqs", "5000",
-                "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore",
-            ]
-            tblastn_result = subprocess.run(
-                tblastn_cmd + ["-out", tblastn_hits_file] + genetic_code_flag("tblastn"),
-                check=True,
-                capture_output=True, text=True
-            )
+            ] + genetic_code_flag("tblastn")
+            tblastn_json = run_tblastn_tabular_and_json(tblastn_cmd, tblastn_hits_file)
             # With other word size / composition statistics (the short_query module) a second
             # run finds; the run with tblastn's defaults stays the label's second E source
             # (EeffTblastn), so that what decides between the two E sources is unchanged.
@@ -3436,7 +3521,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             if finding_opts:
                 tblastn_finding_file = f"{tblastn_hits_file}.finding"
                 subprocess.run(
-                    tblastn_cmd + ["-out", tblastn_finding_file] + genetic_code_flag("tblastn") + finding_opts,
+                    tblastn_cmd + finding_opts + ["-outfmt", TBLASTN_TABULAR, "-out", tblastn_finding_file],
                     check=True, capture_output=True, text=True)
 
             tblastn_hits = parse_hits(
@@ -3456,9 +3541,13 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 # floor and the spatial dedup: the E source "tblastn per window" of the
                 # label rework (annotate_place_evalues) needs the hit even where it is weak
                 # in the window or where another engine's hit at the same place was kept.
+                # Its E-values at full precision, from the same run's JSON (review fix RF-3, F4).
+                full_e = synvoy_evalue.tblastn_json_evalues(tblastn_json) if tblastn_json else {}
                 for hit in parse_hits(tblastn_hits_file, 0.0, 1, float('inf'),
                                       query_lengths=goi_query_lengths):
                     hit['method'] = 'tblastn'
+                    hit['evalue'] = full_e.get((hit['query'], hit['chrom'], hit['qstart'], hit['qend'],
+                                                hit['start'], hit['end'], hit['strand']), hit['evalue'])
                     tblastn_sink.append(hit)
         except FileNotFoundError:
             logger.warning(f"[{genome_name}] tblastn/makeblastdb not found on PATH. Install BLAST+ to enable tblastn search.")
@@ -3623,7 +3712,8 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         files_to_remove = [variants_fasta, query_fasta, aug_hits_file]
         if 'sw_hits_file' in locals():
              files_to_remove.append(sw_hits_file)
-        files_to_remove += [tblastn_hits_file, f"{tblastn_hits_file}.finding"]
+        files_to_remove += [tblastn_hits_file, f"{tblastn_hits_file}.finding",
+                            f"{tblastn_hits_file}.asn", f"{tblastn_hits_file}.json"]
             
         for f in files_to_remove:
             if os.path.exists(f):
@@ -5330,7 +5420,12 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         return greedy_select(cands)
 
     if decoy_candidates:
-        decoy_final = _judge_window(decoy_candidates)
+        # Each decoy case (home GOI x decoy kind) is chosen among its own candidates (review
+        # fix RF-3, F3): pooled, an overlapping call of another kind suppressed it, and the
+        # decoy rate was a lower bound.
+        decoy_final = []
+        for case in decoy_cases(decoy_candidates):
+            decoy_final += _judge_window(case)
         _ctx = getattr(args, 'genome_ctx', None)
         if _ctx is not None:
             for cand in decoy_final:
@@ -7768,6 +7863,12 @@ def main():
     # home locus span in the query set (goi= in the anchor headers).
     args.goi_ranks = synvoy_evalue.ranks_around_goi(
         (args.home_geometry or {}).get('genes', {}), (args.home_geometry or {}).get('goi'))
+    if not args.goi_ranks:
+        # Review fix RF-3, F18: without the home locus span the slot of every block is
+        # empty, so no candidate is judged in it; say so instead of silently.
+        logger.warning("No home locus span (goi= in the anchor headers of the query set) or no "
+                       "anchors with home coordinates: the slot of every block is disabled, and "
+                       "candidates are judged in the core, the window or the genome.")
     if args.home_geometry:
         logger.info(
             f"Home neighbourhood: {args.home_geometry['n']} anchors over "

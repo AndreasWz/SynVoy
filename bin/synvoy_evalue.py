@@ -251,3 +251,31 @@ def blastp_evalue(query: str, subjects: Sequence[str], searchsp: int) -> Tuple[f
                         if (e, -b) < (best[0], -best[1]):
                             best = (e, b)
     return best
+
+
+# ------------------------------------------------------------------ tblastn at full precision
+def tblastn_json_evalues(json_path: str) -> Dict[Tuple[str, str, int, int, int, int, str], float]:
+    """E-values of a tblastn run at full precision, from its JSON output (-outfmt 15; the
+    runner writes it with blast_formatter from the run's archive, next to the tabular output
+    the search reads), keyed like iterative_search_runner.parse_hits builds a hit from a
+    tabular row of the same run: (query, subject, qstart, qend, start 0-based, end, strand).
+    Tabular output prints E with 3 decimals from 0.0009 to 0.1 (0.00123 as 0.001), 2 below 1
+    and 1 below 10 (review fix RF-3, F4). Empty when the file is missing or unparsable."""
+    try:
+        with open(json_path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for rep in data.get("BlastOutput2", []):
+        search = rep.get("report", {}).get("results", {}).get("search", {})
+        query = ((search.get("query_title") or "").split() or [""])[0]
+        for hit in search.get("hits", []):
+            desc = (hit.get("description") or [{}])[0]
+            subject = ((desc.get("title") or "").split() or [desc.get("id", "")])[0]
+            for hsp in hit.get("hsps", []):
+                a, b = sorted((int(hsp["hit_from"]), int(hsp["hit_to"])))
+                strand = "-" if int(hsp.get("hit_frame", 1)) < 0 else "+"
+                out[(query, subject, int(hsp["query_from"]), int(hsp["query_to"]), a - 1, b,
+                     strand)] = float(hsp["evalue"])
+    return out

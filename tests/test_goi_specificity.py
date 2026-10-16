@@ -25,6 +25,12 @@ from sequence_utils import sw_bits  # noqa: E402
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 
+def _tabular(cmd):
+    """A tblastn or blast_formatter call that writes tabular output (-outfmt 6 ...)."""
+    return ("-outfmt" in cmd and str(cmd[cmd.index("-outfmt") + 1]).startswith("6")
+            and os.path.basename(str(cmd[0])) in ("tblastn", "blast_formatter"))
+
+
 
 def _random(n, seed):
     rng = random.Random(seed)
@@ -216,7 +222,8 @@ def test_window_hits_are_deduplicated_per_query(tmp_path, monkeypatch):
     region.write_text(">region_seq\n" + "ACGT" * 500 + "\n")
 
     def fake_run(cmd, *a, **k):
-        if cmd[0] == "tblastn":
+        # tabular output, by tblastn or by blast_formatter from its archive (RF-3, F4)
+        if _tabular(cmd):
             with open(cmd[cmd.index("-out") + 1], "w") as fh:
                 fh.write("GOI_q\tregion_seq\t40.0\t50\t30\t0\t1\t50\t100\t249\t1e-05\t60.0\n")
                 fh.write("GOI_q~rel\tregion_seq\t90.0\t50\t5\t0\t1\t50\t100\t249\t1e-20\t110.0\n")

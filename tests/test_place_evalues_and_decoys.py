@@ -24,6 +24,12 @@ AA = "ACDEFGHIKLMNPQRSTVWY"
 CODON = {a: c for a, c in zip(AA, ["GCT", "TGT", "GAT", "GAA", "TTT", "GGT", "CAT", "ATT", "AAA", "CTT",
                                    "ATG", "AAT", "CCT", "CAA", "CGT", "TCT", "ACT", "GTT", "TGG", "TAT"])}
 
+def _tabular(cmd):
+    """A tblastn or blast_formatter call that writes tabular output (-outfmt 6 ...)."""
+    return ("-outfmt" in cmd and str(cmd[cmd.index("-outfmt") + 1]).startswith("6")
+            and os.path.basename(str(cmd[0])) in ("tblastn", "blast_formatter"))
+
+
 
 def _protein(n, seed):
     rng = random.Random(seed)
@@ -153,7 +159,8 @@ def test_window_search_hands_over_every_tblastn_row(tmp_path, monkeypatch):
     region.write_text(">region_seq\n" + "ACGT" * 500 + "\n")
 
     def fake_run(cmd, *a, **k):
-        if cmd[0] == "tblastn":
+        # tabular output, by tblastn or by blast_formatter from its archive (RF-3, F4)
+        if _tabular(cmd):
             with open(cmd[cmd.index("-out") + 1], "w") as fh:
                 fh.write("GOI_q\tregion_seq\t40.0\t50\t30\t0\t1\t50\t100\t249\t1e-05\t60.0\n")
                 fh.write("GOI_q\tregion_seq\t12.0\t20\t18\t0\t1\t20\t900\t959\t3.5\t20.0\n")

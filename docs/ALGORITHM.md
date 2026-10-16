@@ -704,6 +704,11 @@ coverage:
 - AMBIGUOUS calls ("needs curation") are kept, drawn and reported, never counted. A
   gene-order-only call is offered only in a genome where no home locus and no rescue pass
   produced a counted call of the gene.
+- **Slot.** Without the home locus span (`goi=` in the anchor headers) no block has a
+  slot; the search then warns once and judges in the core, the window or the genome.
+- **Without parasail** no `Bits=` is computed: every candidate type is ordered by the best
+  bit score of its own search hits and gets no specificity terms (one warning). Until
+  2026-10-15 hit chains kept the bits of their best hit and every other type had 0.
 - **Precision.** The judge and the seed bar work on the full-precision values; the GFF
   holds E-values with 3 significant digits and `SpecMargin` at 0.1 bit, for reading only
   (review fix RF-1f, 2026-10-15: an E of 1.0004e-6 was read back as 1e-06 and judged HIGH
@@ -826,9 +831,14 @@ the new label will use (`bin/synvoy_evalue.py`):
   at stop codons), `-comp_based_stats 2 -seg no -word_size 2 -threshold 11`, with the
   search space set explicitly to |q| × ⌊place/3⌋ (`-searchsp`; `-dbsize` let cut-out hit
   regions look rarer than they are), read at full precision (JSON). **`EPlaceTblastn`**:
-  the best tblastn row of the home protein inside the model, as tblastn reported it for
-  the window (before the keep floor of 0.1 and the dedup against the other engines' hits),
-  its E rescaled from the window to the place.
+  the best tblastn row of the home protein that reaches into the model (at least 15 bp of
+  it in its own frame inside the model, the rule of the hit regions above; until 2026-10-15
+  the row had to lie wholly inside), as tblastn reported it for the window (before the keep
+  floor of 0.1 and the dedup against the other engines' hits), its E rescaled from the
+  window to the place. The window tblastn runs once into an archive that `blast_formatter`
+  writes twice: as the tabular output the search reads (byte-identical to a direct run) and
+  as JSON, from which this E is read at full precision (tabular output prints E with 3
+  decimals from 0.0009 to 0.1, so 0.00123 read as 0.001). The judge does not use it.
 - **`Eeff`**, **`EeffTblastn`**: the two multiplied by `SigBlocks`, the number of
   significant blocks searched in this genome (each is one predicted place); a model in
   the genome-wide place is not multiplied.
@@ -844,8 +854,13 @@ orthology (Dewey 2011), since each gain or loss in an array shifts every rank be
 
 **Decoy mode** (`--decoy_mode`, off): in every window the reversed home protein and two
 shuffles of it (seeded by the query id) are searched like the home protein, modelled,
-labelled and judged with the same terms, chosen among themselves only, and written to
-`decoys/<locus>/<genome>.decoy.gff` and `.decoy.tsv`. They never seed and never reach the
+labelled and judged with the same terms, and written to
+`decoys/<locus>/<genome>.decoy.gff` and `.decoy.tsv`. Each decoy case (home gene × decoy
+kind) is chosen among its own candidates: pooled, a call of one kind suppressed an
+overlapping call of another, so the rate was a lower bound (rates from before 2026-10-15
+are not comparable). Each decoy row also carries `PlaceBp=` and its E-value in every nested
+place that holds it (`EPlaceSlot`, `EPlaceCore`, `EPlaceWindow`, `EPlaceGenome`, before
+`SigBlocks`), so a rule can be calibrated in any place. They never seed and never reach the
 result GFF. Every decoy call is false, so their rate per label and place calibrates the
 labels without a truth set. The window search takes about four times as long. The report
 sums the decoy cases that were searched (home gene × target genome with a search window ×
