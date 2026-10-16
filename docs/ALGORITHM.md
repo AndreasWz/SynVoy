@@ -749,6 +749,16 @@ For each GOI query:
      for queries below 150 aa, or 150 × (at least 5 kb) for longer ones.
 
    The identity of a chain is the mean over its hits, weighted by alignment length.
+   The mRNA row lists the query interval of each hit (`ChainQuery=1-40,41-88,...`).
+
+   With `goi_chain_query_aware` (off by default, batch G1) the chain follows the query
+   instead: a hit continues the chain only when it starts at most 10 residues before the
+   previous hit ends and ends after it (on the minus strand the mirror image); the residues
+   it skips must fit into the genomic gap (3 bp each, less 30 bp); a gap under 40 bp joins
+   only two pieces of one exon (same reading frame, the gap within 15 bp of the skipped
+   codons), which are then written as one CDS row. The chain with the most bits wins (ties:
+   more query covered, then fewer hits). The label is still computed on the hits
+   themselves, and the chain still carries the bits of its best single hit.
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
    Both get an E-value in their place and are judged like every GOI candidate (§7.8); a
    `raw_hit` needs 60 % query coverage to be written, so it can be HIGH.

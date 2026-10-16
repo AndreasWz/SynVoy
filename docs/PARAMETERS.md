@@ -501,6 +501,11 @@ A safety cap on the total number of candidate syntenic blocks evaluated per targ
 
 The minimum number of flanking gene hits required in a candidate syntenic block for it to be kept and evaluated further. Blocks with fewer than this many hits are discarded as noise. With the default of 2, at least two flanking gene anchors must map to the same target region (within `cluster_distance`). Setting this to 1 is extremely permissive — a single flanking gene hit somewhere on a chromosome does not constitute synteny evidence and is almost certainly a standalone ortholog of that flanking gene rather than a conserved syntenic block. Setting this higher than 3 is very strict and may miss real syntenic regions in organisms with high chromosomal rearrangement. The combination of `min_block_genes` and `min_synteny_score` together determines which candidate regions survive for GOI search: `min_block_genes` is the absolute floor, while `min_synteny_score` is the proportional threshold.
 
+### `goi_chain_query_aware`
+**Type:** Boolean | **Default:** `false`
+
+How the GOI's hits in a search window are chained into a gene when miniprot builds no model (`fallback_hit_span`). Off (the default, as before): the chain with the most hits whose query centres rise along the strand. On (batch G1, 2026-10-16): a hit continues the chain only when it continues the query (it starts at most 10 residues before the previous hit ends and ends after it), the residues it skips fit into the genomic gap, and a gap under 40 bp joins only two pieces of one exon, written as one CDS row; the chain with the most bits wins. It stops a repeat of the same query part, or a short hit inside a longer one, from being read as a next exon. The label is computed on the hits themselves either way, and the chain carries the bits of its best single hit (the short-query gate of 30 bits is not met by three 12-bit hits). Every chain lists its hits' query intervals as `ChainQuery=` on the mRNA row.
+
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
 
