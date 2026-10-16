@@ -699,11 +699,13 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
 def score_goi_candidates(raw_candidates, by_parent) -> int:
     """Bit score of every GOI candidate against the HOME protein of its GOI.
 
-    Smith-Waterman of the candidate's protein (the model's translation, or the translated
-    hits of a chain, a copy, a rescued exon or a raw hit) against the home protein
-    (sequence_utils.sw_bits: BLOSUM62, BLAST gaps 11/1, lambda 0.267, K 0.041). Kept as
-    ``cand['bits']`` for the choice among overlapping candidates and written as ``Bits=``
-    on the candidate's mRNA/gene row. Until 2026-10-14 only hit chains carried a bit score
+    Smith-Waterman of the best of the proteins the candidate is judged on (its label
+    protein in pieces between stops, and its hit regions: ``cand['label_subjects']``,
+    review fix RF-1e; the record protein when they are not prepared) against the home
+    protein (sequence_utils.sw_bits: BLOSUM62, BLAST gaps 11/1, lambda 0.267, K 0.041).
+    Kept as ``cand['bits']`` for the choice among overlapping candidates and written as
+    ``Bits=`` on the candidate's mRNA/gene row; that protein is ``cand['judged_protein']``,
+    on which the specificity is computed too. Until 2026-10-14 only hit chains carried a bit score
     (that of their best single hit) and the choice went by identity; on the Candida pilot
     bits picked the model on the curated gene in 29 of 31 genome pairs with several
     models, identity in 16. Run after rebase_relative_candidates, so every candidate's
@@ -717,14 +719,16 @@ def score_goi_candidates(raw_candidates, by_parent) -> int:
             continue
         parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
         home = by_parent.get(parent) or {}
-        protein = (cand.get('record') or {}).get('seq', '')
-        if not home.get('seq') or not protein:
+        record = (cand.get('record') or {}).get('seq', '')
+        subjects = cand.get('label_subjects') or ([record] if record else [])
+        if not home.get('seq') or not subjects:
             continue
         try:
-            bits = sw_bits(home['seq'], protein)
+            bits, protein = max((sw_bits(home['seq'], s), s) for s in subjects)
         except RuntimeError:
             continue
         cand['bits'] = bits
+        cand['judged_protein'] = protein
         cols[8] = f"{cols[8]};Bits={bits:.1f}"
         gff[0] = '\t'.join(cols)
         n += 1
@@ -768,7 +772,7 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
             continue
         parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
         home = by_parent.get(parent) or {}
-        protein = (cand.get('record') or {}).get('seq', '')
+        protein = cand.get('judged_protein') or (cand.get('record') or {}).get('seq', '')
         if not home.get('seq') or not protein:
             continue
         try:
@@ -972,6 +976,43 @@ def clip_hit_in_frame(hs: int, he: int, strand: str, lo: int, hi: int):
     return (s, e) if e - s >= 15 else None
 
 
+def label_subjects(cand, parent, hits_by_gene, subseq, w_start) -> List[str]:
+    """The proteins a candidate is judged on (plan 3.1-3.2): its label protein in pieces
+    between stops, and the part of each window hit of its parent (and of the parent's
+    relative query) inside the candidate's span, in the hit's frame, in pieces between
+    stops. The place E-value is the best over them; Bits= and the specificity are computed
+    on the best of them (review fix RF-1e: they used the record protein)."""
+    g0, g1 = int(cand['start']), int(cand['end'])
+    protein = cand.get('label_protein')
+    if protein is None:
+        protein = (cand.get('record') or {}).get('seq', '')
+    subjects = synvoy_evalue.split_at_stops(protein)
+    for key in (parent, parent + RELATIVE_QUERY_TAG):
+        for h in hits_by_gene.get(key, []):
+            region = clip_hit_in_frame(int(h.get('gstart', 0)), int(h.get('gend', 0)),
+                                       h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)
+            if region is None:
+                continue
+            dna = subseq[region[0]:region[1]]
+            if h.get('strand', '+') == '-':
+                dna = reverse_complement(dna)
+            dna = dna[:len(dna) - len(dna) % 3]
+            subjects += synvoy_evalue.split_at_stops(translate(dna))
+    return subjects
+
+
+def prepare_label_subjects(candidates, hits_by_gene, subseq, w_start) -> None:
+    """``cand['label_subjects']`` of every candidate (label_subjects), after
+    prepare_label_proteins and before Bits, the place E-value and the specificity."""
+    for cand in candidates:
+        gff = cand.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9:
+            continue
+        parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
+        cand['label_subjects'] = label_subjects(cand, parent, hits_by_gene, subseq, w_start)
+
+
 def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w_start,
                            tblastn_raw=None) -> None:
     """Place and E-value in that place of every kept GOI candidate (label rework, steps 3-4):
@@ -995,27 +1036,15 @@ def annotate_place_evalues(candidates, by_parent, hits_by_gene, terms, subseq, w
         g0, g1 = int(cand['start']), int(cand['end'])
         place, place_bp = synvoy_evalue.place_of((g0, g1), terms['significant'], terms['slot'],
                                                  terms['core'], terms['window'], terms['genome_len'])
-        protein = cand.get('label_protein')
-        if protein is None:
-            protein = (cand.get('record') or {}).get('seq', '')
-        subjects = synvoy_evalue.split_at_stops(protein)
+        subjects = cand.get('label_subjects')
+        if subjects is None:
+            subjects = label_subjects(cand, parent, hits_by_gene, subseq, w_start)
         e_tbn = float('inf')
         for h in tblastn_raw or []:
             hs, he = int(h.get('start', 0)), int(h.get('end', 0))
             if (extract_base_gene_id(h.get('query', '')) == parent
                     and w_start + hs + 1 >= g0 and w_start + he <= g1):
                 e_tbn = min(e_tbn, float(h.get('evalue', float('inf'))))
-        for key in (parent, parent + RELATIVE_QUERY_TAG):
-            for h in hits_by_gene.get(key, []):
-                region = clip_hit_in_frame(int(h.get('gstart', 0)), int(h.get('gend', 0)),
-                                           h.get('strand', '+'), g0 - w_start - 1, g1 - w_start)
-                if region is None:
-                    continue
-                dna = subseq[region[0]:region[1]]
-                if h.get('strand', '+') == '-':
-                    dna = reverse_complement(dna)
-                dna = dna[:len(dna) - len(dna) % 3]
-                subjects += synvoy_evalue.split_at_stops(translate(dna))
         e_place, _bits = synvoy_evalue.blastp_evalue(q, subjects, synvoy_evalue.search_space(len(q), place_bp))
         if e_tbn != float('inf'):
             e_tbn *= place_bp / terms['window_len']
@@ -5254,6 +5283,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         a candidate whose E-value in its place is above 1 is LOW whatever its specificity,
         and E only grows with the genome's multiplier."""
         prepare_label_proteins(cands, subseq, w_start)
+        prepare_label_subjects(cands, hits_by_gene, subseq, w_start)
         score_goi_candidates(cands, goi_query_by_parent)
         annotate_place_evalues(cands, goi_query_by_parent, hits_by_gene, place_terms,
                                subseq, w_start, tblastn_raw)

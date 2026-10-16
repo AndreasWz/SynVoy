@@ -658,9 +658,13 @@ For each GOI query:
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
    Both are always LOW.
 
-Every candidate gets a bit score: the Smith-Waterman score of its protein (the model's
-translation, or the translated hits of a chain, copy or single hit) against the home
-protein, BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`.
+Every candidate gets a bit score: the Smith-Waterman score against the home protein,
+BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`, of the best
+of the proteins the candidate is judged on (§7.13): its label protein in pieces between
+stops (the model's translation through the frame guard, or a chain's, copy's or single
+hit's hits translated again with their stops) and its hit regions. The specificity uses
+that same protein (review fix RF-1e, 2026-10-15; before, both used the record protein,
+for a chain the join of its hits with the stops deleted).
 The candidates of a window are ranked by it, then by the shorter span (a chain over two
 copies scores what its better copy scores, and must not win over that copy), then by
 flanking support, start and id; one that overlaps an accepted candidate by more than
@@ -767,7 +771,7 @@ A strong GOI hit that fails these conditions is written to
 ### 7.12 What is added to the query set
 
 **Specificity** (`bin/synvoy_specificity.py`, written on every kept GOI model). The
-model's protein x is aligned (Smith-Waterman, BLOSUM62, gaps 11/1) to every protein of
+model's protein x (the protein its `Bits=` come from) is aligned (Smith-Waterman, BLOSUM62, gaps 11/1) to every protein of
 the home proteome (one per gene, the longest isoform). The best one other than the GOI's
 own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the

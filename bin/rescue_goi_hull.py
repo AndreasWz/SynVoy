@@ -273,12 +273,13 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     its completeness ``coverage`` (the query span of the alignment; default CDS aa / query
     length). Returns (confidence, rank key, GFF attributes)."""
     qlen = len(query_seq)
-    bits = sw_bits(query_seq, protein) if protein else 0.0
-    evalue, _b = synvoy_evalue.blastp_evalue(
-        query_seq, synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein),
-        synvoy_evalue.search_space(qlen, genome_len))
-    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, protein, bits, neighbourhood)
-            if proteome is not None and protein else None)
+    # One protein for the three terms (review fix RF-1e): the E-value is the best over the
+    # label protein's pieces between stops; Bits= and the specificity use the best piece.
+    subjects = synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein)
+    bits, judged_protein = max(((sw_bits(query_seq, s), s) for s in subjects), default=(0.0, ""))
+    evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, genome_len))
+    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits, neighbourhood)
+            if proteome is not None and judged_protein else None)
     cov = _cds_coverage(cds_rows, qlen) if coverage is None else coverage
     conf, basis = synvoy_label.judge(
         evalue, "genome", False,
