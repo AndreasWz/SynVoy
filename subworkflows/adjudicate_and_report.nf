@@ -33,7 +33,8 @@ workflow ADJUDICATE_AND_REPORT {
     genomes_dir         // value channel: dir holding the target FASTAs
     query_faa           // value channel: the NORMALIZED GOI protein (see F8)
     home_gff            // value channel: home GFF
-    home_proteome       // value channel: home proteome FASTA
+    home_db             // value channel: home protein database folder (home_proteome.faa,
+                        // home_genes.tsv), as the search gets it
     locus_beds          // collected per-locus BEDs
     qc_summary          // genome QC summary JSON
     goi_for_tree        // ITERATIVE_SEARCH.out.goi_for_tree (locus_id, faa) — F9 input
@@ -105,7 +106,7 @@ workflow ADJUDICATE_AND_REPORT {
     // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
     // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
     // STAGE_REGION_GFF like the strong-synteny rescue.
-    RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_proteome)
+    RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db)
 
     // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
     // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target
@@ -115,7 +116,7 @@ workflow ADJUDICATE_AND_REPORT {
     // 49.5% labelled GOI_DCN). No-op when --disable_locus_ownership.
     BUILD_HOME_PARALOG_PANEL(
         home_gff,
-        home_proteome,
+        home_db.map { d -> d.resolve('home_proteome.faa') },
         locus_beds.flatten().collect(),
         query_faa
     )

@@ -691,7 +691,8 @@ coverage:
   `core_completeness` (the `signal_anchor` module) a gene model also carries
   `CoreCoverage`, the share of the protein's core (without the signal peptide and the GPI
   tail found by `query_features.py`) covered by its exons' query intervals, and the judge
-  reads the larger of the two; 0.7 stays the bar. The hull rescue keeps full coverage.
+  reads the larger of the two; 0.7 stays the bar. The hull rescue reads the query span of
+  its alignment, without the core.
 - **Specific**: no real competitor, or a margin of at least 3.3 bits over the best other
   home protein. Within ±3.3 bits a model in the slot or core of a significant block is
   decided for the gene (positional tie-break), unless that protein lies in the gene's own
@@ -707,8 +708,12 @@ coverage:
   (first exon's phase honoured). When that has a stop before its end or a length that is
   not a multiple of 3, another frame over the same exons is used if it is clean
   (`FrameFixed=1`), else only the model's hit regions are judged (`FrameBroken=1`).
-- The hull rescue judges its models with the same function; it has no block E-value, so
-  its place is the whole genome.
+- The hull rescue judges its models with the same function and the same inputs: the
+  label protein through the frame guard (a broken frame is judged on the model's own
+  translation in pieces between stops, since the rescue has no search hits), completeness
+  as the query span of the alignment, specificity with the GOI's home neighbourhood (the
+  anchors of the locus found in the genome). It has no block E-value, so its place is the
+  whole genome.
 - A model carries a provisional LOW (`InferenceReason=awaiting_label`) from the moment it
   is built; every GOI row with an E-value is relabelled at the end of its genome. A GOI
   row the judge cannot label (no Eeff) keeps the LOW, never counts and never seeds, and
@@ -904,8 +909,8 @@ flanking genes alone. Both apply the start/stop refinement of §7.7.
 | Script | `rescue_strong_synteny.py` | `rescue_goi_hull.py` |
 | Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ 4 HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
-| Accepts | every miniprot model covering ≥ 5 % of the query | the most identical model with identity ≥ 40 % and coverage ≥ 0.5 |
-| Confidence | always LOW | by identity only, at the thresholds of the main search (preset included since 2026-10-14; before, the shipped 50 / 40 % also under the short-peptide preset) |
+| Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ 0.5 of the query length (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
+| Confidence | always LOW | the judge of the main search (§7.8): E-value in the genome-wide place, specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
 | Evidence type | `relaxed_miniprot_rescue` | `synteny_hull_rescue` |
 
 **The hull** (`compute_hull`). The HIGH flanking models of a scaffold are clustered
@@ -992,9 +997,8 @@ Consequences of the rules above that a reader of the results should know.
 - A one-exon model can be HIGH only when the home gene has one exon, and then only
   with a coverage of at least 0.7. A one-exon model of a gene that has introns at
   home is MEDIUM at best on the main path.
-- The hull rescue assigns confidence from identity alone. Exon count and gene order
-  are not checked there, and it uses the shipped thresholds (50 / 40), also when
-  `preset_short_peptide` lowered them for the main path (40 / 30).
+- The hull rescue's models are judged like the main search's (§7.8). Its 40 % identity
+  and 0.5 CDS-coverage gates only decide which models are judged.
 - Flanking support is a property of the window. Every candidate in a window has the
   same value, also a copy at the edge of the window.
 - A genome can hold several HIGH models for one home locus: the copies of a tandem

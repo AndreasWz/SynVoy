@@ -83,6 +83,18 @@ def collect_features(gff_path: str):
     return flanking, high_goi
 
 
+def flanking_parent_ids(gff_path: str) -> List[str]:
+    """Home gene ids of the flanking models in a region GFF (SynVoy_Parent of the
+    SynVoyRole=flanking rows), sorted: the anchors of this home locus found in the genome,
+    from which the GOI's home neighbourhood is taken (synvoy_specificity)."""
+    ids = set()
+    for feat in parse_gff(gff_path, feature_types=["gene", "mRNA"]):
+        attrs = feat["attributes"]
+        if attrs.get("SynVoyRole") == "flanking" and attrs.get("SynVoy_Parent"):
+            ids.add(attrs["SynVoy_Parent"])
+    return sorted(ids)
+
+
 LEGACY_HULL_BP = {'cluster_max_gap': 3000000, 'window_pad': 100000, 'max_window': 20000000}
 
 
@@ -253,20 +265,21 @@ def _genome_length(genome_path: str) -> int:
 
 
 def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome,
-                     label_protein=None):
+                     label_protein=None, coverage=None, neighbourhood=None):
     """The label of a rescue model by the search's own judge (synvoy_label, label rework
     2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
-    own), computed on ``label_protein`` (the translation with its stops kept; default
-    ``protein``), its specificity against the home proteome, its completeness. Returns
-    (confidence, rank key, GFF attributes)."""
+    own), computed on ``label_protein`` (hull_label_protein; default ``protein``), its
+    specificity against the home proteome (with the GOI's home ``neighbourhood`` when known),
+    its completeness ``coverage`` (the query span of the alignment; default CDS aa / query
+    length). Returns (confidence, rank key, GFF attributes)."""
     qlen = len(query_seq)
     bits = sw_bits(query_seq, protein) if protein else 0.0
     evalue, _b = synvoy_evalue.blastp_evalue(
         query_seq, synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein),
         synvoy_evalue.search_space(qlen, genome_len))
-    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, protein, bits, None)
+    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, protein, bits, neighbourhood)
             if proteome is not None and protein else None)
-    cov = _cds_coverage(cds_rows, qlen)
+    cov = _cds_coverage(cds_rows, qlen) if coverage is None else coverage
     conf, basis = synvoy_label.judge(
         evalue, "genome", False,
         spec["margin"] if spec else None, spec["real_competitor"] if spec else None, None, cov)
@@ -276,6 +289,47 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     if spec:
         attrs += ";" + synvoy_specificity.gff_attrs(spec)
     return conf, key, attrs, bits
+
+
+def _query_span_coverage(mrna, cds_rows, query_len: int) -> float:
+    """Share of the query between the first and the last residue miniprot aligned
+    (``Target=<query> <start> <end>`` of the mRNA row): the completeness the judge reads,
+    as the runner's QueryCoverage (review fix RF-1d). CDS aa / query length, the old
+    measure, reaches 1.0 for any long model; it stays the fallback without a Target."""
+    target = dict(kv.split("=", 1) for kv in (mrna[8] if len(mrna) > 8 else "").split(";")
+                  if "=" in kv).get("Target", "").split()
+    if query_len > 0 and len(target) >= 3:
+        try:
+            qs, qe = int(target[1]), int(target[2])
+            return max(0.0, min(1.0, (abs(qe - qs) + 1) / query_len))
+        except ValueError:
+            pass
+    return _cds_coverage(cds_rows, query_len)
+
+
+def hull_label_protein(window_seq: str, cds_rows) -> Tuple[str, str]:
+    """(protein, GFF flag) a rescue model is judged on, as the runner's
+    prepare_label_proteins (review fix RF-1d): the CDS through synvoy_label.frame_guard;
+    another clean frame over the same exons gives FrameFixed=1; a broken frame gives
+    FrameBroken=1 and the model's own translation with its stops kept, judged in pieces
+    between stops (the runner judges such a model on its search-hit regions, which the
+    rescue pass does not have)."""
+    if not cds_rows:
+        return "", ""
+    strand = cds_rows[0][6]
+    rows = sorted(cds_rows, key=lambda c: int(c[3]), reverse=(strand == "-"))
+    dna = ""
+    for c in rows:
+        seg = window_seq[max(0, int(c[3]) - 1):int(c[4])]
+        dna += reverse_complement(seg) if strand == "-" else seg
+    try:
+        phase = int(rows[0][7])
+    except (ValueError, TypeError, IndexError):
+        phase = 0
+    protein, status = synvoy_label.frame_guard(dna[phase:])
+    if status == "broken":
+        return _translate_model(window_seq, cds_rows, keep_stops=True), "FrameBroken=1"
+    return protein, ("FrameFixed=1" if status == "fixed" else "")
 
 
 def _cds_coverage(cds_rows, query_len: int) -> float:
@@ -313,12 +367,18 @@ def main() -> int:
                          "the span of the home neighbourhood, scaled to this genome; "
                          "20000000 without that record")
     ap.add_argument("--min_identity", type=float, default=40.0,
-                    help="Min miniprot %%identity to emit a rescued model")
+                    help="Min miniprot %%identity for a model to be judged (a cost filter in "
+                         "front of the judge, kept by decision of 2026-10-15)")
     ap.add_argument("--min_coverage", type=float, default=0.5,
-                    help="Min query coverage (CDS aa / query len) to emit a model")
+                    help="Min CDS aa / query length for a model to be judged (a cost filter; "
+                         "the judge reads the query span of the alignment)")
     ap.add_argument("--home_proteome",
                     help="Home proteome FASTA (one protein per gene): the rescue model's "
                          "specificity, as in the main search (synvoy_specificity)")
+    ap.add_argument("--home_db_dir",
+                    help="The home protein database folder of the search (home_proteome.faa, "
+                         "home_genes.tsv): the proteome with gene coordinates, so the "
+                         "specificity knows the GOI's home neighbourhood; replaces --home_proteome")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=600)
     ap.add_argument("--target_genetic_codes", default="",
@@ -355,9 +415,14 @@ def main() -> int:
     import tempfile
     n_emitted = 0
     proteome = None
-    if args.home_proteome and os.path.exists(args.home_proteome) and os.path.getsize(args.home_proteome):
+    if args.home_db_dir:
+        proteome = synvoy_specificity.HomeProteome.load(args.home_db_dir)
+    elif args.home_proteome and os.path.exists(args.home_proteome) and os.path.getsize(args.home_proteome):
         proteome = synvoy_specificity.HomeProteome(
             [(rid, seq.upper().rstrip("*")) for _h, rid, seq in parse_fasta(args.home_proteome)], {})
+    # The GOI's home neighbourhood (review fix RF-1d; it was None): home genes between the
+    # outermost anchors of this locus that the search found in the genome.
+    neighbourhood = proteome.neighbourhood(flanking_parent_ids(args.region_gff)) if proteome else None
     genome_len = None
     with tempfile.TemporaryDirectory(prefix="synvoy_hull_") as tmp:
         query_fa = os.path.join(tmp, "query.faa")
@@ -405,19 +470,25 @@ def main() -> int:
                 # where the alignment stopped, a few codons inside the gene (CLAUDE.md §21).
                 _refine_rescue_termini(window, mrna, cds_rows)
                 prot = _translate_model(window, cds_rows)
+                # Judged like a candidate of the main search (review fix RF-1d): the label
+                # protein through the frame guard, completeness from the query span of the
+                # alignment, specificity with the GOI's home neighbourhood.
+                label_prot, frame_flag = hull_label_protein(window, cds_rows)
+                span_cov = _query_span_coverage(mrna, cds_rows, qlen)
                 try:
                     conf, key, judged, bits = judge_hull_model(
                         query_id, query_seq, prot, cds_rows, genome_len, proteome,
-                        label_protein=_translate_model(window, cds_rows, keep_stops=True))
+                        label_protein=label_prot, coverage=span_cov, neighbourhood=neighbourhood)
                 except RuntimeError:
                     continue
+                if frame_flag:
+                    judged = f"{judged};{frame_flag}"
                 if best is None or key < best[0]:
-                    best = (key, conf, judged, bits, ident, mrna, cds_rows, prot)
+                    best = (key, conf, judged, bits, ident, mrna, cds_rows, prot, span_cov)
             if best is None:
                 continue
-            _key, conf, judged, bits, ident, mrna, cds_rows, prot = best
+            _key, conf, judged, bits, ident, mrna, cds_rows, prot, best_cov = best
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
-            best_cov = _cds_coverage(cds_rows, qlen)
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
                                                   query_id, parent_id, conf,
                                                   query_coverage=best_cov, bits=bits,

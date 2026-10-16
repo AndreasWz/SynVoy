@@ -30,9 +30,10 @@ process RESCUE_GOI_HULL {
     tuple val(locus_id), val(genome_name), path(region_faa), path(region_gff)
     path(genomes_dir)
     path(query_faa)
-    // The home proteome: a rescue model is judged like a candidate of the main search
-    // (bin/synvoy_label.py), with its specificity against the other home proteins.
-    path(home_proteome)
+    // The home protein database folder (home_proteome.faa + home_genes.tsv): a rescue model
+    // is judged like a candidate of the main search (bin/synvoy_label.py), with its
+    // specificity against the other home proteins and the GOI's home neighbourhood.
+    path(home_db)
 
     output:
     tuple val(locus_id), path("${genome_name}.hull_rescue.gff"), emit: gff
@@ -73,6 +74,6 @@ process RESCUE_GOI_HULL {
         --max_window ${params.goi_hull_max_window} \\
         --min_identity ${params.goi_hull_min_identity} \\
         --min_coverage ${params.goi_hull_min_coverage} \\
-        --home_proteome ${home_proteome} ${GeneticCodes.targetArgs(params)}
+        --home_db_dir ${home_db} ${GeneticCodes.targetArgs(params)}
     """
 }

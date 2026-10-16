@@ -1561,7 +1561,7 @@ workflow {
             genomes_dir_ch.first(),
             normalized_gene_ready_ch.first(),
             effective_home_gff_ch,
-            PREPARE_HOME_PROTEOME.out.faa,
+            PREPARE_HOME_PROTEOME.out.db,
             SPLIT_LOCI.out.beds,
             qc_summary_ch,
             ITERATIVE_SEARCH.out.goi_for_tree,

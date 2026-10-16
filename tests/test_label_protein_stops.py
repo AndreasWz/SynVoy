@@ -99,5 +99,6 @@ def test_the_hull_judge_gets_the_stops():
     rows = [["w", "miniprot", "CDS", "4", str(3 + 63), ".", "+", "0", "Parent=m"]]
     assert hull._translate_model(window, rows) == "MKTAYIAKQRXQISFVKSHF"
     assert hull._translate_model(window, rows, keep_stops=True) == "MKTAYIAKQR*QISFVKSHF"
+    # RF-1d: the judge gets hull_label_protein, whose broken-frame branch keeps the stops
     src = open(os.path.join(BIN, "rescue_goi_hull.py")).read()
-    assert "label_protein=_translate_model(window, cds_rows, keep_stops=True)" in src
+    assert "label_prot, frame_flag = hull_label_protein(window, cds_rows)" in src
