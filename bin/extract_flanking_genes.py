@@ -267,8 +267,10 @@ def is_goi_relative(protein: str, goi_seqs, max_evalue: float, statistic: str = 
     if not protein or not goi_seqs or max_evalue <= 0:
         return False
     if statistic == 'blastp_cbs':
+        # The GOI is the query, as in the label's family test and home_context.py (review fix
+        # RF-2: the two directions differ; this call had the neighbour as the query).
         from synvoy_specificity import pairwise_evalue
-        return any(pairwise_evalue(protein, gs) <= max_evalue for gs in goi_seqs)
+        return any(pairwise_evalue(gs, protein) <= max_evalue for gs in goi_seqs)
     try:
         return any(sw_pair_evalue(protein, gs)[0] <= max_evalue for gs in goi_seqs)
     except RuntimeError as exc:

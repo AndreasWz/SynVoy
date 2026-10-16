@@ -265,7 +265,7 @@ def _genome_length(genome_path: str) -> int:
 
 
 def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome,
-                     label_protein=None, coverage=None, neighbourhood=None):
+                     label_protein=None, coverage=None, neighbourhood=None, n_flanking=0):
     """The label of a rescue model by the search's own judge (synvoy_label, label rework
     2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
     own), computed on ``label_protein`` (hull_label_protein; default ``protein``), its
@@ -278,7 +278,8 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     subjects = synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein)
     bits, judged_protein = max(((sw_bits(query_seq, s), s) for s in subjects), default=(0.0, ""))
     evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, genome_len))
-    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits, neighbourhood)
+    spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits,
+                                           neighbourhood, n_flanking)
             if proteome is not None and judged_protein else None)
     cov = _cds_coverage(cds_rows, qlen) if coverage is None else coverage
     conf, basis = synvoy_label.judge(
@@ -380,6 +381,10 @@ def main() -> int:
                     help="The home protein database folder of the search (home_proteome.faa, "
                          "home_genes.tsv): the proteome with gene coordinates, so the "
                          "specificity knows the GOI's home neighbourhood; replaces --home_proteome")
+    ap.add_argument("--n_flanking_genes", type=int, default=10,
+                    help="Flanking genes per side (pipeline param): the specificity's "
+                         "neighbourhood also holds q's own home gene and this many home genes "
+                         "on each side of it (review fix RF-2)")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=600)
     ap.add_argument("--target_genetic_codes", default="",
@@ -479,7 +484,8 @@ def main() -> int:
                 try:
                     conf, key, judged, bits = judge_hull_model(
                         query_id, query_seq, prot, cds_rows, genome_len, proteome,
-                        label_protein=label_prot, coverage=span_cov, neighbourhood=neighbourhood)
+                        label_protein=label_prot, coverage=span_cov, neighbourhood=neighbourhood,
+                        n_flanking=args.n_flanking_genes)
                 except RuntimeError:
                     continue
                 if frame_flag:

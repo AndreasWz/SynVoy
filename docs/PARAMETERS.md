@@ -233,6 +233,8 @@ Controls what happens when a file supplied via `--target_gffs` cannot be matched
 The number of non-GOI-similar flanking genes to extract on **each side** of the GOI in the home genome. These flanking genes serve as synteny anchors — their presence in target genomes indicates conserved gene order (synteny). With the default of 10, SynVoy extracts up to 10 upstream and 10 downstream genes, for up to 20 total anchors. The optimal value depends on genome architecture: gene-dense genomes (bacteria, compact insects) need fewer anchors (5–8) because genes are closely packed and synteny is well-preserved, while gene-sparse or heavily rearranged genomes (plants, large vertebrates) benefit from more anchors (12–20) to increase the chance that at least some are conserved. More anchors increase computational cost (each must be searched in every target) but improve synteny detection reliability.
 
 
+The same number decides the GOI's own home neighbourhood in the specificity check: the GOI's home gene and `n_flanking_genes` genes on each side of it, in every home locus run (`BestOtherInNeighbourhood`, docs/ALGORITHM.md §7.12).
+
 The flanking genes are also the unit of every distance of the search ([Distances in gene units](#distances-in-gene-units)): the pitch is their mean spacing, and the expansion of a target genome is measured on them. That measurement needs five of them in a row in the target, so with `n_flanking_genes` of 2 or less (at most four anchors) the ratio of the genome sizes is always used instead.
 ### `min_flanking_size`
 **Type:** Integer (bp) | **Default:** `500` | **Range:** 100–5000

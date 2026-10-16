@@ -791,9 +791,15 @@ the home proteome (one per gene, the longest isoform). The best one other than t
 own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
 whole proteome, or when it is a home family member of the GOI (the two align at E ≤ 1e-3,
-blastp with composition-based statistics). `BestOtherInNeighbourhood=1` when p* lies
-between the outermost flanking genes of the home locus: there, position cannot tell
-the GOI from p*. The search is exhaustive: on the Candida pilot a prefilter (MMseqs2,
+blastp with composition-based statistics and SEG, the GOI as the query: the test is not
+symmetric, and in 55 of 949 home pairs the two directions disagree at 1e-3 under `-seg no`,
+34 under `-seg yes`; a failed blastp call is logged and counts as no family).
+`BestOtherInNeighbourhood=1` when p* lies between the outermost flanking genes of the home
+locus (the span extended to the locus itself), or among the GOI's own home gene and its
+`n_flanking_genes` neighbours on each side, also in a run from a secondary home locus:
+there, position cannot tell the GOI from p*. Until 2026-10-15 (review fix RF-2) only the
+first counted, so flanking genes on one side of the locus, or a secondary locus, let the
+positional tie-break decide for a tandem neighbour of the GOI. The search is exhaustive: on the Candida pilot a prefilter (MMseqs2,
 top 15) missed two home paralogs. The proteome and its gene positions reach the search
 inside the home MMseqs2 database folder (`home_proteome.faa`, `home_genes.tsv`). The
 label (§7.8) and the seed rule below use these terms.

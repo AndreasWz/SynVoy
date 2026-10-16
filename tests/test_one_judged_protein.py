@@ -48,7 +48,7 @@ def test_bits_and_specificity_use_the_best_piece(monkeypatch):
     assert cand["bits"] == sw_bits(HOME, cand["judged_protein"]) < sw_bits(HOME, cand["record"]["seq"])
     seen = {}
 
-    def fake_spec(proteome, parent, q, x, bits, hood):
+    def fake_spec(proteome, parent, q, x, bits, hood, n_flanking=0):
         seen["x"], seen["bits"] = x, bits
         return {"margin": 1.0, "real_competitor": False}
     monkeypatch.setattr(isr, "_home_proteome", lambda args: (object(), None))
@@ -68,7 +68,7 @@ def test_the_hull_scores_the_best_piece(monkeypatch):
     seen = {}
     monkeypatch.setattr(hull.synvoy_evalue, "blastp_evalue", lambda q, s, sp: (1e-30, 200.0))
 
-    def fake_spec(proteome, qid, q, x, bits, hood):
+    def fake_spec(proteome, qid, q, x, bits, hood, n_flanking=0):
         seen["x"] = x
         return {"margin": 50.0, "real_competitor": False}
     monkeypatch.setattr(hull.synvoy_specificity, "specificity", fake_spec)

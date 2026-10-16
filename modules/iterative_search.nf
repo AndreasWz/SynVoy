@@ -38,6 +38,7 @@ process ITERATIVE_SEARCH {
         --sorted_genomes $sorted_genomes_file \\
         --genomes_dir $genomes \\
         --home_db_dir $home_db \\
+        --n_flanking_genes ${params.n_flanking_genes} \\
         --output_dir iterative_results \\
         --threads ${task.cpus} \\
         --mmseqs_sens ${sensitivity} \\

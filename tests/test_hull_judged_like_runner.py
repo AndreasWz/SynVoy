@@ -59,16 +59,16 @@ def test_the_judge_gets_the_neighbourhood_and_the_span_coverage(monkeypatch):
     monkeypatch.setattr(hull.synvoy_evalue, "blastp_evalue", lambda q, s, sp: (1e-30, 200.0))
     monkeypatch.setattr(hull, "sw_bits", lambda q, x: 200.0)
 
-    def fake_spec(proteome, qid, q, x, bits, hood):
-        seen["hood"] = hood
+    def fake_spec(proteome, qid, q, x, bits, hood, n_flanking=0):
+        seen["hood"], seen["n_flanking"] = hood, n_flanking
         return {"margin": 50.0, "real_competitor": False, "best_other": "", "best_other_in_neighbourhood": None}
     monkeypatch.setattr(hull.synvoy_specificity, "specificity", fake_spec)
     monkeypatch.setattr(hull.synvoy_specificity, "gff_attrs", lambda spec: "SpecMargin=50")
     rows = _rows([(1, 300)])
     conf, _key, attrs, _bits = hull.judge_hull_model("q", "M" * 100, "M" * 100, rows, 10 ** 7, object(),
                                                      label_protein="M" * 100, coverage=0.49,
-                                                     neighbourhood={"gene-A", "gene-B"})
-    assert seen["hood"] == {"gene-A", "gene-B"}
+                                                     neighbourhood={"gene-A", "gene-B"}, n_flanking=10)
+    assert seen["hood"] == {"gene-A", "gene-B"} and seen["n_flanking"] == 10   # RF-2
     assert conf == "MEDIUM"                                  # significant and specific, 0.49 < 0.7
     conf, *_ = hull.judge_hull_model("q", "M" * 100, "M" * 100, rows, 10 ** 7, object(),
                                      label_protein="M" * 100, coverage=0.9, neighbourhood=None)

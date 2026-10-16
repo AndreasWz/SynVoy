@@ -761,7 +761,10 @@ def _home_proteome(args):
             logger.warning(
                 f"No {synvoy_specificity.PROTEOME_FILE} in --home_db_dir {folder!r}: GOI models get "
                 "no specificity terms, and seeds are chosen by their label alone.")
-        hood = proteome.neighbourhood(getattr(args, 'home_flanking_ids', []) or []) if proteome else None
+        # The hull of this locus's flanking genes, extended to the locus itself (RF-2).
+        span = (getattr(args, 'home_geometry', None) or {}).get('goi')
+        hood = (proteome.neighbourhood(getattr(args, 'home_flanking_ids', []) or [], locus_span=span)
+                if proteome else None)
         _HOME_PROTEOME_CACHE[folder] = (proteome, hood)
     return _HOME_PROTEOME_CACHE[folder]
 
@@ -790,7 +793,8 @@ def annotate_goi_specificity(candidates, by_parent, args) -> int:
             continue
         try:
             spec = synvoy_specificity.specificity(proteome, parent, home['seq'], protein,
-                                                  float(cand['bits']), hood)
+                                                  float(cand['bits']), hood,
+                                                  int(getattr(args, 'n_flanking_genes', 0) or 0))
         except Exception as exc:  # pragma: no cover - defensive: never lose a model over this
             logger.warning(f"specificity of {cand.get('record', {}).get('id', '')} failed: {exc}")
             continue
@@ -7395,6 +7399,10 @@ def main():
                         help="Tab-separated file: genome_path\\tdistance. Genomes sorted by distance.")
     parser.add_argument("--genomes_dir", help="Directory containing genome files (if paths in sorted_genomes are relative)")
     parser.add_argument("--home_db_dir", help="Home Proteome MMseqs DB for RBH")
+    parser.add_argument("--n_flanking_genes", type=int, default=10,
+                        help="Flanking genes per side of the home locus (pipeline param): the "
+                             "specificity's neighbourhood also holds q's own home gene and this "
+                             "many home genes on each side of it (review fix RF-2)")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--evalue", type=float, default=1e-5)
     parser.add_argument("--min_identity", type=float, default=40.0)

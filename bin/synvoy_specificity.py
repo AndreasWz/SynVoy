@@ -18,8 +18,14 @@ other protein of the home genome explains it as well. Used by iterative_search_r
                  both masked: see FAMILY_TEST_SEG).
   neighbourhood  every protein-coding home gene on the scaffold of this home locus between
                  its outermost flanking genes, the relatives the flanking walk skipped
-                 included (extract_flanking_genes.py drops genes that align to q). A p* in
-                 there is a gene position cannot tell from q (a home tandem array).
+                 included (extract_flanking_genes.py drops genes that align to q), the hull
+                 extended to the home locus itself; and q's own home locus: q's own gene and
+                 its n_flanking_genes neighbours on each side, also in a run from a secondary
+                 home locus (review fix RF-2). A p* in there is a gene position cannot tell
+                 from q (a home tandem array).
+  direction      the family test is not symmetric: q is the query, p the subject. E(q->p) and
+                 E(p->q) differ (55 of 949 home pairs disagree at 1e-3 under -seg no, 34 under
+                 -seg yes, label session 2026-10-15); a symmetric rule is a v2 question.
 
 The proteome and its coordinates travel inside the home MMseqs2 database folder that the
 search already receives (modules/prepare_home.nf writes home_proteome.faa and
@@ -75,6 +81,7 @@ class HomeProteome:
         self.coords = coords
         self.total_length = sum(len(s) for _r, s in self.records)
         self._own: Dict[str, Optional[str]] = {}
+        self._own_hood: Dict[Tuple[str, int], Optional[Set[str]]] = {}
         self._family: Dict[Tuple[str, str], float] = {}
 
     @classmethod
@@ -150,9 +157,12 @@ class HomeProteome:
         return self._family[key]
 
     # ------------------------------------------------------------------ positions
-    def neighbourhood(self, flanking_ids: Iterable[str]) -> Optional[Set[str]]:
+    def neighbourhood(self, flanking_ids: Iterable[str],
+                      locus_span: Optional[Tuple[int, int]] = None) -> Optional[Set[str]]:
         """Home genes between the outermost flanking genes of a home locus, on the scaffold
-        that holds most of them. None without coordinates."""
+        that holds most of them, the hull extended to ``locus_span`` (start, end of the home
+        locus on that scaffold): with flanking genes on one side only, the hull ended before
+        q and its adjacent relatives (review fix RF-2). None without coordinates."""
         spans = [self.coords[g] for g in flanking_ids if g in self.coords]
         if not spans:
             return None
@@ -162,10 +172,41 @@ class HomeProteome:
         chrom = sorted(chroms.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         lo = min(s for c, s, _e in spans if c == chrom)
         hi = max(e for c, _s, e in spans if c == chrom)
+        if locus_span:
+            lo, hi = min(lo, int(locus_span[0])), max(hi, int(locus_span[1]))
         return {g for g, (c, s, e) in self.coords.items() if c == chrom and e >= lo and s <= hi}
+
+    def own_neighbourhood(self, q_id: str, q_seq: str, n: int) -> Optional[Set[str]]:
+        """q's own home locus: q's own gene and the ``n`` home genes on each side of it on its
+        scaffold (the genes the flanking walk of the primary locus starts from). A run from a
+        secondary home locus knew only its own locus, so a p* next to q's own gene was not in
+        its neighbourhood (review fix RF-2). None when q's own gene is not found."""
+        key = (q_id, int(n))
+        if key not in self._own_hood:
+            own = self.own_gene(q_id, q_seq)
+            hood = None
+            if own and own in self.coords and n > 0:
+                chrom = self.coords[own][0]
+                order = sorted((s, e, g) for g, (c, s, e) in self.coords.items() if c == chrom)
+                i = next(k for k, (_s, _e, g) in enumerate(order) if g == own)
+                hood = {g for _s, _e, g in order[max(0, i - n): i + n + 1]}
+            self._own_hood[key] = hood
+        return self._own_hood[key]
 
 
 _WARNED: Set[str] = set()
+# Failed blastp calls of the family test in this process (review fix RF-2): each one is logged,
+# and the pair counts as no family (E = inf), as for the place E-value (synvoy_evalue, RF-1c).
+FAMILY_TEST_FAILURES = {"count": 0}
+
+
+def _family_test_failed(reason: str) -> float:
+    import logging
+    FAMILY_TEST_FAILURES["count"] += 1
+    logging.getLogger(__name__).warning(
+        "blastp of the home-family test failed (%s); the pair counts as no family (E = inf) "
+        "(failure %d of this process)", reason, FAMILY_TEST_FAILURES["count"])
+    return float("inf")
 
 
 def _blastp() -> Optional[str]:
@@ -180,8 +221,13 @@ def _blastp() -> Optional[str]:
 
 def pairwise_evalue(a: str, b: str) -> float:
     """E-value of the best alignment of two proteins, composition-corrected, with SEG on
-    both proteins (blastp -comp_based_stats 2 -seg yes). Without blastp: Karlin-Altschul at
-    BLAST 11/1, with a warning, because that one calls low-complexity look-alikes a family."""
+    both proteins (blastp -comp_based_stats 2 -seg yes): ``a`` is the query (q in the family
+    test), ``b`` the subject; the two directions differ (module docstring). Read like
+    synvoy_evalue.blastp_evalue (``bl2seq`` or ``search`` blocks). A failed call (nonzero exit,
+    no output, unparsable JSON or blocks missing) is logged and gives E = inf (review fix
+    RF-2; it fell through to plain Karlin-Altschul in silence). Without blastp: Karlin-Altschul
+    at BLAST 11/1, with a warning, because that one calls low-complexity look-alikes a
+    family (the search stops at the start without blastp)."""
     if not a or not b:
         return float("inf")
     blastp = _blastp()
@@ -201,27 +247,43 @@ def pairwise_evalue(a: str, b: str) -> float:
             proc = subprocess.run([blastp, "-query", qa, "-subject", sb, "-comp_based_stats", "2",
                                    "-seg", FAMILY_TEST_SEG, "-outfmt", "15"],
                                   capture_output=True, text=True, check=False)
-            if proc.returncode == 0 and proc.stdout.strip():
-                try:
-                    report = json.loads(proc.stdout)["BlastOutput2"][0]["report"]["results"]
-                    hits = (report.get("bl2seq") or [{}])[0].get("hits", [])
-                    evalues = [h["evalue"] for hit in hits for h in hit.get("hsps", [])]
-                    return min(evalues) if evalues else float("inf")
-                except (KeyError, IndexError, ValueError, TypeError):
-                    pass
+        if proc.returncode != 0:
+            return _family_test_failed(f"exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+        if not proc.stdout.strip():
+            return _family_test_failed("no output")
+        try:
+            data = json.loads(proc.stdout)
+            reports = data["BlastOutput2"]
+            evalues = []
+            for rep in reports:
+                results = rep["report"]["results"]
+                if "bl2seq" not in results and "search" not in results:
+                    raise KeyError("bl2seq")
+                for search in (results["bl2seq"] if "bl2seq" in results else [results["search"]]) or []:
+                    for hit in search.get("hits", []):
+                        evalues += [float(h["evalue"]) for h in hit.get("hsps", [])]
+        except (KeyError, IndexError, ValueError, TypeError) as exc:
+            return _family_test_failed(f"unparsable JSON output ({type(exc).__name__}: {exc})")
+        return min(evalues) if evalues else float("inf")
     import parasail  # type: ignore
     score = parasail.sw_striped_sat(a, b, 12, 1, parasail.blosum62).score
     return SW_K_11_1 * len(a) * len(b) * math.exp(-SW_LAMBDA_11_1 * score)
 
 
 def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_qx: float,
-                neighbourhood: Optional[Set[str]]) -> Dict[str, object]:
+                neighbourhood: Optional[Set[str]], n_flanking: int = 0) -> Dict[str, object]:
     """Specificity terms of model x of GOI q (see the module docstring).
 
-    Returns ``best_other`` (p*, "" when no other home protein aligns), ``best_other_bits``,
+    ``neighbourhood`` is that of this home locus (HomeProteome.neighbourhood); with
+    ``n_flanking`` > 0 q's own home locus (own_neighbourhood) is added. Returns
+    ``best_other`` (p*, "" when no other home protein aligns), ``best_other_bits``,
     ``margin``, ``real_competitor`` (bool), ``in_neighbourhood`` (bool, None without
     coordinates) and ``seed_specific`` (margin >= SEED_MIN_MARGIN_BITS or no real competitor).
     """
+    if n_flanking:
+        own_hood = proteome.own_neighbourhood(q_id, q_seq, n_flanking)
+        if own_hood is not None:
+            neighbourhood = (neighbourhood or set()) | own_hood
     own = proteome.own_gene(q_id, q_seq)
     p_id, p_raw = proteome.best_other(x_seq, [own] if own else [])
     p_bits = raw_to_bits(p_raw) if p_id else 0.0
