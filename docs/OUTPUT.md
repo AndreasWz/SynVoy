@@ -165,6 +165,11 @@ Attributes on a model's `mRNA` row:
 | `CoreCoverage` | GOI gene models, only with `--core_completeness` (on with the `signal_anchor` module): share of the home protein's core (without signal peptide and GPI tail) covered by the model's exons; the label reads the larger of `QueryCoverage` and this |
 | `LowComplexity` | GOI models, only with `--report_low_complexity` (on with the `low_complexity` module): share of the model protein inside low-complexity windows (12 residues, Shannon entropy ≤ 2.2 bits; an approximation of SEG). Advisory |
 | `CopiesInSlot`, `SlotRank` | GOI models, only with `--report_copies_in_slot` (on with the `local_family` module): the GOI models of the block's slot (`Place=slot`) labelled AMBIGUOUS or better, and this model's rank among them counted from the home neighbour on the left. Absent in a block without a slot (a neighbour missing on one side). Advisory: equal rank is not positional orthology |
+| `ChainQuery` | GOI hit chains (`fallback_hit_span`): the query interval of each hit of the chain, in query order (`1-40,41-88`) |
+| `MissingQueryStart`, `FirstExon`, `MissingQueryEnd`, `LastExon` | GOI gene models, only with `--goi_first_exon_guard`: the query residues before (after) the model where a short home first (last) exon is missing; the model keeps miniprot's start (stop). Advisory |
+| `JoinedHits` | GOI gene models, only with `--goi_join_leftover_hits`: the query intervals of the leftover hits joined into this model (it keeps the id of the model it replaced) |
+| `GenomeWide` | GOI models, only with `--goi_genome_wide_path`: `1` on a call of the genome-wide path (hits outside every searched window; `Place=genome`, see the report's `genome_wide_path`) |
+| `RetrocopyCandidate` | Genome-wide calls, only with `--goi_genome_wide_without_blocks`: `1` when a CDS or a hit of the call runs across an exon junction of the home gene (annotated, ≥ 2 exons) with 10 residues on each side, so the target encodes both exons there without an intron. A candidate only: an ortholog that lost the intron looks the same |
 | `Rearranged_from` | Flanking models placed on another scaffold than their block |
 
 `CDS` rows add `SpliceDonor` / `SpliceAcceptor`. A target genome searched with a genetic code other than the standard one carries the header line `##synvoy-genetic-code N` (NCBI table N).

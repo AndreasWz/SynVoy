@@ -521,6 +521,11 @@ A GOI gene model from miniprot is extended to its own start and stop codon (`ref
 
 A GOI hit outside every searched window is modelled today only by the dispersed-GOI rescue (`enable_dispersed_goi_rescue`: ≥ 40 % identity, E ≤ 1e-10, ≥ 50 aligned residues, inside the envelope of ≥ 3 anchors on its chromosome). With this switch (FINAL step 5, 2026-10-16), in a genome with at least one block at E_syn ≤ 0.1, the GOI hits outside every window are grouped per chromosome into places; a place is modelled when the home protein's E against its hits over the whole genome is at most 1e-3 and no other home protein explains it as well (specificity in the genome place), at most the query's home family size + 1 places per genome, best E first. Its calls are judged in the genome place and carry `GenomeWide=1`; every place, also the ones cut by the cap, is listed with its E in `hits/<genome>.genome_wide.tsv` and in the report's `genome_wide_path` block. The genome place has no decoy calibration. Needs the home proteome (a home GFF, or the borrowed one).
 
+### `goi_genome_wide_without_blocks`
+**Type:** Boolean | **Default:** `false`
+
+Only with `goi_genome_wide_path`: the genome-wide path also runs in a genome without a block at E_syn ≤ 0.1, and in one where no block is found at all (PR-9, 2026-10-16), with the same rules and judge. A genome-wide call whose CDS or hit of the home query runs across an exon junction of the home gene (annotated, two or more exons) with 10 residues on each side carries `RetrocopyCandidate=1`; advisory, no label reads it. Set without `goi_genome_wide_path`, it has no effect (the search warns).
+
 ### `goi_join_leftover_hits`
 **Type:** Boolean | **Default:** `false`
 

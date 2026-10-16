@@ -5760,10 +5760,24 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                                    place_terms['slot_inverted'])
     if genome_wide:
         # The genome-wide path's origin flag (FINAL step 5): the rule below is keyed on it,
-        # not on Place=genome, which hull models and weak blocks' candidates share.
+        # not on Place=genome, which hull models and weak blocks' candidates share. With PR-9 a
+        # call whose CDS or hit of the home query runs across a home exon junction is a
+        # retrocopy candidate (annotated home gene of >= 2 exons).
+        _junctions = (getattr(args, 'home_goi_junctions', None) or []
+                      if getattr(args, 'goi_genome_wide_without_blocks', False) else [])
         for _c in raw_candidates:
-            if _c.get('gff'):
-                _c['gff'][0] += ";GenomeWide=1"
+            if not _c.get('gff'):
+                continue
+            _c['gff'][0] += ";GenomeWide=1"
+            if _junctions:
+                _parent = _candidate_parent(_c)
+                _g0, _g1 = int(_c['start']) - w_start - 1, int(_c['end']) - w_start
+                _pieces = [(int(h['qstart']), int(h['qend'])) for h in hits_by_gene.get(_parent, [])
+                           if min(int(h['gend']), _g1) - max(int(h['gstart']), _g0) > 0]
+                if _c.get('model_parent') == _parent:
+                    _pieces += [(int(e['qstart']), int(e['qend'])) for e in _c.get('model_exons') or []]
+                if spans_a_junction(_pieces, _junctions):
+                    _c['gff'][0] += ";RetrocopyCandidate=1"
 
     def _judge_all(cands):
         """Every candidate judged (label rework, step 4) before the choice among them.
@@ -6628,6 +6642,27 @@ def _hit_pieces(genome_seqs, h) -> List[str]:
     return synvoy_evalue.split_at_stops(translate(dna)) if dna else []
 
 
+# PR-9 (H1, --goi_genome_wide_without_blocks): a genome-wide call that encodes two home exons
+# contiguously across their junction, this far on each side, is a retrocopy candidate.
+RETROCOPY_JUNCTION_FLANK_AA = 10
+
+
+def home_exon_junctions(lengths) -> List[int]:
+    """Query positions of the home gene's exon-exon junctions: the last residue of every exon
+    but the last (cumulative exon lengths in aa, read_home_exons)."""
+    out, pos = [], 0
+    for n in list(lengths)[:-1]:
+        pos += int(n)
+        out.append(pos)
+    return out
+
+
+def spans_a_junction(pieces, junctions, flank: int = RETROCOPY_JUNCTION_FLANK_AA) -> bool:
+    """A piece (query start, end) of one CDS or one hit that aligns ``flank`` residues on both
+    sides of a home junction: the target encodes both exons there without an intron."""
+    return any(qs <= j - flank + 1 and qe >= j + flank for qs, qe in pieces for j in junctions)
+
+
 def _write_genome_wide_table(args, prefix, genome_name, places) -> None:
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.genome_wide.tsv")
     try:
@@ -6648,9 +6683,10 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
     ctx = args.genome_ctx
     n_sig = sum(1 for e in (ctx.get('block_esyn') or {}).values()
                 if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN)
-    if not n_sig:
+    if not n_sig and not getattr(args, 'goi_genome_wide_without_blocks', False):
         logger.info(f"[{genome_name}] genome-wide path: no block at E_syn <= "
-                    f"{synvoy_evalue.SIGNIFICANT_BLOCK_ESYN}, not run.")
+                    f"{synvoy_evalue.SIGNIFICANT_BLOCK_ESYN}, not run (--goi_genome_wide_without_blocks "
+                    f"runs it).")
         return [], []
     proteome, hood = _home_proteome(args)
     if proteome is None:
@@ -6951,10 +6987,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         f"anchors before each gap {','.join(map(str, _b['bridge_anchors']))}; "
                         f"genes {','.join(_b.get('genes', []))}")
 
+        _gw_any_genome = (getattr(args, 'goi_genome_wide_path', False)
+                          and getattr(args, 'goi_genome_wide_without_blocks', False))
         if not synteny_blocks:
-            logger.info(f"[{genome_name}] No valid syntenic region found.")
-            return genome_name, [], [], None
-            
+            logger.info(f"[{genome_name}] No valid syntenic region found."
+                        + (" The genome-wide path searches it (--goi_genome_wide_without_blocks)."
+                           if _gw_any_genome else ""))
+            if not _gw_any_genome:
+                return genome_name, [], [], None
+
         # Optimization: Merge overlapping search regions
         pre_merge_count = len(synteny_blocks)
         synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
@@ -7118,7 +7159,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         missing_flanking = all_db_flanking_parents - found_flanking_parents
         block_chroms = {b['chrom'] for b in synteny_blocks}
 
-        if missing_flanking and hits:
+        if missing_flanking and hits and synteny_blocks:
             # Gather off-block-chrom hits for missing parents
             off_chrom_hits_by_parent = defaultdict(list)
             for h in hits:
@@ -8189,6 +8230,11 @@ def main():
                              "places per GOI and genome, best E first, judged in the genome place; "
                              "only in a genome with a block at E_syn <= 0.1 (FINAL step 5; off by "
                              "default)")
+    parser.add_argument("--goi_genome_wide_without_blocks", type=str2bool, default=False,
+                        help="With --goi_genome_wide_path: run the genome-wide path also in a genome "
+                             "without a block at E_syn <= 0.1 (or without any block), and mark a "
+                             "genome-wide call that runs across a home exon junction without an "
+                             "intron RetrocopyCandidate=1 (PR-9; off by default)")
     parser.add_argument("--goi_join_leftover_hits", type=str2bool, default=False,
                         help="Join a GOI hit that no gene model covers into a confident (HIGH or "
                              "MEDIUM) model of the home query or its decoy when it continues the "
@@ -8461,8 +8507,12 @@ def main():
 
     # Exons of the home gene, without tandem copies of the home model (ExonsKept), and the
     # exon lengths of an annotated multi-exon home gene (the first-exon guard of G3A).
-    args.home_goi_exons, args.home_goi_structure = home_exon_terms(
-        *read_home_exons(getattr(args, "goi_info", None)))
+    _home_method, _home_lengths = read_home_exons(getattr(args, "goi_info", None))
+    args.home_goi_exons, args.home_goi_structure = home_exon_terms(_home_method, _home_lengths)
+    # The junctions of an annotated multi-exon home gene (RetrocopyCandidate, PR-9).
+    args.home_goi_junctions = home_exon_junctions(_home_lengths) if args.home_goi_structure else []
+    if getattr(args, 'goi_genome_wide_without_blocks', False) and not getattr(args, 'goi_genome_wide_path', False):
+        logger.warning("--goi_genome_wide_without_blocks has no effect without --goi_genome_wide_path.")
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov

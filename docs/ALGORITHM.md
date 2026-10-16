@@ -942,6 +942,14 @@ specificity terms, its rank, the cap and what became of it (`modelled`, `cut_by_
 `not_specific`, `not_significant`); the report's `genome_wide_path` block lists them. The
 genome place has no decoy calibration: decoys are searched in block windows only.
 
+With `goi_genome_wide_without_blocks` as well (PR-9) the path also runs in a genome without
+a block at E_syn ≤ 0.1, and in one where no block is found at all (the search then goes on
+with no block instead of stopping; the cross-chromosome flanking recovery is skipped there).
+A genome-wide call carries `RetrocopyCandidate=1` when one of its CDS, or one hit of the home
+query in it, aligns 10 residues on both sides of an exon junction of the home gene
+(annotated, ≥ 2 exons): the target encodes both exons there without an intron, as a
+retrocopy does (and an ortholog that lost the intron).
+
 ### 7.12 What is added to the query set
 
 **Specificity** (`bin/synvoy_specificity.py`, written on every kept GOI model). The
