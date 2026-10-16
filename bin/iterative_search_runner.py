@@ -1108,20 +1108,53 @@ GOI_CLASS_OF_LABEL = {"HIGH": "confident_goi", "MEDIUM": "probable_goi",
                       "AMBIGUOUS": "syntenic_candidate_unconfirmed", "LOW": "ambiguous_goi_family_member"}
 
 
+# Candidates built from search hits: their record protein has its stops deleted (it is
+# a query of the next wave and goes to the tree), so their label protein is translated
+# again from the CDS rows, with the stops kept.
+HIT_EVIDENCE_TYPES = ('fallback_hit_span', 'rescued_exon', 'raw_hit')
+
+
+def hit_label_protein(gff_rows, subseq, w_start) -> str:
+    """The label protein of a candidate built from search hits (review fix RF-1a): each CDS
+    row (one hit) translated with its stops kept, in transcript order, the rows joined with
+    '*'. split_at_stops then judges the pieces between stops and never joins two hits; with
+    the stops deleted, one 3-stop on-truth model read E 9.1e-13 instead of 6.3e-6."""
+    pieces, minus = [], False
+    rows = []
+    for line in gff_rows:
+        c = line.split('\t')
+        if len(c) >= 9 and c[2] == 'CDS':
+            rows.append((int(c[3]), int(c[4])))
+            minus = c[6] == '-'
+    for start, end in sorted(rows, reverse=minus):
+        dna = subseq[start - w_start - 1:end - w_start]
+        if minus:
+            dna = reverse_complement(dna)
+        dna = dna[:len(dna) - len(dna) % 3]
+        if dna:
+            pieces.append(translate(dna))
+    return '*'.join(pieces)
+
+
 def prepare_label_proteins(candidates, subseq, w_start) -> None:
-    """The protein a miniprot model's E-value is computed on (plan 3.1): the translation
-    of its CDS, honouring the first exon's phase. The length must be a multiple of 3 and
-    the translation free of stops before its end; otherwise another frame over the same
-    exons is used when it is clean (FrameFixed=1), and when none is the model is judged
-    on its hit regions only (FrameBroken=1: a pseudogene is as likely as a frameshift).
-    Kept as ``cand['label_protein']``; other evidence types use their translated hits."""
+    """The protein a candidate's E-value is computed on (plan 3.1). A miniprot model: the
+    translation of its CDS, honouring the first exon's phase. The length must be a multiple
+    of 3 and the translation free of stops before its end; otherwise another frame over the
+    same exons is used when it is clean (FrameFixed=1), and when none is the model is
+    judged on its hit regions only (FrameBroken=1: a pseudogene is as likely as a
+    frameshift). A candidate built from search hits: its hits translated with their stops
+    (hit_label_protein). Kept as ``cand['label_protein']``; the record protein is not changed."""
     for cand in candidates:
         gff = cand.get('gff') or []
         cols = gff[0].split('\t') if gff else []
         if len(cols) < 9:
             continue
         cand['label_protein'] = (cand.get('record') or {}).get('seq', '')
-        if _parse_gff_attr_string(cols[8]).get('EvidenceType') != 'exon_annotation':
+        evidence = _parse_gff_attr_string(cols[8]).get('EvidenceType')
+        if evidence in HIT_EVIDENCE_TYPES:
+            cand['label_protein'] = hit_label_protein(gff[1:], subseq, w_start) or cand['label_protein']
+            continue
+        if evidence != 'exon_annotation':
             continue
         rows = []
         for line in gff[1:]:

@@ -205,8 +205,11 @@ def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_i
     return rows
 
 
-def _translate_model(window_seq: str, cds_rows) -> str:
-    """Protein for a miniprot model, from CDS rows in WINDOW coordinates.
+def _translate_model(window_seq: str, cds_rows, keep_stops: bool = False) -> str:
+    """Protein for a miniprot model, from CDS rows in WINDOW coordinates. Internal stops are
+    written as X, for the FASTA the ownership check aligns; with ``keep_stops`` they stay
+    '*', for the judge's E-value, which is computed on the pieces between stops (review
+    fix RF-1a: with X nothing was split).
 
     Needed because the rescue passes emit only a GFF, but the §1m ownership check
     RBH-aligns a protein FASTA. Without this a rescue model can never be checked
@@ -235,7 +238,8 @@ def _translate_model(window_seq: str, cds_rows) -> str:
         phase = 0
     dna = dna[phase:]
     dna = dna[:len(dna) - (len(dna) % 3)]
-    return translate(dna).rstrip("*").replace("*", "X")
+    protein = translate(dna).rstrip("*")
+    return protein if keep_stops else protein.replace("*", "X")
 
 
 def _genome_length(genome_path: str) -> int:
@@ -248,15 +252,17 @@ def _genome_length(genome_path: str) -> int:
     return sum(len(seq) for _h, _i, seq in parse_fasta(genome_path))
 
 
-def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome):
+def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome,
+                     label_protein=None):
     """The label of a rescue model by the search's own judge (synvoy_label, label rework
     2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
-    own), its specificity against the home proteome, its completeness. Returns
+    own), computed on ``label_protein`` (the translation with its stops kept; default
+    ``protein``), its specificity against the home proteome, its completeness. Returns
     (confidence, rank key, GFF attributes)."""
     qlen = len(query_seq)
     bits = sw_bits(query_seq, protein) if protein else 0.0
     evalue, _b = synvoy_evalue.blastp_evalue(
-        query_seq, synvoy_evalue.split_at_stops(protein),
+        query_seq, synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein),
         synvoy_evalue.search_space(qlen, genome_len))
     spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, protein, bits, None)
             if proteome is not None and protein else None)
@@ -400,8 +406,9 @@ def main() -> int:
                 _refine_rescue_termini(window, mrna, cds_rows)
                 prot = _translate_model(window, cds_rows)
                 try:
-                    conf, key, judged, bits = judge_hull_model(query_id, query_seq, prot, cds_rows,
-                                                               genome_len, proteome)
+                    conf, key, judged, bits = judge_hull_model(
+                        query_id, query_seq, prot, cds_rows, genome_len, proteome,
+                        label_protein=_translate_model(window, cds_rows, keep_stops=True))
                 except RuntimeError:
                     continue
                 if best is None or key < best[0]:

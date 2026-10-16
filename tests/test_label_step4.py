@@ -60,10 +60,12 @@ def test_frame_guard_fixes_a_shifted_frame_and_marks_a_broken_one():
 
 
 def test_hit_chains_keep_their_translated_hits():
+    """A hit chain is judged on its hits, translated again from its CDS rows with the stops
+    kept (review fix RF-1a), not on its record protein (stops deleted)."""
     cand = _model([(1, 27, 0)])
     cand["gff"][0] = cand["gff"][0].replace("EvidenceType=exon_annotation", "EvidenceType=fallback_hit_span")
     isr.prepare_label_proteins([cand], "A" * 60, 0)
-    assert cand["label_protein"] == "MKL"
+    assert cand["label_protein"] == "K" * 9 and cand["record"]["seq"] == "MKL"
 
 
 # ---------------------------------------------------------------- the window's choice
