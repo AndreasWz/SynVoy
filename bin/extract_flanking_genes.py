@@ -252,6 +252,7 @@ LCS_FALLBACK_THRESHOLD = 35.0   # only used when no aligner is available, see is
 # E-value at or below which the annotated gene at the GOI's own position counts as the
 # GOI itself, whatever --goi_relative_evalue says about the neighbours.
 GOI_SELF_EVALUE = 1e-5
+BEST_INTERVAL = 'best_interval'   # split_loci.py's name for the interval a locus walk starts from
 
 
 def is_goi_relative(protein: str, goi_seqs, max_evalue: float, statistic: str = 'sw') -> bool:
@@ -428,23 +429,40 @@ def main():
         print(f"Loaded {len(goi_seqs)} GOI sequence(s); genes related to them "
               f"(alignment E <= {args.goi_relative_evalue:g}, {statistic}) are not used as anchors")
 
-    # Load INPUT Genes
+    # Load INPUT Genes: the hit intervals of one home locus (split_loci.py). A row that
+    # split_loci snapped to an annotated gene carries its hit span in columns 8-9.
     target_regions = []
     with open(args.bed, 'r') as f:
         for line in f:
             parts = line.strip().split('\t')
             if len(parts) >= 3:
-                target_regions.append({
+                region = {
                     'chrom': parts[0],
                     'start': int(parts[1]),
-                    'end': int(parts[2])
-                })
+                    'end': int(parts[2]),
+                    'name': parts[3] if len(parts) > 3 else '',
+                }
+                if len(parts) >= 9 and parts[7].isdigit() and parts[8].isdigit():
+                    region['hit_start'], region['hit_end'] = int(parts[7]), int(parts[8])
+                target_regions.append(region)
 
     if not target_regions:
         print("No target regions found.")
         open(args.out_bed, 'w').close()
         open(args.out_faa, 'w').close()
         return
+    # One walk per home locus (batch HG-1B), from its best interval: the row split_loci
+    # names best_interval, else the first row (a BED with one row, or one written before).
+    # The locus's other intervals are copies or relatives of the gene: genes there are not
+    # anchors, and each is written as a GOI_ row without a protein. Until 2026-10-16 every
+    # row had a walk of its own and a GOI pseudo-gene.
+    walk_region = next((r for r in target_regions if r.get('name') == BEST_INTERVAL),
+                       target_regions[0])
+    other_regions = [r for r in target_regions if r is not walk_region]
+
+    def _at_other_interval(g):
+        return any(g['chrom'] == r['chrom'] and g['start'] < r['end'] and g['end'] > r['start']
+                   for r in other_regions)
 
     genome_seqs = load_genome(args.genome)
 
@@ -588,8 +606,8 @@ def main():
     else:
         # EXISTING LOGIC FOR GFF
         all_genes = parse_gff_for_genes(args.gff)
-        
-        for region in target_regions:
+
+        for region in [walk_region]:
             # Filter genes on same chrom
             chrom_genes = [g for g in all_genes if g['chrom'] == region['chrom']]
             
@@ -687,6 +705,10 @@ def main():
                         else:
                             print(f"  [flank-filter] Skipping GOI-similar upstream gene: {name}")
                         continue
+                    if _at_other_interval(g):
+                        print(f"  [flank-filter] Skipping upstream gene at another hit interval "
+                              f"of this locus: {_preferred_gene_label(g)}")
+                        continue
                     upstream_all.append(g)
                     if g.get('cds_parts'):
                         upstream_slots += 1
@@ -717,6 +739,10 @@ def main():
                         else:
                             print(f"  [flank-filter] Skipping GOI-similar downstream gene: {name}")
                         continue
+                    if _at_other_interval(g):
+                        print(f"  [flank-filter] Skipping downstream gene at another hit interval "
+                              f"of this locus: {_preferred_gene_label(g)}")
+                        continue
                     downstream_all.append(g)
                     if g.get('cds_parts'):
                         downstream_slots += 1
@@ -734,7 +760,7 @@ def main():
             else:
                 start_idx = max(0, center_idx - args.n_flank)
                 end_idx = min(len(chrom_genes), center_idx + args.n_flank + 1)
-                window_genes = chrom_genes[start_idx:end_idx]
+                window_genes = [g for g in chrom_genes[start_idx:end_idx] if not _at_other_interval(g)]
 
             # Add genes from window
             extracted_genes.extend(window_genes)
@@ -784,6 +810,25 @@ def main():
                 })
                 print(f"Injected GOI pseudo-gene at {region['chrom']}:{goi_start}-{goi_end}")
 
+            # The locus's other intervals: the annotated gene at each (the largest overlap) is
+            # written as a GOI_ row without a protein, so the region scoring counts it as the
+            # GOI and not as an anchor (cluster_grs.py) and the figures draw it as a copy. An
+            # interval without a gene gets no row.
+            for other in other_regions:
+                at = [(min(g['end'], other['end']) - max(g['start'], other['start']), i, g)
+                      for i, g in enumerate(all_genes)
+                      if g['chrom'] == other['chrom'] and g['start'] < other['end']
+                      and g['end'] > other['start']]
+                if not at:
+                    continue
+                gene = max(at, key=lambda t: (t[0], -t[1]))[2]
+                goi_row = dict(gene)
+                goi_row['attrs'] = dict(gene.get('attrs') or {}, ID=f"GOI_{gene['chrom']}_{gene['start']}")
+                goi_row['placeholder'] = True
+                extracted_genes.append(goi_row)
+                print(f"GOI row for the gene at another hit interval of this locus: "
+                      f"{_preferred_gene_label(gene)} {gene['chrom']}:{gene['start']}-{gene['end']}")
+
     # Write Outputs
     all_fasta_records = []  # Collect all FASTA records
     # Home coordinates of every anchor and the length of the home genome travel with the
@@ -792,10 +837,13 @@ def main():
     genome_bp = sum(len(seq) for seq in genome_seqs.values())
     # The home locus itself (`goi=`), so the search knows on which side of the gene each
     # anchor lies (its slot between the nearest neighbours, bin/synvoy_evalue.py).
+    # Over every interval of the locus, from the hits (a row snapped to a gene keeps its hit
+    # span in columns 8-9), so snapping leaves the search's slots as they were.
     goi_span = {}
     for region in target_regions:
-        lo, hi = goi_span.get(region['chrom'], (region['start'], region['end']))
-        goi_span[region['chrom']] = (min(lo, region['start']), max(hi, region['end']))
+        h0, h1 = region.get('hit_start', region['start']), region.get('hit_end', region['end'])
+        lo, hi = goi_span.get(region['chrom'], (h0, h1))
+        goi_span[region['chrom']] = (min(lo, h0), max(hi, h1))
 
     def _home_fields(gene):
         fields = f"home={gene['start']}-{gene['end']} genome={genome_bp}"

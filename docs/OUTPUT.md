@@ -444,7 +444,7 @@ columns of `hits/<genome>.target_policy.tsv` in a decoy run.
 |---|---|
 | `query/` | `normalized_query.faa` — the cleaned query (translated if the input was DNA; only the first record of a multi-sequence file) |
 | `locate_gene/` | The query's hits on the home genome, `hit_profile.json`, `auto_preset.json`, `home_context.json`, `effective_params.json` |
-| `split_loci/` | One BED per home locus (the annotated home gene is the first one; `--home_locus_mode`) |
+| `split_loci/` | One BED per home locus (the annotated home gene is the first one; `--home_locus_mode`). A row is a hit interval, one copy of the gene, snapped to the coding span of the annotated gene that covers at least half of it (the hit span then in columns 8-9); with several rows the first, named `best_interval`, is where the flanking walk of the locus starts |
 | `flanking/` | The flanking genes of each home locus (`synteny_block_locus_<N>.bed`, proteins) |
 | `annotate_goi/` | The GOI's exon structure on the home genome (`goi_exons.faa`, `goi_annotation.bed`, `goi_info.json`) |
 | `phylo_sort/` | Target genomes ordered closest first, with distances (`sorted_genomes.txt`), and `sort_provenance.json`: the strategy that ordered them (`ete3_taxonomy`, `accession_taxonomy`, `minhash`, `alphabetical`), the taxonomy database ETE3 opened (path, size, date, md5), the home TaxID and the order. Two machines with different taxonomy databases order the search waves differently |

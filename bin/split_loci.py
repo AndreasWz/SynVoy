@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sequence_utils import load_home_hits, one_copy_score  # noqa: E402
+from sequence_utils import cds_models_by_gene, load_home_hits, one_copy_score  # noqa: E402
 from synvoy_scale import FALLBACK_LOCUS_GAP_BP, load_gene_spans  # noqa: E402,F401
 
 def parse_args():
@@ -176,6 +176,91 @@ def apply_home_gene(clusters, gene):
         'line': f"{chrom}\t{start}\t{end}\tgene_loc\t{evalue}\t{strand}\t{bit_text}",
     }]
     return primary, others
+
+
+BEST_INTERVAL = 'best_interval'   # name of the first row of a locus BED with several rows
+
+
+def coding_spans(gff, chroms):
+    """``{chrom: [(start, end, gene_id)]}``: the coding span (0-based start) of the longest
+    coding model of every annotated gene on ``chroms``, the model gff_to_faa.py takes for the
+    home proteome (sequence_utils.cds_models_by_gene). {} without a usable annotation."""
+    if not gff or os.path.basename(str(gff)) == 'NO_GFF' or not os.path.exists(gff):
+        return {}
+    out = {}
+    for gid, info in cds_models_by_gene(gff, set(chroms)).items():
+        exons = info['exons']
+        out.setdefault(info['chrom'], []).append(
+            (min(s for s, _e, _p in exons) - 1, max(e for _s, e, _p in exons), gid))
+    return {c: sorted(v) for c, v in out.items()}
+
+
+def gene_of_interval(entry, spans):
+    """The annotated gene whose coding span covers at least half of a hit interval (the
+    largest overlap; ties by gene id), as ``(start, end, gene_id)``, or None."""
+    length = entry['end'] - entry['start']
+    best = None
+    for gs, ge, gid in spans.get(entry['chrom'], []):
+        ov = min(ge, entry['end']) - max(gs, entry['start'])
+        if ov > 0 and ov >= 0.5 * length:
+            key = (-ov, gid)
+            if best is None or key < best[0]:
+                best = (key, (gs, ge, gid))
+    return best[1] if best else None
+
+
+def locus_lines(cl, raw_hits, spans):
+    """The BED lines of one kept locus (batch HG-1B): its hit intervals, each snapped to the
+    annotated gene that covers at least half of it (the gene's coding span, the hit span kept
+    in columns 8-9 for the anchor headers' goi= field), intervals on one gene merged; with
+    several rows the row holding the best copy of the gene (one_copy_score of the hits in its
+    hit span) comes first, named best_interval: the flanking walk of this locus starts there,
+    once. A row that no gene covers keeps its line as it was."""
+    rows = []
+    for e in cl:
+        f = e['line'].split('\t')
+        rows.append({'chrom': e['chrom'], 'start': e['start'], 'end': e['end'],
+                     'hit_start': e['start'], 'hit_end': e['end'], 'evalue': e['evalue'],
+                     'evalue_text': f[4] if len(f) > 4 else '.', 'strand': f[5] if len(f) > 5 else '+',
+                     'bit': e.get('bit'), 'bit_text': f[6] if len(f) > 6 else '.',
+                     'line': e['line'], 'snapped': False})
+    merged, by_gene = [], {}
+    for r in rows:
+        gene = gene_of_interval(r, spans)
+        if gene is None:
+            merged.append(r)
+            continue
+        if gene[2] in by_gene:
+            m = by_gene[gene[2]]
+            m['hit_start'], m['hit_end'] = min(m['hit_start'], r['hit_start']), max(m['hit_end'], r['hit_end'])
+            if r['evalue'] < m['evalue']:
+                m['evalue'], m['evalue_text'] = r['evalue'], r['evalue_text']
+            if r['bit'] is not None and (m['bit'] is None or r['bit'] > m['bit']):
+                m['bit'], m['bit_text'] = r['bit'], r['bit_text']
+            continue
+        r.update(start=gene[0], end=gene[1], snapped=True)
+        by_gene[gene[2]] = r
+        merged.append(r)
+    # The best copy: one_copy_score of the hits within each row's hit span (the pieces of one
+    # gene together), then the best E-value, then the position.
+    for r in merged:
+        hits = [h for h in raw_hits if h['chrom'] == r['chrom'] and h['start'] < r['hit_end']
+                and h['end'] > r['hit_start']]
+        r['score'] = one_copy_score(hits) if hits else 0.0
+    best = min(merged, key=lambda r: (-r['score'], r['evalue'], r['start']))
+    merged.sort(key=lambda r: r is not best)           # stable: the others keep their order
+    lines = []
+    for i, r in enumerate(merged):
+        name = BEST_INTERVAL if i == 0 and len(merged) > 1 else 'gene_loc'
+        if not r['snapped']:
+            f = r['line'].split('\t')
+            if len(f) > 3:
+                f[3] = name
+            lines.append('\t'.join(f))
+            continue
+        lines.append(f"{r['chrom']}\t{r['start']}\t{r['end']}\t{name}\t{r['evalue_text']}\t"
+                     f"{r['strand']}\t{r['bit_text']}\t{r['hit_start']}\t{r['hit_end']}")
+    return lines
 
 
 def split_into_loci(entries, gene_spans, gap_genes, gap_bp):
@@ -340,16 +425,22 @@ def main():
         clusters = kept
 
     print(f"Found {len(clusters)} distinct loci.")
-    
+
+    # The kept loci, scored and filtered on their hit intervals above, now get their rows
+    # snapped to annotated genes and the best interval first (batch HG-1B). The primary locus
+    # made from the annotated home gene is that gene's span already, one row.
+    spans = coding_spans(args.gff, {cl[0]['chrom'] for cl in clusters})
     for i, cl in enumerate(clusters):
         # We name the file so Nextflow can pick it up.
         # Use simple indexing.
         out_name = f"{args.output_prefix}_{i+1}.bed"
+        lines = ([e['line'] for e in cl] if (home_gene and i == 0)
+                 else locus_lines(cl, raw_hits, spans))
         with open(out_name, 'w') as f_out:
-            for entry in cl:
-                f_out.write(entry['line'] + "\n")
+            for line in lines:
+                f_out.write(line + "\n")
         best_ev = min(e['evalue'] for e in cl)
-        print(f"Wrote locus {i+1} to {out_name} ({len(cl)} hits, best e-value={best_ev:.2e})")
+        print(f"Wrote locus {i+1} to {out_name} ({len(lines)} interval(s), best e-value={best_ev:.2e})")
 
 if __name__ == "__main__":
     main()

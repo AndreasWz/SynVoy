@@ -291,7 +291,15 @@ features; the report copies it as `run_settings`.
 4. Keep a further locus only if its score is at least `locus_min_bit_ratio` (0.5) of
    the primary's.
 5. Keep at most `max_loci` (5): the primary locus and the highest-scoring others.
+6. **Rows of a kept locus** (batch HG-1B). Each hit interval that an annotated gene
+   covers at least half of is replaced by that gene's coding span (the longest coding
+   model, as the home proteome takes it); its hit span stays in columns 8 and 9.
+   Intervals on one gene become one row. With several rows the row holding the best
+   copy of the gene (`one_copy_score` of the hits in it) comes first and is named
+   `best_interval`: the flanking walk of the locus starts there (§5.7). The primary
+   locus made from the annotated home gene stays its one row.
 
+Scoring and filtering (steps 3 to 5) use the hit intervals as chained, before step 6.
 More than 10 loci before filtering produce a large-family warning.
 
 ### 5.5 The annotated home gene as primary locus
@@ -349,9 +357,14 @@ annotated gene it is the protein of the chosen transcript.
 
 ### 5.7 Flanking genes
 
-`extract_flanking_genes.py`, per home locus:
+`extract_flanking_genes.py` walks once per home locus, from its best interval (the
+first row of the locus BED, named `best_interval` when the locus has several rows,
+[§5.4](#54-splitting-into-home-loci)). The locus's other intervals are copies or
+relatives of the gene: a gene there is no anchor, and it is written into the home BED
+as a `GOI_` row without a protein. Until 2026-10-16 (batch HG-1B) every interval had a
+walk and a GOI marker of its own, so a tandem array of three copies gave three walks.
 
-1. Take the annotated gene whose centre is closest to the locus centre.
+1. Take the annotated gene whose centre is closest to the centre of the best interval.
 2. Walk outwards on each side. Collect genes until `n_flanking_genes` (10)
    protein-coding genes are found on that side, looking at no more than 50 genes per
    side.
@@ -378,7 +391,10 @@ of an exon its own coordinates (`coords=`). The search derives its distances fro
 them ([§7, Distances](#distances-in-gene-units)).
 
 The home BED also gets a marker row for the GOI (`GOI_<scaffold>_<start>`) when no
-annotated gene is left at its position. It is used by the figures and is not a query.
+annotated gene is left at the best interval, and one row named the same way for the
+annotated gene at each other interval of the locus. They are used by the region scoring
+and the figures and are not queries. The `goi=` field of the anchors' headers spans the
+hits of every interval of the locus (the hit span of a snapped row, columns 8-9).
 
 ### 5.8 The initial query set
 
