@@ -5,6 +5,11 @@ process ITERATIVE_SEARCH {
     // counts (columns of hits/<genome>.target_policy.tsv).
     publishDir path: { "${params.outdir}/decoys/${locus_id}" }, mode: 'copy',
         pattern: 'iterative_results/decoys/*', saveAs: { fn -> file(fn).name }
+    // One row per searched block of each genome (blocks/<genome>.blocks.tsv: span, E_syn, the
+    // calls in it), published so a finished run holds it; no process reads it. Its own folder:
+    // a file inside the hits/ output folder is published only with that whole folder.
+    publishDir path: { "${params.outdir}/blocks/${locus_id}" }, mode: 'copy',
+        pattern: 'iterative_results/blocks/*', saveAs: { fn -> file(fn).name }
 
     input:
     tuple val(locus_id), path(initial_db)
@@ -26,6 +31,7 @@ process ITERATIVE_SEARCH {
     tuple val(locus_id), path("iterative_results/regions/*.gff"), emit: gff, optional: true
     tuple val(locus_id), path("iterative_results/regions/*.homology.tsv"), emit: homology, optional: true
     tuple val(locus_id), path("iterative_results/decoys/*"), emit: decoys, optional: true
+    tuple val(locus_id), path("iterative_results/blocks/*"), emit: blocks, optional: true
 
 
     script:

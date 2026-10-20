@@ -236,6 +236,24 @@ awk -F'\t' 'NR>1 && $1==1 {print $3, $4, $8, $9, $16}' OFS='\t' regions/*/*.scor
 Scores from runs before 2026-07-26 are not comparable: the strand and order
 terms were redefined then.
 
+**`blocks/<locus>/<genome>.blocks.tsv`** — the search's own view of the same question, one
+row per synteny block it searched in that genome, also one without a call (since
+2026-10-19; a genome the search reached without a block has the header only). The region
+scores above are computed afterwards, apart from it; nothing reads this table yet.
+
+| Column | Meaning |
+|---|---|
+| `block` | The block number: the `N` of `_b<N>_` in the ids of the models found in it |
+| `chrom`, `start`, `end` | The block's span, from its first to its last seed hit (anchors; GOI hits in a GOI-seeded block), 0-based, end exclusive |
+| `hood_start`, `hood_end` | The neighbourhood its anchors were counted in (block ± padding); E_syn is computed for this length |
+| `flanking_support`, `collinear_support` | Flanking genes with hits in that neighbourhood, and the longest run of them in home order (`BlockFlankingSupport`, `BlockCollinearSupport` of its models) |
+| `esyn`, `significant` | The block's E_syn at full precision (its models' `BlockEsyn` prints 3 digits; `inf` when the window had no GOI query), and 1 when it is at most 0.1: a predicted place, counted in `SigBlocks` |
+| `goi_seeded` | 1 when the GOI seeded the block (the GOI's own home gene among the anchors, or a rescued GOI hit): kept whatever its number of genes |
+| `context` | `left`, `right` or `both`: the window ran past a scaffold end there |
+| `best_call`, `best_call_id`, `n_high` … `n_low` | The block's best GOI model in the label's order (label, then `Eeff`, E_syn, bits) and its GOI models per final label, as the search wrote them: decoy models are not counted, and a gene-order-only call that the report leaves out (in a genome with a counted call) is still counted here |
+
+Windows of the genome-wide path (`--goi_genome_wide_path`) are not blocks and have no row.
+
 ---
 
 ## "I want the big-picture summary"

@@ -1032,6 +1032,10 @@ the new label will use (`bin/synvoy_evalue.py`):
   significant blocks searched in this genome (each is one predicted place); a model in
   the genome-wide place is not multiplied.
 
+Every block searched, with or without a call, is written with its E_syn at full precision,
+its neighbourhood and the final labels of its GOI models to `blocks/<locus>/<genome>.blocks.tsv`
+(since 2026-10-19; it changes no call).
+
 **Copies in the slot** (`--report_copies_in_slot`, off; the `local_family` module turns it
 on). After the genome's final labels, every GOI model of a block that has a slot gets
 `CopiesInSlot=`: the GOI models with `Place=slot` and a label of AMBIGUOUS or better in that

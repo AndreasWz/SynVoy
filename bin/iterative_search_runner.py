@@ -1006,6 +1006,19 @@ def slot_inverted(placed: Dict[int, Tuple[int, int]]) -> Optional[bool]:
 SLOT_COPY_LABELS = ('HIGH', 'MEDIUM', 'AMBIGUOUS')
 
 
+def block_index_of(model_id: str, genome_tag: str) -> Optional[int]:
+    """The search block a model of this genome was found in: N of
+    ``<parent>|<genome_tag>_b<N>_...`` (``genome_tag`` = the genome name with '.', '-' and
+    ' ' replaced by '_', as the model ids carry it). None for a model without a block
+    number (cross-chromosome flanking models) or of another genome."""
+    rest = (model_id or '').split('|', 1)
+    prefix = f"{genome_tag}_b"
+    if len(rest) < 2 or not rest[1].startswith(prefix):
+        return None
+    digits = rest[1][len(prefix):].split('_', 1)[0]
+    return int(digits) if digits.isdigit() else None
+
+
 def annotate_slot_copies(gff_lines: List[str], genome_tag: str,
                          block_slots: Dict[int, Tuple[Tuple[int, int], Optional[bool]]]) -> List[str]:
     """CopiesInSlot and SlotRank of the GOI models (preset plan of 2026-10-15, PR-6; with
@@ -1014,22 +1027,13 @@ def annotate_slot_copies(gff_lines: List[str], genome_tag: str,
     has a slot gets CopiesInSlot=<copies in that slot>; each copy gets SlotRank=<k>, counted
     from the copy nearest the home neighbour on the left (SlotRank=1). A report attribute,
     never a gate: equal rank is not positional orthology (Dewey 2011)."""
-    prefix = f"{genome_tag}_b"
-
-    def block_of(attrs):
-        rest = (attrs.get('ID') or '').split('|', 1)
-        if len(rest) < 2 or not rest[1].startswith(prefix):
-            return None
-        digits = rest[1][len(prefix):].split('_', 1)[0]
-        return int(digits) if digits.isdigit() else None
-
     rows = []
     for i, line in enumerate(gff_lines):
         cols = line.split('\t')
         if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'SynVoyRole=goi' not in cols[8]:
             continue
         a = _parse_gff_attr_string(cols[8])
-        b = block_of(a)
+        b = block_index_of(a.get('ID') or '', genome_tag)
         if b is None or (block_slots.get(b) or (None, None))[0] is None:
             continue
         is_copy = a.get('Place') == 'slot' and a.get('Confidence') in SLOT_COPY_LABELS
@@ -4564,6 +4568,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         block_collinear_support, _dir = _longest_collinear_run(ordered_ranks)
     else:
         block_collinear_support = None
+    # The block's row of blocks/<genome>.blocks.tsv, for every window cut out (the blocks of
+    # block_context), also one whose search ends before its candidates are judged.
+    if not genome_wide:
+        record_block_row(args, block_idx, block, hood_start, hood_end,
+                         block_flanking_support, block_collinear_support)
     unique_queries = set(extract_base_gene_id(h['query']) for h in relevant_hits)
 
     found_queries = []
@@ -6370,6 +6379,107 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         logger.warning(f"[{genome_name}] could not write the target policy: {exc}")
 
 
+BLOCK_TABLE_COLUMNS = ['genome', 'block', 'chrom', 'start', 'end', 'hood_start', 'hood_end',
+                       'flanking_support', 'collinear_support', 'esyn', 'significant', 'goi_seeded',
+                       'context', 'best_call', 'best_call_id', 'n_high', 'n_medium', 'n_ambiguous',
+                       'n_low']
+BLOCK_TABLE_COUNTS = {'HIGH': 'n_high', 'MEDIUM': 'n_medium', 'AMBIGUOUS': 'n_ambiguous', 'LOW': 'n_low'}
+
+
+def record_block_row(args, block_idx, block, hood_start, hood_end, flanking_support,
+                     collinear_support) -> None:
+    """A searched block for blocks/<genome>.blocks.tsv (``genome_ctx['block_rows']``; E_syn
+    and the calls are added at the genome's end by _write_block_table). A later block with
+    the same number replaces it, as in block_esyn."""
+    ctx = getattr(args, 'genome_ctx', None)
+    if ctx is None:
+        return
+    ctx.setdefault('block_rows', {})[block_idx] = {
+        'chrom': block['chrom'], 'start': int(block['start']), 'end': int(block['end']),
+        'hood_start': int(hood_start), 'hood_end': int(hood_end),
+        'flanking_support': int(flanking_support or 0), 'collinear_support': collinear_support,
+        'genes': list(block.get('genes', []))}
+
+
+def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_seeded=None):
+    """blocks/<genome>.blocks.tsv: one row per block of this genome whose window was cut out
+    (step 1 of choosing what the figures show with the label's scoring; it changes no call).
+
+      block                the N of ``_b<N>_`` in the ids of the block's models
+      chrom, start, end    the block span, 0-based and half-open, as the window code cuts it
+      hood_start, hood_end the neighbourhood E_syn was counted in (block +- padding)
+      flanking_support,    BlockFlankingSupport and BlockCollinearSupport of its models
+      collinear_support    ('' when collinearity is off)
+      esyn                 E_syn at full precision (repr); 'inf' when the block's search ended
+                           before its candidates were judged (no GOI query for the window)
+      significant          1 when esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN, as Place and
+                           SigBlocks read it
+      goi_seeded           1 when the GOI seeded the block (ALGORITHM.md §7.4: the GOI's own
+                           gene among the anchors, a rescued GOI hit); '' when not known
+      context              left / right / both: the window ran past a scaffold end there
+      best_call(_id)       the block's best GOI row by the judge's order (synvoy_label.rank_key)
+      n_high ... n_low     its GOI rows per label
+
+    Labels are the final ones of the genome (after relabel_goi_lines), before the report: a
+    gene_order_only call that the report drops in a genome with a counted call (and
+    apply_report_drops.py leaves out of the plot GFFs) is counted here. Decoy rows are written
+    apart and not counted. Windows of the genome-wide path have no block and no row. Written
+    with its header as soon as the search reaches the genome and again at the genome's end, as
+    target_policy.tsv, but in a folder of its own: the module publishes it, and Nextflow
+    publishes a file inside a declared output folder (hits/) only with that folder
+    (Nextflow 26.04, 2026-10-19). An extra block (cross-chromosome GOI proxy, on-block GOI proxy sweep) is
+    numbered from the number of models found so far, so one that yields no model shares its
+    number with the next extra block: its row then holds the later block, as block_esyn and
+    block_context do (seen in the code on 2026-10-19, not changed)."""
+    path = os.path.join(args.output_dir, 'blocks', f"{prefix}{genome_name}.blocks.tsv")
+    ctx = ctx or {}
+    blocks = ctx.get('block_rows') or {}
+    esyn = ctx.get('block_esyn') or {}
+    context = ctx.get('block_context') or {}
+    numbers = ctx.get('judge_numbers') or {}
+    tag = genome_name.replace('.', '_').replace('-', '_').replace(' ', '_')
+    calls: Dict[int, List[Tuple[Any, str, str]]] = defaultdict(list)
+    for line in gff_lines or []:
+        cols = line.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'SynVoyRole=goi' not in cols[8]:
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        model_id = a.get('ID', '')
+        b = block_index_of(model_id, tag)
+        if a.get('SynVoyRole') != 'goi' or b not in blocks:
+            continue
+        n = numbers.get(model_id) or {}
+        e_eff = n['Eeff'] if n.get('Eeff') is not None else _safe_float(a.get('Eeff'))
+        b_esyn = n['BlockEsyn'] if n.get('BlockEsyn') is not None else _safe_float(a.get('BlockEsyn'))
+        key = synvoy_label.rank_key(a.get('Confidence', ''), e_eff, b_esyn, _safe_float(a.get('Bits')),
+                                    int(cols[4]) - int(cols[3]) + 1, int(cols[3]), model_id)
+        calls[b].append((key, a.get('Confidence', ''), model_id))
+    rows = []
+    for b in sorted(blocks):
+        r = blocks[b]
+        e = float(esyn.get(b, float('inf')))
+        found = sorted(calls.get(b, []))
+        row = {'genome': genome_name, 'block': b, 'chrom': r['chrom'], 'start': r['start'],
+               'end': r['end'], 'hood_start': r['hood_start'], 'hood_end': r['hood_end'],
+               'flanking_support': r['flanking_support'],
+               'collinear_support': '' if r['collinear_support'] is None else r['collinear_support'],
+               'esyn': repr(e), 'significant': int(e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN),
+               'goi_seeded': '' if goi_seeded is None else int(bool(goi_seeded(r))),
+               'context': context.get(b) or '',
+               'best_call': found[0][1] if found else '', 'best_call_id': found[0][2] if found else ''}
+        for label, column in BLOCK_TABLE_COUNTS.items():
+            row[column] = sum(1 for _key, conf, _id in found if conf == label)
+        rows.append(row)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=BLOCK_TABLE_COLUMNS, delimiter='\t')
+            w.writeheader()
+            w.writerows(rows)
+    except OSError as exc:
+        logger.warning(f"[{genome_name}] could not write the block table: {exc}")
+
+
 def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
     """§1x: write the refused-but-strong GOI candidates next to the raw hits.
 
@@ -6880,6 +6990,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if not hits:
             logger.info(f"[{genome_name}] No hits found in MMseqs output.")
             _write_target_policy(args, prefix, genome_name, None, 0)
+            _write_block_table(args, prefix, genome_name)
             return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
@@ -6951,6 +7062,15 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     f"envelope as rescue seed(s) (scatter={_rscore:.2f}, "
                     f"id>={getattr(args, 'dispersed_goi_min_identity', 40.0)}).")
 
+        def _goi_seeded(b):
+            """A GOI-seeded block (ALGORITHM.md §7.4): among its seeds the GOI's own home gene
+            (a GOI proxy among the anchors), a rescued GOI hit (§1o) or a GOI hit. The filter
+            keeps it whatever its gene count, the cap takes it first; goi_seeded in blocks.tsv."""
+            genes = set(b.get('genes', []))
+            return (bool(genes & goi_proxy_flanking_parents)
+                    or bool(genes & rescue_goi_genes)
+                    or any(is_goi_query_id(g) for g in genes))
+
         # The target's distance from the home genome, as the median identity of its
         # flanking-gene matches: recorded, it changes nothing (until 2026-10-15 it relaxed
         # the identity thresholds of the old GOI label, §1g).
@@ -6959,6 +7079,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             logger.info(f"[{genome_name}] Median flanking identity: {_flank_median:.1f}% "
                         f"over {_flank_n} flanking gene(s).")
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n)
+        _write_block_table(args, prefix, genome_name)
 
         synteny_blocks = identify_synteny_blocks(
             seed_hits,
@@ -7016,14 +7137,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             for _b in synteny_blocks:
                 if _b.get('genes_count', 0) >= args.min_block_genes:
                     filtered_blocks.append(_b)
-                elif goi_proxy_flanking_parents and any(
-                    _g in goi_proxy_flanking_parents for _g in _b.get('genes', [])
-                ):
-                    proxy_blocks.append(_b)
-                elif any(is_goi_query_id(_g) or _g in rescue_goi_genes
-                         for _g in _b.get('genes', [])):
-                    # §1o: a GOI-seeded (dispersed-rescue) block is single-gene by
-                    # construction — keep it despite min_block_genes.
+                elif _goi_seeded(_b):
+                    # A GOI proxy among the anchors, or §1o: a GOI-seeded (dispersed-rescue)
+                    # block is single-gene by construction — keep it despite min_block_genes.
                     proxy_blocks.append(_b)
             synteny_blocks = filtered_blocks + proxy_blocks
             logger.info(
@@ -7057,11 +7173,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # low-collinearity proxy seed is never dropped by the cap.
         if home_rank and len(synteny_blocks) > 1:
             def _cap_key(b):
-                genes = set(b.get('genes', []))
-                is_proxy = (bool(genes & goi_proxy_flanking_parents)
-                            or bool(genes & rescue_goi_genes)
-                            or any(is_goi_query_id(g) for g in genes))
-                return (1 if is_proxy else 0,
+                return (1 if _goi_seeded(b) else 0,
                         b.get('collinear_chain_len', 0),
                         b.get('genes_count', 0))
             synteny_blocks.sort(key=_cap_key, reverse=True)
@@ -7565,6 +7677,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
+        _write_block_table(args, prefix, genome_name, all_gff_lines, args.genome_ctx, _goi_seeded)
 
         # Write aggregated GFF
         if all_gff_lines:
