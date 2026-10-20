@@ -5420,6 +5420,166 @@ def _grid_variant_list(text):
     return items
 
 
+def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_fallback_bp):
+    """The genes one target row shows, and the candidate regions they were chosen from (the
+    row's chromosome label falls back to the first one). In order: the row's models
+    (parse_target_gff), the GOI cap steering the choice (_cap_goi_genes); the models inside
+    this genome's CLUSTER_REGIONS regions (--candidate_beds), narrowed to the regions with a
+    GOI model when those keep enough flanking context; a GOI-centred window when the regions
+    miss every GOI model; when they give two genes or fewer, a step meant to take the richest
+    search block, which finds no block (it reads the block number from the Name attribute;
+    NB below); on a chromosome-level assembly, the GOI chromosomes with flanking support plus
+    every chromosome with >= 3 flanking genes; then the capped GOI models inside that view. Taken
+    out of _run_figures unchanged (2026-10-19), so scripts/compare_plot_selection.py reads
+    today's choice from the same code; it prints its choices as before."""
+    genes_all, capped_goi = _cap_goi_genes(parse_target_gff(gff_file, cap=False),
+                                           _MAX_GOI_PER_GENOME)
+    candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
+    genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
+
+    # Try restricting to GOI-containing candidate regions, but ONLY if
+    # that doesn't discard most flanking context.  The GOI hit is often in
+    # a tiny region separate from the main synteny block — blindly
+    # restricting to GOI regions would throw away all flanking evidence.
+    goi_candidate_regions = _candidate_regions_with_goi(candidate_regions, genes_all)
+    if goi_candidate_regions:
+        goi_only_genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
+        if len(goi_only_genes) >= max(3, len(genes) * 0.5):
+            # GOI regions contain enough flanking context — use them.
+            genes = goi_only_genes
+            candidate_regions = goi_candidate_regions
+        else:
+            # GOI is isolated from flanking genes; keep ALL candidate
+            # regions so flanking context is preserved.
+            print(
+                f"[plot] {genome_id}: GOI-only regions have {len(goi_only_genes)} genes "
+                f"vs {len(genes)} from all regions — keeping all regions."
+            )
+
+    # If candidate regions exist but miss GOI, recover a GOI-centered context.
+    if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
+        fallback_genes = _select_goi_context_genes(genes_all, flank_bp=flank_fallback_bp)
+        if fallback_genes:
+            genes = fallback_genes
+            print(
+                f"[plot] {genome_id}: candidate regions missed GOI; "
+                f"using GOI-centered fallback ({len(genes)} genes)."
+            )
+
+    # Richest-block fallback: if candidate regions yielded very few genes
+    # (≤2), they likely cover low-quality scoring windows rather than the
+    # block with the best synteny evidence.  Find the block containing
+    # a GOI gene with the most flanking genes, or fall back to the globally
+    # richest block.
+    # NB (2026-10-19, not changed): it reads the block number from "name", the GFF Name
+    # attribute, which never holds _b<N>_ (only the ID does), so it finds no block.
+    if len(genes) <= 2 and len(genes_all) > len(genes):
+        from collections import Counter
+        block_counter = Counter()
+        block_genes = defaultdict(list)
+        for g in genes_all:
+            gname = g.get("name", "")
+            m = re.search(r'_b(\d+)_', gname)
+            if m:
+                bid = m.group(1)
+                block_counter[bid] += 1
+                block_genes[bid].append(g)
+
+        if block_counter:
+            # Blocks that contain at least one GOI gene
+            goi_bids = set()
+            for g in genes_all:
+                if _is_goi_target_gene(g):
+                    m = re.search(r'_b(\d+)_', g.get("name", ""))
+                    if m:
+                        goi_bids.add(m.group(1))
+
+            if goi_bids:
+                # Pick richest block that contains a GOI
+                # sorted(): a tie in max() over a set of strings resolves by hash order
+                best_block = max(sorted(goi_bids, key=int),
+                                 key=lambda bid: block_counter.get(bid, 0))
+            else:
+                best_block = block_counter.most_common(1)[0][0]
+
+            best_genes = block_genes[best_block]
+            if len(best_genes) > len(genes):
+                genes = best_genes
+                print(
+                    f"[plot] {genome_id}: candidate regions had ≤2 genes; "
+                    f"using richest block b{best_block} ({len(genes)} genes)."
+                )
+
+    # Focus on the most informative chromosomes for chromosome-level assemblies.
+    # For scaffold/contig-level assemblies (many distinct contigs), flanking genes
+    # may legitimately reside on different contigs — do NOT apply the restriction.
+    all_chroms_in_gff = {g["chrom"] for g in genes_all}
+    is_scaffold_assembly = len(all_chroms_in_gff) > 20
+
+    if not is_scaffold_assembly and any(_is_goi_target_gene(g) for g in genes):
+        goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
+        # Count flanking genes per chromosome (non-GOI genes)
+        from collections import Counter as _Counter
+        chrom_flank_counts = _Counter(
+            g["chrom"] for g in genes if not _is_goi_target_gene(g)
+        )
+
+        # ── Synteny-aware GOI filter ──────────────────────────────
+        # GOI hits on chromosomes without ANY flanking gene support
+        # are almost certainly low-complexity/spurious matches.
+        # Without synteny context, orthology cannot be established.
+        # Drop them unless they are the ONLY GOI hits in this genome.
+        unsupported_goi_chroms = {
+            ch for ch in goi_chroms
+            if chrom_flank_counts.get(ch, 0) == 0
+        }
+        supported_goi_chroms = goi_chroms - unsupported_goi_chroms
+
+        if unsupported_goi_chroms and supported_goi_chroms:
+            n_dropped = sum(
+                1 for g in genes
+                if g["chrom"] in unsupported_goi_chroms
+            )
+            genes = [
+                g for g in genes
+                if g["chrom"] not in unsupported_goi_chroms
+            ]
+            print(
+                f"[plot] {genome_id}: dropped {n_dropped} unsupported GOI "
+                f"hits on {unsupported_goi_chroms} (no flanking genes = "
+                f"no synteny evidence)"
+            )
+            # Refresh GOI chroms after drop
+            goi_chroms = supported_goi_chroms
+
+        # Keep GOI chromosome(s) + any chromosome with >=3 flanking genes
+        important_chroms = set(goi_chroms)
+        for ch, cnt in chrom_flank_counts.items():
+            if cnt >= 3:
+                important_chroms.add(ch)
+
+        # Only filter if we'd still have enough genes
+        filtered = [g for g in genes if g["chrom"] in important_chroms]
+        if len(filtered) >= len(genes) * 0.3 or len(important_chroms) <= 3:
+            if len(filtered) < len(genes):
+                dropped_chroms = {g["chrom"] for g in genes} - important_chroms
+                print(
+                    f"[plot] {genome_id}: keeping {len(important_chroms)} informative "
+                    f"chromosomes ({len(filtered)} genes), dropped {dropped_chroms}"
+                )
+            genes = filtered
+
+    # The cap steered the neighbourhood choice only: every GOI model inside the
+    # chosen view is drawn (tandem arrays), and counted in the anchor grid.
+    restored = _restore_goi_in_view(genes, capped_goi)
+    if restored:
+        genes = genes + restored
+        print(f"[plot] {genome_id}: restored {len(restored)} capped GOI model(s) "
+              f"inside the displayed neighbourhood")
+
+    return genes, candidate_regions
+
+
 def _run_figures(args, show_fragments=False, suffix=""):
     """Build the tracks and write every figure for one fragment-display variant.
 
@@ -5580,148 +5740,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
     for gff_file in args.target_gffs:
         genome_id = clean_genome_name(
             os.path.basename(gff_file).replace(".gff", ""))
-        genes_all, capped_goi = _cap_goi_genes(parse_target_gff(gff_file, cap=False),
-                                               _MAX_GOI_PER_GENOME)
-        candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
-        genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
-
-        # Try restricting to GOI-containing candidate regions, but ONLY if
-        # that doesn't discard most flanking context.  The GOI hit is often in
-        # a tiny region separate from the main synteny block — blindly
-        # restricting to GOI regions would throw away all flanking evidence.
-        goi_candidate_regions = _candidate_regions_with_goi(candidate_regions, genes_all)
-        if goi_candidate_regions:
-            goi_only_genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
-            if len(goi_only_genes) >= max(3, len(genes) * 0.5):
-                # GOI regions contain enough flanking context — use them.
-                genes = goi_only_genes
-                candidate_regions = goi_candidate_regions
-            else:
-                # GOI is isolated from flanking genes; keep ALL candidate
-                # regions so flanking context is preserved.
-                print(
-                    f"[plot] {genome_id}: GOI-only regions have {len(goi_only_genes)} genes "
-                    f"vs {len(genes)} from all regions — keeping all regions."
-                )
-
-        # If candidate regions exist but miss GOI, recover a GOI-centered context.
-        if candidate_regions and not any(_is_goi_target_gene(g) for g in genes):
-            fallback_genes = _select_goi_context_genes(genes_all, flank_bp=args.flank_fallback_bp)
-            if fallback_genes:
-                genes = fallback_genes
-                print(
-                    f"[plot] {genome_id}: candidate regions missed GOI; "
-                    f"using GOI-centered fallback ({len(genes)} genes)."
-                )
-
-        # Richest-block fallback: if candidate regions yielded very few genes
-        # (≤2), they likely cover low-quality scoring windows rather than the
-        # block with the best synteny evidence.  Find the block containing
-        # a GOI gene with the most flanking genes, or fall back to the globally
-        # richest block.
-        if len(genes) <= 2 and len(genes_all) > len(genes):
-            from collections import Counter
-            block_counter = Counter()
-            block_genes = defaultdict(list)
-            for g in genes_all:
-                gname = g.get("name", "")
-                m = re.search(r'_b(\d+)_', gname)
-                if m:
-                    bid = m.group(1)
-                    block_counter[bid] += 1
-                    block_genes[bid].append(g)
-
-            if block_counter:
-                # Blocks that contain at least one GOI gene
-                goi_bids = set()
-                for g in genes_all:
-                    if _is_goi_target_gene(g):
-                        m = re.search(r'_b(\d+)_', g.get("name", ""))
-                        if m:
-                            goi_bids.add(m.group(1))
-
-                if goi_bids:
-                    # Pick richest block that contains a GOI
-                    # sorted(): a tie in max() over a set of strings resolves by hash order
-                    best_block = max(sorted(goi_bids, key=int),
-                                     key=lambda bid: block_counter.get(bid, 0))
-                else:
-                    best_block = block_counter.most_common(1)[0][0]
-
-                best_genes = block_genes[best_block]
-                if len(best_genes) > len(genes):
-                    genes = best_genes
-                    print(
-                        f"[plot] {genome_id}: candidate regions had ≤2 genes; "
-                        f"using richest block b{best_block} ({len(genes)} genes)."
-                    )
-
-        # Focus on the most informative chromosomes for chromosome-level assemblies.
-        # For scaffold/contig-level assemblies (many distinct contigs), flanking genes
-        # may legitimately reside on different contigs — do NOT apply the restriction.
-        all_chroms_in_gff = {g["chrom"] for g in genes_all}
-        is_scaffold_assembly = len(all_chroms_in_gff) > 20
-
-        if not is_scaffold_assembly and any(_is_goi_target_gene(g) for g in genes):
-            goi_chroms = {g["chrom"] for g in genes if _is_goi_target_gene(g)}
-            # Count flanking genes per chromosome (non-GOI genes)
-            from collections import Counter as _Counter
-            chrom_flank_counts = _Counter(
-                g["chrom"] for g in genes if not _is_goi_target_gene(g)
-            )
-
-            # ── Synteny-aware GOI filter ──────────────────────────────
-            # GOI hits on chromosomes without ANY flanking gene support
-            # are almost certainly low-complexity/spurious matches.
-            # Without synteny context, orthology cannot be established.
-            # Drop them unless they are the ONLY GOI hits in this genome.
-            unsupported_goi_chroms = {
-                ch for ch in goi_chroms
-                if chrom_flank_counts.get(ch, 0) == 0
-            }
-            supported_goi_chroms = goi_chroms - unsupported_goi_chroms
-
-            if unsupported_goi_chroms and supported_goi_chroms:
-                n_dropped = sum(
-                    1 for g in genes
-                    if g["chrom"] in unsupported_goi_chroms
-                )
-                genes = [
-                    g for g in genes
-                    if g["chrom"] not in unsupported_goi_chroms
-                ]
-                print(
-                    f"[plot] {genome_id}: dropped {n_dropped} unsupported GOI "
-                    f"hits on {unsupported_goi_chroms} (no flanking genes = "
-                    f"no synteny evidence)"
-                )
-                # Refresh GOI chroms after drop
-                goi_chroms = supported_goi_chroms
-
-            # Keep GOI chromosome(s) + any chromosome with >=3 flanking genes
-            important_chroms = set(goi_chroms)
-            for ch, cnt in chrom_flank_counts.items():
-                if cnt >= 3:
-                    important_chroms.add(ch)
-
-            # Only filter if we'd still have enough genes
-            filtered = [g for g in genes if g["chrom"] in important_chroms]
-            if len(filtered) >= len(genes) * 0.3 or len(important_chroms) <= 3:
-                if len(filtered) < len(genes):
-                    dropped_chroms = {g["chrom"] for g in genes} - important_chroms
-                    print(
-                        f"[plot] {genome_id}: keeping {len(important_chroms)} informative "
-                        f"chromosomes ({len(filtered)} genes), dropped {dropped_chroms}"
-                    )
-                genes = filtered
-
-        # The cap steered the neighbourhood choice only: every GOI model inside the
-        # chosen view is drawn (tandem arrays), and counted in the anchor grid.
-        restored = _restore_goi_in_view(genes, capped_goi)
-        if restored:
-            genes = genes + restored
-            print(f"[plot] {genome_id}: restored {len(restored)} capped GOI model(s) "
-                  f"inside the displayed neighbourhood")
+        genes, candidate_regions = select_target_genes(
+            gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
