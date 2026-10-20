@@ -6498,9 +6498,9 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
 def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
     """§1x: write the refused-but-strong GOI candidates next to the raw hits.
 
-    Written INTO `hits/`, which `modules/generate_report.nf` already stages wholesale
-    (`cp -r "$d"/* staged_results/hits/`). That means the report picks these up with no
-    new Nextflow channel and no edit to `main.nf`'s `workflow {}` — which matters,
+    Written INTO `hits/`, from which `modules/generate_report.nf` stages each table the
+    report reads by name (`-name '*.nonsyntenic.tsv'`). That means the report picks these up
+    with no new Nextflow channel and no edit to `main.nf`'s `workflow {}` — which matters,
     because that method body is at the JVM 64 kB limit (CLAUDE.md §17).
     """
     if not records:

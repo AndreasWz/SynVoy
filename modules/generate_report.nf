@@ -57,14 +57,18 @@ process GENERATE_REPORT {
     done
 
     # Stage the per-genome tables the search writes into its hits/ folder: the §1x
-    # non-syntenic candidates, the genomes it could not search, and each genome's target
-    # policy (median flanking identity, blocks, window cut at a scaffold end). Each hits/
-    # folder arrives as hits/<n>/hits/<file>, one level deeper than the old loops looked, so
-    # none of them ever reached the report (bug hunt 2026-10-13). Their names carry the locus,
-    # so one flat folder is safe. The raw .m8 hits are not staged: they are large and the
-    # old copies of them were never read.
+    # non-syntenic candidates, the genomes it could not search, each genome's target policy
+    # (median flanking identity, blocks, window cut at a scaffold end) and the places of the
+    # genome-wide path (--goi_genome_wide_path; not staged until 2026-10-19, so the report had
+    # neither its genome_wide_path block nor its warning). One -name per table the report reads
+    # (generate_report.py, hits_scan; a test checks it). Each hits/ folder arrives as
+    # hits/<n>/hits/<file>, one level deeper than the old loops looked, so none of them ever
+    # reached the report (bug hunt 2026-10-13). Their names carry the locus, so one flat folder
+    # is safe. The raw .m8 hits are not staged: they are large and the old copies of them were
+    # never read.
     find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\
-        -o -name '*.target_policy.tsv' \\) -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
+        -o -name '*.target_policy.tsv' -o -name '*.genome_wide.tsv' \\) \\
+        -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
 
     # Stage structured region scores
     for f in \$(find -L scores -type f 2>/dev/null); do

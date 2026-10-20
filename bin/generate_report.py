@@ -1739,8 +1739,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "gff": (".gff", ".gff3"),
     })
     scores_scan = scan_dir_by_suffix(scores_dir, {"scores": (".scores.tsv",)})
-    # §1x candidates ride along in hits/ (staged wholesale by generate_report.nf),
-    # so they need no channel of their own.
+    # The search's per-genome tables ride along in hits/, so they need no channel of their
+    # own; generate_report.nf stages each by name (every suffix below but .m8).
     hits_scan = scan_dir_by_suffix(
         hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,),
                    "not_searched": (NOT_SEARCHED_SUFFIX,),
