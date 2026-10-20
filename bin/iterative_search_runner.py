@@ -6386,11 +6386,26 @@ BLOCK_TABLE_COLUMNS = ['genome', 'block', 'chrom', 'start', 'end', 'hood_start',
 BLOCK_TABLE_COUNTS = {'HIGH': 'n_high', 'MEDIUM': 'n_medium', 'AMBIGUOUS': 'n_ambiguous', 'LOW': 'n_low'}
 
 
+def next_block_number(used: set, wanted: int) -> int:
+    """The number of an extra search block of a genome (cross-chromosome GOI proxy, on-block
+    GOI proxy sweep, genome-wide window): ``wanted``, the number its kind gives it, when that
+    is free, else the next free number above it; it is added to ``used``, which starts as the
+    numbers of the genome's blocks, set(range(len(synteny_blocks))). A proxy or sweep number
+    counts the models found so far, so until 2026-10-19 an extra block that yielded no model
+    gave the next extra block of the same kind its number, and that block's E_syn, context
+    and table row replaced its own (its E_syn left SigBlocks)."""
+    n = int(wanted)
+    while n in used:
+        n += 1
+    used.add(n)
+    return n
+
+
 def record_block_row(args, block_idx, block, hood_start, hood_end, flanking_support,
                      collinear_support) -> None:
     """A searched block for blocks/<genome>.blocks.tsv (``genome_ctx['block_rows']``; E_syn
-    and the calls are added at the genome's end by _write_block_table). A later block with
-    the same number replaces it, as in block_esyn."""
+    and the calls are added at the genome's end by _write_block_table). Block numbers are
+    unique within a genome (extra blocks take theirs from next_block_number)."""
     ctx = getattr(args, 'genome_ctx', None)
     if ctx is None:
         return
@@ -6427,10 +6442,10 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
     with its header as soon as the search reaches the genome and again at the genome's end, as
     target_policy.tsv, but in a folder of its own: the module publishes it, and Nextflow
     publishes a file inside a declared output folder (hits/) only with that folder
-    (Nextflow 26.04, 2026-10-19). An extra block (cross-chromosome GOI proxy, on-block GOI proxy sweep) is
-    numbered from the number of models found so far, so one that yields no model shares its
-    number with the next extra block: its row then holds the later block, as block_esyn and
-    block_context do (seen in the code on 2026-10-19, not changed)."""
+    (Nextflow 26.04, 2026-10-19). Every block has a number of its own: an extra block
+    (cross-chromosome GOI proxy, on-block GOI proxy sweep) takes the next free one
+    (next_block_number). Until 2026-10-19 one that yielded no model shared its number with the
+    next extra block of the same kind, whose row, E_syn and context then replaced its own."""
     path = os.path.join(args.output_dir, 'blocks', f"{prefix}{genome_name}.blocks.tsv")
     ctx = ctx or {}
     blocks = ctx.get('block_rows') or {}
@@ -6788,9 +6803,11 @@ def _write_genome_wide_table(args, prefix, genome_name, places) -> None:
 
 
 def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, unique_id,
-                         threads_per_job, native_annot_index, prefix, first_idx):
+                         threads_per_job, native_annot_index, prefix, first_idx, block_numbers=None):
     """FINAL step 5 for one genome (see above): ``(genes, gff_lines)`` of the windows it
-    searched."""
+    searched. The window of the k-th kept place is numbered ``first_idx + k`` (a place without
+    a window leaves its number out); with ``block_numbers``, the genome's used numbers, a taken
+    number moves up to the next free one (next_block_number)."""
     ctx = args.genome_ctx
     n_sig = sum(1 for e in (ctx.get('block_esyn') or {}).values()
                 if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN)
@@ -6855,7 +6872,9 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
             continue
         block = {'chrom': p['chrom'], 'start': p['start'], 'end': p['end'], 'genes': [p['parent']],
                  'genes_count': 1, 'loci_count': p['hits'], 'genome_wide': True, 'window': (lo, hi)}
-        g, lines = process_region_block(first_idx + k, block, hits, genome_seqs, db_sequences,
+        number = (first_idx + k if block_numbers is None
+                  else next_block_number(block_numbers, first_idx + k))
+        g, lines = process_region_block(number, block, hits, genome_seqs, db_sequences,
                                         genome_name, args, unique_id, threads_per_job,
                                         native_annot_index=native_annot_index)
         genes.extend(g)
@@ -7222,6 +7241,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             )
             return _compose_gff_attrs(base_attrs, native)
 
+        # Numbers taken by this genome's blocks; an extra block (proxy, sweep, genome-wide
+        # window) takes the next free one, so no two blocks share a number (next_block_number).
+        _block_numbers = set(range(len(synteny_blocks)))
         for i, block in enumerate(synteny_blocks):
             block_genes, block_gff = process_region_block(
                 i,
@@ -7353,7 +7375,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                             f"{off_chrom}:{off_start}-{off_end} "
                             f"({best_bits:.0f} bits) — running full GOI search."
                         )
-                        _proxy_idx = len(synteny_blocks) + 1000 + len(all_genes)
+                        _proxy_idx = next_block_number(
+                            _block_numbers, len(synteny_blocks) + 1000 + len(all_genes))
                         _p_genes, _p_gff = process_region_block(
                             _proxy_idx,
                             _proxy_block,
@@ -7594,7 +7617,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                         f"{_lchrom}:{_lstart}-{_lend} ({_lbits:.0f} bits) outside "
                         f"processed regions — running full GOI search."
                     )
-                    _sw_idx = len(synteny_blocks) + 2000 + len(all_genes)
+                    _sw_idx = next_block_number(
+                        _block_numbers, len(synteny_blocks) + 2000 + len(all_genes))
                     _sw_genes, _sw_gff = process_region_block(
                         _sw_idx,
                         _sweep_block,
@@ -7619,7 +7643,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if getattr(args, 'goi_genome_wide_path', False):
             _gw_genes, _gw_gff = genome_wide_goi_pass(
                 args, hits, genome_seqs, base_db_sequences, genome_name, unique_id,
-                threads_per_job, native_annot_index, prefix, len(synteny_blocks) + 5000)
+                threads_per_job, native_annot_index, prefix, len(synteny_blocks) + 5000,
+                block_numbers=_block_numbers)
             all_genes.extend(_gw_genes)
             all_gff_lines.extend(_gw_gff)
 
