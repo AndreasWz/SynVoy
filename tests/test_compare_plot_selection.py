@@ -1,6 +1,8 @@
-"""scripts/compare_plot_selection.py (plot selection, step 2, 2026-10-19): what the figures
-show today (plot_synteny.select_target_genes) against the choice by the label's scoring
-(the call's own block first, then the blocks by E_syn), on a small run folder."""
+"""scripts/compare_plot_selection.py (plot selection, steps 2-3, 2026-10-19/21): what the
+figures show by the candidate regions (plot_synteny.select_target_genes) against the choice by
+the label's scoring (the call's own block first, then the blocks by E_syn) that the figures make
+with block tables (plot_synteny.choose_blocks), on a small run folder. Its default is the
+figures' rule (Calls+significant); FIRST_RULE is the rule the step-2 comparison ran."""
 import csv
 import importlib.util
 import os
@@ -9,6 +11,8 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 import iterative_search_runner as isr  # noqa: E402
+
+FIRST_RULE = ("--call_labels", "HIGH,MEDIUM,AMBIGUOUS,LOW", "--context_max_esyn", "inf")
 
 _spec = importlib.util.spec_from_file_location(
     "compare_plot_selection", os.path.join(ROOT, "scripts", "compare_plot_selection.py"))
@@ -74,7 +78,7 @@ def _compare(tmp_path, monkeypatch, capsys, *extra, with_table=True, models=()):
 
 
 def test_the_calls_block_first_then_the_blocks_by_esyn(tmp_path, monkeypatch, capsys):
-    (line,), rows = _compare(tmp_path, monkeypatch, capsys)
+    (line,), rows = _compare(tmp_path, monkeypatch, capsys, *FIRST_RULE)
     assert {m: (r["drawn_by"], r["why"]) for m, r in rows.items()} == {
         "GOI_q|G_fna_b1_l1_exon_ann": ("blocks", "call_block"),            # missed today
         "gene-F3|G_fna_b2_fl1_flank_ann": ("blocks", "predicted_no_call"),
@@ -88,7 +92,7 @@ def test_the_calls_block_first_then_the_blocks_by_esyn(tmp_path, monkeypatch, ca
 
 
 def test_the_cap_counts_the_call_blocks(tmp_path, monkeypatch, capsys):
-    (line,), rows = _compare(tmp_path, monkeypatch, capsys, "--max_regions", "3")
+    (line,), rows = _compare(tmp_path, monkeypatch, capsys, *FIRST_RULE, "--max_regions", "3")
     assert "gene-F4|G_fna_b3_fl1_flank_ann" not in rows
     assert rows["gene-F3|G_fna_b2_fl1_flank_ann"]["why"] == "predicted_no_call"
     assert "blocks drawn 3" in line
@@ -99,15 +103,29 @@ LOW_CALL = _model("GOI_q|G_fna_b3_l1_fallback", 1_520_001, 1_520_600, "goi", "LO
 
 
 def test_a_low_call_draws_its_block_unless_the_labels_say_otherwise(tmp_path, monkeypatch, capsys):
-    (_line,), rows = _compare(tmp_path / "a", monkeypatch, capsys, models=[LOW_CALL])
+    (_line,), rows = _compare(tmp_path / "a", monkeypatch, capsys, *FIRST_RULE, models=[LOW_CALL])
     assert rows["gene-F4|G_fna_b3_fl1_flank_ann"]["why"] == "call_block"
     assert rows["GOI_q|G_fna_b3_l1_fallback"]["why"] == "call_block"
-    (line,), rows = _compare(tmp_path / "b", monkeypatch, capsys, "--call_labels", "HIGH,MEDIUM,AMBIGUOUS",
-                             "--context_max_esyn", "0.1", models=[LOW_CALL])
+    # the default, the figures' rule: no LOW call block, no non-significant fill-up
+    (line,), rows = _compare(tmp_path / "b", monkeypatch, capsys, models=[LOW_CALL])
     assert {m: r["why"] for m, r in rows.items()} == {
         "GOI_q|G_fna_b1_l1_exon_ann": "call_block",
         "gene-F3|G_fna_b2_fl1_flank_ann": "predicted_no_call",
         "gene-F5|G_fna_rearranged": "in_drawn_span"}
+    assert "blocks drawn 3 (call_block 2, predicted_no_call 1, context 0)" in line
+
+
+FRAGMENT = _model("GOI_q|G_fna_b3_r1_fallback", 1_520_001, 1_520_300, "goi", "MEDIUM",
+                  ";ModelStatus=fragment;Bits=40;Eeff=1e-4;BlockEsyn=3")
+
+
+def test_a_fragment_call_draws_its_block_and_stays_hidden(tmp_path, monkeypatch, capsys):
+    (line,), rows = _compare(tmp_path / "a", monkeypatch, capsys, models=[FRAGMENT])
+    assert rows["gene-F4|G_fna_b3_fl1_flank_ann"]["why"] == "call_block"   # E_syn 3, its block
+    assert "GOI_q|G_fna_b3_r1_fallback" not in rows                       # hidden in both
+    assert "blocks drawn 4 (call_block 3, predicted_no_call 1, context 0)" in line
+    (line,), rows = _compare(tmp_path / "b", monkeypatch, capsys, "--hide_fragments", models=[FRAGMENT])
+    assert "gene-F4|G_fna_b3_fl1_flank_ann" not in rows
     assert "blocks drawn 3 (call_block 2, predicted_no_call 1, context 0)" in line
 
 
@@ -130,4 +148,7 @@ def test_the_figures_call_the_same_selection():
     src = open(os.path.join(ROOT, "bin", "plot_synteny.py")).read()
     assert src.count("_cap_goi_genes(parse_target_gff(gff_file, cap=False)") == 1
     assert ("genes, candidate_regions = select_target_genes(\n"
-            "            gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)") in src
+            "                gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)") in src
+    assert "genes, candidate_regions = select_target_genes_by_blocks(gff_file, genome_id, block_choice)" in src
+    cps_src = open(os.path.join(ROOT, "scripts", "compare_plot_selection.py")).read()
+    assert "ps.choose_blocks(" in cps_src and "ps.models_in_choice(" in cps_src

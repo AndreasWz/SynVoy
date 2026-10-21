@@ -411,6 +411,7 @@ The region score is **coverage-dominated**: `synteny_score = Q × C` with `Q = 0
 | `--flank_fallback_bp` | `1000000` | Maximum window (bp) rendered around distal targets |
 | `--scale_bar_len` | `auto` | Scale bar of the ribbon plot: `auto` = a round length about 120 px wide at the scale of the drawing, or a length in bp |
 | `--hide_goi_absent_tracks` | `false` | Leave genomes without any GOI call out of the figures. By default every searched genome is drawn |
+| `--plot_block_selection` | `false` | A target row shows the search's blocks chosen by the label's scoring (the blocks of HIGH, MEDIUM and AMBIGUOUS GOI calls, then the significant blocks, up to 6) instead of the candidate regions; see [PARAMETERS.md](PARAMETERS.md#plot_block_selection) |
 | `--plot_extra_args` | _(empty)_ | Extra options passed verbatim to `bin/plot_synteny.py`, for the figure controls below. Quote the whole value: `--plot_extra_args '--print_grid_numbers --no_fragment_variant'`. |
 
 Figure controls available through `--plot_extra_args`, or after the run with `scripts/replot.sh <outdir>/plot_inputs_synteny_block_locus_1 <new_folder> [options]`, which re-draws the figures of a finished run without re-running the search:

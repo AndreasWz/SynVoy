@@ -107,7 +107,7 @@ try:
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
-        parse_genetic_code_spec, low_complexity_mask,
+        parse_genetic_code_spec, low_complexity_mask, block_index_of,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -126,7 +126,7 @@ except ImportError:
         longest_collinear_run as _shared_longest_collinear_run,
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
-        parse_genetic_code_spec, low_complexity_mask,
+        parse_genetic_code_spec, low_complexity_mask, block_index_of,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -1004,19 +1004,6 @@ def slot_inverted(placed: Dict[int, Tuple[int, int]]) -> Optional[bool]:
 
 
 SLOT_COPY_LABELS = ('HIGH', 'MEDIUM', 'AMBIGUOUS')
-
-
-def block_index_of(model_id: str, genome_tag: str) -> Optional[int]:
-    """The search block a model of this genome was found in: N of
-    ``<parent>|<genome_tag>_b<N>_...`` (``genome_tag`` = the genome name with '.', '-' and
-    ' ' replaced by '_', as the model ids carry it). None for a model without a block
-    number (cross-chromosome flanking models) or of another genome."""
-    rest = (model_id or '').split('|', 1)
-    prefix = f"{genome_tag}_b"
-    if len(rest) < 2 or not rest[1].startswith(prefix):
-        return None
-    digits = rest[1][len(prefix):].split('_', 1)[0]
-    return int(digits) if digits.isdigit() else None
 
 
 def annotate_slot_copies(gff_lines: List[str], genome_tag: str,

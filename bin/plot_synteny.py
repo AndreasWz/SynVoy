@@ -28,8 +28,10 @@ Output
 
 import argparse
 import collections
+import contextlib
 import csv
 import colorsys
+import io
 import json
 import math
 import os
@@ -43,6 +45,8 @@ from urllib.parse import unquote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_bed, parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
 from sequence_utils import strip_species_qualifier  # noqa: E402
+from sequence_utils import block_index_of  # noqa: E402
+from synvoy_evalue import SIGNIFICANT_BLOCK_ESYN  # noqa: E402
 import synvoy_gene_names as _gnames  # noqa: E402
 import synvoy_grid as _grid  # noqa: E402
 import synvoy_legend as _legend  # noqa: E402
@@ -531,7 +535,7 @@ def _goi_priority_key(gene):
             _model_strength(gene))
 
 
-def parse_target_gff(gff_file, cap=True):
+def parse_target_gff(gff_file, cap=True, raw=False):
     """
     Parse a SynVoy target-genome GFF.
 
@@ -539,6 +543,8 @@ def parse_target_gff(gff_file, cap=True):
     Also collects CDS sub-features to build exon coordinate lists.
     Returns list of gene dicts with 'home_gene_id' from SynVoy_Parent.
     Deduplicates overlapping entries (same region annotated by different queries).
+    raw=True returns every row as read: no fragment hiding, dedup or GOI cap (the block
+    choice reads the fragment calls from it, choice_models).
     """
     genes = []
     cds_by_parent = defaultdict(list)  # mRNA_ID -> [(start, end), ...]
@@ -644,6 +650,9 @@ def parse_target_gff(gff_file, cap=True):
                 "inference_reason": attrs.get("InferenceReason", ""),
                 "gff_id":       gene_id,
             })
+
+    if raw:
+        return genes
 
     # Fragment GOI models go before dedup and the GOI cap: dedup always prefers a
     # GOI entry, so a fragment overlapping a flanking model would otherwise erase
@@ -5252,6 +5261,12 @@ def main():
                          "track (e.g. 'Homo sapiens') instead of 'Home genome'.")
     ap.add_argument("--query_bed",      default=None)
     ap.add_argument("--target_gffs",    nargs="*", default=[])
+    ap.add_argument("--block_tables",   nargs="*", default=[],
+                    help="The search's block tables (<locus>_<genome>.blocks.tsv). A target "
+                         "genome whose table is among them shows the blocks of its HIGH, "
+                         "MEDIUM and AMBIGUOUS GOI calls, then its significant blocks (E_syn "
+                         "<= 0.1), up to 6 blocks; one without keeps the candidate regions "
+                         "(--candidate_beds). Tables of other loci are ignored.")
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
@@ -5388,6 +5403,7 @@ def main():
         print(f"WARNING: low-quality assembly, marked {LOW_QUALITY_MARK} in the figures: "
               + ", ".join(sorted(_LOW_QUALITY_GENOMES)), file=sys.stderr)
 
+    args._block_choices = load_block_choices(args)
     _run_figures(args)
     # Fragment GOI models are hidden in the default figures; when any were hidden,
     # a '*_with_fragments' sibling of the ribbon plot and anchor grid shows them.
@@ -5580,6 +5596,188 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     return genes, candidate_regions
 
 
+# -- Rows chosen by the search's blocks (plot selection, step 3) --------------------
+# With --block_tables (blocks/<locus>/<locus>_<genome>.blocks.tsv of the search, copied into
+# plot_inputs_* by PLOT_SYNTENY when plot_block_selection is on) a target row shows the
+# blocks the label's scoring points to, rule "Calls+significant": the block of every HIGH,
+# MEDIUM and AMBIGUOUS GOI call, then the significant blocks (E_syn <= 0.1) without one, up
+# to 6 blocks in all. A LOW call draws no block of its own; a non-significant block without
+# a call is not drawn. A genome without its table keeps the candidate regions.
+BLOCK_RULE_CALL_LABELS = ("HIGH", "MEDIUM", "AMBIGUOUS")
+# Blocks per row, call blocks included. Fixed here: adaptive_max_regions, today's cap of the
+# candidate regions, is changed by presets, and no setting reaches a redraw.
+BLOCK_RULE_MAX_BLOCKS = 6
+COUNTED_LABELS = ("HIGH", "MEDIUM")
+
+
+class BlockChoice:
+    """The blocks one target row draws (choose_blocks): drawn {block: why}, why = call_block,
+    predicted_no_call (significant, no HIGH/MEDIUM GOI model) or context (a block drawn by a
+    wider rule of compare_plot_selection.py); predicted = the significant blocks without a
+    HIGH/MEDIUM GOI model; esyn {block: E_syn}; spans [(chrom, start0, end)] in which a model
+    without a block number is drawn: the neighbourhood (hood_start-hood_end) of a drawn block,
+    or the span of its own models when it has no table row (a genome-wide window)."""
+
+    def __init__(self, drawn, predicted, esyn, spans, table):
+        self.drawn, self.predicted, self.esyn = drawn, predicted, esyn
+        self.spans, self.table = spans, table
+
+
+def read_block_table(path):
+    """{block: row} of a search block table (esyn as a float); {} for a header-only table (a
+    genome without a block counts as having its table); None when there is no file."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, newline="") as fh:
+        rows = {}
+        for r in csv.DictReader(fh, delimiter="\t"):
+            r["esyn"] = float(r["esyn"])
+            rows[int(r["block"])] = r
+    return rows
+
+
+def block_table_name(home_bed, gff_file):
+    """The table of a target GFF: <locus>_<genome>.blocks.tsv, locus = the home BED's name
+    without synteny_block_, genome = the GFF's file name without .gff (its FASTA extension
+    stays: locus_1_X.fna.blocks.tsv for X.fna.gff), as the search names it."""
+    locus = os.path.basename(home_bed)
+    locus = locus[:-len(".bed")] if locus.endswith(".bed") else locus
+    locus = locus[len("synteny_block_"):] if locus.startswith("synteny_block_") else locus
+    return f"{locus}_{os.path.basename(gff_file)[:-len('.gff')]}.blocks.tsv"
+
+
+def genome_tag(gff_file):
+    """The genome as the model ids carry it: X.fna.gff -> X_fna."""
+    return (os.path.basename(gff_file)[:-len(".gff")]
+            .replace(".", "_").replace("-", "_").replace(" ", "_"))
+
+
+def choice_models(gff_file):
+    """The models the block choice reads: the row's models with fragments hidden, as the
+    default figures parse them, plus every fragment GOI row as read (no dedup). The choice
+    is the same for the default figures and the '_with_fragments' ones."""
+    global _SHOW_GOI_FRAGMENTS
+    shown, count = _SHOW_GOI_FRAGMENTS, _HIDDEN_FRAGMENT_COUNT[0]
+    _SHOW_GOI_FRAGMENTS = False
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            genes = parse_target_gff(gff_file, cap=False)
+    finally:
+        _SHOW_GOI_FRAGMENTS, _HIDDEN_FRAGMENT_COUNT[0] = shown, count
+    return genes + [g for g in parse_target_gff(gff_file, raw=True) if _is_fragment_goi(g)]
+
+
+def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
+                  call_labels=BLOCK_RULE_CALL_LABELS, context_max_esyn=None):
+    """The blocks a target row draws (BlockChoice), from its models `genes` (choice_models)
+    and its block `table` (read_block_table; None: none, so only step 1, with E_syn from the
+    models' BlockEsyn):
+    1. the block of every GOI model whose label is in call_labels, best call first
+       (_goi_priority_key);
+    2. the other blocks of the table that hold a model, by E_syn ascending, while fewer than
+       max_blocks are drawn: those the search calls significant (its `significant` column),
+       or with context_max_esyn those with E_syn <= context_max_esyn.
+    The defaults are the figures' rule; compare_plot_selection.py tries others."""
+    block_of = {g["gff_id"]: block_index_of(g["gff_id"], tag) for g in genes}
+    by_block = defaultdict(list)
+    for g in genes:
+        by_block[block_of[g["gff_id"]]].append(g)
+    counted = {b for b, gs in by_block.items()
+               if any(_is_goi_target_gene(g) and g["confidence"] in COUNTED_LABELS for g in gs)}
+    blocks = set(table or ()) | {b for b in by_block if b is not None}
+    esyn = {}
+    for b in blocks:
+        if table is not None and b in table:
+            esyn[b] = table[b]["esyn"]
+        else:
+            values = [g["block_esyn"] for g in by_block.get(b, []) if g.get("block_esyn") is not None]
+            esyn[b] = min(values) if values else None
+
+    def significant(b):
+        if table is not None and b in table:
+            return str(table[b].get("significant", "")).strip() == "1"
+        return esyn[b] is not None and esyn[b] <= SIGNIFICANT_BLOCK_ESYN
+
+    predicted = {b for b in blocks if significant(b) and b not in counted}
+    drawn = {}
+    calls = sorted((g for g in genes if _is_goi_target_gene(g) and g["confidence"] in call_labels),
+                   key=_goi_priority_key, reverse=True)
+    for g in calls:                                                     # step 1
+        b = block_of[g["gff_id"]]
+        if b is not None and b not in drawn:
+            drawn[b] = "predicted_no_call" if b in predicted else "call_block"
+    if table is not None:                                               # step 2
+        for e, b in sorted((esyn[b], b) for b in table if b not in drawn and by_block.get(b)):
+            if len(drawn) >= max_blocks:
+                break
+            if context_max_esyn is None:
+                if not significant(b):
+                    continue
+            elif e > context_max_esyn:
+                break
+            drawn[b] = "predicted_no_call" if b in predicted else "context"
+    spans = []
+    for b in drawn:
+        if table is not None and b in table:
+            r = table[b]
+            spans.append((r["chrom"], int(r["hood_start"]), int(r["hood_end"])))
+        else:
+            for chrom in sorted({g["chrom"] for g in by_block.get(b, [])}):
+                cg = [g for g in by_block[b] if g["chrom"] == chrom]
+                spans.append((chrom, min(g["start"] for g in cg) - 1, max(g["end"] for g in cg)))
+    return BlockChoice(drawn, predicted, esyn, spans, table)
+
+
+def models_in_choice(genes, tag, choice, call_labels=BLOCK_RULE_CALL_LABELS):
+    """{model id: (why, block)} of the models a row draws for a BlockChoice: every model of a
+    drawn block; a GOI model without a block number whose label is in call_labels; any other
+    model without a block number (cross-chromosome flanking recovery) that lies inside one of
+    the choice's spans (in_drawn_span)."""
+    chosen = {}
+    for g in genes:
+        b = block_index_of(g["gff_id"], tag)
+        if b is not None and b in choice.drawn:
+            chosen[g["gff_id"]] = (choice.drawn[b], b)
+        elif b is None and _is_goi_target_gene(g) and g["confidence"] in call_labels:
+            chosen[g["gff_id"]] = ("call_block", None)
+        elif b is None and any(c == g["chrom"] and s <= g["start"] - 1 and g["end"] <= e
+                               for c, s, e in choice.spans):
+            chosen[g["gff_id"]] = ("in_drawn_span", None)
+    return chosen
+
+
+def load_block_choices(args):
+    """{target GFF: BlockChoice} for the genomes whose table is among --block_tables; None
+    without --block_tables (every row keeps the candidate regions). Made once, before the
+    fragment variants are drawn. The console names each genome without its table."""
+    if not args.block_tables:
+        print("[plot] no block tables (--block_tables): rows show the candidate regions")
+        return None
+    tables = {os.path.basename(p): p for p in args.block_tables}
+    choices = {}
+    for gff_file in args.target_gffs:
+        genome_id = clean_genome_name(os.path.basename(gff_file).replace(".gff", ""))
+        name = block_table_name(args.home_bed, gff_file)
+        if name not in tables:
+            print(f"[plot] {genome_id}: no block table {name}: its row shows the candidate regions")
+            continue
+        choices[gff_file] = choose_blocks(choice_models(gff_file), genome_tag(gff_file),
+                                          read_block_table(tables[name]))
+    return choices
+
+
+def select_target_genes_by_blocks(gff_file, genome_id, choice):
+    """The genes one target row shows under the block rule, and the spans they were chosen
+    from (the row's chromosome label falls back to the first): the models of this figure
+    variant (fragments hidden or shown) that models_in_choice keeps."""
+    genes_all = parse_target_gff(gff_file, cap=False)
+    chosen = models_in_choice(genes_all, genome_tag(gff_file), choice)
+    genes = [g for g in genes_all if g["gff_id"] in chosen]
+    drawn = ", ".join(f"b{b} {why}" for b, why in sorted(choice.drawn.items())) or "none"
+    print(f"[plot] {genome_id}: blocks drawn: {drawn}; {len(genes)} models")
+    return genes, choice.spans
+
+
 def _run_figures(args, show_fragments=False, suffix=""):
     """Build the tracks and write every figure for one fragment-display variant.
 
@@ -5740,8 +5938,12 @@ def _run_figures(args, show_fragments=False, suffix=""):
     for gff_file in args.target_gffs:
         genome_id = clean_genome_name(
             os.path.basename(gff_file).replace(".gff", ""))
-        genes, candidate_regions = select_target_genes(
-            gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)
+        block_choice = (getattr(args, "_block_choices", None) or {}).get(gff_file)
+        if block_choice is not None:
+            genes, candidate_regions = select_target_genes_by_blocks(gff_file, genome_id, block_choice)
+        else:
+            genes, candidate_regions = select_target_genes(
+                gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])

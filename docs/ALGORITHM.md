@@ -1051,7 +1051,8 @@ the new label will use (`bin/synvoy_evalue.py`):
 
 Every block searched, with or without a call, is written with its E_syn at full precision,
 its neighbourhood and the final labels of its GOI models to `blocks/<locus>/<genome>.blocks.tsv`
-(since 2026-10-19; it changes no call).
+(since 2026-10-19; it changes no call). With `--plot_block_selection true` the figures choose
+from it (§8).
 
 **Copies in the slot** (`--report_copies_in_slot`, off; the `local_family` module turns it
 on). After the genome's final labels, every GOI model of a block that has a slot gets
@@ -1087,7 +1088,10 @@ preset module sets it.
 
 `cluster_grs.py` scores candidate regions per genome. They are used for the figures
 and for the strong-synteny rescue ([§9](#9-rescue-passes)). They do not change the
-confidence of a gene model.
+confidence of a gene model. With `--plot_block_selection true` (off by default) a figure row
+shows the search's blocks instead: the blocks of the HIGH, MEDIUM and AMBIGUOUS GOI calls,
+then the significant blocks without a counted call by E_syn, up to 6 (fragment calls take
+part, hidden from view); a genome without its block table keeps the regions.
 
 **Clusters.** The genome-wide hits are put into one fixed order and clustered: a hit
 joins the cluster when it starts less than the block gap of the search for this

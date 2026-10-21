@@ -662,6 +662,20 @@ def merge_fastas(input_paths: List[str], output_path: str, deduplicate: bool = T
     write_fasta(records, output_path)
 
 
+def block_index_of(model_id: str, genome_tag: str) -> Optional[int]:
+    """The search block a model of this genome was found in: N of
+    ``<parent>|<genome_tag>_b<N>_...`` (``genome_tag`` = the genome name with '.', '-' and
+    ' ' replaced by '_', as the model ids carry it). None for a model without a block
+    number (cross-chromosome flanking models) or of another genome. Here, not in the
+    search, so that the figures read it without importing the search."""
+    rest = (model_id or '').split('|', 1)
+    prefix = f"{genome_tag}_b"
+    if len(rest) < 2 or not rest[1].startswith(prefix):
+        return None
+    digits = rest[1][len(prefix):].split('_', 1)[0]
+    return int(digits) if digits.isdigit() else None
+
+
 # =============================================================================
 # BED PARSING
 # =============================================================================

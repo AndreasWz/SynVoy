@@ -832,6 +832,13 @@ By default every searched genome is drawn in every figure, also one in which no 
 
 Set it to `true` to leave these genomes out of the figures (the former default; on 26 finished loci it removed 16 of 90 searched genomes from the figures without a word in them). They stay in `synvoy_report.json` either way.
 
+### `plot_block_selection`
+**Type:** Boolean | **Default:** `false` (since 2026-10-21)
+
+What a target genome's row shows. With `false` the figures show the candidate regions of the region scorer (`regions/<locus>/<genome>.scores.tsv`, at most `adaptive_max_regions`). With `true` they show the search's own blocks (`blocks/<locus>/<genome>.blocks.tsv`), chosen by the label's scoring: the block of every HIGH, MEDIUM and AMBIGUOUS GOI call, then the significant blocks (E_syn <= 0.1, the predicted places) that hold no counted call, by E_syn, up to 6 blocks in all. A LOW call draws no block of its own (its model is drawn when its block is drawn for another reason), and a block that is not significant and holds no call is not drawn. Fragment GOI models take part in the choice and stay hidden in the default figures, so the `*_with_fragments` figures show the same blocks. A genome whose rule leaves nothing to draw keeps its row, empty.
+
+The tables are copied into `plot_inputs_<locus>/`, so `scripts/replot.sh` and `scripts/replot_run.sh` draw a re-draw of such a run by the same rule; a run without tables in that folder keeps the candidate regions, and only the console says so. The cap of 6 and the significance threshold are fixed in the figure code (presets change `adaptive_max_regions`, and no setting reaches a re-draw). A run made with `false` (or between 2026-10-19 and 2026-10-21) has its tables in `blocks/` only; to draw it by its blocks: `scripts/replot_run.sh <run> --block_tables <run>/blocks/*/*.blocks.tsv` (each locus takes its own tables).
+
 ### `plot_extra_args`
 **Type:** String | **Default:** `''`
 

@@ -13,6 +13,7 @@ process PLOT_SYNTENY {
     val home_species
     path genome_qc   // genome_qc_summary.json: a target that failed the check is marked in the figures
     path report      // synvoy_report.json (or NO_REPORT): what the report drops, the GFFs and figures leave out
+    path block_tables   // the search's <locus>_<genome>.blocks.tsv of this locus ([] when none)
 
     output:
     path "*_synteny_plot.html", emit: plot
@@ -55,6 +56,10 @@ process PLOT_SYNTENY {
     def species_arg = species_map.name != 'NO_SPECIES_MAP' ? "--species_map ${species_map}" : ""
     def qc_arg = genome_qc.name != 'NO_GENOME_QC' ? "--genome_qc ${genome_qc}" : ""
     def hide_absent_arg = params.hide_goi_absent_tracks.toString().toBoolean() ? "--hide_goi_absent" : ""
+    // plot_block_selection: the block tables choose what a target row shows. They are copied
+    // beside the plot inputs, where a re-draw (scripts/replot.sh) finds them; off, none is.
+    def tables_str = (params.plot_block_selection.toString().toBoolean() && block_tables) ? block_tables.join(' ') : ''
+    def tables_arg = tables_str ? "--block_tables \$block_tables_in" : ""
     def plot_extra_args = params.plot_extra_args ?: ''
     
     """
@@ -94,6 +99,11 @@ process PLOT_SYNTENY {
     if [ -n "${cands_str}" ]; then
         cp ${cands_str} "\$inputs_dir/" || true
     fi
+    block_tables_in=""
+    if [ -n "${tables_str}" ]; then
+        cp ${tables_str} "\$inputs_dir/"
+        for f in ${tables_str}; do block_tables_in="\$block_tables_in \$inputs_dir/\$(basename "\$f")"; done
+    fi
     if [ -n "${homo_str}" ]; then
         cp ${homo_str} "\$inputs_dir/" || true
     fi
@@ -112,6 +122,7 @@ process PLOT_SYNTENY {
         --home_bed $home_bed \\
         --home_gff "\$FINAL_HOME_GFF" \\
         $gffs_arg \\
+        $tables_arg \\
         $cands_arg \\
         $homo_arg \\
         --tree $tree \\

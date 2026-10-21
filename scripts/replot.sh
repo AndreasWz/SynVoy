@@ -18,6 +18,12 @@
 #  --home_species labels the home row (the pipeline passes it; without it the row
 #  reads "Home genome").
 #
+#  Block tables: a run made with --plot_block_selection true keeps the search's
+#  <locus>_<genome>.blocks.tsv in the folder; they are passed on, so the rows show
+#  the same blocks as the run's figures. Without them the rows show the candidate
+#  regions. To draw an earlier run by its blocks, pass the tables of its blocks/
+#  folder: --block_tables <run>/blocks/locus_<N>/*.blocks.tsv
+#
 #  Gene names: the run's own names table (<plot_inputs_dir>/gene_names.tsv) is
 #  reused, so the labels are those of the run. A run without that table, or one
 #  whose figures were drawn offline, gets its names looked up at NCBI Gene (one
@@ -30,7 +36,7 @@
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-    sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 
@@ -46,6 +52,7 @@ home_beds=("$IN"/synteny_block_*.bed)
 query_beds=("$IN"/locus_*.bed)
 trees=("$IN"/*tree.nwk)
 homology=("$IN"/*.homology.tsv)
+block_tables=("$IN"/*.blocks.tsv)
 regions=("$IN"/*.regions.bed)
 target_gffs=()
 home_gff=""
@@ -69,6 +76,7 @@ args=(--home_bed "$home_bed" --target_gffs "${target_gffs[@]}")
 [ -n "$home_gff" ]          && args+=(--home_gff "$home_gff")
 [ ${#homology[@]} -ge 1 ]   && args+=(--homology_tsvs "${homology[@]}")
 [ ${#regions[@]} -ge 1 ]    && args+=(--candidate_beds "${regions[@]}")
+[ ${#block_tables[@]} -ge 1 ] && args+=(--block_tables "${block_tables[@]}")
 [ ${#trees[@]} -ge 1 ]      && args+=(--tree "${trees[0]}")
 [ -f "$IN/species_mapping.tsv" ] && args+=(--species_map "$IN/species_mapping.tsv")
 [ -f "$IN/genome_qc_summary.json" ] && args+=(--genome_qc "$IN/genome_qc_summary.json")

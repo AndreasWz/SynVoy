@@ -239,7 +239,9 @@ terms were redefined then.
 **`blocks/<locus>/<genome>.blocks.tsv`** — the search's own view of the same question, one
 row per synteny block it searched in that genome, also one without a call (since
 2026-10-19; a genome the search reached without a block has the header only). The region
-scores above are computed afterwards, apart from it; nothing reads this table yet.
+scores above are computed afterwards, apart from it. With `--plot_block_selection true`
+(since 2026-10-21) the figures choose what a target row shows from this table, and a copy of
+each table is kept in `plot_inputs_<locus>/` for a re-draw.
 
 | Column | Meaning |
 |---|---|
@@ -441,6 +443,12 @@ cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 To re-draw every locus of a run at once, also one made before May 2026 whose plot inputs
 use older names: `scripts/replot_run.sh results/my_run [options]` (figures in
 `results/my_run/figures_redrawn_<date>/`, with a `REDRAWN.txt` that names both versions).
+
+A re-draw takes the rule the run took: a plot-input folder with block tables
+(`--plot_block_selection true`) is drawn by the blocks, one without by the candidate
+regions. To draw a run whose tables are only in `blocks/` by its blocks, pass them:
+`scripts/replot_run.sh results/my_run --block_tables results/my_run/blocks/*/*.blocks.tsv`
+(each locus takes its own tables).
 
 ---
 

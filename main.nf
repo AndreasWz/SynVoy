@@ -1483,6 +1483,11 @@ workflow {
             .map { locus_id, tsv -> tuple(locus_id, tsv) }
             .groupTuple()  // [locus_id, [tsv1, tsv2, ...]]
 
+        blocks_by_locus_ch = ITERATIVE_SEARCH.out.blocks
+            .transpose()
+            .map { locus_id, table -> tuple(locus_id, table) }
+            .groupTuple()  // [locus_id, [blocks.tsv, ...]]
+
         cluster_by_locus_ch = CLUSTER_REGIONS.out.bed
             .map { genome_name, payload, locus_id, bed -> tuple(locus_id, genome_name, bed) }
             .groupTuple()  // produces [locus_id, [names], [beds]]
@@ -1501,6 +1506,7 @@ workflow {
             .join(tree_by_locus_ch)                       // [..., tree]
             .join(gffs_by_locus_ch, remainder: true)      // [..., tree, gffs_or_null]
             .join(tsvs_by_locus_ch, remainder: true)      // [..., tree, gffs_or_null, tsvs_or_null]
+            .join(blocks_by_locus_ch, remainder: true)    // [..., tsvs_or_null, tables_or_null]
             .map { entry ->
                 def locus_id = entry[0]
                 def home_bed = entry[1]
@@ -1510,7 +1516,8 @@ workflow {
                 def tree = entry[5]
                 def gffs = entry[6] ?: []
                 def tsvs = entry[7] ?: []
-                tuple(home_bed, query_bed, names, beds, gffs, tsvs, tree)
+                def block_tables = entry[8] ?: []
+                tuple(home_bed, query_bed, names, beds, gffs, tsvs, tree, block_tables)
             }
 
         plot_inputs.multiMap { item ->
@@ -1520,6 +1527,7 @@ workflow {
             target_gffs: item[4]
             homology_tsvs: item[5]
             tree: item[6]
+            block_tables: item[7]
         }.set { plot_inputs_split }
 
         // Final Reporting
@@ -1565,7 +1573,8 @@ workflow {
             species_map_ch,                   // species_mapping.tsv (already a value channel)
             home_species_for_sort_ch,         // home species label of the home row
             qc_summary_ch,                    // genome quality summary (value channel)
-            ADJUDICATE_AND_REPORT.out.report_for_plot   // drawn after the report: leave out what it drops
+            ADJUDICATE_AND_REPORT.out.report_for_plot,  // drawn after the report: leave out what it drops
+            plot_inputs_split.block_tables    // the search's block tables (used with plot_block_selection)
         )
 
         PLOT_SYNTENY.out.plot.view { plot ->
