@@ -17,7 +17,7 @@ diffs them and fails CI on drift.
 
 Resolution order (later wins):
   1. defaults from --defaults <json>          (passed in from nextflow.config params)
-  2. preset modules (--modules auto or a list; select_modules.py), merged by key class
+  2. preset modules (--modules auto or a list; select_modules.py): one rule per key
   3. preset overrides from PRESET_OVERRIDES[preset]: the chooser's preset under
      --modules legacy (the default), or --preset_override in any mode
   4. values the user set themselves           (detected via --shipped_config)
@@ -26,6 +26,14 @@ Resolution order (later wins):
 Under --modules legacy the module triggers are evaluated and recorded only
 (modules_would_fire); the preset is applied exactly as before the modules existed, and
 its nominal module set is listed in modules_applied (reason "legacy: <preset>").
+
+Besides the settings, the output records (any mode): ``profile``, the design quantities
+the module rules read (select_modules.design_profile); ``derivation``, per key that a
+module rule, the preset or the user set, its value, the default and what set it (for a
+module rule also the formula and its inputs: "goi_candidate_regions_per_query 4 =
+max(2, c + 1), c = 3 (A1)"); and ``constraints``, the checks of how the settings must
+relate to each other. A violation that only the module rules made is a bug: the script
+exits 2 and the run stops before the search.
 
 Step 3 exists because the --defaults map is the launch-time ``params``: it
 already contains whatever the user passed on the command line, in a params
@@ -163,6 +171,14 @@ def load_shipped_defaults(config_path: str, keys) -> dict:
     return found
 
 
+def _typed(text):
+    """A shipped default as written in nextflow.config, typed for the JSON record."""
+    kind, value = _norm(text)
+    if kind == "num":
+        return int(value) if value.is_integer() and re.fullmatch(r"-?\d+", str(text).strip()) else value
+    return value
+
+
 def detect_user_set(defaults: dict, shipped: dict) -> dict:
     """Keys whose launch-time value differs from the shipped default, i.e. values
     the user chose (CLI flag, params file, -c config, or a profile)."""
@@ -175,7 +191,9 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             user_overrides: dict | None = None,
             user_set: dict | None = None,
             modules_spec: object = "legacy",
-            features: dict | None = None) -> dict:
+            features: dict | None = None,
+            design: dict | None = None,
+            shipped: dict | None = None) -> dict:
     """Apply the resolution order (defaults < modules < preset < user-set < user CLI) and
     return a flat ``{settings: ..., preset_applied: ..., source: ...}`` result.
 
@@ -183,26 +201,32 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
     ``user_set`` | ``user_cli``. ``user_set_kept`` lists the keys where a value the user
     set was kept although a module or the applied preset wanted a different one.
     ``modules_spec`` is the --modules value (ValueError when it is not one); ``features``
-    the flat dict of select_modules.flat_features."""
+    the flat dict of select_modules.flat_features; ``design`` the profile of
+    select_modules.design_profile (default: the profile of the features alone);
+    ``shipped`` the defaults of nextflow.config, for the derivation of user-set keys."""
     settings = dict(defaults)
     source = {k: "default" for k in defaults}
     preset_applied: str | None = None
     apply_reason = ""
     feats = features or {}
+    prof = design if design is not None else select_modules.design_profile(feats)
     mode, chosen, fired = select_modules.choose(modules_spec, feats)
     modules_applied: list = []
     wanted: dict = {}
+    derivation: dict = {}
+    rules_on: list = []
 
     if disable_auto_apply:
         apply_reason = "auto_apply_preset=false → defaults flow through"
     else:
         if mode in ("auto", "list") and chosen:
-            by_id = {m.id: m for m in select_modules.MODULES}
-            mod_settings, mod_source = select_modules.merge([by_id[d["id"]] for d in chosen], feats)
+            rules_on = [d["id"] for d in chosen]
+            mod_settings, mod_source, mod_derivation = select_modules.apply_rules(rules_on, prof)
             for k, v in mod_settings.items():
                 source[k] = mod_source[k] if k in settings else mod_source[k] + "(new)"
                 settings[k] = v
                 wanted[k] = v
+                derivation[k] = dict(mod_derivation[k], default=defaults.get(k))
             modules_applied = chosen
         if preset_override:
             if preset_override not in VALID_PRESETS:
@@ -241,6 +265,8 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
                 source[k] = f"preset:{preset_applied}"
             settings[k] = v
             wanted[k] = v
+            derivation[k] = {"value": v, "default": defaults.get(k), "rule": f"preset:{preset_applied}",
+                             "line": f"{k} {v} (preset {preset_applied})"}
         if mode == "legacy":
             by_id = {m.id: m for m in select_modules.MODULES}
             modules_applied = [{"id": i, "name": by_id[i].name, "reason": f"legacy: {preset_applied}"}
@@ -254,11 +280,20 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
                 user_set_kept.append(k)
             settings[k] = v
             source[k] = "user_set"
+            derivation[k] = {"value": v, "default": _typed((shipped or {}).get(k)), "rule": "user_set",
+                             "line": f"{k} {v} (set by the user)"}
+            if k in wanted:
+                derivation[k]["wanted"] = wanted[k]
 
     if user_overrides:
         for k, v in user_overrides.items():
             settings[k] = v
             source[k] = "user_cli"
+            derivation[k] = {"value": v,
+                             "default": _typed(shipped[k]) if k in (shipped or {}) else defaults.get(k),
+                             "rule": "user_cli", "line": f"{k} {v} (--user_override)"}
+            if k in wanted:
+                derivation[k]["wanted"] = wanted[k]
 
     legacy_pick = (auto_preset or {}).get("preset") if isinstance(auto_preset, dict) else None
     return {
@@ -273,6 +308,9 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
         "legacy_preset": legacy_pick,
         "features": feats,
         "home_copies": select_modules.home_copies(feats),
+        "profile": prof,
+        "derivation": derivation,
+        "constraints": select_modules.check_constraints(settings, source, prof, rules_on),
     }
 
 
@@ -322,6 +360,9 @@ def main() -> None:
                     help="Preset modules: legacy (default: the old preset, triggers recorded "
                          "only), auto, none, a list (short_query,local_family) or deltas "
                          "(auto,-dispersed_family). See select_modules.py")
+    ap.add_argument("--n_flanking_genes", type=int, default=None,
+                    help="n_flanking_genes of the run: the profile's n (recorded; no rule reads "
+                         "it yet)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -361,6 +402,7 @@ def main() -> None:
     auto_preset = _read_json_or_empty(args.auto_preset)
 
     user_set: dict[str, object] = {}
+    shipped: dict = {}
     if args.shipped_config:
         shipped = load_shipped_defaults(args.shipped_config, defaults.keys())
         if not shipped:
@@ -369,8 +411,9 @@ def main() -> None:
                   f"from defaults, so a preset may override them", file=sys.stderr)
         user_set = detect_user_set(defaults, shipped)
 
+    goi_info = _read_json_or_empty(args.goi_info)
     features = select_modules.flat_features(_read_json_or_empty(args.hit_profile),
-                                            _read_json_or_empty(args.goi_info),
+                                            goi_info,
                                             _read_json_or_empty(args.home_context))
     try:
         result = resolve(
@@ -382,6 +425,8 @@ def main() -> None:
             user_set=user_set,
             modules_spec=args.modules,
             features=features,
+            design=select_modules.design_profile(features, goi_info, args.n_flanking_genes),
+            shipped=shipped,
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -395,10 +440,27 @@ def main() -> None:
     fired = ", ".join(f"{d['id']} {d['name']} ({d['reason']})" for d in result["modules_would_fire"])
     print(f"MODULES: mode {result['modules_mode']}; applied: {applied or 'none'}; "
           f"triggers firing: {fired or 'none'}")
+    for k in sorted(result["derivation"]):
+        if str(result["source"].get(k, "")).startswith("module:"):
+            print(f"RULE: {result['derivation'][k]['line']}")
     if result["user_set_kept"]:
         kept = ", ".join(f"{k}={result['settings'][k]}" for k in result["user_set_kept"])
         print(f"EFFECTIVE-PRESET: kept {len(result['user_set_kept'])} user-set value(s) "
               f"over {result['preset_applied'] or 'the modules'}: {kept}")
+    errors = []
+    for c in result["constraints"]:
+        if c["applies"] and not c["ok"]:
+            msg = f"constraint {c['id']} violated ({c['doc']}): {c['detail']}"
+            if c["on_violation"] == "stop":
+                errors.append(msg)
+            else:
+                print(f"WARN: {msg}; kept, because a value the user set (or a default) is involved",
+                      file=sys.stderr)
+    if errors:
+        for msg in errors:
+            print(f"ERROR: {msg}. The module rules made it: a bug, the run stops before the search.",
+                  file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

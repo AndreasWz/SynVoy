@@ -48,13 +48,16 @@ def test_b1_sets_the_engine_keys_and_legacy_does_not():
         assert legacy["settings"][k] == DEFAULTS[k], k
 
 
-def test_the_most_permissive_value_wins_when_two_modules_set_one():
-    a = sm.Module("Z1", "z1", "", "", lambda f: (True, ""), lambda f: {"window_tblastn_word_size": 2,
-                                                                    "miniprot_short_orf_max_len": 80})
-    b = sm.Module("Z2", "z2", "", "", lambda f: (True, ""), lambda f: {"window_tblastn_word_size": 3,
-                                                                    "miniprot_short_orf_max_len": 100})
-    settings, _ = sm.merge([a, b], {})
-    assert settings == {"window_tblastn_word_size": 2, "miniprot_short_orf_max_len": 100}
+def test_each_engine_key_is_one_rule_of_b1():
+    """One rule per key (profile handoff, stage 1): the value is B1's formula, whatever other
+    modules are applied with it."""
+    for k, v in B1_KEYS.items():
+        rule = sm.RULES_BY_KEY[k]
+        assert rule.owners == ("B1",) and rule.formula({}, frozenset({"B1"})) == v, k
+    every = [sm.module(m) for m in ("A1", "A2", "B1", "B2", "B3", "C1")]
+    settings, source = sm.merge(every, {"query_len": 50, "primary_copies": 3.0})
+    assert {k: settings[k] for k in B1_KEYS} == B1_KEYS
+    assert {source[k] for k in B1_KEYS} == {"module:B1"}
 
 
 def test_tblastn_finding_options_only_away_from_the_defaults():

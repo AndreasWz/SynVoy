@@ -46,6 +46,14 @@ workflow RESOLVE_SETTINGS {
             def shown = parsed.modules_mode == 'legacy' ? 'triggers firing (recorded only)' : 'applied'
             def mods = parsed.modules_mode == 'legacy' ? parsed.modules_would_fire : parsed.modules_applied
             log.info "[INFO] modules (${parsed.modules_mode}), ${shown}: ${fmt.call(mods)}"
+            // What each module rule set and from what (select_modules.RULES); none under legacy.
+            def ruled = (parsed.derivation ?: [:]).findAll { k, d -> (parsed.source ?: [:])[k]?.toString()?.startsWith('module:') }
+            if (ruled) {
+                log.info "[INFO] settings from the module rules: ${ruled.collect { k, d -> d.line }.sort().join('; ')}"
+            }
+            (parsed.constraints ?: []).findAll { con -> con.applies && !con.ok }.each { con ->
+                log.warn "constraint ${con.id} (${con.doc}): ${con.detail}; kept, a value you set or a default is involved"
+            }
             parsed.settings as Map
         }
         .first()

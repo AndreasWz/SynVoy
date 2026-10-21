@@ -243,14 +243,27 @@ hold for every module:
 - **A module never moves the label.** It may widen the search, tighten the inputs of the
   specificity test, change how completeness is measured, or add report labels; the
   judge's significance levels (§7.8) are constants, not parameters.
-- **Every key belongs to a class with a merge rule** (`KEY_CLASS`), so the order of the
-  modules never matters: the anchor filter `goi_relative_evalue` takes the largest E (it
-  keeps the most relatives out of the anchors); a search-breadth key takes the most
-  permissive value and then a fixed cap (`goi_candidate_regions_per_query` ≤ 10); a
-  report switch is on when any module turns it on; a specificity guard takes the stricter
-  value (`blastp_cbs` over `sw`); the region caps and the model-status
-  bounds may be written by one module only. `n_flanking_genes` and `expand_goi_similar`
-  are forbidden to modules, and so is `decoy_mode`, a run-level option.
+- **One rule per parameter** (`RULES`, since 2026-10-20). Every parameter a module may
+  change has exactly one rule: its owners (the modules that switch it on), one formula of
+  the run's design quantities, a cap, and the evidence for it. The rule applies when any
+  of its owners is applied, so two modules can never disagree about a key and their order
+  never matters. The design quantities are computed once from the features
+  (`design_profile`): `c` the home copies (as defined for A1 above), `R` the reach of the
+  home array in genes (the largest |rank| of a family member in the flank walk, 0 without
+  one), `Fam` the home loci of the family, `Lq` the query length, `Lx` the longest real
+  exon of the home gene, `Lpiece` = min(`Lq`, `Lx`), `Lcore` the query without its signal
+  peptide and GPI tail, `nx` the real exons of the home gene, and `n` =
+  `n_flanking_genes`. Today's rules give the values in the table above: the A1 rule for
+  `goi_candidate_regions_per_query` is max(2, `c` + 1), capped at 10, and every other rule
+  is a constant. No rule may write a switch (a whole step on or off, such as `decoy_mode`,
+  a run-level option, or `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`,
+  or the module mechanism itself (`FORBIDDEN_FOR_MODULES`).
+- **Constraints** (`check_constraints`, after the rules and the values the user set): with
+  A1, the GOI loci kept per query reach `c` + 1 within the cap (a cap that binds is named);
+  a value a rule set stays within its cap; the ModelStatus fragment bound lies below the
+  complete bound. A violation that the rules alone made is a bug and stops the run before
+  the search; one that involves a value the user set is a warning, and the user's value is
+  kept.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
   under `legacy`, or `--preset_override` in any mode) < a value the user set at launch
   (a `-profile preset_X` included) < `--user_override`.
@@ -271,7 +284,11 @@ The chosen values travel to the later steps as a `settings` map of 22 parameters
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
 the modules applied and why, the triggers that fire, the source of every value and the
-features; the report copies it as `run_settings`.
+features, and the report copies these as `run_settings`. The same file also holds the
+design quantities (`profile`), the derivation of every value a rule, the preset or the
+user set (`derivation`; for a rule its formula and inputs, e.g.
+`goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`), and the constraint
+checks (`constraints`).
 
 ### 5.4 Splitting into home loci
 

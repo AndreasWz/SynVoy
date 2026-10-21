@@ -7,7 +7,10 @@
 // value), the user's preset_override / disable-auto knobs and --modules, then emits a
 // single effective_params.json that downstream processes consume as a Map via
 // `val settings` (see modules/iterative_search.nf, cluster_regions.nf,
-// extract_flanking.nf), and that the report reads as its run_settings.
+// extract_flanking.nf), and that the report reads as its run_settings. It also holds the
+// profile the module rules read, the derivation of every key a module rule, the preset or
+// the user set, and the constraint checks; a violation that only the rules made exits 2
+// (the run stops before the search).
 //
 // We intentionally keep this process tiny + cheap (cache 'deep'): the
 // resolution logic lives in bin/resolve_effective_params.py for testability.
@@ -51,6 +54,7 @@ __SYNVOY_DEFAULTS__
         --goi_info ${goi_info} \\
         --home_context ${home_context} \\
         --modules '${modules_spec}' \\
+        --n_flanking_genes ${params.n_flanking_genes} \\
         --defaults defaults.json \\
         --shipped_config ${projectDir}/nextflow.config \\
         ${override_arg} \\

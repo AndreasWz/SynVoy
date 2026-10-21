@@ -47,11 +47,12 @@ def test_a1_keeps_home_copies_plus_one_loci_between_2_and_10():
         assert source["goi_candidate_regions_per_query"] == "module:A1"
 
 
-def test_the_report_switch_is_on_when_any_module_turns_it_on():
-    on = sm.Module("Z1", "z1", "", "", lambda f: (True, ""), lambda f: {"report_copies_in_slot": True})
-    off = sm.Module("Z2", "z2", "", "", lambda f: (True, ""), lambda f: {"report_copies_in_slot": False})
-    assert sm.merge([off, on], {})[0]["report_copies_in_slot"] is True
-    assert sm.merge([off], {})[0]["report_copies_in_slot"] is False
+def test_the_report_switch_is_one_rule_of_a1():
+    """One rule per key (profile handoff, stage 1): no other module can switch it off."""
+    rule = sm.RULES_BY_KEY["report_copies_in_slot"]
+    assert rule.owners == ("A1",) and rule.evidence == "report only"
+    assert sm.merge([sm.module("B1"), sm.module("A1")], {})[0]["report_copies_in_slot"] is True
+    assert "report_copies_in_slot" not in sm.merge([sm.module("B1")], {})[0]
 
 
 def test_legacy_and_the_defaults_keep_two_loci_and_no_report():

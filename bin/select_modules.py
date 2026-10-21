@@ -4,16 +4,22 @@
 The four presets (preset_short_peptide, _tandem_family, _paralog_discrimination,
 _single_copy) were chosen by the first matching rule from the home hits alone. A gene is
 not one kind: it can be short, cysteine-rich, secreted and tandem at once (proposal of
-2026-10-15, cloud_claude_input/proposal_151026.md). Modules replace that choice:
+2026-10-15, cloud_claude_input/proposal_151026.md). Modules replace that choice, and one
+profile sets every parameter they touch (profile handoff of 2026-10-20, stage 1):
 
 * every module tests its own trigger on the run's features (hit_profile.json with its
   query_features, goi_info.json, home_context.json); they stack, none comes first;
-* a module may only write keys of KEY_CLASS, and each key class has a merge rule, so the
-  order of the modules never matters (MERGE below);
-* no module writes a label threshold: one judge (synvoy_label) labels every call, and
-  the judge's constants are not parameters at all. Modules widen the search, tighten the
-  inputs of the specificity test, change how completeness is measured, or add report
-  labels.
+* the features give a few design quantities, once (design_profile: home copies, the reach
+  of the home array, query and exon lengths; PROFILE_SYMBOLS);
+* every parameter a module may change has ONE rule (RULES): the modules that switch it on
+  (its owners), one formula of the design quantities, a cap, the evidence and a line of
+  doc. A rule applies when any of its owners is applied, so two modules can never disagree
+  about a key and the order of the modules never matters;
+* after the rules, check_constraints tests how the settings must relate to each other; a
+  violation that only the rules made is a bug and stops the run before the search;
+* no rule writes a label threshold: one judge (synvoy_label) labels every call, and the
+  judge's constants are not parameters at all. Switches, n_flanking_genes and the module
+  mechanism itself are forbidden to the rules (FORBIDDEN_FOR_MODULES).
 
 `--modules` (nextflow.config):
   legacy   the default until the measured switch: the old chooser's preset is applied
@@ -26,13 +32,14 @@ not one kind: it can be short, cysteine-rich, secreted and tandem at once (propo
   deltas   "auto,-dispersed_family,+cys_framework"; "none,+short_query" = a list
 
     select_modules.py --hit_profile hit_profile.json [--goi_info goi_info.json]
-                      [--home_context home_context.json] [--modules auto] [--output x.json]
+                      [--home_context home_context.json] [--modules auto]
+                      [--n_flanking_genes 10] [--output x.json]
 """
 import argparse
 import json
 import math
 import os
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 # ----------------------------------------------------------------------------- constants
 # Every constant here is assumed (proposal §3.1) or today's value; none is tuned.
@@ -54,46 +61,40 @@ LEGACY_ALIAS = {
     "preset_single_copy": (),
 }
 
-# Keys a module may write, with the class that decides how two modules' values merge.
-#   anchor_hygiene  the largest E (excludes the most relatives from the anchors)
-#   search_breadth  the most permissive value (per key: the larger or the smaller one),
-#                   then RESOURCE_CAPS
-#   figure_regions  one module only (the region caps of the figures)
-#   model_status    one module only (ModelStatus coverage bounds)
-#   report          on when any module turns it on (attributes that decide nothing)
-#   specificity_guard  the stricter value (STRICTER_ORDER)
-#   completeness_basis one module only (B3: completeness on the core of the protein)
-KEY_CLASS: Dict[str, Tuple[str, str]] = {
-    "goi_relative_evalue": ("anchor_hygiene", "max"),
-    "goi_candidate_regions_per_query": ("search_breadth", "max"),
-    "window_tblastn_word_size": ("search_breadth", "min"),
-    "window_tblastn_comp_stats": ("search_breadth", "min"),
-    "window_mmseqs_min_length": ("search_breadth", "min"),
-    "miniprot_short_orf_max_len": ("search_breadth", "max"),
-    "adaptive_score_floor_frac": ("figure_regions", "single"),
-    "adaptive_score_floor_abs": ("figure_regions", "single"),
-    "adaptive_max_regions": ("figure_regions", "single"),
-    "classify_complete_min_qcov": ("model_status", "single"),
-    "classify_fragment_max_qcov": ("model_status", "single"),
-    "report_copies_in_slot": ("report", "any"),
-    "report_low_complexity": ("report", "any"),
-    "goi_relative_statistic": ("specificity_guard", "stricter"),
-    "core_completeness": ("completeness_basis", "single"),
-}
-# specificity_guard: the stricter value wins; booleans: on when any module turns them on,
-# other keys by this order (last = strictest).
-STRICTER_ORDER: Dict[str, Tuple[str, ...]] = {"goi_relative_statistic": ("sw", "blastp_cbs")}
-# Upper bounds of search_breadth keys, whatever the modules want.
-RESOURCE_CAPS: Dict[str, float] = {"goi_candidate_regions_per_query": 10}
-# Keys that change the home side (anchors, home loci), that a measurement banned, or that
-# stay run-level options.
+# Switches: a whole step on or off, a benchmark control or a run-level choice. A switch
+# becomes a default after its own gate, never per gene (profile handoff, section 3).
+SWITCHES = frozenset({
+    "exon_level_search", "enable_smith_waterman", "sw_method", "allow_missing_smith_waterman",
+    "deterministic_goi_search", "tandem_copy_parent", "enable_dispersed_goi_rescue",
+    "report_nonsyntenic_candidates", "disable_goi_hull_rescue", "disable_strong_synteny_rescue",
+    "disable_distant_synteny_rescue", "goi_genome_wide_path", "goi_genome_wide_without_blocks",
+    "disable_locus_ownership", "disable_paralog_check", "require_paralog_panel",
+    "rank_wave_binning", "disable_wavefront", "disable_anchor_resolution",
+    "disable_relative_query", "disable_synteny_collinearity", "synteny_bridge_two_sided",
+    "goi_chain_query_aware", "tandem_query_restart", "goi_first_exon_guard",
+    "goi_join_leftover_hits", "decoy_mode",
+})
+# Keys no rule may write (constraint C10): the home side (anchors, home loci), what a
+# measurement banned, the module mechanism itself, and every switch.
 # expand_goi_similar: with it on, LY6 scaffold recall fell from 8/9 to 0/9.
 # decoy_mode: a calibration switch of the run; B2 fires on 47 % of the Candida genes, so as
 # a module key it would add the decoy searches to about half of all runs.
-FORBIDDEN_FOR_MODULES = frozenset({"n_flanking_genes", "expand_goi_similar", "decoy_mode"})
+FORBIDDEN_FOR_MODULES = frozenset({
+    "n_flanking_genes", "expand_goi_similar", "expand_goi_similar_distance",
+    "modules", "preset_override", "auto_apply_preset",
+}) | SWITCHES
 
 
 # ----------------------------------------------------------------------------- features
+def _real_exons(goi_info: Optional[dict]) -> Optional[List[dict]]:
+    """The home gene's own exons: none of a tandem-duplication or whole-protein model, no
+    GOI_copy_ rows. None when goi_info holds no such gene model."""
+    gi = goi_info or {}
+    if not gi or gi.get("method") in ("tandem_duplication", "full_protein_only"):
+        return None
+    return [e for e in gi.get("exons") or [] if not str(e.get("id", "")).startswith("GOI_copy_")]
+
+
 def flat_features(hit_profile: Optional[dict], goi_info: Optional[dict],
                   home_context: Optional[dict]) -> Dict[str, Any]:
     """One flat dict of everything a trigger may read (missing inputs give None values)."""
@@ -101,11 +102,7 @@ def flat_features(hit_profile: Optional[dict], goi_info: Optional[dict],
     qf = hp.get("query_features") or {}
     gi = goi_info or {}
     hc = home_context or {}
-    method = gi.get("method")
-    exons = gi.get("exons") or []
-    real_exons = None
-    if gi and method not in ("tandem_duplication", "full_protein_only"):
-        real_exons = sum(1 for e in exons if not str(e.get("id", "")).startswith("GOI_copy_"))
+    real = _real_exons(gi)
     f = {
         # home hits (profile_hits.py)
         "n_hits": hp.get("n_hits"),
@@ -129,10 +126,10 @@ def flat_features(hit_profile: Optional[dict], goi_info: Optional[dict],
         "n_cys": qf.get("n_cys"),
         "cys_max90": qf.get("cys_max90"),
         # the home gene model (annotate_goi_exons.py)
-        "goi_method": method,
+        "goi_method": gi.get("method"),
         "goi_found_by": gi.get("found_by"),
         "goi_home_gene_ambiguous": gi.get("home_gene_ambiguous"),
-        "goi_real_exons": real_exons,
+        "goi_real_exons": None if real is None else len(real),
         # the home neighbourhood (home_context.py)
         "goi_gene": hc.get("goi_gene"),
         "relatives_nearby": hc.get("relatives_nearby"),
@@ -167,10 +164,54 @@ def home_copies(f: Dict[str, Any]) -> Optional[int]:
     return max(int(math.floor(float(copies or 1) + 0.5)), 1 + len(rel or []))
 
 
-def family_candidate_regions(f: Dict[str, Any]) -> int:
-    """A1: GOI loci kept per query in a search window, home copies + 1, between 2 and
-    RESOURCE_CAPS (merge applies the cap)."""
-    return max(2, (home_copies(f) or 1) + 1)
+# ----------------------------------------------------------------------------- the profile
+# The design quantities, computed once per run and written to effective_params.json as
+# `profile`. A rule reads these and nothing else (Rule.inputs names the ones it reads).
+PROFILE_SYMBOLS: Dict[str, str] = {
+    "c": "home copies: the larger of primary_copies (rounded half up) and 1 + the family "
+         "members within the flank walk (home_copies); unknown without hits and GFF",
+    "R": "reach of the home array in genes: the largest |rank| of a family member within the "
+         "flank walk; 0 without one",
+    "Fam": "home loci of the query's family (n_independent_loci)",
+    "Lq": "query length (aa)",
+    "Lx": "longest real exon of the home gene (aa); real as in goi_real_exons",
+    "Lpiece": "min(Lq, Lx), Lq when Lx is unknown: the longest piece one true hit can be, "
+              "since a hit does not cross an intron",
+    "Lcore": "Lq without the signal peptide and the GPI tail",
+    "nx": "real exons of the home gene (goi_real_exons)",
+    "n": "n_flanking_genes of the run",
+}
+
+
+def longest_real_exon_aa(goi_info: Optional[dict]) -> Optional[int]:
+    """Lx: the longest real exon of the home gene in aa; None when unknown."""
+    lengths = [int(e["length_aa"]) for e in _real_exons(goi_info) or [] if e.get("length_aa")]
+    return max(lengths) if lengths else None
+
+
+def design_profile(f: Dict[str, Any], goi_info: Optional[dict] = None,
+                   n_flanking_genes: Optional[Any] = None) -> Dict[str, Any]:
+    """The design quantities of PROFILE_SYMBOLS from the flat features, the home gene model
+    (for Lx) and the run's n_flanking_genes; an unknown quantity is None."""
+    lq, lx = f.get("query_len"), longest_real_exon_aa(goi_info)
+    lpiece = lq if lx is None else (lx if lq is None else min(int(lq), lx))
+    lcore = None
+    if lq is not None:
+        sp = int(f.get("sp_len") or 0) if f.get("sp") else 0
+        gpi = int(f.get("gpi_len") or 0) if f.get("gpi") else 0
+        lcore = max(0, int(lq) - sp - gpi)
+    ranks = [abs(int(r["rank"])) for r in f.get("relatives_nearby") or [] if r.get("rank") is not None]
+    return {
+        "c": home_copies(f),
+        "R": max(ranks) if ranks else 0,
+        "Fam": f.get("n_independent_loci"),
+        "Lq": lq,
+        "Lx": lx,
+        "Lpiece": lpiece,
+        "Lcore": lcore,
+        "nx": f.get("goi_real_exons"),
+        "n": None if n_flanking_genes in (None, "") else int(n_flanking_genes),
+    }
 
 
 # ----------------------------------------------------------------------------- triggers
@@ -245,44 +286,30 @@ def _t_home_context(f):
     return False, ""
 
 
-# ----------------------------------------------------------------------------- registry
+# ----------------------------------------------------------------------------- modules
 class Module:
+    """One kind of gene: its trigger, and the switch that enables the rules it owns."""
+
     def __init__(self, mid: str, name: str, axis: str, tier: str,
                  trigger: Callable[[Dict[str, Any]], Tuple[bool, str]],
-                 overrides: Callable[[Dict[str, Any]], Dict[str, Any]],
                  legacy_alias: Optional[str] = None):
         self.id, self.name, self.axis, self.tier = mid, name, axis, tier
-        self.trigger, self.overrides, self.legacy_alias = trigger, overrides, legacy_alias
-
-
-def _none(_f):
-    return {}
+        self.trigger, self.legacy_alias = trigger, legacy_alias
 
 
 MODULES: List[Module] = [
     Module("A1", "local_family", "copy architecture", "after benchmark", _t_local_family,
-           lambda f: {"goi_relative_evalue": 1e-3,
-                      "goi_candidate_regions_per_query": family_candidate_regions(f),
-                      "report_copies_in_slot": True}, "preset_tandem_family"),
+           "preset_tandem_family"),
     Module("A2", "dispersed_family", "copy architecture", "now", _t_dispersed_family,
-           lambda f: {"adaptive_score_floor_frac": 0.45, "adaptive_score_floor_abs": 0.08,
-                      "adaptive_max_regions": 4}, "preset_paralog_discrimination"),
-    Module("A3", "shared_domain", "copy architecture", "now", _t_shared_domain, _none),
+           "preset_paralog_discrimination"),
+    Module("A3", "shared_domain", "copy architecture", "now", _t_shared_domain),
     Module("B1", "short_query", "sequence signal", "after benchmark", _t_short_query,
-           lambda f: {"classify_complete_min_qcov": 0.5, "classify_fragment_max_qcov": 0.3,
-                      # finding only: the judge's own blastp is untouched
-                      "window_tblastn_word_size": 2, "window_tblastn_comp_stats": 0,
-                      "window_mmseqs_min_length": 10, "miniprot_short_orf_max_len": 100},
            "preset_short_peptide"),
-    Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity,
-           lambda f: {"goi_relative_statistic": "blastp_cbs", "report_low_complexity": True}),
-    Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor,
-           lambda f: {"core_completeness": True}),
-    Module("B4", "cys_framework", "sequence signal", "now (advisory)", _t_cys_framework, _none),
-    Module("C1", "exon_structure", "structure and locus at home", "now (advisory)",
-           _t_exon_structure, _none),
-    Module("C2", "home_context", "structure and locus at home", "now (advisory)",
-           _t_home_context, _none),
+    Module("B2", "low_complexity", "sequence signal", "after benchmark", _t_low_complexity),
+    Module("B3", "signal_anchor", "sequence signal", "after benchmark", _t_signal_anchor),
+    Module("B4", "cys_framework", "sequence signal", "now (advisory)", _t_cys_framework),
+    Module("C1", "exon_structure", "structure and locus at home", "now (advisory)", _t_exon_structure),
+    Module("C2", "home_context", "structure and locus at home", "now (advisory)", _t_home_context),
 ]
 BY_KEY = {m.id.lower(): m for m in MODULES}
 BY_KEY.update({m.name.lower(): m for m in MODULES})
@@ -294,6 +321,232 @@ def module(name: str) -> Module:
     except KeyError:
         known = ", ".join(f"{m.name} ({m.id})" for m in MODULES)
         raise ValueError(f"unknown preset module '{name}' (known: {known})") from None
+
+
+# ----------------------------------------------------------------------------- the rules
+# measured: a run or a count showed it; found in the code: a limit read off the code;
+# inferred: argued, not measured yet; report only: an attribute that decides nothing.
+EVIDENCE = ("measured", "found in the code", "inferred", "report only")
+
+
+class Rule:
+    """The one rule of a parameter. It applies when any of its owners (module ids) is
+    applied; formula(profile, applied module ids) gives the value, which `cap` bounds."""
+
+    def __init__(self, key: str, owners: Sequence[str],
+                 formula: Callable[[Dict[str, Any], FrozenSet[str]], Any], text: str,
+                 inputs: Sequence[str] = (), cap: Optional[float] = None,
+                 evidence: str = "inferred", doc: str = ""):
+        self.key, self.owners, self.formula, self.text = key, tuple(owners), formula, text
+        self.inputs, self.cap, self.evidence, self.doc = tuple(inputs), cap, evidence, doc
+
+
+def _const(value: Any) -> Callable[[Dict[str, Any], FrozenSet[str]], Any]:
+    return lambda _p, _on: value
+
+
+# Stage 1 of the profile handoff: the 15 keys the modules set on 2026-10-15, each as a
+# rule with the value it had. Registry order = documentation order.
+RULES: List[Rule] = [
+    Rule("goi_relative_evalue", ("A1",), _const(1e-3), "1e-3",
+         doc="family members next to the GOI: weaker relatives are kept out of the anchors too "
+             "(the old preset_tandem_family)"),
+    Rule("goi_candidate_regions_per_query", ("A1",),
+         lambda p, _on: max(2, (p["c"] or 1) + 1), "max(2, c + 1)", inputs=("c",), cap=10,
+         doc="GOI loci kept per query in a search window: each home copy, plus one"),
+    Rule("report_copies_in_slot", ("A1",), _const(True), "on", evidence="report only",
+         doc="CopiesInSlot / SlotRank on the GOI models, copies_in_slot in the report"),
+    Rule("adaptive_score_floor_frac", ("A2",), _const(0.45), "0.45",
+         doc="figure regions, relatives elsewhere in the genome: a higher relative score floor "
+             "(the old preset_paralog_discrimination)"),
+    Rule("adaptive_score_floor_abs", ("A2",), _const(0.08), "0.08",
+         doc="figure regions: a higher absolute score floor (the old preset_paralog_discrimination)"),
+    Rule("adaptive_max_regions", ("A2",), _const(4), "4",
+         doc="figure regions: at most 4 per genome (the old preset_paralog_discrimination)"),
+    Rule("classify_complete_min_qcov", ("B1",), _const(0.5), "0.5",
+         doc="ModelStatus only: one missed exon is a large share of a short protein "
+             "(the old preset_short_peptide)"),
+    Rule("classify_fragment_max_qcov", ("B1",), _const(0.3), "0.3",
+         doc="ModelStatus only (the old preset_short_peptide)"),
+    Rule("window_tblastn_word_size", ("B1",), _const(2), "2",
+         doc="finding only: a short query has few words of 3"),
+    Rule("window_tblastn_comp_stats", ("B1",), _const(0), "0",
+         doc="finding only: a short query loses score to the composition adjustment; the run "
+             "with tblastn's defaults still gives EeffTblastn"),
+    Rule("window_mmseqs_min_length", ("B1",), _const(10), "10",
+         doc="window ORFs from 10 codons, so an exon of a short peptide between two stops is "
+             "searched"),
+    Rule("miniprot_short_orf_max_len", ("B1",), _const(100), "100",
+         doc="every query under 100 aa gets miniprot -L 10 in the windows"),
+    Rule("goi_relative_statistic", ("B2",), _const("blastp_cbs"), "blastp_cbs",
+         doc="the flank walk's relative test with composition statistics: a low-complexity "
+             "look-alike is no relative (a constructed PEPEP protein: SW E 4e-8, blastp_cbs no hit)"),
+    Rule("report_low_complexity", ("B2",), _const(True), "on", evidence="report only",
+         doc="LowComplexity= on the GOI models"),
+    Rule("core_completeness", ("B3",), _const(True), "on",
+         doc="completeness for HIGH also on the core of the home protein (no signal peptide, "
+             "no GPI tail)"),
+]
+
+
+def validate_registry(rules: Sequence[Rule], modules: Sequence[Module]) -> Dict[str, Rule]:
+    """{key: rule}; ValueError for two rules of one key, a forbidden key, an unknown or
+    missing owner, an unknown profile input or evidence, or a rule without text or doc."""
+    ids = {m.id for m in modules}
+    by_key: Dict[str, Rule] = {}
+    for r in rules:
+        if r.key in by_key:
+            raise ValueError(f"two rules for {r.key}")
+        if r.key in FORBIDDEN_FOR_MODULES:
+            raise ValueError(f"a rule writes the forbidden key {r.key}")
+        if not r.owners or set(r.owners) - ids:
+            raise ValueError(f"rule {r.key}: owners {r.owners} are not module ids")
+        if set(r.inputs) - set(PROFILE_SYMBOLS):
+            raise ValueError(f"rule {r.key} reads {sorted(set(r.inputs) - set(PROFILE_SYMBOLS))}, "
+                             "which the profile does not have")
+        if r.evidence not in EVIDENCE:
+            raise ValueError(f"rule {r.key}: evidence '{r.evidence}' is not one of {EVIDENCE}")
+        if not r.text or not r.doc:
+            raise ValueError(f"rule {r.key} needs its formula as text and a line of doc")
+        by_key[r.key] = r
+    return by_key
+
+
+RULES_BY_KEY = validate_registry(RULES, MODULES)
+
+
+def rule_keys(mid: str) -> List[str]:
+    """The parameters set by the rules a module (an id) owns."""
+    return [r.key for r in RULES if mid in r.owners]
+
+
+def _shown(v: Any) -> str:
+    if v is None:
+        return "unknown"
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+def apply_rules(on: Iterable[str], p: Dict[str, Any],
+                rules: Optional[Sequence[Rule]] = None) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, dict]]:
+    """(settings, source, derivation) of every rule with an applied owner. source is
+    "module:<owner ids>"; a derivation entry gives the value, the formula, the owners, the
+    profile inputs with their values, the evidence, the cap and the uncapped value when the
+    cap binds, and one readable line ("goi_candidate_regions_per_query 4 = max(2, c + 1),
+    c = 3 (A1)")."""
+    applied = frozenset(on)
+    settings: Dict[str, Any] = {}
+    source: Dict[str, str] = {}
+    derivation: Dict[str, dict] = {}
+    for r in RULES if rules is None else rules:
+        owners = sorted(set(r.owners) & applied)
+        if not owners:
+            continue
+        want = r.formula(p, applied)
+        capped = r.cap is not None and want > r.cap
+        value = r.cap if capped else want
+        settings[r.key] = value
+        source[r.key] = "module:" + "+".join(owners)
+        entry = {"value": value, "rule": r.text, "owners": owners,
+                 "inputs": {s: p.get(s) for s in r.inputs}, "evidence": r.evidence}
+        line = f"{r.key} {_shown(value)}"
+        if r.inputs:
+            line += f" = {r.text}, " + ", ".join(f"{s} = {_shown(p.get(s))}" for s in r.inputs)
+        if capped:
+            entry.update(cap=r.cap, uncapped=want)
+            line += f", capped at {_shown(r.cap)} (wanted {_shown(want)})"
+        entry["line"] = line + " (" + "+".join(owners) + ")"
+        derivation[r.key] = entry
+    return settings, source, derivation
+
+
+def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """(settings, source) of these modules' rules on the profile of the features alone (no
+    exon lengths, n unknown): apply_rules for callers that hold Module objects."""
+    settings, source, _derivation = apply_rules({m.id for m in chosen}, design_profile(f))
+    return settings, source
+
+
+# ----------------------------------------------------------------------------- constraints
+# How the settings must relate to each other, checked after the rules and the values the
+# user set (profile handoff, section 4). The later stages add theirs with their rules
+# (C1/C2 the GOI margin, C4/C5 the panels and the figure copies, C6 one coverage basis, C7
+# one length rule for short pieces, C8 composition statistics with B2, C9 counts tied to n).
+# C10, no rule writes a forbidden key, is enforced when this module loads (validate_registry).
+def _num(v: Any) -> float:
+    return float(v)
+
+
+def _c3_regions_reach_the_copies(settings, _source, p, on):
+    key = "goi_candidate_regions_per_query"
+    if "A1" not in on or key not in settings:
+        return None
+    cap = RULES_BY_KEY[key].cap
+    need = (p.get("c") or 1) + 1
+    detail = f"{key} {settings[key]}, home copies + 1 = {need}"
+    if cap is not None and need > cap:
+        detail += f": the cap of {cap} binds"
+        need = cap
+    return _num(settings[key]) >= need, (key,), detail
+
+
+def _c11_caps(settings, source, _p, _on):
+    keys = [r.key for r in RULES if r.cap is not None and r.key in settings
+            and str(source.get(r.key, "")).startswith("module:")]
+    if not keys:
+        return None
+    over = [k for k in keys if _num(settings[k]) > RULES_BY_KEY[k].cap]
+    detail = ("above the cap: " + ", ".join(over)) if over else "within the caps: " + ", ".join(keys)
+    return not over, tuple(keys), detail
+
+
+def _c12_model_status_order(settings, _source, _p, _on):
+    lo, hi = "classify_fragment_max_qcov", "classify_complete_min_qcov"
+    if lo not in settings or hi not in settings:
+        return None
+    return (_num(settings[lo]) < _num(settings[hi]), (lo, hi),
+            f"fragment below {settings[lo]}, complete from {settings[hi]}")
+
+
+CONSTRAINTS: List[Tuple[str, str, Callable]] = [
+    ("C3", "with A1, the GOI loci kept per query reach the home copies + 1, within the cap "
+           "(a cap that binds is named)", _c3_regions_reach_the_copies),
+    ("C11", "a value set by a rule stays within the rule's cap", _c11_caps),
+    ("C12", "ModelStatus: the fragment bound lies below the complete bound", _c12_model_status_order),
+]
+
+
+def check_constraints(settings: Dict[str, Any], source: Dict[str, str], p: Dict[str, Any],
+                      on: Iterable[str]) -> List[Dict[str, Any]]:
+    """Every constraint: applies, ok, on_violation and detail. `on` = the modules whose
+    rules were applied (none under legacy). on_violation is "stop" when a rule set one of
+    the constraint's keys and the user set none of them (a violation is then a bug, and the
+    run stops before the search), else "warn" (the value the user set wins, as everywhere;
+    defaults and presets alone never stop a run)."""
+    applied = frozenset(on)
+    out = []
+    for cid, doc, fn in CONSTRAINTS:
+        try:
+            res = fn(settings, source, p, applied)
+        except (TypeError, ValueError) as exc:
+            # only a value set by hand can be no number; the step that reads it decides
+            out.append({"id": cid, "doc": doc, "applies": True, "ok": False, "on_violation": "warn",
+                        "keys": [], "detail": f"not checked: {exc}"})
+            continue
+        if res is None:
+            out.append({"id": cid, "doc": doc, "applies": False})
+            continue
+        ok, keys, detail = res
+        srcs = [str(source.get(k, "default")) for k in keys]
+        stop = (not any(s in ("user_set", "user_cli") for s in srcs)
+                and any(s.startswith("module:") for s in srcs))
+        out.append({"id": cid, "doc": doc, "applies": True, "ok": bool(ok),
+                    "on_violation": "stop" if stop else "warn", "keys": list(keys),
+                    "detail": detail})
+    return out
 
 
 # ----------------------------------------------------------------------------- --modules
@@ -325,48 +578,6 @@ def parse_spec(spec: Any) -> Tuple[str, Set[str], Set[str]]:
     if base == "none" and on:
         base = "list"
     return base, on, off
-
-
-# ----------------------------------------------------------------------------- merge
-def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, str]]:
-    """(settings, source) of the chosen modules' overrides, merged by key class.
-    Raises ValueError for a key outside KEY_CLASS, a forbidden key, or two different
-    values for a key only one module may write (a registry error)."""
-    wanted: Dict[str, List[Tuple[str, Any]]] = {}
-    for m in chosen:
-        for k, v in m.overrides(f).items():
-            if k in FORBIDDEN_FOR_MODULES:
-                raise ValueError(f"module {m.id} writes the forbidden key {k}")
-            if k not in KEY_CLASS:
-                raise ValueError(f"module {m.id} writes {k}, which has no key class")
-            wanted.setdefault(k, []).append((m.id, v))
-    settings, source = {}, {}
-    for k in sorted(wanted):
-        _cls, rule = KEY_CLASS[k]
-        vals = sorted(wanted[k], key=lambda t: t[0])
-        if rule == "max":
-            mid, v = max(vals, key=lambda t: (float(t[1]), t[0]))
-        elif rule == "min":
-            mid, v = min(vals, key=lambda t: (float(t[1]), t[0]))
-        elif rule == "single":
-            if len({json.dumps(v) for _m, v in vals}) > 1:
-                raise ValueError(f"key {k} is written by {[m for m, _ in vals]} with different values")
-            mid, v = vals[0]
-        elif rule == "any":
-            v = any(bool(x) for _m, x in vals)
-        elif rule == "stricter":
-            order = STRICTER_ORDER.get(k)
-            if order is None:
-                v = any(bool(x) for _m, x in vals)
-            else:
-                v = max((x for _m, x in vals), key=order.index)
-        else:  # pragma: no cover - a rule without code is a registry error
-            raise ValueError(f"key {k}: unknown merge rule {rule}")
-        if k in RESOURCE_CAPS:
-            v = min(v, RESOURCE_CAPS[k])
-        settings[k] = v
-        source[k] = "module:" + "+".join(m for m, _ in vals)
-    return settings, source
 
 
 def evaluate(f: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -415,14 +626,19 @@ def main() -> None:
     ap.add_argument("--goi_info", help="goi_info.json of ANNOTATE_GOI")
     ap.add_argument("--home_context", help="home_context.json of HOME_CONTEXT")
     ap.add_argument("--modules", default="auto", help="--modules value to evaluate (default auto)")
-    ap.add_argument("--output", help="Write {features, modules_would_fire, modules_applied, settings} here")
+    ap.add_argument("--n_flanking_genes", type=int, default=None,
+                    help="n_flanking_genes of the run, for the profile (default: unknown)")
+    ap.add_argument("--output", help="Write {features, profile, modules_would_fire, modules_applied, "
+                                     "settings, source, derivation} here")
     args = ap.parse_args()
-    f = flat_features(_read(args.hit_profile), _read(args.goi_info), _read(args.home_context))
+    goi_info = _read(args.goi_info)
+    f = flat_features(_read(args.hit_profile), goi_info, _read(args.home_context))
+    p = design_profile(f, goi_info, args.n_flanking_genes)
     mode, applied, fired = choose(args.modules, f)
-    by_id = {m.id: m for m in MODULES}
-    settings, source = merge([by_id[d["id"]] for d in applied], f)
+    settings, source, derivation = apply_rules([d["id"] for d in applied], p)
     out = {"modules_mode": mode, "modules_applied": applied, "modules_would_fire": fired,
-           "settings": settings, "source": source, "features": f}
+           "settings": settings, "source": source, "features": f, "profile": p,
+           "derivation": derivation}
     if args.output:
         with open(args.output, "w") as fh:
             json.dump(out, fh, indent=2, sort_keys=True)

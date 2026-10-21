@@ -959,7 +959,7 @@ Pin a specific preset and skip the hit-profile decision. Valid values: `preset_s
 ### `modules`
 **Type:** String | **Default:** `'legacy'`
 
-Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-parameter-preset-and-preset-modules)). Instead of one preset chosen by the first matching rule, each kind of gene is a module that tests its own trigger: `local_family` (A1), `dispersed_family` (A2), `shared_domain` (A3), `short_query` (B1), `low_complexity` (B2), `signal_anchor` (B3), `cys_framework` (B4), `exon_structure` (C1), `home_context` (C2). Modules stack, merge by fixed rules (their order never matters), and never move the label of a call.
+Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-parameter-preset-and-preset-modules)). Instead of one preset chosen by the first matching rule, each kind of gene is a module that tests its own trigger: `local_family` (A1), `dispersed_family` (A2), `shared_domain` (A3), `short_query` (B1), `low_complexity` (B2), `signal_anchor` (B3), `cys_framework` (B4), `exon_structure` (C1), `home_context` (C2). Modules stack, and they never move the label of a call. Every parameter a module may change has exactly one rule (since 2026-10-20): the modules that switch it on, one formula of the run's design quantities, and a cap. Two modules can therefore never disagree about a value, and their order never matters.
 
 | Value | Meaning |
 |---|---|
@@ -970,6 +970,14 @@ Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-paramete
 | `auto,-dispersed_family,+cys_framework` | `auto` without one module and with another |
 
 LOCATE_GENE runs before the modules are resolved: when the value selects `short_query` (`auto` without `-short_query`, or a list that names it) and a query shorter than 100 aa has no home hit at E ≤ `search_evalue`, tblastn searches the home genome once more with `-seg no`; the hit profile records it (`locate_retry`, in `run_settings.features`). Put a value that contains a minus sign in quotes: `--modules 'auto,-dispersed_family'`. A value you set yourself for any of the settings keys wins over every module. Unknown names stop the run at the start. The console shows the modules after `[INFO] modules (...)`; `intermediate/locate_gene/home_context.json` holds the home neighbourhood the triggers read.
+
+Besides the settings, `intermediate/locate_gene/effective_params.json` records:
+
+- `profile`: the design quantities the rules read. These are `c` (home copies), `R` (reach of the home array in genes: the largest distance, in gene ranks, of a family member next to the home gene), `Fam` (home loci of the family), `Lq` (query length), `Lx` (longest real exon of the home gene), `Lpiece` (min(`Lq`, `Lx`)), `Lcore` (the query without signal peptide and GPI tail), `nx` (real exons of the home gene) and `n` (`n_flanking_genes`).
+- `derivation`: for every value that a module rule, the preset or you set, the value, the default and what set it. For a rule it also gives the formula and its inputs, for example `goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`. The console prints these lines after `[INFO] settings from the module rules`.
+- `constraints`: the checks of how the settings relate. With A1, the GOI loci kept per query must reach the home copies + 1, within the cap (a cap that binds is named). A value a rule set must stay within its cap. The fragment bound of the model status must lie below the complete bound.
+
+A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept.
 
 ### `allow_unknown_species`
 **Type:** Boolean | **Default:** `false`

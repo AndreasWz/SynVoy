@@ -45,26 +45,23 @@ def test_b2_turns_the_guards_on_and_legacy_does_not():
     assert legacy["settings"] == DEFAULTS
 
 
-def test_the_stricter_value_wins(monkeypatch):
-    a = sm.Module("Z1", "z1", "", "", lambda f: (True, ""),
-                  lambda f: {"goi_relative_statistic": "sw", "zz_guard": False})
-    b = sm.Module("Z2", "z2", "", "", lambda f: (True, ""),
-                  lambda f: {"goi_relative_statistic": "blastp_cbs", "zz_guard": True})
-    monkeypatch.setitem(sm.KEY_CLASS, "zz_guard", ("specificity_guard", "stricter"))  # a boolean guard
-    for order in ([a, b], [b, a]):
-        assert sm.merge(order, {})[0] == {"goi_relative_statistic": "blastp_cbs", "zz_guard": True}
-    assert sm.merge([a], {})[0] == {"goi_relative_statistic": "sw", "zz_guard": False}
+def test_the_relative_statistic_is_one_rule_of_b2():
+    """One rule per key (profile handoff, stage 1): blastp_cbs whenever B2 is applied, and no
+    other module can set the statistic back to sw."""
+    rule = sm.RULES_BY_KEY["goi_relative_statistic"]
+    assert rule.owners == ("B2",)
+    every = [sm.module(m) for m in ("A1", "A2", "B1", "B2", "B3", "C1")]
+    assert sm.merge(every, {"query_len": 50, "seg_frac": 0.3})[0]["goi_relative_statistic"] == "blastp_cbs"
+    assert "goi_relative_statistic" not in sm.merge([m for m in every if m.id != "B2"], {})[0]
 
 
 def test_decoy_mode_is_a_run_level_option():
     """B2 fires on 47 % of the Candida genes: as a module key, decoy mode would add the decoy
     searches to about half of all runs (the plan's author, 2026-10-15)."""
-    assert "decoy_mode" not in sm.KEY_CLASS and "decoy_mode" in sm.FORBIDDEN_FOR_MODULES
-    assert all("decoy_mode" not in m.overrides({"query_len": 50, "seg_frac": 0.3, "sp": True,
-                                                  "primary_copies": 3.0}) for m in sm.MODULES)
-    rogue = sm.Module("Z3", "z3", "", "", lambda f: (True, ""), lambda f: {"decoy_mode": True})
-    with pytest.raises(ValueError):
-        sm.merge([rogue], {})
+    assert "decoy_mode" not in sm.RULES_BY_KEY and "decoy_mode" in sm.FORBIDDEN_FOR_MODULES
+    rogue = sm.Rule("decoy_mode", ("B2",), lambda p, on: True, "on", doc="a rogue rule")
+    with pytest.raises(ValueError, match="forbidden"):
+        sm.validate_registry(sm.RULES + [rogue], sm.MODULES)
     assert "--decoy_mode ${params.decoy_mode}" in (ROOT / "modules" / "iterative_search.nf").read_text()
     keys = (ROOT / "main.nf").read_text().split("def presetDefaultKeys()")[1].split("}")[0]
     assert "decoy_mode" not in keys

@@ -959,9 +959,10 @@ the situation you are working around here.
 Check these in order:
 
 1. **Was it replaced by a preset?** Open `intermediate/locate_gene/effective_params.json`.
-   `source` says, per parameter, whether the value came from the default, a preset or
-   you (`user_set`). Since 2026-10-05 a value you set wins; on an older checkout the
-   auto-selected preset overwrote it — `git pull`.
+   `source` says, per parameter, whether the value came from the default, a preset, a
+   preset module (`module:A1`) or you (`user_set`), and `derivation` says what set each
+   value that is not the default (for a module rule, from which inputs). Since 2026-10-05 a value you set
+   wins; on an older checkout the auto-selected preset overwrote it — `git pull`.
 2. **Was the parameter removed?** Parameters that no step read were removed on
    2026-10-09 (`--keep_intermediate`, `--max_retries`, `--multi_profile`, …): the run
    prints a warning and ignores them. A replaced parameter (`--max_flanking_goi_similarity`,
