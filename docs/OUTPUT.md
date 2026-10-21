@@ -438,6 +438,10 @@ A re-draw reuses the run's own `gene_names.tsv`, so the labels do not change. Fo
 run without that table, or one whose figures were drawn without network access (a
 cluster node, for instance), the re-draw looks the names up at NCBI Gene.
 
+To re-draw every locus of a run at once, also one made before May 2026 whose plot inputs
+use older names: `scripts/replot_run.sh results/my_run [options]` (figures in
+`results/my_run/figures_redrawn_<date>/`, with a `REDRAWN.txt` that names both versions).
+
 ---
 
 ## Decoy calls (`--decoy_mode`)
