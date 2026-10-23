@@ -278,6 +278,7 @@ Windows of the genome-wide path (`--goi_genome_wide_path`) are not blocks and ha
 | `run_settings` | What decided the run's settings (from `effective_params.json`): `modules_mode` (`--modules`), `modules_applied` and `modules_would_fire` (preset modules with the reason each fired), `preset_applied` and `apply_reason`, the chooser's `legacy_preset`, `settings` and `source` (per parameter: default, `module:<id>`, `preset:<name>`, `user_set`), `user_set_kept`, the `features` the triggers read (query features, home loci, home neighbourhood), and `home_copies` (copies of the gene family at home: the query's coverage at its home locus, rounded half up, or 1 + the family members next to the home gene, whichever is more). `flags` says what the triggers found: `domain_shared` (relatives share only a domain), `dispersed_family_loci` (the home loci of a family on several places, with the query coverage of each), `home_contig_end` (the home gene lies near a scaffold end), `home_subtelomeric` (and a telomeric repeat sits at that end), `dist_to_scaffold_end`. `null` when the file is missing |
 | `copies_in_slot` | Only with `--report_copies_in_slot`: per genome `home_copies`, `copies_in_slot` of the slot that holds the genome's best call with a slot, `unit` (`2:3`) and that call (`slot_of`) |
 | `target_policy` | Per target genome (`hits/<genome>.target_policy.tsv` of the search): the median identity of the best hit of each flanking gene (how far the genome is from home; it changes nothing), the blocks searched, how many are significant, the best block's E_syn and whether its window ran past a scaffold end, and the genetic code its translations used (`genetic_code`; see `target_genetic_codes`) |
+| `limits` | What each fixed limit of the search dropped, summed over the run: per counter the `total` and the `genomes` where it is not 0, and `genome_searches` (home loci × genomes). Counts only: no limit is changed by them. See "What the search's limits dropped" below |
 | `staging_diagnostics` | Plumbing diagnostics — useful when something looks wrong |
 
 The fields of `summary` worth reading:
@@ -472,6 +473,43 @@ searched), and for `high`, `medium_or_better` and `ambiguous_or_better` the `cal
 with such a decoy call) and `ci95_upper`, the upper end of their exact (Clopper–Pearson)
 95 % interval. 0 calls means "at most that bound", not 0 %. The per-genome counts are
 columns of `hits/<genome>.target_policy.tsv` in a decoy run.
+
+### What the search's limits dropped (`limits`)
+
+Several fixed limits of the search can drop a hit, a candidate or a block without a trace in
+the results. Each is counted per genome: in the `limit_<name>` columns of
+`hits/<genome>.target_policy.tsv`, in one INFO line at the end of each genome in the search log
+(`Limit counts (stage 2; they change nothing): ...`, only the counts that are not 0, else
+`none`), and summed in the report's `limits` block. Hits and candidates of decoy queries are
+left out, except in `regions_cap_decoy`. A limit that never shows a count on your data does
+not bind there.
+
+| Counter | Counts |
+|---|---|
+| `miniprot_timeout_goi`, `miniprot_timeout_flanking` | miniprot calls that ran into the 120-s timeout: the call for the gene of interest (sensitive) or for a flanking gene. A timeout gives no model, and in the masked rounds of a GOI locus it ends the search for further copies |
+| `miniprot_failed_*`, `miniprot_no_alignment_*` | miniprot calls that failed, and those that found no alignment (the same kinds) |
+| `goi_model_loci`, `goi_models_found`, `goi_models_kept` | GOI loci modelled, the alignments miniprot returned there over all rounds, and the models kept (`goi_max_models_per_locus`, 10) |
+| `goi_model_cap_stopped` | GOI loci where the model cap stopped the rounds while an alignment that would have been kept, or a window hit no model explains, was left |
+| `goi_models_below_outs` | Alignments of a masked round below 0.3 × the best score (miniprot's own `--outs` bound, applied again) |
+| `goi_models_near_outs` | Kept models scoring below 0.4 × the best: models close to that bound, a hint at what `--outs` leaves out |
+| `goi_model_rounds_ended_by_timeout` | Masked rounds ended by a miniprot timeout |
+| `window_len_floor_mmseqs`, `_tblastn`, `_sw` | Window hits that pass the E-value and identity floors but are shorter than the length floor (15 aa for longer queries; Smith-Waterman 10 aa) |
+| `window_len_floor_lt15_long_query` | Of those, hits shorter than 15 aa on a query longer than 100 aa |
+| `mmseqs_maxseqs_window`, `mmseqs_maxseqs_genome` | Queries with 300 result rows in a window or in the genome-wide search: MMseqs2 reports at most 300 targets per query (its `--max-seqs` default), so such a query may have lost more |
+| `sw_timeout` | Windows whose Smith-Waterman search ran into `sw_timeout_seconds`: all of its Smith-Waterman hits are lost |
+| `sw_long_query_skipped` | Query × window pairs Smith-Waterman skipped as longer than 10,000 aa |
+| `goi_core_filter` | Window GOI hits outside the block's GOI core (block ± GOI margin), which are not used |
+| `regions_cap`, `regions_cap_rel`, `regions_cap_decoy` | GOI loci of one query in a window beyond `goi_candidate_regions_per_query` (2): of the home GOI and models of earlier genomes, of the relative's query, of a decoy |
+| `fallback_refused` and `fallback_short_aln`, `_short_bits`, `_long_qcov`, `_long_aln`, `_long_bits` | Hit-chain fallback models refused by the fallback gate, and the tests they failed (a query below `fallback_short_query_len`: aligned length, bit score; a longer one: query coverage 0.25, aligned length, bit score) |
+| `fallback_span_cap` | Fallback models refused because their hits span more than 600 × the query length in bp below 150 aa (at least 100 kb), 150 × from 150 aa on (at least 5 kb) |
+| `flanking_loci_cap` | Loci of a flanking gene in a window beyond the two strongest |
+| `blocks_capped`, `blocks_capped_goi_seeded`, `blocks_capped_without_home_order` | Blocks dropped by `max_blocks_per_genome`, of them GOI-seeded ones, and those dropped without the home order (then the blocks are not sorted and GOI-seeded ones go first). Each dropped block also has an INFO line |
+| `dispersed_identity`, `dispersed_evalue`, `dispersed_alnlen`, `dispersed_near_anchor` | Genome-wide GOI hits the dispersed-GOI rescue (§1o) does not take, by the first test they fail: identity < `dispersed_goi_min_identity`, E > `dispersed_goi_max_evalue`, aligned length < `dispersed_goi_min_alnlen` (50 aa), or lying within `region_padding` of an anchor (left to the blocks) |
+| `dead_zone` | Of the near-anchor hits, those that no searched block's GOI core holds: strong GOI hits that neither the blocks nor the rescue use |
+
+Two limits outside the search are logged instead: `split_loci.py` warns whenever `--max_loci`
+drops a home locus (`WARNING: --max_loci N dropped K home locus/loci ...`), and the strong-synteny
+rescue logs `miniprot timed out in K of M window(s)` at its end (its GFF is unchanged).
 
 ## Intermediate / debugging artifacts (most users skip)
 

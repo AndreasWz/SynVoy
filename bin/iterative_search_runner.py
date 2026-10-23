@@ -327,11 +327,16 @@ def parse_hits(
     query_lengths: Optional[Dict[str, int]] = None,
     short_query_frac: float = 0.60,
     short_query_min: int = 12,
+    drops: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Parse MMseqs2 hits and return a list of hit dictionaries.
     Filters by basic quality metrics.
     Preserves qstart/qend (query protein positions) and strand for exon annotation.
+
+    ``drops`` (stage 2, counts only): rows of non-decoy queries that pass the E-value and
+    identity floors but not the length floor are counted as 'len_floor', and those among
+    them shorter than 15 aa on a query longer than 100 aa also as 'len_floor_lt15_long_query'.
     """
     hits = []
     if not os.path.exists(hits_file):
@@ -367,6 +372,12 @@ def parse_hits(
                 if q_len and q_len > 0:
                     adaptive_min = max(short_query_min, int(round(q_len * short_query_frac)))
                     effective_min_length = min(min_length, adaptive_min)
+
+                if (drops is not None and evalue <= evalue_thresh and pident >= min_identity
+                        and alnlen < effective_min_length and limit_query_kind(q_id) != 'decoy'):
+                    drops['len_floor'] = drops.get('len_floor', 0) + 1
+                    if alnlen < 15 and q_len and q_len > 100:
+                        drops['len_floor_lt15_long_query'] = drops.get('len_floor_lt15_long_query', 0) + 1
 
                 if (evalue <= evalue_thresh and
                     pident >= min_identity and
@@ -3773,13 +3784,18 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             relaxed_identity = max(args.aug_relaxed_identity_min, args.min_identity * args.aug_relaxed_identity_factor)
             relaxed_length = max(args.aug_relaxed_length_min, int(args.min_length // args.aug_relaxed_length_div))
             
+            _drops = {}
             mmseqs_hits = parse_hits(
                 aug_hits_file,
                 relaxed_identity,
                 relaxed_length,
                 args.evalue * args.aug_relaxed_parse_evalue_mult,
-                query_lengths=variant_query_lengths
+                query_lengths=variant_query_lengths,
+                drops=_drops,
             )
+            count_limit(args, 'window_len_floor_mmseqs', _drops.get('len_floor', 0))
+            count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
+            count_limit(args, 'mmseqs_maxseqs_window', queries_at_max_seqs(aug_hits_file))
             if mmseqs_hits:
                 print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
                 all_hits.extend(mmseqs_hits)
@@ -3815,13 +3831,17 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     tblastn_cmd + finding_opts + ["-outfmt", TBLASTN_TABULAR, "-out", tblastn_finding_file],
                     check=True, capture_output=True, text=True)
 
+            _drops = {}
             tblastn_hits = parse_hits(
                 tblastn_finding_file,
                 relaxed_identity,
                 relaxed_length,
                 args.evalue * args.aug_relaxed_parse_evalue_mult,
-                query_lengths=goi_query_lengths
+                query_lengths=goi_query_lengths,
+                drops=_drops,
             )
+            count_limit(args, 'window_len_floor_tblastn', _drops.get('len_floor', 0))
+            count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
             if tblastn_hits:
                 print(f"[{genome_name}] tblastn augmented search found {len(tblastn_hits)} hits.", flush=True)
                 for hit in tblastn_hits:
@@ -3870,9 +3890,14 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     sw_cmd += ["--max_alignments_per_piece", str(args.sw_max_alignments_per_piece)]
                 
                 result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=args.sw_timeout_seconds)
+                # Queries smith_waterman_search.py skips as too long (SW_MAX_QUERY_LEN); its
+                # message goes to stderr, which is read below only when SW fails.
+                count_limit(args, 'sw_long_query_skipped',
+                            (result.stderr or '').count('Smith-Waterman skipped for'))
                 
                 if result.returncode == 0 and os.path.exists(sw_hits_file):
                     # Parse Smith-Waterman hits (BLAST m8 format)
+                    _drops = {}
                     sw_hits = parse_hits(
                         sw_hits_file,
                         args.sw_min_identity,
@@ -3883,8 +3908,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                         # window); the weak melittin-family members SW exists for sit at
                         # E 0.002-0.25 (smith_waterman_search.KARLIN_ALTSCHUL_BLOSUM62).
                         1.0,
-                        query_lengths=goi_query_lengths
+                        query_lengths=goi_query_lengths,
+                        drops=_drops,
                     )
+                    count_limit(args, 'window_len_floor_sw', _drops.get('len_floor', 0))
+                    count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
                     if sw_hits:
                         print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
                         # Mark hits as from Smith-Waterman
@@ -3896,6 +3924,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                     
             except subprocess.TimeoutExpired:
                 print(f"[{genome_name}] Smith-Waterman timed out after {args.sw_timeout_seconds} seconds, using MMseqs2 only.", flush=True)
+                count_limit(args, 'sw_timeout')
             except FileNotFoundError:
                 print(f"[{genome_name}] Smith-Waterman script not found, using MMseqs2 only.", flush=True)
             except Exception as sw_err:
@@ -4361,12 +4390,26 @@ def is_valid_fallback(
     unaffected); Tetramorium (76% cov) clears either path. ``short_query_len <= 0``
     reverts to the legacy coverage gate for every query.
     """
+    return not fallback_refusal(ordered_hit_count, qcov, single_aln, aln_total, best_bits,
+                                query_len, short_query_len, short_min_aln_aa, short_min_bits)
+
+
+def fallback_refusal(ordered_hit_count: int, qcov: float, single_aln: int, aln_total: int,
+                     best_bits: float, query_len: int, short_query_len: int,
+                     short_min_aln_aa: int, short_min_bits: float) -> List[str]:
+    """The tests of is_valid_fallback that a GOI fallback model fails, [] when it is emitted:
+    'short_aln' / 'short_bits' for a short query; for a long one 'long_qcov' / 'long_aln'
+    (one hit: either refuses) or all three of 'long_qcov', 'long_aln', 'long_bits' (several
+    hits: refused only when all three are low). The names are stage 2's counters."""
     if 0 < short_query_len and query_len < short_query_len:
         aln_for_gate = single_aln if ordered_hit_count == 1 else aln_total
-        return aln_for_gate >= short_min_aln_aa and best_bits >= short_min_bits
+        return ((['short_aln'] if aln_for_gate < short_min_aln_aa else [])
+                + (['short_bits'] if best_bits < short_min_bits else []))
     if ordered_hit_count == 1:
-        return not (qcov < 0.25 or single_aln < 25)
-    return not (qcov < 0.25 and aln_total < 35 and best_bits < 60.0)
+        return (['long_qcov'] if qcov < 0.25 else []) + (['long_aln'] if single_aln < 25 else [])
+    if qcov < 0.25 and aln_total < 35 and best_bits < 60.0:
+        return ['long_qcov', 'long_aln', 'long_bits']
+    return []
 
 
 def define_waves(genome_entries, args):
@@ -4464,6 +4507,74 @@ def assign_waves_by_rank(genome_entries):
     return waves
 
 
+def outside_goi_core(args, query_id: str, global_start: int, global_end: int,
+                     core_start: int, core_end: int) -> bool:
+    """Whether a window hit lies outside the block's GOI core (block +- GOI margin), where
+    it is not used; counted as goi_core_filter (decoy queries left out)."""
+    if global_end <= core_start or global_start >= core_end:
+        if limit_query_kind(query_id) != 'decoy':
+            count_limit(args, 'goi_core_filter')
+        return True
+    return False
+
+
+def cap_goi_parent_loci(args, parent_id: str, parent_loci, rank):
+    """The strongest GOI loci of one query in a window, to avoid noisy paralog floods
+    (goi_candidate_regions_per_query: 2; the local_family module raises it for a family with
+    home copies). The loci cut are counted per query kind: regions_cap (the home GOI and
+    models of earlier genomes), regions_cap_rel (the relative's query), regions_cap_decoy."""
+    kept = sorted(parent_loci, key=rank, reverse=True)[
+        :max(1, int(getattr(args, 'goi_candidate_regions_per_query', 2) or 2))]
+    count_limit(args, {'goi': 'regions_cap', 'rel': 'regions_cap_rel',
+                       'decoy': 'regions_cap_decoy'}[limit_query_kind(parent_id)],
+                len(parent_loci) - len(kept))
+    return kept
+
+
+def cap_flanking_loci(args, parent_loci):
+    """The two strongest loci of a flanking gene in a window (anchor support, not paralog
+    mining); the loci cut are counted as flanking_loci_cap."""
+    count_limit(args, 'flanking_loci_cap', max(0, len(parent_loci) - 2))
+    return sorted(
+        parent_loci,
+        key=lambda hs: (max(h.get('bits', 0) for h in hs), len(hs)),
+        reverse=True
+    )[:2]
+
+
+def count_fallback_refusal(args, parent_id: str, refused) -> None:
+    """A refused GOI fallback model (fallback_refusal's tests): fallback_refused and one count
+    per failed test (decoy queries left out)."""
+    if refused and limit_query_kind(parent_id) != 'decoy':
+        count_limit(args, 'fallback_refused')
+        for test in refused:
+            count_limit(args, f'fallback_{test}')
+
+
+def fallback_span_too_wide(args, parent_id: str, ordered_hits, query_len: int) -> bool:
+    """Span sanity check of a GOI fallback model: its hits may span at most 600x the CDS
+    length below 150 aa (introns dominate a short peptide's span: melittin at 70 aa can span
+    tens of kb in bee genomes), at least 100 kb, and 50x from 150 aa on (raised from 30x
+    after TP53 runs showed real TP63/TP73 loci spanning > 100 kb), at least 5 kb. A refusal
+    is counted as fallback_span_cap (decoy queries left out)."""
+    if query_len < 150:
+        max_span_nt = max(100_000, query_len * 3 * 200)
+    else:
+        max_span_nt = max(5000, query_len * 3 * 50)
+    gspan_min = min(h.get('gstart', 0) for h in ordered_hits)
+    gspan_max = max(h.get('gend', 0) for h in ordered_hits)
+    actual_span = gspan_max - gspan_min
+    if actual_span > max_span_nt:
+        logger.debug(
+            f"[FALLBACK] REJECTED span={actual_span} "
+            f"> max_span={max_span_nt} for {parent_id}"
+        )
+        if limit_query_kind(parent_id) != 'decoy':
+            count_limit(args, 'fallback_span_cap')
+        return True
+    return False
+
+
 def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, genome_name, args, unique_id,
                          threads_per_job, native_annot_index=None):
     """
@@ -4515,6 +4626,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     core_end = min(slen, block['end'] + core_margin)
     if genome_wide:
         core_start, core_end = w_start, w_end
+    elif getattr(args, 'genome_ctx', None) is not None:
+        # The searched GOI cores of the genome, for its dead-zone count (log_genome_limits).
+        args.genome_ctx.setdefault('goi_cores', []).append((chrom, core_start, core_end))
     # DNA around a candidate's hits that the gene model may use: never less than the
     # gene's own span at home.
     goi_model_margin = max(args.gap_search_window,
@@ -4815,7 +4929,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                 global_start = w_start + local_start
                 global_end = w_start + local_end
-                if global_end <= core_start or global_start >= core_end:
+                if outside_goi_core(args, hit.get('query', ''), global_start, global_end,
+                                    core_start, core_end):
                     continue
 
                 query_id = hit.get('query', '')
@@ -4917,8 +5032,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                 # Keep only the strongest loci per parent to avoid noisy paralog floods
                 # (2; the local_family module raises it for a family with home copies).
-                parent_loci = sorted(parent_loci, key=_locus_rank, reverse=True)[
-                    :max(1, int(getattr(args, 'goi_candidate_regions_per_query', 2) or 2))]
+                parent_loci = cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank)
 
                 for locus_idx, gene_hits in enumerate(parent_loci, start=1):
                     work_hits = gene_hits
@@ -4950,7 +5064,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         # copies score within a per cent of each other, so keeping the first
                         # alone reported one copy picked almost at random. Single-segment
                         # copies from the hit pattern are kept where no model lies.
-                        with maybe_quiet_streams(args.quiet_subtools):
+                        with maybe_quiet_streams(args.quiet_subtools), \
+                                miniprot_counting(limit_query_kind(parent_id) != 'decoy'):
                             models = annotate_models_from_hit_list(
                                 work_hits,
                                 parent_query_seq,
@@ -5010,7 +5125,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                                     # A1 "the fumble": short queries gate on aligned length +
                                     # bitscore, not coverage (see is_valid_fallback).
-                                    valid_fallback = is_valid_fallback(
+                                    _refused = fallback_refusal(
                                         ordered_hit_count=len(ordered_hits),
                                         qcov=qcov,
                                         single_aln=int(ordered_hits[0].get('alnlen', 0)),
@@ -5021,6 +5136,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                         short_min_aln_aa=args.fallback_short_min_aln_aa,
                                         short_min_bits=args.fallback_short_min_bits,
                                     )
+                                    valid_fallback = not _refused
+                                    count_fallback_refusal(args, parent_id, _refused)
 
                                     # Span sanity check: reject fallback hits whose
                                     # genomic span is wildly disproportionate to the
@@ -5029,26 +5146,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     # by introns, so a flat 30x multiplier rejects
                                     # valid multi-exon loci (e.g. melittin at 70 aa
                                     # can span tens of kb in bee genomes).
-                                    if valid_fallback:
-                                        # Short queries (<150 aa, e.g. melittin/toxin peptides):
-                                        #   genomic span is dominated by introns; allow up to
-                                        #   600x the CDS length so real multi-exon loci pass.
-                                        # Long queries (>=150 aa, e.g. TP53/TP63/TP73):
-                                        #   raised from 30x -> 50x after TP53 runs showed real
-                                        #   TP63/TP73 loci spanning >100 kb being rejected.
-                                        if query_len < 150:
-                                            max_span_nt = max(100_000, query_len * 3 * 200)
-                                        else:
-                                            max_span_nt = max(5000, query_len * 3 * 50)
-                                        gspan_min = min(h.get('gstart', 0) for h in ordered_hits)
-                                        gspan_max = max(h.get('gend', 0) for h in ordered_hits)
-                                        actual_span = gspan_max - gspan_min
-                                        if actual_span > max_span_nt:
-                                            logger.debug(
-                                                f"[FALLBACK] REJECTED span={actual_span} "
-                                                f"> max_span={max_span_nt} for {parent_id}"
-                                            )
-                                            valid_fallback = False
+                                    if valid_fallback and fallback_span_too_wide(
+                                            args, parent_id, ordered_hits, query_len):
+                                        valid_fallback = False
 
                                     logger.debug(f"[FALLBACK] valid_fallback={valid_fallback}")
 
@@ -5364,11 +5464,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 continue
 
             # Keep strongest loci first; flanking is anchor support, not exhaustive paralog mining.
-            parent_loci = sorted(
-                parent_loci,
-                key=lambda hs: (max(h.get('bits', 0) for h in hs), len(hs)),
-                reverse=True
-            )[:2]
+            parent_loci = cap_flanking_loci(args, parent_loci)
 
             for locus_idx, work_hits in enumerate(parent_loci, start=1):
                 model_protein = None
@@ -6324,6 +6420,124 @@ TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 
                          'significant_blocks', 'best_block_esyn', 'best_block_context',
                          'truncated_blocks', 'genetic_code']
 
+# What every limit that can drop a result dropped in a genome's search (profile handoff,
+# stage 2: counted, nothing changes). Written as limit_<key> columns of target_policy.tsv,
+# logged in one INFO line per genome, summed by the report into its `limits` block. Hits and
+# candidates of decoy queries are left out, except in regions_cap_decoy; docs/OUTPUT.md says
+# what each counts.
+LIMIT_KEYS = [
+    # miniprot (annotate_goi_exons.LIMIT_COUNTS): calls per kind, models per GOI locus
+    'miniprot_timeout_goi', 'miniprot_timeout_flanking', 'miniprot_failed_goi',
+    'miniprot_failed_flanking', 'miniprot_no_alignment_goi', 'miniprot_no_alignment_flanking',
+    'goi_model_loci', 'goi_models_found', 'goi_models_kept', 'goi_model_cap_stopped',
+    'goi_models_below_outs', 'goi_models_near_outs', 'goi_model_rounds_ended_by_timeout',
+    # window search
+    'window_len_floor_mmseqs', 'window_len_floor_tblastn', 'window_len_floor_sw',
+    'window_len_floor_lt15_long_query', 'mmseqs_maxseqs_window', 'mmseqs_maxseqs_genome',
+    'sw_timeout', 'sw_long_query_skipped',
+    # GOI candidates of a window
+    'goi_core_filter', 'regions_cap', 'regions_cap_rel', 'regions_cap_decoy',
+    'fallback_refused', 'fallback_short_aln', 'fallback_short_bits', 'fallback_long_qcov',
+    'fallback_long_aln', 'fallback_long_bits', 'fallback_span_cap', 'flanking_loci_cap',
+    # blocks and the dispersed-GOI rescue of the genome
+    'blocks_capped', 'blocks_capped_goi_seeded', 'blocks_capped_without_home_order',
+    'dispersed_identity', 'dispersed_evalue', 'dispersed_alnlen', 'dispersed_near_anchor',
+    'dead_zone',
+]
+LIMIT_COLUMNS = [f'limit_{k}' for k in LIMIT_KEYS]
+# MMseqs2 search reports at most this many targets per query (its --max-seqs default; the
+# search does not set it): a query with this many result rows may have lost more.
+MMSEQS_DEFAULT_MAX_SEQS = 300
+
+
+@contextlib.contextmanager
+def miniprot_counting(on: bool):
+    """Whether the miniprot calls inside count in annotate_goi_exons.LIMIT_COUNTS: off while a
+    decoy query is modelled, so decoys stay out of the limit counts."""
+    import annotate_goi_exons as _age
+    old = _age.LIMIT_COUNTING
+    _age.LIMIT_COUNTING = bool(on)
+    try:
+        yield
+    finally:
+        _age.LIMIT_COUNTING = old
+
+
+def count_limit(args, key: str, n: int = 1) -> None:
+    """Add ``n`` to this genome's count of a limit (LIMIT_KEYS); a no-op outside a genome's
+    search (no ``args.genome_ctx``) and for n = 0."""
+    ctx = getattr(args, 'genome_ctx', None)
+    if ctx is None or not n:
+        return
+    limits = ctx.setdefault('limits', {})
+    limits[key] = limits.get(key, 0) + int(n)
+
+
+def limit_query_kind(query_id: str) -> str:
+    """'decoy', 'rel' (the relative's query) or 'goi' for a window query or parent id."""
+    parent = extract_base_gene_id(str(query_id or ''))
+    if is_decoy_parent(parent):
+        return 'decoy'
+    return 'rel' if parent.endswith(RELATIVE_QUERY_TAG) else 'goi'
+
+
+def queries_at_max_seqs(hits_file: str, max_seqs: int = MMSEQS_DEFAULT_MAX_SEQS) -> int:
+    """Queries (decoys left out) with at least ``max_seqs`` rows in an MMseqs2 m8 file."""
+    rows = defaultdict(int)
+    try:
+        with open(hits_file) as fh:
+            for line in fh:
+                q = line.split('\t', 1)[0]
+                if q and q.strip():
+                    rows[q] += 1
+    except OSError:
+        return 0
+    return sum(1 for q, n in rows.items() if n >= max_seqs and limit_query_kind(q) != 'decoy')
+
+
+def overlaps_any(chrom: str, start: int, end: int, intervals) -> bool:
+    """Whether [start, end) overlaps one of ``intervals`` ((chrom, start, end), half-open)."""
+    return any(c == chrom and start < e and s < end for c, s, e in intervals)
+
+
+def log_capped_blocks(args, genome_name: str, dropped, first_rank: int, goi_seeded,
+                      proxy_parents, home_order: bool) -> None:
+    """One INFO line per block the per-genome cap drops (max_blocks_per_genome) and its
+    counts. ``dropped`` in the order the cap read them, from rank ``first_rank`` on; without
+    the home order the blocks are not sorted, and the GOI-seeded ones, appended last by the
+    gene-count filter, are dropped first."""
+    for rank, b in enumerate(dropped, start=first_rank):
+        seeded = bool(goi_seeded(b))
+        proxy = bool(set(b.get('genes', [])) & set(proxy_parents or ()))
+        logger.info(f"[{genome_name}] block cap dropped block {rank} {b['chrom']}:{b['start']}-"
+                    f"{b['end']}: {b.get('genes_count', 0)} anchor(s), GOI-seeded "
+                    f"{'yes' if seeded else 'no'}, GOI proxy {'yes' if proxy else 'no'}, "
+                    f"home order {'yes' if home_order else 'no'}.")
+        count_limit(args, 'blocks_capped')
+        count_limit(args, 'blocks_capped_goi_seeded', int(seeded))
+        count_limit(args, 'blocks_capped_without_home_order', int(not home_order))
+
+
+def log_genome_limits(args, genome_name: str) -> None:
+    """At a genome's end: add the miniprot counts of this worker task and the dead zone (the
+    near-anchor GOI hits the dispersed rescue skipped that lie in no searched GOI core) to
+    the genome's counts, and log the counts that are not 0 in one INFO line."""
+    ctx = getattr(args, 'genome_ctx', None)
+    if ctx is None:
+        return
+    import annotate_goi_exons as _age
+    for key, n in sorted(_age.LIMIT_COUNTS.items()):
+        count_limit(args, key, n)
+    _age.LIMIT_COUNTS.clear()
+    cores = ctx.get('goi_cores') or []
+    count_limit(args, 'dead_zone', sum(
+        1 for h in ctx.get('near_anchor_hits') or []
+        if not overlaps_any(h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0)), cores)))
+    limits = ctx.get('limits') or {}
+    shown = [f"{k} {limits[k]}" for k in LIMIT_KEYS if limits.get(k)]
+    logger.info(f"[{genome_name}] Limit counts (stage 2; they change nothing): "
+                + (", ".join(shown) if shown else "none"))
+
 
 def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None):
     """hits/<genome>.target_policy.tsv: what this genome's search was like (preset plan
@@ -6332,7 +6546,8 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
     (E_syn <= 0.1), the best block's E_syn and whether its window ran past a scaffold end
     (left/right/both, '' = complete), and how many windows did. Written as soon as the
     median is known and again when the genome is done, so it exists for every genome the
-    search reached, also one without a model."""
+    search reached, also one without a model. The limit_* columns (LIMIT_KEYS) count what
+    each limit dropped (0 until the genome's end)."""
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.target_policy.tsv")
     ctx = ctx or {}
     esyn = ctx.get('block_esyn') or {}
@@ -6356,6 +6571,9 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         # the report sums them into the run's decoy rate.
         row.update(ctx.get('decoy_counts') or dict.fromkeys(DECOY_COLUMNS, 0))
         columns += DECOY_COLUMNS
+    limits = ctx.get('limits') or {}
+    row.update({f'limit_{k}': int(limits.get(k, 0)) for k in LIMIT_KEYS})
+    columns += LIMIT_COLUMNS
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', newline='') as fh:
@@ -6511,7 +6729,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
                                min_identity=40.0, max_evalue=1e-10,
                                min_alnlen=50, min_chrom_anchors=3,
                                region_padding=50000, envelope_margin=200000,
-                               rejected_out=None, genome_name=""):
+                               rejected_out=None, genome_name="", drops=None, near_out=None):
     """Rescue a strong GOI hit that dispersed WITHIN the flanking ENVELOPE of its
     chromosome, so it can seed its own block.
 
@@ -6539,8 +6757,19 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
     54-72 % hit inside the real gene (the Anopheles defensin case). The caller writes
     these to `hits/<genome>.nonsyntenic.tsv` so the report can say "found, not syntenic"
     instead of "absent".
+
+    Stage 2 (counts only): ``drops``, a dict, gets the GOI hits stopped by each test in the
+    order of the tests (dispersed_identity, dispersed_evalue, dispersed_alnlen,
+    dispersed_near_anchor); ``near_out``, a list, the near-anchor hits themselves, so the
+    search can count those that no searched GOI core holds (the dead zone).
     """
     by_chrom = _flanking_anchor_positions(flanking_hits)
+
+    def _drop(key, h=None):
+        if drops is not None:
+            drops[key] = drops.get(key, 0) + 1
+        if h is not None and near_out is not None:
+            near_out.append(h)
 
     def _reject(h, gate):
         if rejected_out is None:
@@ -6595,8 +6824,10 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
         if not is_goi_query_id(h.get('query', '')):
             continue
         if h.get('pident', 0.0) < min_identity or h.get('evalue', 1.0) > max_evalue:
+            _drop('dispersed_identity' if h.get('pident', 0.0) < min_identity else 'dispersed_evalue')
             continue
         if h.get('alnlen', 0) < min_alnlen:
+            _drop('dispersed_alnlen')
             continue
         env = envelopes.get(h.get('chrom'))
         if not env:                              # chromosome doesn't carry the neighbourhood
@@ -6611,6 +6842,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             not (he < s - region_padding or hs > e + region_padding)
             for _g, _m, s, e in genes)
         if near_anchor:                          # already covered by a flanking block
+            _drop('dispersed_near_anchor', h)
             continue
         key = (h.get('chrom'), hs // max(1, region_padding))
         if key in seen:
@@ -6901,6 +7133,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     # raises it); a module setting of annotate_goi_exons, set for this worker task.
     import annotate_goi_exons as _age
     _age.MINIPROT_SHORT_ORF_MAX_LEN = int(getattr(args, 'miniprot_short_orf_max_len', 60))
+    _age.LIMIT_COUNTS.clear()        # this genome's miniprot counts (log_genome_limits)
     global CORE_COMPLETENESS
     CORE_COMPLETENESS = bool(getattr(args, 'core_completeness', False))
     
@@ -7028,6 +7261,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # (block_place_terms, finalize_place_evalues) and the decoy calls (decoy mode).
         args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},
                            'decoy_lines': []}
+        count_limit(args, 'mmseqs_maxseqs_genome', queries_at_max_seqs(hits_file))
         c_dist = args.cluster_distance
         _bridge_max_gap = args.synteny_bridge_max_gap
         _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
@@ -7056,7 +7290,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 min_chrom_anchors=getattr(args, 'dispersed_min_chrom_anchors', 3),
                 region_padding=args.region_padding,
                 envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000),
-                rejected_out=_nonsyntenic, genome_name=genome_name)
+                rejected_out=_nonsyntenic, genome_name=genome_name,
+                drops=args.genome_ctx.setdefault('limits', {}),
+                near_out=args.genome_ctx.setdefault('near_anchor_hits', []))
             _write_nonsyntenic_candidates(args, prefix, genome_name, _nonsyntenic)
             if _disp_seeds:
                 seed_hits = seed_hits + _disp_seeds
@@ -7190,6 +7426,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 f"[{genome_name}] Capping blocks: {len(synteny_blocks)} -> "
                 f"{args.max_blocks_per_genome} (max_blocks_per_genome)."
             )
+            log_capped_blocks(args, genome_name, synteny_blocks[args.max_blocks_per_genome:],
+                              args.max_blocks_per_genome, _goi_seeded,
+                              goi_proxy_flanking_parents, bool(home_rank))
             synteny_blocks = synteny_blocks[:args.max_blocks_per_genome]
         
         all_genes = []
@@ -7688,6 +7927,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             args.genome_ctx['decoy_counts'] = decoy_case_counts(
                 _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
+        log_genome_limits(args, genome_name)
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
         _write_block_table(args, prefix, genome_name, all_gff_lines, args.genome_ctx, _goi_seeded)
 

@@ -1362,6 +1362,22 @@ MINIPROT_AVAILABLE = _check_miniprot()
 # The search sets it per run (iterative_search_runner --miniprot_short_orf_max_len; the
 # short_query preset module raises it to 100); the home gene model always uses 60.
 MINIPROT_SHORT_ORF_MAX_LEN = 60
+# What a limit of the miniprot calls dropped (profile handoff, stage 2; they change no
+# result): per call kind ("goi" = the sensitive call for the gene of interest, "flanking"
+# otherwise) the calls that timed out, failed or found no alignment, and per GOI locus of
+# miniprot_gene_models the alignments found, the models kept and whether the model cap
+# stopped the masked rounds. The search resets it at the start of each genome and reports
+# it at the end (iterative_search_runner: limit_* columns of hits/<genome>.target_policy.tsv).
+LIMIT_COUNTS = {}
+# False while the search models a decoy query: its calls are left out of LIMIT_COUNTS.
+LIMIT_COUNTING = True
+
+
+def _count(key, n=1):
+    if LIMIT_COUNTING:
+        LIMIT_COUNTS[key] = LIMIT_COUNTS.get(key, 0) + n
+
+
 _MINIPROT_T_OK = None
 
 
@@ -1666,6 +1682,7 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
     _tfd, target_file = tempfile.mkstemp(prefix="synvoy_mp_target_", suffix=".fna")
     os.close(_qfd)
     os.close(_tfd)
+    kind = "goi" if sensitive else "flanking"
 
     try:
         write_fasta([("query", query_seq)], query_file)
@@ -1710,21 +1727,26 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
         if result.returncode != 0:
             print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
                   f"{result.stderr[:200]}", file=sys.stderr)
+            _count(f"miniprot_failed_{kind}")
             return []
         if not result.stdout.strip():
             print("[miniprot] No alignments found", file=sys.stderr)
+            _count(f"miniprot_no_alignment_{kind}")
             return []
 
         models = _parse_miniprot_gff(result.stdout)
         if not models:
             print("[miniprot] No gene models parsed from GFF", file=sys.stderr)
+            _count(f"miniprot_no_alignment_{kind}")
         return models
 
     except subprocess.TimeoutExpired:
         print("[miniprot] Timed out after 120s", file=sys.stderr)
+        _count(f"miniprot_timeout_{kind}")
         return []
     except Exception as e:
         print(f"[miniprot] Error: {e}", file=sys.stderr)
+        _count(f"miniprot_failed_{kind}")
         return []
     finally:
         for f in [query_file, target_file]:
@@ -1925,14 +1947,22 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
     first model costs one run, as before.
 
     Returns ``[(exons, full_protein), ...]``, best first, at most ``max_models``.
+
+    For the gene of interest (``sensitive``) LIMIT_COUNTS records per call: the locus, the
+    alignments miniprot returned over all rounds, the models kept, alignments below the
+    score bound of a masked round, kept models within 1.33x of that bound (a proxy for
+    alignments miniprot's own --outs left out), whether the cap stopped the rounds while an
+    alignment or a hit was still unexplained, and whether a timeout ended them.
     """
     if not query_seq or not chrom_seq:
         return []
     limit = max(1, int(max_models))
     min_ratio = MINIPROT_OUTS_SENSITIVE if sensitive else MINIPROT_OUTS_DEFAULT
     kept, kept_cds = [], []
+    kept_scores = []
     best_score = None
     target = chrom_seq
+    left_over = False
 
     def unexplained():
         for start, end in evidence or ():
@@ -1940,15 +1970,33 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
                 return True
         return False
 
+    def would_be_kept(model):
+        """The score and overlap tests below, for an alignment the cap left unread."""
+        if best_score is not None and float(model.get('score', 0) or 0) < min_ratio * best_score:
+            return False
+        cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
+        coding = sum(e - b for b, e in cds)
+        return coding > 0 and sum(max(0, min(e, ke) - max(b, kb)) for b, e in cds
+                                  for other in kept_cds for kb, ke in other) <= 0.5 * coding
+
     for _round in range(limit):
         added = 0
-        for model in _run_miniprot(query_seq, target, chrom_name, max_intron, sensitive):
+        timeouts_before = LIMIT_COUNTS.get("miniprot_timeout_goi", 0)
+        found = _run_miniprot(query_seq, target, chrom_name, max_intron, sensitive)
+        if sensitive:
+            _count("goi_models_found", len(found))
+            if _round and LIMIT_COUNTS.get("miniprot_timeout_goi", 0) > timeouts_before:
+                _count("goi_model_rounds_ended_by_timeout")
+        for i, model in enumerate(found):
             if len(kept) >= limit:
+                left_over = sensitive and any(would_be_kept(m) for m in found[i:])
                 break
             score = float(model.get('score', 0) or 0)
             if best_score is None:
                 best_score = score
             elif score < min_ratio * best_score:
+                if sensitive and _round:
+                    _count("goi_models_below_outs")
                 continue
             cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
             coding = sum(e - b for b, e in cds)
@@ -1970,6 +2018,7 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
                 continue
             kept.append((exons, protein or ''))
             kept_cds.append(cds)
+            kept_scores.append(score)
             added += 1
         if not added or len(kept) >= limit or not unexplained():
             break
@@ -1978,6 +2027,14 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
             for b, e in cds:
                 masked[b:e] = 'N' * (e - b)
         target = ''.join(masked)
+    if sensitive:
+        _count("goi_model_loci")
+        _count("goi_models_kept", len(kept))
+        if best_score:
+            _count("goi_models_near_outs",
+                   sum(1 for s in kept_scores[1:] if s < 1.33 * min_ratio * best_score))
+        if len(kept) >= limit and (left_over or unexplained()):
+            _count("goi_model_cap_stopped")
     return kept
 
 

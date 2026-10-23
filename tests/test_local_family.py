@@ -78,11 +78,17 @@ def test_a_value_the_user_set_wins_over_a1():
 
 def test_the_runner_reads_the_key_where_the_fixed_two_was():
     src = (ROOT / "bin" / "iterative_search_runner.py").read_text()
-    i = src.index("parent_loci = sorted(parent_loci, key=_locus_rank, reverse=True)")
-    assert "getattr(args, 'goi_candidate_regions_per_query', 2)" in src[i:i + 200]
-    assert "reverse=True)[:2]" not in src[i:i + 80]
+    # The cap and its count live in helpers since stage 2 (cap_goi_parent_loci,
+    # cap_flanking_loci); process_region_block calls them.
+    i, j = src.index("def cap_goi_parent_loci"), src.index("def cap_flanking_loci")
+    assert "sorted(parent_loci, key=rank, reverse=True)" in src[i:j]
+    assert "getattr(args, 'goi_candidate_regions_per_query', 2)" in src[i:j]
+    assert "[:2]" not in src[i:j]
     # the cap on the loci of a flanking gene stays
-    assert re.search(r"\)\[:2\]", src[src.index("def process_region_block"):])
+    assert re.search(r"\)\[:2\]", src[j:src.index("def count_fallback_refusal")])
+    block = src[src.index("def process_region_block"):]
+    assert "cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank)" in block
+    assert "cap_flanking_loci(args, parent_loci)" in block
 
 
 # ============================================================ the slot

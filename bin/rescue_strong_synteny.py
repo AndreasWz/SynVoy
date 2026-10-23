@@ -56,6 +56,11 @@ def _read_query(query_path: str) -> tuple[str, str]:
     return name, "".join(seq_parts)
 
 
+# Windows whose miniprot timed out in this run (profile handoff, stage 2): counted and logged
+# at the end, never written to the GFF (results stay byte-identical).
+TIMEOUTS = {"windows": 0, "runs": 0}
+
+
 def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
                           timeout: int) -> str:
     """Run miniprot --gff with very permissive thresholds against a single window.
@@ -77,6 +82,7 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
     ] + genetic_code_flag("miniprot") + [   # the target's genetic code ([] for table 1)
         window_fa, query_fa,
     ]
+    TIMEOUTS["runs"] += 1
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -85,6 +91,7 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
         # A missing binary still raises: that is an installation fault, not a window.
         print(f"[rescue] miniprot timed out after {timeout} s on {window_fa}; window skipped",
               file=sys.stderr)
+        TIMEOUTS["windows"] += 1
         return ""
     if proc.returncode != 0:
         print(f"[rescue] miniprot non-zero exit ({proc.returncode}) on "
@@ -309,6 +316,10 @@ def main() -> None:
 
     with open(args.output, "w") as out:
         out.write("\n".join(out_lines) + "\n")
+    if TIMEOUTS["runs"]:
+        print(f"[rescue] {args.genome_name}: miniprot timed out in {TIMEOUTS['windows']} of "
+              f"{TIMEOUTS['runs']} window(s) (--miniprot_timeout {args.miniprot_timeout} s)",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

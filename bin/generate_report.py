@@ -516,7 +516,8 @@ def collect_target_policy(paths):
     (iterative_search_runner._write_target_policy): median flanking identity, blocks,
     significant blocks, the best block's E_syn and window context. With several home loci a
     genome has one row per locus; the row kept is the one with the most informative
-    context (complete over truncated over no block), then the most significant block."""
+    context (complete over truncated over no block), then the most significant block. The
+    limit_* columns are left out here; collect_limits sums them."""
     out = {}
     for path in sorted(paths):
         try:
@@ -524,7 +525,7 @@ def collect_target_policy(paths):
                 for row in csv.DictReader(fh, delimiter="\t"):
                     genome = canonical_genome_id(
                         row.get("genome") or os.path.basename(path).split(TARGET_POLICY_SUFFIX)[0])
-                    row = {k: v for k, v in row.items() if k}
+                    row = {k: v for k, v in row.items() if k and not k.startswith(LIMIT_PREFIX)}
                     row["genome"] = genome
                     key = (_CONTEXT_ORDER.get(row.get("best_block_context") or "NA", 2),
                            _safe_float(row.get("best_block_esyn")) if row.get("best_block_esyn") not in (None, "", "NA") else float("inf"))
@@ -537,6 +538,41 @@ def collect_target_policy(paths):
 
 
 DECOY_COUNT_COLUMNS = ("decoy_cases", "decoy_high", "decoy_medium_plus", "decoy_ambiguous_plus")
+LIMIT_PREFIX = "limit_"
+
+
+def collect_limits(paths):
+    """What each limit of the search dropped (profile handoff, stage 2; counts only): the
+    limit_* columns of every target-policy row (one row per home locus and searched genome),
+    summed, with the genomes where a count is not 0. iterative_search_runner.LIMIT_KEYS and
+    docs/OUTPUT.md say what each counts. None when no row carries them."""
+    totals, genomes, order = {}, {}, []
+    rows = 0
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    keys = [k for k in row if k and k.startswith(LIMIT_PREFIX)]
+                    if not keys:
+                        continue
+                    rows += 1
+                    genome = canonical_genome_id(
+                        row.get("genome") or os.path.basename(path).split(TARGET_POLICY_SUFFIX)[0])
+                    for k in keys:
+                        name = k[len(LIMIT_PREFIX):]
+                        if name not in totals:
+                            order.append(name)
+                            totals[name], genomes[name] = 0, set()
+                        n = int(float(row.get(k) or 0))
+                        totals[name] += n
+                        if n:
+                            genomes[name].add(genome)
+        except (OSError, csv.Error, ValueError):
+            continue
+    if not rows:
+        return None
+    return {"genome_searches": rows,
+            "counts": {k: {"total": totals[k], "genomes": sorted(genomes[k])} for k in order}}
 
 
 def collect_decoy_rate(paths):
@@ -2052,6 +2088,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     decoy_rate = collect_decoy_rate(hits_scan["target_policy"])
     if decoy_rate is not None:
         report["decoy_rate"] = decoy_rate
+    # What each limit of the search dropped (counts; they change no call).
+    limits = collect_limits(hits_scan["target_policy"])
+    if limits is not None:
+        report["limits"] = limits
     return report
 
 

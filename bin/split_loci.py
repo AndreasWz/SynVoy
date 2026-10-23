@@ -416,6 +416,14 @@ def main():
                 map(id, sorted(kept[1:], key=rank)[:max(0, args.max_loci - 1)]))
             dropped.extend((cl, f"exceeds --max_loci {args.max_loci}")
                            for cl in kept if id(cl) not in survivors)
+            # Whenever the cap drops a locus, also below --family_warning_threshold and for a
+            # short query (profile handoff, stage 2): each dropped locus is a home copy that is
+            # never searched.
+            n_capped = len(kept) - len(survivors)
+            print(f"WARNING: --max_loci {args.max_loci} dropped {n_capped} home "
+                  f"locus/loci that passed the bit-score ratio test ({len(kept)} passed, "
+                  f"{args.max_loci} kept). Raise --max_loci to search them; they are listed "
+                  f"below as 'exceeds --max_loci'.", file=sys.stderr)
             kept = [cl for cl in kept if id(cl) in survivors]
 
         for cl, reason in dropped:
