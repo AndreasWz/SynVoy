@@ -7133,6 +7133,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     # raises it); a module setting of annotate_goi_exons, set for this worker task.
     import annotate_goi_exons as _age
     _age.MINIPROT_SHORT_ORF_MAX_LEN = int(getattr(args, 'miniprot_short_orf_max_len', 60))
+    _age.GOI_MINIPROT_TIMEOUT = int(getattr(args, 'goi_miniprot_timeout', 120))
     _age.LIMIT_COUNTS.clear()        # this genome's miniprot counts (log_genome_limits)
     global CORE_COMPLETENESS
     CORE_COMPLETENESS = bool(getattr(args, 'core_completeness', False))
@@ -8534,6 +8535,10 @@ def main():
                         help="Gene models kept per GOI locus of a window: every miniprot model "
                              "that does not lie on a better one, up to this number; 1 = the "
                              "best model only (default: 10)")
+    parser.add_argument("--goi_miniprot_timeout", type=int, default=120,
+                        help="Seconds per miniprot run that models a GOI in a window; a run "
+                             "that times out gives no model and ends that locus's copy rounds "
+                             "(default: 120)")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
@@ -9094,6 +9099,9 @@ def main():
         sys.exit(1)
     if args.sw_max_alignments_per_piece < 1:
         logger.error(f"sw_max_alignments_per_piece must be >= 1 (got {args.sw_max_alignments_per_piece})")
+        sys.exit(1)
+    if args.goi_miniprot_timeout < 1:
+        logger.error(f"goi_miniprot_timeout must be >= 1 (got {args.goi_miniprot_timeout})")
         sys.exit(1)
 
     # SW is the load-bearing tier for divergent GOI recovery (e.g. re-finding a 26-40 %

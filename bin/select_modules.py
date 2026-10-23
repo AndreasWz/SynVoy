@@ -33,7 +33,7 @@ profile sets every parameter they touch (profile handoff of 2026-10-20, stage 1)
 
     select_modules.py --hit_profile hit_profile.json [--goi_info goi_info.json]
                       [--home_context home_context.json] [--modules auto]
-                      [--n_flanking_genes 10] [--output x.json]
+                      [--n_flanking_genes 10] [--window_margin_genes 7] [--output x.json]
 """
 import argparse
 import json
@@ -180,7 +180,20 @@ PROFILE_SYMBOLS: Dict[str, str] = {
     "Lcore": "Lq without the signal peptide and the GPI tail",
     "nx": "real exons of the home gene (goi_real_exons)",
     "n": "n_flanking_genes of the run",
+    "W": "window_margin_genes of the run: the neighbourhood around a block in gene pitches; "
+         "the DNA searched ends there, so it caps the GOI margin (C1)",
 }
+
+# The shipped window_margin_genes, for a profile made without the run's value (W unknown).
+WINDOW_MARGIN_GENES_DEFAULT = 7
+
+
+def _whole(v: Any) -> Optional[float]:
+    """A number from a run value: an int when it is whole (7, not 7.0); None when unset."""
+    if v in (None, ""):
+        return None
+    x = float(v)
+    return int(x) if x.is_integer() else x
 
 
 def longest_real_exon_aa(goi_info: Optional[dict]) -> Optional[int]:
@@ -190,9 +203,11 @@ def longest_real_exon_aa(goi_info: Optional[dict]) -> Optional[int]:
 
 
 def design_profile(f: Dict[str, Any], goi_info: Optional[dict] = None,
-                   n_flanking_genes: Optional[Any] = None) -> Dict[str, Any]:
+                   n_flanking_genes: Optional[Any] = None,
+                   window_margin_genes: Optional[Any] = None) -> Dict[str, Any]:
     """The design quantities of PROFILE_SYMBOLS from the flat features, the home gene model
-    (for Lx) and the run's n_flanking_genes; an unknown quantity is None."""
+    (for Lx) and the run's n_flanking_genes and window_margin_genes; an unknown quantity is
+    None."""
     lq, lx = f.get("query_len"), longest_real_exon_aa(goi_info)
     lpiece = lq if lx is None else (lx if lq is None else min(int(lq), lx))
     lcore = None
@@ -211,6 +226,7 @@ def design_profile(f: Dict[str, Any], goi_info: Optional[dict] = None,
         "Lcore": lcore,
         "nx": f.get("goi_real_exons"),
         "n": None if n_flanking_genes in (None, "") else int(n_flanking_genes),
+        "W": _whole(window_margin_genes),
     }
 
 
@@ -345,15 +361,46 @@ def _const(value: Any) -> Callable[[Dict[str, Any], FrozenSet[str]], Any]:
     return lambda _p, _on: value
 
 
+def _goi_margin(p: Dict[str, Any], _on: FrozenSet[str]) -> Any:
+    w = p.get("W")
+    return min(WINDOW_MARGIN_GENES_DEFAULT if w is None else w, max(2, (p.get("R") or 0) + 1))
+
+
+def _piece_floor(p: Dict[str, Any], _on: FrozenSet[str]) -> int:
+    """C7: a per-hit length floor that one true hit can clear: 0.6 of the longest piece,
+    between 10 and 50; 50 (the default) when the piece length is unknown."""
+    lp = p.get("Lpiece")
+    return 50 if lp is None else int(min(50, max(10, round(0.6 * float(lp)))))
+
+
+def _sw_alignments(p: Dict[str, Any], _on: FrozenSet[str]) -> int:
+    return 3 if (p.get("c") or 0) >= 2 or (p.get("nx") or 0) >= 2 else 1
+
+
 # Stage 1 of the profile handoff: the 15 keys the modules set on 2026-10-15, each as a
-# rule with the value it had. Registry order = documentation order.
+# rule with the value it had. Stage 3 adds the search's rules (the model and region caps,
+# the GOI margin, Smith-Waterman alignments per piece, the short-piece length floors) and
+# raises the regions cap from 10 to 40. Registry order = documentation order.
 RULES: List[Rule] = [
     Rule("goi_relative_evalue", ("A1",), _const(1e-3), "1e-3",
          doc="family members next to the GOI: weaker relatives are kept out of the anchors too "
              "(the old preset_tandem_family)"),
     Rule("goi_candidate_regions_per_query", ("A1",),
-         lambda p, _on: max(2, (p["c"] or 1) + 1), "max(2, c + 1)", inputs=("c",), cap=10,
-         doc="GOI loci kept per query in a search window: each home copy, plus one"),
+         lambda p, _on: max(2, (p["c"] or 1) + 1), "max(2, c + 1)", inputs=("c",), cap=40,
+         doc="GOI loci kept per query in a search window: each home copy, plus one (an array in "
+             "4 sub-clusters lost 15 of 31 copies at the old cap of 10: magic-numbers report #6)"),
+    Rule("goi_max_models_per_locus", ("A1",),
+         lambda p, _on: max(10, (p["c"] or 1) + 1), "max(10, c + 1)", inputs=("c",), cap=60,
+         doc="gene models per GOI locus (masked miniprot re-runs): each home copy, plus one; "
+             "copies beyond the cap became rescued_exon fragments (magic-numbers report #3)"),
+    Rule("goi_margin_genes", ("A1",), _goi_margin, "min(W, max(2, R + 1))", inputs=("R", "W"),
+         doc="the GOI core reaches the farthest home family member next to the GOI, plus one "
+             "gene; never beyond the window margin W, where the DNA searched ends (C1)"),
+    Rule("sw_max_alignments_per_piece", ("A1", "C1"), _sw_alignments,
+         "3 if c >= 2 or nx >= 2, else 1", inputs=("c", "nx"),
+         doc="Smith-Waterman reports one alignment per frame: a second copy or exon in the same "
+             "frame of a window piece is found only with more (Round 2 could not separate this "
+             "switch from --tandem_copy_parent home in arm A, so it is a rule, not a default)"),
     Rule("report_copies_in_slot", ("A1",), _const(True), "on", evidence="report only",
          doc="CopiesInSlot / SlotRank on the GOI models, copies_in_slot in the report"),
     Rule("adaptive_score_floor_frac", ("A2",), _const(0.45), "0.45",
@@ -372,12 +419,24 @@ RULES: List[Rule] = [
          doc="finding only: a short query has few words of 3"),
     Rule("window_tblastn_comp_stats", ("B1",), _const(0), "0",
          doc="finding only: a short query loses score to the composition adjustment; the run "
-             "with tblastn's defaults still gives EeffTblastn"),
+             "with tblastn's defaults still gives EeffTblastn. Also for a low-complexity short "
+             "query: keeping 2 there (C8, stage 3) cost real tblastn window hits on curated "
+             "SPIN copies and shortened a counted call, with decoys at 0 MEDIUM+ either way"),
     Rule("window_mmseqs_min_length", ("B1",), _const(10), "10",
          doc="window ORFs from 10 codons, so an exon of a short peptide between two stops is "
              "searched"),
     Rule("miniprot_short_orf_max_len", ("B1",), _const(100), "100",
          doc="every query under 100 aa gets miniprot -L 10 in the windows"),
+    Rule("aug_relaxed_length_min", ("B1",), _const(10), "10", evidence="found in the code",
+         doc="window hits from 10 aa: B1 opens 10-codon ORFs, but the window search dropped "
+             "every GOI hit under 15 aa (C7)"),
+    Rule("fallback_short_min_aln_aa", ("B1",), _const(10), "10", evidence="found in the code",
+         doc="the short-query fallback judges the same short hits as the window floor, with "
+             "the same floor (C7); its 30-bit floor stays"),
+    Rule("dispersed_goi_min_alnlen", ("B1", "C1"), _piece_floor,
+         "min(50, max(10, round(0.6 x Lpiece)))", inputs=("Lpiece",), evidence="found in the code",
+         doc="the dispersed rescue judged each hit against 50 aa, so no piece of a gene whose "
+             "exons are shorter could be rescued; its E <= 1e-10 and 40 % identity stay (C7)"),
     Rule("goi_relative_statistic", ("B2",), _const("blastp_cbs"), "blastp_cbs",
          doc="the flank walk's relative test with composition statistics: a low-complexity "
              "look-alike is no relative (a constructed PEPEP protein: SW E 4e-8, blastp_cbs no hit)"),
@@ -473,24 +532,56 @@ def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 # ----------------------------------------------------------------------------- constraints
 # How the settings must relate to each other, checked after the rules and the values the
 # user set (profile handoff, section 4). The later stages add theirs with their rules
-# (C1/C2 the GOI margin, C4/C5 the panels and the figure copies, C6 one coverage basis, C7
-# one length rule for short pieces, C8 composition statistics with B2, C9 counts tied to n).
-# C10, no rule writes a forbidden key, is enforced when this module loads (validate_registry).
+# (C2 is a code fix of the dispersed rescue, C4/C5 the panels and the figure copies, C6 one
+# coverage basis, C9 counts tied to n). C8 (composition statistics kept for a low-complexity
+# short query) was tried in stage 3 and taken out again; see window_tblastn_comp_stats. C10,
+# no rule writes a forbidden key, is enforced when this module loads (validate_registry).
 def _num(v: Any) -> float:
     return float(v)
 
 
-def _c3_regions_reach_the_copies(settings, _source, p, on):
-    key = "goi_candidate_regions_per_query"
-    if "A1" not in on or key not in settings:
+def _c1_goi_margin_within_window(settings, _source, p, _on):
+    key = "goi_margin_genes"
+    if key not in settings:
         return None
-    cap = RULES_BY_KEY[key].cap
-    need = (p.get("c") or 1) + 1
-    detail = f"{key} {settings[key]}, home copies + 1 = {need}"
-    if cap is not None and need > cap:
-        detail += f": the cap of {cap} binds"
-        need = cap
-    return _num(settings[key]) >= need, (key,), detail
+    w = p.get("W")
+    w = WINDOW_MARGIN_GENES_DEFAULT if w is None else w
+    return (_num(settings[key]) <= _num(w), (key,),
+            f"{key} {settings[key]}, window margin {w} (no DNA is searched beyond it)")
+
+
+def _c3_caps_reach_the_copies(settings, _source, p, on):
+    keys = [k for k in ("goi_candidate_regions_per_query", "goi_max_models_per_locus")
+            if k in settings]
+    if "A1" not in on or not keys:
+        return None
+    ok, parts = True, []
+    for key in keys:
+        cap = RULES_BY_KEY[key].cap
+        need = (p.get("c") or 1) + 1
+        part = f"{key} {settings[key]}, home copies + 1 = {need}"
+        if cap is not None and need > cap:
+            part += f": the cap of {cap} binds"
+            need = cap
+        ok = ok and _num(settings[key]) >= need
+        parts.append(part)
+    return ok, tuple(keys), "; ".join(parts)
+
+
+C7_KEYS = ("aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen")
+
+
+def _c7_one_length_rule(settings, source, p, _on):
+    keys = [k for k in C7_KEYS if k in settings and str(source.get(k, "")).startswith("module:")]
+    if not keys:
+        return None
+    lp = p.get("Lpiece")
+    bound = None if lp is None else max(10, int(round(0.6 * float(lp))))
+    over = [k for k in keys if _num(settings[k]) < 10 or (bound is not None and _num(settings[k]) > bound)]
+    detail = (", ".join(f"{k} {settings[k]}" for k in keys)
+              + (f"; bound max(10, round(0.6 x Lpiece)) = {bound}" if bound is not None
+                 else "; Lpiece unknown"))
+    return not over, tuple(keys), detail
 
 
 def _c11_caps(settings, source, _p, _on):
@@ -512,8 +603,12 @@ def _c12_model_status_order(settings, _source, _p, _on):
 
 
 CONSTRAINTS: List[Tuple[str, str, Callable]] = [
-    ("C3", "with A1, the GOI loci kept per query reach the home copies + 1, within the cap "
-           "(a cap that binds is named)", _c3_regions_reach_the_copies),
+    ("C1", "the GOI margin lies within the window margin, where the DNA searched ends",
+     _c1_goi_margin_within_window),
+    ("C3", "with A1, the GOI loci kept per query and the models per GOI locus reach the home "
+           "copies + 1, within their caps (a cap that binds is named)", _c3_caps_reach_the_copies),
+    ("C7", "a per-hit length floor a rule sets is at least 10 and at most max(10, 0.6 x Lpiece)",
+     _c7_one_length_rule),
     ("C11", "a value set by a rule stays within the rule's cap", _c11_caps),
     ("C12", "ModelStatus: the fragment bound lies below the complete bound", _c12_model_status_order),
 ]
@@ -628,12 +723,15 @@ def main() -> None:
     ap.add_argument("--modules", default="auto", help="--modules value to evaluate (default auto)")
     ap.add_argument("--n_flanking_genes", type=int, default=None,
                     help="n_flanking_genes of the run, for the profile (default: unknown)")
+    ap.add_argument("--window_margin_genes", type=float, default=None,
+                    help="window_margin_genes of the run, for the profile (default: unknown, "
+                         "the GOI margin rule then caps at the shipped 7)")
     ap.add_argument("--output", help="Write {features, profile, modules_would_fire, modules_applied, "
                                      "settings, source, derivation} here")
     args = ap.parse_args()
     goi_info = _read(args.goi_info)
     f = flat_features(_read(args.hit_profile), goi_info, _read(args.home_context))
-    p = design_profile(f, goi_info, args.n_flanking_genes)
+    p = design_profile(f, goi_info, args.n_flanking_genes, args.window_margin_genes)
     mode, applied, fired = choose(args.modules, f)
     settings, source, derivation = apply_rules([d["id"] for d in applied], p)
     out = {"modules_mode": mode, "modules_applied": applied, "modules_would_fire": fired,

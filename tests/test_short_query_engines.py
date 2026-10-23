@@ -31,10 +31,12 @@ import resolve_effective_params as rep  # noqa: E402
 import select_modules as sm  # noqa: E402
 
 B1_KEYS = {"window_tblastn_word_size": 2, "window_tblastn_comp_stats": 0,
-           "window_mmseqs_min_length": 10, "miniprot_short_orf_max_len": 100}
+           "window_mmseqs_min_length": 10, "miniprot_short_orf_max_len": 100,
+           "aug_relaxed_length_min": 10, "fallback_short_min_aln_aa": 10}
 DEFAULTS = {"classify_complete_min_qcov": 0.7, "classify_fragment_max_qcov": 0.4,
             "window_tblastn_word_size": 3, "window_tblastn_comp_stats": 2,
-            "window_mmseqs_min_length": 30, "miniprot_short_orf_max_len": 60}
+            "window_mmseqs_min_length": 30, "miniprot_short_orf_max_len": 60,
+            "aug_relaxed_length_min": 15, "fallback_short_min_aln_aa": 15}
 
 
 def test_b1_sets_the_engine_keys_and_legacy_does_not():

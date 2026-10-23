@@ -1362,6 +1362,9 @@ MINIPROT_AVAILABLE = _check_miniprot()
 # The search sets it per run (iterative_search_runner --miniprot_short_orf_max_len; the
 # short_query preset module raises it to 100); the home gene model always uses 60.
 MINIPROT_SHORT_ORF_MAX_LEN = 60
+# Seconds per miniprot run of the sensitive (GOI) kind; the search sets it per run
+# (iterative_search_runner --goi_miniprot_timeout). Every other run keeps 120 s.
+GOI_MINIPROT_TIMEOUT = 120
 # What a limit of the miniprot calls dropped (profile handoff, stage 2; they change no
 # result): per call kind ("goi" = the sensitive call for the gene of interest, "flanking"
 # otherwise) the calls that timed out, failed or found no alignment, and per GOI locus of
@@ -1722,7 +1725,8 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
         cmd.extend(_miniprot_genetic_code_args())
         cmd.extend([target_file, query_file])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        timeout = GOI_MINIPROT_TIMEOUT if sensitive else 120
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
         if result.returncode != 0:
             print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
@@ -1741,7 +1745,7 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
         return models
 
     except subprocess.TimeoutExpired:
-        print("[miniprot] Timed out after 120s", file=sys.stderr)
+        print(f"[miniprot] Timed out after {timeout}s", file=sys.stderr)
         _count(f"miniprot_timeout_{kind}")
         return []
     except Exception as e:

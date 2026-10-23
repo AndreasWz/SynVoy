@@ -63,7 +63,7 @@ process ITERATIVE_SEARCH {
         --cluster_distance ${params.cluster_distance} \\
         --window_margin_genes ${params.window_margin_genes} \\
         --region_padding ${params.region_padding} \\
-        --goi_margin_genes ${params.goi_margin_genes} \\
+        --goi_margin_genes ${settings.goi_margin_genes} \\
         --goi_margin ${params.goi_margin} \\
         --padding_min ${params.padding_min} \\
         --padding_max ${params.padding_max} \\
@@ -73,14 +73,14 @@ process ITERATIVE_SEARCH {
         --sw_min_score ${settings.sw_min_score} \\
         --sw_min_identity ${settings.sw_min_identity} \\
         --sw_timeout_seconds ${params.sw_timeout_seconds} \\
-        --sw_max_alignments_per_piece ${params.sw_max_alignments_per_piece} \\
+        --sw_max_alignments_per_piece ${settings.sw_max_alignments_per_piece} \\
         --aug_relaxed_evalue_mult ${params.aug_relaxed_evalue_mult} \\
         --aug_relaxed_evalue_cap ${params.aug_relaxed_evalue_cap} \\
         --aug_relaxed_parse_evalue_mult ${params.aug_relaxed_parse_evalue_mult} \\
         --aug_relaxed_identity_factor ${params.aug_relaxed_identity_factor} \\
         --aug_relaxed_identity_min ${params.aug_relaxed_identity_min} \\
         --aug_relaxed_length_div ${params.aug_relaxed_length_div} \\
-        --aug_relaxed_length_min ${params.aug_relaxed_length_min} \\
+        --aug_relaxed_length_min ${settings.aug_relaxed_length_min} \\
         --gap_search_window ${params.gap_search_window} \\
         --gap_min_identity ${params.gap_min_identity} \\
         --gap_max_hits ${params.gap_max_hits} \\
@@ -99,7 +99,8 @@ process ITERATIVE_SEARCH {
         --goi_join_leftover_hits ${params.goi_join_leftover_hits} \\
         --goi_genome_wide_path ${params.goi_genome_wide_path} \\
         --goi_genome_wide_without_blocks ${params.goi_genome_wide_without_blocks} \\
-        --goi_max_models_per_locus ${params.goi_max_models_per_locus} \\
+        --goi_max_models_per_locus ${settings.goi_max_models_per_locus} \\
+        --goi_miniprot_timeout ${params.goi_miniprot_timeout} \\
         --goi_candidate_regions_per_query ${settings.goi_candidate_regions_per_query} \\
         --report_copies_in_slot ${settings.report_copies_in_slot} \\
         --window_tblastn_word_size ${settings.window_tblastn_word_size} \\
@@ -111,7 +112,7 @@ process ITERATIVE_SEARCH {
         --synteny_bridge_two_sided ${params.synteny_bridge_two_sided} \\
         --synteny_bridge_max_per_block ${params.synteny_bridge_max_per_block} \\
         --fallback_short_query_len ${params.fallback_short_query_len} \\
-        --fallback_short_min_aln_aa ${params.fallback_short_min_aln_aa} \\
+        --fallback_short_min_aln_aa ${settings.fallback_short_min_aln_aa} \\
         --fallback_short_min_bits ${params.fallback_short_min_bits} \\
         --quiet_subtools ${params.iterative_quiet_subtools} \\
         --decoy_mode ${params.decoy_mode} \\
@@ -148,7 +149,7 @@ process ITERATIVE_SEARCH {
         --enable_dispersed_goi_rescue ${params.enable_dispersed_goi_rescue} \\
         --dispersed_goi_min_identity ${params.dispersed_goi_min_identity} \\
         --dispersed_goi_max_evalue ${params.dispersed_goi_max_evalue} \\
-        --dispersed_goi_min_alnlen ${params.dispersed_goi_min_alnlen} \\
+        --dispersed_goi_min_alnlen ${settings.dispersed_goi_min_alnlen} \\
         --dispersed_min_chrom_anchors ${params.dispersed_min_chrom_anchors} \\
         --dispersed_envelope_margin_genes ${params.dispersed_envelope_margin_genes} \\
         --dispersed_envelope_margin ${params.dispersed_envelope_margin} \\

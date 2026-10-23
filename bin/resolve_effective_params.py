@@ -363,6 +363,9 @@ def main() -> None:
     ap.add_argument("--n_flanking_genes", type=int, default=None,
                     help="n_flanking_genes of the run: the profile's n (recorded; no rule reads "
                          "it yet)")
+    ap.add_argument("--window_margin_genes", type=float, default=None,
+                    help="window_margin_genes of the run: the profile's W, the cap of the GOI "
+                         "margin rule (constraint C1)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -425,7 +428,8 @@ def main() -> None:
             user_set=user_set,
             modules_spec=args.modules,
             features=features,
-            design=select_modules.design_profile(features, goi_info, args.n_flanking_genes),
+            design=select_modules.design_profile(features, goi_info, args.n_flanking_genes,
+                                                 args.window_margin_genes),
             shipped=shipped,
         )
     except ValueError as exc:

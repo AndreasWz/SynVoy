@@ -37,9 +37,10 @@ def test_home_copies_from_the_coverage_or_the_family_members_nearby():
     assert sm.home_copies({"primary_copies": None, "relatives_nearby": None}) is None
 
 
-def test_a1_keeps_home_copies_plus_one_loci_between_2_and_10():
+def test_a1_keeps_home_copies_plus_one_loci_between_2_and_40():
     by_id = {m.id: m for m in sm.MODULES}
-    for copies, rel, want in ((1.6, 0, 3), (2.34, 0, 3), (1.0, 5, 7), (40.0, 0, 10), (None, None, 2)):
+    for copies, rel, want in ((1.6, 0, 3), (2.34, 0, 3), (1.0, 5, 7), (40.0, 0, 40), (50.0, 0, 40),
+                              (None, None, 2)):
         f = {"primary_copies": copies, "relatives_nearby": _rel(rel) if rel is not None else None}
         settings, source = sm.merge([by_id["A1"]], f)
         assert settings["goi_candidate_regions_per_query"] == want, (copies, rel)

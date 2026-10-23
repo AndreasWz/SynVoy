@@ -353,6 +353,8 @@ The extent of the neighbourhood on each side of a block, in pitches (in bp: `reg
 
 A hit of the gene of interest is used for a gene model only when it lies in the block of flanking genes or at most this far outside it. Until 2026-10-08 this was `gap_search_window` (50 kb), which also set the DNA given to miniprot; the two are separate now.
 
+`goi_margin_genes` is a settings key. The `local_family` module (A1) sets it to min(`window_margin_genes`, max(2, R + 1)), where R is the largest distance, in genes, of a family member next to the home gene: the copies of a home array that reach further than 2 genes from the GOI are then inside the margin in the target too. It never passes `window_margin_genes`, where the DNA searched ends (constraint C1). A wider margin adds no DNA but makes the GOI core, and so the place a call's E-value is counted in, larger. A `goi_margin` in bp that you set still wins.
+
 ### `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap`
 **Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `20` / `auto`
 
@@ -364,6 +366,11 @@ Two clusters of flanking genes on one sequence stay one block across a gap up to
 **Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `9` / `auto`
 
 A strong hit of the gene of interest outside every block is still accepted when it lies inside the envelope of the flanking genes on that sequence, widened by this margin; outside it the hit is listed under `rejected_candidates` in the report.
+
+### `dispersed_goi_min_alnlen`
+**Type:** Integer (aa) | **Default:** `50`
+
+The aligned length a GOI hit needs before the dispersed rescue considers it (with ≥ 40 % identity and E ≤ 1e-10, which stay the rescue's noise guard). A hit does not cross an intron, so a gene whose exons are all shorter than 50 aa, or a query shorter than that, could never be rescued. A settings key: the `short_query` (B1) and `exon_structure` (C1) modules set min(50, max(10, round(0.6 × Lpiece))), with Lpiece the shorter of the query and the longest exon of the home gene (21 for a 70-aa precursor of two 35-aa exons; constraint C7).
 
 ### `min_synteny_score`
 **Type:** Float | **Default:** `0.6` | **Range:** 0.1–1.0
@@ -431,6 +438,8 @@ The maximum time in seconds allowed for a single Smith-Waterman search invocatio
 
 How many Smith-Waterman alignments are returned per piece of a translated reading frame (a frame is one piece unless query length × frame length exceeds 200 million cells). At 1 the best alignment of each piece is returned, as before. Above 1, the residues of each alignment are masked and the piece is aligned again; further alignments are returned while their E-value is at most 1 (the filter the search applies to Smith-Waterman hits anyway), up to this number. Two copies of the gene, or two exons, in the same frame of a window are otherwise reported as one: the second is hidden behind the best alignment. A piece without an alignment at E ≤ 1 costs the same as at 1; each further alignment costs one score-only pass and one traceback, which counts against `sw_timeout_seconds`. Applies to the parasail backend only.
 
+A settings key. The `local_family` (A1) and `exon_structure` (C1) modules set 3 for a gene with two or more home copies or two or more home exons. Round 2 ran 3 only together with `--tandem_copy_parent home`, so its effect alone is not measured and 1 stays the default.
+
 ---
 
 ## 7. Augmented / Relaxed Search
@@ -489,7 +498,7 @@ The identity floor of a window hit is the larger of `aug_relaxed_identity_min` a
 ### `aug_relaxed_length_div`
 **Type:** Integer | **Default:** `2`
 
-The length floor of a window hit is the larger of `aug_relaxed_length_min` and `min_hit_length / aug_relaxed_length_div`. At the defaults that is max(15, 5) = 15 aa; the divisor only matters when `min_hit_length` is set above 30. The 15 aa are a real limit for short queries: an exon of fewer than 15 residues cannot produce a window hit from MMseqs2 or tblastn (Smith-Waterman has no such floor beyond 10 aa).
+The length floor of a window hit is the larger of `aug_relaxed_length_min` and `min_hit_length / aug_relaxed_length_div`. At the defaults that is max(15, 5) = 15 aa; the divisor only matters when `min_hit_length` is set above 30. The 15 aa are a real limit for short queries: an exon of fewer than 15 residues cannot produce a window hit from MMseqs2 or tblastn (Smith-Waterman has no such floor beyond 10 aa). The `short_query` module (B1), which already opens 10-codon reading frames in the windows, sets `aug_relaxed_length_min` to 10 (a settings key).
 
 ### `max_blocks_per_genome`
 **Type:** Integer | **Default:** `80` | **Range:** 5–500
@@ -536,7 +545,7 @@ A GOI hit that no gene model of its locus covers is written as a `rescued_exon` 
 
 These control the **short-query GOI fallback gate** — the "fallback" model emitted (from tblastn/MMseqs2/Smith-Waterman hits) when miniprot cannot build a spliced gene model in a flanking-seeded block. The legacy gate vetoed a fallback on low *query coverage*, which is structurally low for a short precursor whose conserved region is only a fraction of the query: a 26 aa mature melittin peptide is ~37% of the 70 aa preprotein, so a perfect hit still looks "low coverage" and was rejected — while a high-coverage but low-identity artifact in a *different* block passed, stamping the GOI on the wrong locus.
 
-For a query shorter than `fallback_short_query_len` (aa), SynVoy instead gates the fallback on **absolute aligned length** (`fallback_short_min_aln_aa`) AND **bitscore** (`fallback_short_min_bits`) — coverage is no longer a veto — so the real, divergent hit is emitted in its own flanking-seeded block. A micro-window (a few aa) is still rejected by the aligned-length floor, and a statistically weak hit by the bitscore floor. Queries at or above `fallback_short_query_len` keep the coverage floor unchanged, so long single-copy or paralog-family genes (e.g. LY6, TP53) are unaffected, and a high-coverage divergent ortholog (e.g. the *Tetramorium* myrmicitoxin at ~40% identity × ~76% coverage) clears either path. Set `fallback_short_query_len 0` to disable the short-query path entirely (legacy coverage gate for all queries). Lower `fallback_short_min_aln_aa`/`fallback_short_min_bits` for extremely short or divergent peptide families; raise them if a short-query run produces spurious LOW fallbacks. This is the core of the §A1 "fumble" fix.
+For a query shorter than `fallback_short_query_len` (aa), SynVoy instead gates the fallback on **absolute aligned length** (`fallback_short_min_aln_aa`) AND **bitscore** (`fallback_short_min_bits`) — coverage is no longer a veto — so the real, divergent hit is emitted in its own flanking-seeded block. A micro-window (a few aa) is still rejected by the aligned-length floor, and a statistically weak hit by the bitscore floor. Queries at or above `fallback_short_query_len` keep the coverage floor unchanged, so long single-copy or paralog-family genes (e.g. LY6, TP53) are unaffected, and a high-coverage divergent ortholog (e.g. the *Tetramorium* myrmicitoxin at ~40% identity × ~76% coverage) clears either path. Set `fallback_short_query_len 0` to disable the short-query path entirely (legacy coverage gate for all queries). Lower `fallback_short_min_aln_aa`/`fallback_short_min_bits` for extremely short or divergent peptide families; raise them if a short-query run produces spurious LOW fallbacks. This is the core of the §A1 "fumble" fix. `fallback_short_min_aln_aa` is a settings key: the `short_query` module (B1) sets 10, the same floor as the window hits it judges (constraint C7); the 30-bit floor stays.
 
 ---
 
@@ -581,10 +590,17 @@ DNA added on each side of the hits of one candidate before miniprot builds its g
 
 Gene models kept per candidate locus. miniprot reports every place where the query aligns in the stretch of DNA; until 2026-10-08 the first model was used and the rest dropped, so a tandem array gave one model, and which copy it was depended on a score difference of under one per cent. Now every model is kept whose coding sequence overlaps the coding sequence of a better model by less than half. Where hits of the window search remain on no model, the coding exons found so far are masked and miniprot runs again (with a long allowed intron it does not report a diverged neighbouring copy in the first run: of two copies 2 kb apart the one at 80 % identity is missing from 10 kb on). A further model must reach 30 % of the best score, the limit miniprot applies itself. Further models carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are classified like any other model.
 
+A settings key. The `local_family` module (A1) sets max(10, home copies + 1), at most 60, so every copy of a home array larger than ten can get its own model (beyond the cap, copies become fragments). Whether the cap stopped the copy rounds of a locus is counted in the report's `limits` block (`goi_model_cap_stopped`).
+
+### `goi_miniprot_timeout`
+**Type:** Integer (s) | **Default:** `120`
+
+Seconds per miniprot run that models the gene of interest in a window; one run per copy round of a locus. A run that times out gives no model, and the copy rounds of that locus end there: a timeout in the first round leaves the locus without a model. The report's `limits` block counts timeouts (`miniprot_timeout_goi`) apart from runs that found nothing, and rounds a timeout ended (`goi_model_rounds_ended_by_timeout`). The value was fixed at 120 s in the code until 2026-10-22. Flanking-gene models, the home gene model and the rescue passes keep their own limits (the strong-synteny rescue: `strong_synteny_rescue_miniprot_timeout`).
+
 ### `window_tblastn_word_size`, `window_tblastn_comp_stats`
 **Type:** Integer | **Defaults:** `3`, `2` (tblastn's own)
 
-`-word_size` and `-comp_based_stats` of the tblastn search inside each window (finding only). With a value other than tblastn's defaults, tblastn runs twice per window: the run with these values adds hits, and the run with the defaults still gives `EeffTblastn`, the second E source the label is compared on. The `short_query` preset module (B1) sets 2 and 0: a short query has few words of 3 and loses score to the composition adjustment. The label's own E-value (blastp, `Eeff`) is not affected. Settings keys: a value you set yourself is kept.
+`-word_size` and `-comp_based_stats` of the tblastn search inside each window (finding only). With a value other than tblastn's defaults, tblastn runs twice per window: the run with these values adds hits, and the run with the defaults still gives `EeffTblastn`, the second E source the label is compared on. The `short_query` preset module (B1) sets 2 and 0: a short query has few words of 3 and loses score to the composition adjustment. This holds for a low-complexity short query too. Keeping the composition statistics at 2 there (constraint C8, tried in stage 3 of the profile handoff, 22-23 Oct 2026) cost real tblastn window hits on curated SPIN copies of the family pilot (33 -> 19 hits in one *Harpegnathos* window) and shortened a counted call there, while decoys stayed at 0 MEDIUM or better with and without it; it was taken out again. The label's own E-value (blastp, `Eeff`) is not affected. Settings keys: a value you set yourself is kept.
 
 ### `window_mmseqs_min_length`
 **Type:** Integer (codons) | **Default:** `30` (MMseqs2's own)
@@ -597,9 +613,9 @@ MMseqs2 `--min-length` of the window search: open reading frames of the target s
 Queries shorter than this are aligned by miniprot with `-L 10` (open reading frames from 10 aa; miniprot's default is 30) when the gene models of a window are built. The `short_query` module (B1) sets 100. The home gene model is built before the modules are resolved and always uses 60; the rescue passes use `-L 10` for every query. Settings key.
 
 ### `goi_candidate_regions_per_query`
-**Type:** Integer | **Default:** `2` | **Range:** 1–10 (modules cap it at 10)
+**Type:** Integer | **Default:** `2` | **Range:** 1–40 (modules cap it at 40)
 
-GOI loci kept per query in a search window. The hits of a query in a window are split into loci (hits less than 40 kb apart, more for a home gene with long introns), ranked by the share of the query they cover, then the best bit score, then the number of hits, and this many are modelled; the rest are dropped. Until 2026-10-15 the 2 was fixed in the code. The `local_family` preset module (A1) sets it to the home copies + 1 (the larger of the query's coverage at its home locus, rounded half up, and 1 + the family members among the neighbours of the home gene), between 2 and 10, so a tandem array with more copies than two gets each copy modelled. A settings key: a value you set yourself is kept.
+GOI loci kept per query in a search window. The hits of a query in a window are split into loci (hits less than 40 kb apart, more for a home gene with long introns), ranked by the share of the query they cover, then the best bit score, then the number of hits, and this many are modelled; the rest are dropped. Until 2026-10-15 the 2 was fixed in the code. The `local_family` preset module (A1) sets it to the home copies + 1 (the larger of the query's coverage at its home locus, rounded half up, and 1 + the family members among the neighbours of the home gene), between 2 and 40 (10 until 2026-10-22: an array in four sub-clusters lost 15 of 31 copies at 10), so a tandem array with more copies than two gets each copy modelled. A settings key: a value you set yourself is kept.
 
 ### `report_copies_in_slot`
 **Type:** Boolean | **Default:** `false`
@@ -955,9 +971,9 @@ LOCATE_GENE runs before the modules are resolved: when the value selects `short_
 
 Besides the settings, `intermediate/locate_gene/effective_params.json` records:
 
-- `profile`: the design quantities the rules read. These are `c` (home copies), `R` (reach of the home array in genes: the largest distance, in gene ranks, of a family member next to the home gene), `Fam` (home loci of the family), `Lq` (query length), `Lx` (longest real exon of the home gene), `Lpiece` (min(`Lq`, `Lx`)), `Lcore` (the query without signal peptide and GPI tail), `nx` (real exons of the home gene) and `n` (`n_flanking_genes`).
+- `profile`: the design quantities the rules read. These are `c` (home copies), `R` (reach of the home array in genes: the largest distance, in gene ranks, of a family member next to the home gene), `Fam` (home loci of the family), `Lq` (query length), `Lx` (longest real exon of the home gene), `Lpiece` (min(`Lq`, `Lx`)), `Lcore` (the query without signal peptide and GPI tail), `nx` (real exons of the home gene), `n` (`n_flanking_genes`) and `W` (`window_margin_genes`).
 - `derivation`: for every value that a module rule, the preset or you set, the value, the default and what set it. For a rule it also gives the formula and its inputs, for example `goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`. The console prints these lines after `[INFO] settings from the module rules`.
-- `constraints`: the checks of how the settings relate. With A1, the GOI loci kept per query must reach the home copies + 1, within the cap (a cap that binds is named). A value a rule set must stay within its cap. The fragment bound of the model status must lie below the complete bound.
+- `constraints`: the checks of how the settings relate. C1: the GOI margin lies within the window margin. C3: with A1, the GOI loci kept per query and the gene models per GOI locus reach the home copies + 1, within their caps (a cap that binds is named). C7: a per-hit length floor a rule sets lies between 10 and max(10, 0.6 × Lpiece). C11: a value a rule set stays within its cap. C12: the fragment bound of the model status lies below the complete bound.
 
 A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept.
 

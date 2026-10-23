@@ -289,7 +289,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--max_intron` | `20000` | Maximum intron length (bp) for miniprot gene models |
 | `--region_padding` | `auto` | Extent of the neighbourhood (bp) on each side of a block: blocks whose extents overlap are merged, anchors inside count as support. `auto` = `--window_margin_genes` pitches × expansion; the DNA cut out and searched is then at most this and not more than GOI margin + the room for one gene model. A number restores the former behaviour: an adaptive margin between `--padding_min` and `--padding_max`, searched in full. |
 | `--window_margin_genes` | `7` | The same extent in gene pitches. |
-| `--goi_margin_genes` / `--goi_margin` | `2` / `auto` | How far outside the block of flanking genes a GOI hit may lie and still be modelled (pitches / bp; 50000 before). |
+| `--goi_margin_genes` / `--goi_margin` | `2` / `auto` | How far outside the block of flanking genes a GOI hit may lie and still be modelled (pitches / bp; 50000 before; `local_family`: the home array's reach + 1, at most `window_margin_genes`). |
 | `--padding_min` | `50000` | Minimum padding (bp); only read when `--region_padding` is a number |
 | `--padding_max` | `200000` | Maximum padding (bp) |
 | `--max_blocks_per_genome` | `80` | Safety cap on candidate blocks per target genome |
@@ -304,8 +304,9 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--goi_relative_statistic` | `sw` | Statistic of the relative test of the flank walk: `sw` or `blastp_cbs` (composition-based; `low_complexity` module). |
 | `--report_low_complexity` | `false` | `LowComplexity=` on GOI models (`low_complexity` module). |
 | `--core_completeness` | `false` | HIGH's completeness also on the protein without signal peptide and GPI tail (`CoreCoverage`; `signal_anchor` module). |
-| `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before. |
-| `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 10). |
+| `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before (`local_family`: home copies + 1, at most 60). |
+| `--goi_miniprot_timeout` | `120` | Seconds per miniprot run that models a GOI in a window; a timeout ends that locus's copy rounds (counted in the report's `limits`). |
+| `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 40). |
 | `--report_copies_in_slot` | `false` | `CopiesInSlot` / `SlotRank` on GOI models and home : target copies per genome in the report (on with `local_family`). |
 | `--window_tblastn_word_size` / `--window_tblastn_comp_stats` | `3` / `2` | tblastn options of the window search (finding only; the `short_query` module sets 2 / 0). |
 | `--window_mmseqs_min_length` | `30` | MMseqs2 ORF floor (codons) of the window search (`short_query`: 10). |
@@ -322,7 +323,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--sw_min_score` | `20` | Minimum SW alignment score to report a hit |
 | `--sw_min_identity` | `10.0` | Minimum identity (%) for SW hits |
 | `--sw_timeout_seconds` | `300` | Timeout per SW search invocation |
-| `--sw_max_alignments_per_piece` | `1` | SW alignments per piece of a frame; above 1, further exons or copies in the same frame while E ≤ 1 |
+| `--sw_max_alignments_per_piece` | `1` | SW alignments per piece of a frame; above 1, further exons or copies in the same frame while E ≤ 1 (`local_family` / `exon_structure`: 3) |
 
 ### Window search thresholds
 
@@ -335,10 +336,10 @@ One search per window (the names date from a design with several relaxed rounds)
 | `--aug_relaxed_evalue_cap` | `10.0` | See above |
 | `--aug_relaxed_identity_min` | `15.0` | Identity floor (%) of a window hit |
 | `--aug_relaxed_identity_factor` | `0.6` | Floor becomes `min_hit_identity` × this when that is larger than the line above |
-| `--aug_relaxed_length_min` | `15` | Length floor (aa) of a window hit |
+| `--aug_relaxed_length_min` | `15` | Length floor (aa) of a window hit (`short_query`: 10) |
 | `--aug_relaxed_length_div` | `2` | Floor becomes `min_hit_length` / this when that is larger than the line above |
 | `--fallback_short_query_len` | `150` | Queries shorter than this (aa) gate their GOI fallback on aligned length + bitscore instead of query coverage — a short mature peptide in a longer precursor (e.g. melittin) is structurally low-coverage even on a perfect hit. `0` = legacy coverage gate for all queries. |
-| `--fallback_short_min_aln_aa` | `15` | Minimum aligned length (aa) for a short-query GOI fallback. Rejects micro-window overcalls while admitting short mature peptides. |
+| `--fallback_short_min_aln_aa` | `15` | Minimum aligned length (aa) for a short-query GOI fallback. Rejects micro-window overcalls while admitting short mature peptides (`short_query`: 10). |
 | `--fallback_short_min_bits` | `30` | Minimum bitscore for a short-query GOI fallback. Lets a high-bitscore divergent hit pass where low coverage would have vetoed it. |
 
 ### MMseqs2
@@ -502,7 +503,7 @@ already recovered.
 | `--enable_dispersed_goi_rescue` | `true` | Seed a block from a strong GOI hit that landed *outside* every flanking-seeded block, provided the chromosome carries enough flanking anchors to define an envelope around it. |
 | `--dispersed_goi_min_identity` | `40.0` | Min % identity for a dispersed GOI hit to qualify. |
 | `--dispersed_goi_max_evalue` | `1e-10` | Max e-value for a dispersed GOI hit. |
-| `--dispersed_goi_min_alnlen` | `50` | Min alignment length for a dispersed GOI hit. |
+| `--dispersed_goi_min_alnlen` | `50` | Min alignment length for a dispersed GOI hit (`short_query` / `exon_structure`: 0.6 × the longest exon or the query, 10-50). |
 | `--dispersed_min_chrom_anchors` | `3` | The chromosome must carry at least this many flanking genes before an envelope is drawn around the dispersed hit. |
 | `--dispersed_envelope_margin` | `auto` | bp padding each side of the flanking envelope. `auto` = `--dispersed_envelope_margin_genes` (9) pitches × expansion (200000 before). |
 

@@ -276,6 +276,8 @@ def presetDefaultKeys() {
         'window_tblastn_word_size', 'window_tblastn_comp_stats', 'window_mmseqs_min_length',
         'miniprot_short_orf_max_len', 'goi_relative_statistic', 'report_low_complexity',
         'core_completeness',
+        'goi_max_models_per_locus', 'goi_margin_genes', 'sw_max_alignments_per_piece',
+        'aug_relaxed_length_min', 'fallback_short_min_aln_aa', 'dispersed_goi_min_alnlen',
         'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
         'adaptive_max_regions', 'adaptive_unique_gene_floor',
     ]

@@ -155,6 +155,7 @@ EDGES = {
     "B1": ({"query_len": 99}, {"query_len": 100}),
     "B2": ({"seg_frac": 0.10, "repeat_frac": 0.0}, {"seg_frac": 0.099, "repeat_frac": 0.249}),
     "B3": ({"sp": True, "sp_len": 20}, {"sp": False, "sp_len": 0, "gpi": False}),
+    "C1": ({"goi_real_exons": 2}, {"goi_real_exons": 1}),
 }
 
 
@@ -170,8 +171,11 @@ def test_each_rule_at_the_edge_of_its_trigger(key):
         assert res["source"][key] == "default" and res["settings"][key] == FULL[key], (key, mid)
 
 
-@pytest.mark.parametrize("copies,want,capped", [(9.0, 10, False), (10.0, 10, True), (31.0, 10, True)])
+@pytest.mark.parametrize("copies,want,capped", [(9.0, 10, False), (31.0, 32, False), (39.0, 40, False),
+                                                 (40.0, 40, True)])
 def test_the_regions_rule_at_its_cap(copies, want, capped):
+    """Stage 3 raised the cap from 10 to 40 (an array in 4 sub-clusters lost 15 of 31 copies
+    at 10)."""
     settings, _source, derivation = sm.apply_rules({"A1"}, sm.design_profile({"primary_copies": copies}))
     d = derivation["goi_candidate_regions_per_query"]
     assert settings["goi_candidate_regions_per_query"] == want
@@ -191,20 +195,25 @@ def test_the_settings_map_holds_the_rule_keys_and_known_leftovers_only():
     assert not SETTINGS_KEYS_WITHOUT_A_RULE & set(sm.RULES_BY_KEY)
 
 
-def test_the_rules_of_stage_1_are_the_fifteen_module_keys_of_2026_10_15():
-    """Stage 1 of the profile handoff moved the keys into rules without changing a value."""
+def test_the_rules_of_stages_1_and_3():
+    """Stage 1 of the profile handoff moved the 15 module keys of 2026-10-15 into rules
+    without changing a value; stage 3 added the search's rules (A1: models, GOI margin;
+    A1 / C1: Smith-Waterman alignments per piece; B1: the short-piece floors; B1 / C1: the
+    dispersed rescue's floor) and raised the regions cap to 40. C1 stops being advisory."""
     assert {m.id: sm.rule_keys(m.id) for m in sm.MODULES} == {
-        "A1": ["goi_relative_evalue", "goi_candidate_regions_per_query", "report_copies_in_slot"],
+        "A1": ["goi_relative_evalue", "goi_candidate_regions_per_query", "goi_max_models_per_locus",
+               "goi_margin_genes", "sw_max_alignments_per_piece", "report_copies_in_slot"],
         "A2": ["adaptive_score_floor_frac", "adaptive_score_floor_abs", "adaptive_max_regions"],
         "A3": [],
         "B1": ["classify_complete_min_qcov", "classify_fragment_max_qcov", "window_tblastn_word_size",
-               "window_tblastn_comp_stats", "window_mmseqs_min_length", "miniprot_short_orf_max_len"],
+               "window_tblastn_comp_stats", "window_mmseqs_min_length", "miniprot_short_orf_max_len",
+               "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen"],
         "B2": ["goi_relative_statistic", "report_low_complexity"],
         "B3": ["core_completeness"],
-        "B4": [], "C1": [], "C2": [],
+        "B4": [], "C1": ["sw_max_alignments_per_piece", "dispersed_goi_min_alnlen"], "C2": [],
     }
     assert {k: r.cap for k, r in sm.RULES_BY_KEY.items() if r.cap is not None} == {
-        "goi_candidate_regions_per_query": 10}
+        "goi_candidate_regions_per_query": 40, "goi_max_models_per_locus": 60}
 
 
 def test_a_rule_applies_when_any_owner_is_applied_and_its_formula_alone_decides():
@@ -264,7 +273,8 @@ class _Reads(dict):
 
 @pytest.mark.parametrize("c", [None, 1, 3, 40])
 def test_every_formula_reads_only_its_declared_profile_inputs(c):
-    values = {"c": c, "R": 2, "Fam": 3, "Lq": 60, "Lx": 30, "Lpiece": 30, "Lcore": 40, "nx": 2, "n": 10}
+    values = {"c": c, "R": 2, "Fam": 3, "Lq": 60, "Lx": 30, "Lpiece": 30, "Lcore": 40, "nx": 2, "n": 10,
+              "W": 7}
     assert set(values) == set(sm.PROFILE_SYMBOLS)
     for r in sm.RULES:
         p = _Reads(values)
@@ -285,7 +295,8 @@ def test_the_design_profile_of_a_secreted_gene_in_an_array():
     p = sm.design_profile(f, goi, "10")
     assert f["sp_len"] == 20 and f["gpi"]
     assert p == {"c": 3, "R": 4, "Fam": 3, "Lq": 131, "Lx": 96, "Lpiece": 96,
-                 "Lcore": 131 - 20 - f["gpi_len"], "nx": 2, "n": 10}
+                 "Lcore": 131 - 20 - f["gpi_len"], "nx": 2, "n": 10, "W": None}
+    assert sm.design_profile(f, goi, 10, "7")["W"] == 7 and sm.design_profile(f, goi, 10, 7.5)["W"] == 7.5
     # a short query: the longest piece is the query
     short = sm.design_profile(dict(f, query_len=70, sp=False, gpi=False), goi, 10)
     assert (short["Lpiece"], short["Lcore"]) == (70, 70)
@@ -294,7 +305,7 @@ def test_the_design_profile_of_a_secreted_gene_in_an_array():
 def test_the_design_profile_without_its_inputs():
     assert sm.design_profile({}, None, None) == {
         "c": None, "R": 0, "Fam": None, "Lq": None, "Lx": None, "Lpiece": None, "Lcore": None,
-        "nx": None, "n": None}
+        "nx": None, "n": None, "W": None}
     f = sm.flat_features(_profile(query_len=80), None, None)
     p = sm.design_profile(f, {"method": "tandem_duplication", "exons": [{"id": "e", "length_aa": 40}]})
     assert (p["Lx"], p["Lpiece"], p["nx"], p["c"]) == (None, 80, None, 1)
@@ -306,7 +317,9 @@ def test_the_design_profile_without_its_inputs():
 FULL = dict(DEFAULTS, goi_candidate_regions_per_query=2, report_copies_in_slot=False,
             window_tblastn_word_size=3, window_tblastn_comp_stats=2, window_mmseqs_min_length=30,
             miniprot_short_orf_max_len=60, goi_relative_statistic="sw", report_low_complexity=False,
-            core_completeness=False)
+            core_completeness=False, goi_max_models_per_locus=10, goi_margin_genes=2,
+            sw_max_alignments_per_piece=1, aug_relaxed_length_min=15, fallback_short_min_aln_aa=15,
+            dispersed_goi_min_alnlen=50)
 
 
 def test_the_derivation_says_what_set_each_key_and_from_what():
@@ -334,10 +347,16 @@ def _constraint(res, cid):
 def test_a_binding_cap_is_named_and_is_no_violation():
     f = sm.flat_features(_profile(copies=40.0), None, None)
     res = rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=f)
-    assert res["settings"]["goi_candidate_regions_per_query"] == 10
+    assert res["settings"]["goi_candidate_regions_per_query"] == 40
     assert res["derivation"]["goi_candidate_regions_per_query"]["uncapped"] == 41
+    assert res["settings"]["goi_max_models_per_locus"] == 41      # below its cap of 60
     c3 = _constraint(res, "C3")
-    assert c3["ok"] and "the cap of 10 binds" in c3["detail"]
+    assert c3["ok"] and "goi_candidate_regions_per_query 40, home copies + 1 = 41: the cap of 40 binds" in c3["detail"]
+    assert "goi_max_models_per_locus 41, home copies + 1 = 41" in c3["detail"]
+    f = sm.flat_features(_profile(copies=75.0), None, None)
+    res = rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=f)
+    assert res["settings"]["goi_max_models_per_locus"] == 60
+    assert "goi_max_models_per_locus 60, home copies + 1 = 76: the cap of 60 binds" in _constraint(res, "C3")["detail"]
     assert _constraint(res, "C11")["ok"]
     legacy = rep.resolve(FULL, auto_preset={"preset": "preset_tandem_family"}, modules_spec="legacy", features=f)
     assert not _constraint(legacy, "C3")["applies"] and not _constraint(legacy, "C11")["applies"]
@@ -364,7 +383,7 @@ def test_a_violation_the_rules_make_alone_stops_the_run(monkeypatch, tmp_path, c
     f = sm.flat_features(_profile(query_len=50), None, None)
     c12 = _constraint(rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=f), "C12")
     assert not c12["ok"] and c12["on_violation"] == "stop"
-    over = sm.check_constraints({"goi_candidate_regions_per_query": 12},
+    over = sm.check_constraints({"goi_candidate_regions_per_query": 41},
                                 {"goi_candidate_regions_per_query": "module:A1"}, {"c": 3}, {"A1"})
     assert {c["id"]: (c.get("ok"), c.get("on_violation")) for c in over}["C11"] == (False, "stop")
     (tmp_path / "defaults.json").write_text(json.dumps(FULL))
@@ -402,7 +421,9 @@ def test_merge_does_not_depend_on_the_order_of_the_modules():
 # applying PRESET_OVERRIDES alone, so a legacy run never sees them.
 KEYS_AFTER_V1 = {"goi_candidate_regions_per_query", "report_copies_in_slot",
                  "window_tblastn_word_size", "window_tblastn_comp_stats",
-                 "window_mmseqs_min_length", "miniprot_short_orf_max_len"}
+                 "window_mmseqs_min_length", "miniprot_short_orf_max_len",
+                 "goi_max_models_per_locus", "goi_margin_genes", "sw_max_alignments_per_piece",
+                 "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen"}
 
 
 def test_the_old_presets_are_module_sets_with_the_same_values():

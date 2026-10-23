@@ -55,6 +55,7 @@ __SYNVOY_DEFAULTS__
         --home_context ${home_context} \\
         --modules '${modules_spec}' \\
         --n_flanking_genes ${params.n_flanking_genes} \\
+        --window_margin_genes ${params.window_margin_genes} \\
         --defaults defaults.json \\
         --shipped_config ${projectDir}/nextflow.config \\
         ${override_arg} \\

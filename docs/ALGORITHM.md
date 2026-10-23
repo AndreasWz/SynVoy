@@ -227,14 +227,14 @@ distance to the scaffold end).
 
 | Id | Module | Trigger | What it changes (today) |
 |---|---|---|---|
-| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 10, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; `report_copies_in_slot` on (§7.13) |
+| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 40, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; gene models per GOI locus (`goi_max_models_per_locus`) 10 → max(10, home copies + 1), at most 60; the GOI margin (`goi_margin_genes`) 2 → min(`window_margin_genes`, max(2, R + 1)); Smith-Waterman alignments per piece 1 → 3; `report_copies_in_slot` on (§7.13) |
 | A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
-| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
+| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); the length floors of window hits and of the short-query fallback 15 → 10 aa, the dispersed rescue's 50 → 0.6 × `Lpiece` (10-50); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
 | B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | stricter only: the relative test of the flank walk with blastp and composition-based statistics (`goi_relative_statistic blastp_cbs`); `LowComplexity=` on GOI models |
 | B3 | `signal_anchor` | a signal peptide or a GPI tail | completeness for HIGH also on the core of the home protein (`core_completeness`: `CoreCoverage=` on gene models, the judge reads the larger of the two coverages; §7.8) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
-| C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | nothing (advisory) |
+| C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | Smith-Waterman alignments per piece 1 → 3 (a second exon in the same frame); the dispersed rescue's length floor 50 → 0.6 × `Lpiece` (10-50) |
 | C2 | `home_context` | the home gene < 40 kb from the end of a scaffold of ≥ 1 Mb | nothing (advisory) |
 
 The thresholds marked as triggers are today's values or assumed, never tuned. Rules that
@@ -252,16 +252,22 @@ hold for every module:
   home array in genes (the largest |rank| of a family member in the flank walk, 0 without
   one), `Fam` the home loci of the family, `Lq` the query length, `Lx` the longest real
   exon of the home gene, `Lpiece` = min(`Lq`, `Lx`), `Lcore` the query without its signal
-  peptide and GPI tail, `nx` the real exons of the home gene, and `n` =
-  `n_flanking_genes`. Today's rules give the values in the table above: the A1 rule for
-  `goi_candidate_regions_per_query` is max(2, `c` + 1), capped at 10, and every other rule
-  is a constant. No rule may write a switch (a whole step on or off, such as `decoy_mode`,
+  peptide and GPI tail, `nx` the real exons of the home gene, `n` =
+  `n_flanking_genes`, and `W` = `window_margin_genes`. Today's rules give the values in the
+  table above: max(2, `c` + 1) for the GOI loci per query (cap 40), max(10, `c` + 1) for the models per GOI locus (cap 60),
+  min(`W`, max(2, `R` + 1)) for the GOI margin, 3 Smith-Waterman alignments per piece when
+  `c` ≥ 2 or `nx` ≥ 2, min(50, max(10, round(0.6 × `Lpiece`))) for the dispersed rescue's
+  floor; every other rule is a constant. No rule may write a switch (a whole step on or off,
+  such as `decoy_mode`,
   a run-level option, or `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`,
   or the module mechanism itself (`FORBIDDEN_FOR_MODULES`).
-- **Constraints** (`check_constraints`, after the rules and the values the user set): with
-  A1, the GOI loci kept per query reach `c` + 1 within the cap (a cap that binds is named);
-  a value a rule set stays within its cap; the ModelStatus fragment bound lies below the
-  complete bound. A violation that the rules alone made is a bug and stops the run before
+- **Constraints** (`check_constraints`, after the rules and the values the user set): the
+  GOI margin lies within the window margin, where the DNA searched ends (C1); with A1, the
+  GOI loci kept per query and the models per GOI locus reach `c` + 1 within their caps (a
+  cap that binds is named; C3); a per-hit length floor a rule sets lies between 10 and
+  max(10, 0.6 × `Lpiece`) (C7); a value a rule set stays within its cap (C11); the
+  ModelStatus fragment bound lies below the complete bound (C12). A violation that the rules
+  alone made is a bug and stops the run before
   the search; one that involves a value the user set is a warning, and the user's value is
   kept.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
@@ -279,7 +285,7 @@ retry follows the `--modules` value itself: `auto` (unless it removes `short_que
 list that names it; never `legacy` or `none`. A run without home hits stops today, so the
 retry can only rescue a run.
 
-The chosen values travel to the later steps as a `settings` map of 22 parameters
+The chosen values travel to the later steps as a `settings` map of 28 parameters
 (`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
