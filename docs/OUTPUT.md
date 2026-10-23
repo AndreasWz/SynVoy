@@ -504,7 +504,7 @@ not bind there.
 | `fallback_span_cap` | Fallback models refused because their hits span more than 600 × the query length in bp below 150 aa (at least 100 kb), 150 × from 150 aa on (at least 5 kb) |
 | `flanking_loci_cap` | Loci of a flanking gene in a window beyond the two strongest |
 | `blocks_capped`, `blocks_capped_goi_seeded`, `blocks_capped_without_home_order` | Blocks dropped by `max_blocks_per_genome`, of them GOI-seeded ones, and those dropped without the home order (then the blocks are not sorted and GOI-seeded ones go first). Each dropped block also has an INFO line |
-| `dispersed_identity`, `dispersed_evalue`, `dispersed_alnlen`, `dispersed_near_anchor` | Genome-wide GOI hits the dispersed-GOI rescue (§1o) does not take, by the first test they fail: identity < `dispersed_goi_min_identity`, E > `dispersed_goi_max_evalue`, aligned length < `dispersed_goi_min_alnlen` (50 aa), or lying within `region_padding` of an anchor (left to the blocks) |
+| `dispersed_identity`, `dispersed_evalue`, `dispersed_alnlen`, `dispersed_near_anchor` | Genome-wide GOI hits the dispersed-GOI rescue (§1o) does not take, by the first test they fail: identity < `dispersed_goi_min_identity`, E > `dispersed_goi_max_evalue`, aligned length < `dispersed_goi_min_alnlen` (50 aa), or lying within the GOI margin of an anchor (left to the blocks; the window margin until 2026-10-22) |
 | `dead_zone` | Of the near-anchor hits, those that no searched block's GOI core holds: strong GOI hits that neither the blocks nor the rescue use |
 
 Two limits outside the search are logged instead: `split_loci.py` warns whenever `--max_loci`

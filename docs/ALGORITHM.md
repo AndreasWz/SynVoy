@@ -934,7 +934,9 @@ of its own when:
 - its scaffold carries at least 3 distinct flanking genes,
 - it lies between the outermost of them, widened by the envelope margin
   ([Distances](#distances-in-gene-units): 9 pitches), and
-- it is not already within the window margin of a flanking gene.
+- it is not already within the GOI margin of a flanking gene (a block keeps the GOI hits
+  within the GOI margin of it; until 2026-10-22 the radius here was the window margin, so a
+  hit between the two was used by neither path).
 
 A strong GOI hit that fails these conditions is written to
 `hits/<genome>.nonsyntenic.tsv`, so the report can say "found, not syntenic".

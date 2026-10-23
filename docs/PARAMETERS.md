@@ -365,7 +365,7 @@ Two clusters of flanking genes on one sequence stay one block across a gap up to
 ### `dispersed_envelope_margin_genes` / `dispersed_envelope_margin`
 **Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `9` / `auto`
 
-A strong hit of the gene of interest outside every block is still accepted when it lies inside the envelope of the flanking genes on that sequence, widened by this margin; outside it the hit is listed under `rejected_candidates` in the report.
+A strong hit of the gene of interest outside every block is still accepted when it lies inside the envelope of the flanking genes on that sequence, widened by this margin; outside it the hit is listed under `rejected_candidates` in the report. A hit within the GOI margin (`goi_margin_genes`) of a flanking gene is left to the blocks, which use the GOI hits within that margin; until 2026-10-22 the radius was the window margin, and a hit between the two margins was used by neither.
 
 ### `dispersed_goi_min_alnlen`
 **Type:** Integer (aa) | **Default:** `50`

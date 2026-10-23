@@ -6729,7 +6729,8 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
                                min_identity=40.0, max_evalue=1e-10,
                                min_alnlen=50, min_chrom_anchors=3,
                                region_padding=50000, envelope_margin=200000,
-                               rejected_out=None, genome_name="", drops=None, near_out=None):
+                               rejected_out=None, genome_name="", drops=None, near_out=None,
+                               skip_radius=None):
     """Rescue a strong GOI hit that dispersed WITHIN the flanking ENVELOPE of its
     chromosome, so it can seed its own block.
 
@@ -6744,8 +6745,12 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
         recovered.
     A strong hit on a chromosome with too few anchors, or outside the envelope, is
     rejected as a probable paralog / fold-analogue (the biglycan-on-chrX and
-    structdisc cases have no such envelope). Hits already within region_padding of
-    an anchor are skipped (handled by the normal block path).
+    structdisc cases have no such envelope). Hits already within ``skip_radius`` of an
+    anchor are skipped (handled by the normal block path). The search passes its GOI
+    margin (profile constraint C2): a block keeps only the GOI hits within the GOI margin of
+    it, so a wider radius (it was ``region_padding``, the window margin, up to 7 gene
+    pitches) left the hits between the two to neither path, the dead zone. Without
+    ``skip_radius`` the radius is ``region_padding``, as before.
 
     Returns a list of GOI hit dicts to add to the block seed set.
 
@@ -6764,6 +6769,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
     search can count those that no searched GOI core holds (the dead zone).
     """
     by_chrom = _flanking_anchor_positions(flanking_hits)
+    radius = region_padding if skip_radius is None else skip_radius
 
     def _drop(key, h=None):
         if drops is not None:
@@ -6839,7 +6845,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             _reject(h, 'outside_flanking_envelope')
             continue
         near_anchor = any(
-            not (he < s - region_padding or hs > e + region_padding)
+            not (he < s - radius or hs > e + radius)
             for _g, _m, s, e in genes)
         if near_anchor:                          # already covered by a flanking block
             _drop('dispersed_near_anchor', h)
@@ -7293,7 +7299,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000),
                 rejected_out=_nonsyntenic, genome_name=genome_name,
                 drops=args.genome_ctx.setdefault('limits', {}),
-                near_out=args.genome_ctx.setdefault('near_anchor_hits', []))
+                near_out=args.genome_ctx.setdefault('near_anchor_hits', []),
+                skip_radius=getattr(args, 'goi_margin', None) or args.gap_search_window)
             _write_nonsyntenic_candidates(args, prefix, genome_name, _nonsyntenic)
             if _disp_seeds:
                 seed_hits = seed_hits + _disp_seeds
