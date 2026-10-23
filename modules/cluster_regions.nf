@@ -60,7 +60,7 @@ process CLUSTER_REGIONS {
         --adaptive_score_floor_abs ${settings.adaptive_score_floor_abs} \\
         --adaptive_max_regions ${settings.adaptive_max_regions} \\
         --adaptive_unique_gene_floor ${settings.adaptive_unique_gene_floor} \\
-        --strong_synteny_min_flanking ${params.strong_synteny_min_flanking} \\
+        --strong_synteny_min_flanking ${FlankingCounts.value(params, 'strong_synteny_min_flanking')} \\
         ${distant_rescue_arg} \\
         ${legacy_strand_arg} \\
         ${species_arg}

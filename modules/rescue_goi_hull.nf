@@ -71,7 +71,7 @@ process RESCUE_GOI_HULL {
         --genome_name ${genome_name} \\
         --output ${genome_name}.hull_rescue.gff \\
         --output_faa ${genome_name}.hull_rescue.faa \\
-        --min_flanking ${params.goi_hull_min_flanking} \\
+        --min_flanking ${FlankingCounts.value(params, 'goi_hull_min_flanking')} \\
         --cluster_max_gap ${params.goi_hull_cluster_max_gap} \\
         --window_pad ${params.goi_hull_window_pad} \\
         --max_window ${params.goi_hull_max_window} \\

@@ -88,7 +88,7 @@ process ITERATIVE_SEARCH {
         --max_blocks_per_genome ${params.max_blocks_per_genome} \\
         --min_block_genes ${params.min_block_genes} \\
         --disable_synteny_collinearity ${params.disable_synteny_collinearity} \\
-        --synteny_bridge_max_gap_genes ${params.synteny_bridge_max_gap_genes} \\
+        --synteny_bridge_max_gap_genes ${FlankingCounts.value(params, 'synteny_bridge_max_gap_genes')} \\
         --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
         --disable_anchor_resolution ${params.disable_anchor_resolution} \\
         --anchor_max_places ${params.anchor_max_places} \\

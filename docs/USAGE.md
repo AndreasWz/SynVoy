@@ -272,7 +272,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--n_flanking_genes` | `10` | Number of non-GOI-similar flanking genes to extract on each side of the GOI |
+| `--n_flanking_genes` | `10` | Number of non-GOI-similar flanking genes to extract on each side of the GOI. Four counts follow it (`auto`): the bridge limit, the strong-synteny and hull-rescue flanking counts and the gene gap between home loci |
 | `--min_flanking_size` | `500` | Minimum size (bp) for a flanking gene to be included |
 | `--goi_relative_evalue` | `1e-5` | A neighbour whose protein aligns to the GOI with an E-value at or below this (pairwise Smith–Waterman) is a relative of the GOI and is not used as an anchor. `0` = off. Replaces `--max_flanking_goi_similarity`, which removed about half of all genes of the GOI's size whatever their sequence. |
 | `--max_flanking_distance` | `0` | Max distance (bp) from GOI center to walk for flanking genes. `0` = unlimited. Useful when the GOI neighbours a large tandem array. |
@@ -296,7 +296,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--min_block_genes` | `2` | Minimum flanking-gene hits in a block to keep it |
 | `--disable_synteny_collinearity` | `false` | Disable collinearity-aware block scoring + gap-bridging (revert to legacy gene-count clustering). When on (default), blocks are ranked by their longest run of home-ordered flanking genes and a GOI sitting in a rearrangement gap between two collinear clusters is kept inside one searched block. |
 | `--synteny_bridge_max_gap` | `auto` | Largest gap (bp) between two same-chromosome flanking clusters that is bridged into one block when they continue the home gene order. `auto` = `--synteny_bridge_max_gap_genes` pitches × expansion (6000000 before). `0` disables bridging. |
-| `--synteny_bridge_max_gap_genes` | `20` | The same gap in gene pitches: one home neighbourhood of 10 genes per side. `0` disables bridging. |
+| `--synteny_bridge_max_gap_genes` | `auto` | The same gap in gene pitches. `auto` = 2 × `--n_flanking_genes` (20 at the default): one home neighbourhood per side. `0` disables bridging. |
 | `--anchor_max_places` | `0` | Each flanking gene seeds blocks only at its N best places in a target genome (0 = every place). Cuts the blocks that two anchors form by chance: with `5`, the same orthologs from 18 windows instead of 101 in yeast and from 9 instead of 238 in four plant genomes. Recommended for plants; off by default until tested on the large benchmark families, see PARAMETERS.md |
 | `--disable_anchor_resolution` | `false` | Where hits of different flanking genes cover the same target DNA only the best one counts as an anchor (a target gene is the ortholog of one home gene at most). `true` counts them all, as before. |
 | `--disable_relative_query` | `false` | A window is searched with the home protein and, in addition, the gene model of the genome searched most recently; identity, coverage and confidence always refer to the home protein. `true` = home protein only. |
@@ -488,13 +488,13 @@ already recovered.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--strong_synteny_min_flanking` | `5` | A block with ≥ this many HIGH-confidence flanking genes but no GOI model is surfaced as `goi_missing_but_strong_synteny` (promoted to MEDIUM) instead of being dropped. |
+| `--strong_synteny_min_flanking` | `auto` | A block with ≥ this many HIGH-confidence flanking genes but no GOI model is surfaced as `goi_missing_but_strong_synteny` (promoted to MEDIUM) instead of being dropped. `auto` = half of `--n_flanking_genes`, rounded up (5 at the default); `0` = off. |
 | `--disable_strong_synteny_rescue` | `false` | Turn off the relaxed-miniprot pass inside those blocks. It emits a LOW-confidence model tagged `EvidenceType=relaxed_miniprot_rescue` — *some* model to inspect rather than a silent absence. |
 | `--strong_synteny_rescue_miniprot_outc` | `0.05` | Min query coverage (fraction) for the relaxed pass to emit a model. |
 | `--strong_synteny_rescue_window_pad` | `2000` | bp added each side of the block coordinates before the rescue search. |
 | `--strong_synteny_rescue_miniprot_timeout` | `120` | Seconds per block for the rescue miniprot call. |
 | `--disable_goi_hull_rescue` | `false` | Turn off the GOI **hull** rescue — miniprot of the GOI across the whole flanking neighbourhood of a target chromosome, which catches a gene sitting in a rearrangement gap *between* seeded blocks. Largely superseded by collinearity bridging (`--synteny_bridge_max_gap`), which covers the gap up front; kept as a backstop for when home gene order is unavailable. |
-| `--goi_hull_min_flanking` | `4` | Min HIGH-confidence flanking genes in the hull before a rescue is attempted. |
+| `--goi_hull_min_flanking` | `auto` | Min HIGH-confidence flanking genes in the hull before a rescue is attempted. `auto` = round(0.4 × `--n_flanking_genes`) (4 at the default). |
 | `--goi_hull_cluster_max_gap` | `auto` | bp gap that splits flanking genes into separate clusters when computing the hull. `auto` = the bridge limit of the search for that genome (3000000 before). |
 | `--goi_hull_window_pad` | `auto` | bp padding around the hull window. `auto` = the GOI margin of the search (100000 before). |
 | `--goi_hull_max_window` | `auto` | Skip hulls longer than this (bp). `auto` = twice the home neighbourhood × expansion (20000000 before). |

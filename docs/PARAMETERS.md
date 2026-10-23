@@ -236,6 +236,8 @@ The number of non-GOI-similar flanking genes to extract on **each side** of the 
 The same number decides the GOI's own home neighbourhood in the specificity check: the GOI's home gene and `n_flanking_genes` genes on each side of it, in every home locus run (`BestOtherInNeighbourhood`, docs/ALGORITHM.md §7.12).
 
 The flanking genes are also the unit of every distance of the search ([Distances in gene units](#distances-in-gene-units)): the pitch is their mean spacing, and the expansion of a target genome is measured on them. That measurement needs five of them in a row in the target, so with `n_flanking_genes` of 2 or less (at most four anchors) the ratio of the genome sizes is always used instead.
+
+Four counts follow it (constraint C9; `auto`, the default of each): the largest gap a block may bridge, `synteny_bridge_max_gap_genes` = 2 × `n_flanking_genes` pitches; the HIGH flanking genes of a strong-synteny region, `strong_synteny_min_flanking` = `n_flanking_genes` / 2, rounded up; those in the hull of the hull rescue, `goi_hull_min_flanking` = round(0.4 × `n_flanking_genes`); and the gene gap between home loci, `locus_gap_genes` = floor(`n_flanking_genes` / 2). At the default of 10 they are 20, 5, 4 and 5, the fixed defaults they had (until 2026-10-23; `locus_gap_genes` until 2026-10-15), so a different `n_flanking_genes` moves them together. A number sets a count directly. The flank walk's limit of 5 × `n_flanking_genes` visited genes per side follows it as well.
 ### `min_flanking_size`
 **Type:** Integer (bp) | **Default:** `500` | **Range:** 100–5000
 
@@ -323,7 +325,7 @@ A distance that describes a neighbourhood means something else in every genome: 
 | largest gap between two anchors of one block | `block_gap_genes` | 7 | `cluster_distance` | 150,000 |
 | extent of the neighbourhood on each side of a block | `window_margin_genes` | 7 | `region_padding` | 150,000 |
 | how far outside the block a GOI hit may lie | `goi_margin_genes` | 2 | `goi_margin` | 50,000 |
-| largest gap a block may bridge | `synteny_bridge_max_gap_genes` | 20 | `synteny_bridge_max_gap` | 6,000,000 |
+| largest gap a block may bridge | `synteny_bridge_max_gap_genes` | auto: 2 × `n_flanking_genes` = 20 | `synteny_bridge_max_gap` | 6,000,000 |
 | margin of the flanking envelope for a dispersed GOI | `dispersed_envelope_margin_genes` | 9 | `dispersed_envelope_margin` | 200,000 |
 
 Each bp parameter takes `auto` (default: derive it) or a number, which is then used as it is for every genome. The defaults in pitches are the former bp values at the locus where they were set: at the median honeybee locus of the family benchmark the pitch is 23 kb, so 150 kb are 7 pitches and 50 kb are 2; the 6 Mb bridge limit was set for cow decorin, where it is 18 pitches (20 pitches are a whole home neighbourhood of 10 genes per side).
@@ -356,9 +358,9 @@ A hit of the gene of interest is used for a gene model only when it lies in the 
 `goi_margin_genes` is a settings key. The `local_family` module (A1) sets it to min(`window_margin_genes`, max(2, R + 1)), where R is the largest distance, in genes, of a family member next to the home gene: the copies of a home array that reach further than 2 genes from the GOI are then inside the margin in the target too. It never passes `window_margin_genes`, where the DNA searched ends (constraint C1). A wider margin adds no DNA but makes the GOI core, and so the place a call's E-value is counted in, larger. A `goi_margin` in bp that you set still wins.
 
 ### `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap`
-**Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `20` / `auto`
+**Type:** `auto` or Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `auto` / `auto`
 
-Two clusters of flanking genes on one sequence stay one block across a gap up to this size when the flanking genes continue the home order across it (a local rearrangement the gene may sit in). `0` in either parameter switches bridging off. The rules for *when* a gap is bridged are `synteny_bridge_max_rank_gap`, `synteny_bridge_min_anchors`, `synteny_bridge_two_sided` and `synteny_bridge_max_per_block`.
+Two clusters of flanking genes on one sequence stay one block across a gap up to this size when the flanking genes continue the home order across it (a local rearrangement the gene may sit in). `0` in either parameter switches bridging off. `auto` (in pitches) is 2 × `n_flanking_genes`, one home neighbourhood of that many genes per side: 20 at the default of 10, the fixed default until 2026-10-23. The rules for *when* a gap is bridged are `synteny_bridge_max_rank_gap`, `synteny_bridge_min_anchors`, `synteny_bridge_two_sided` and `synteny_bridge_max_per_block`.
 
 `synteny_bridge_min_anchors` (default `2`, `3` until 2026-10-14): the number of distinct flanking genes a block must hold before it may bridge a gap. With 2, a block of two genes bridges when the first gene after the gap continues their home order within `synteny_bridge_max_rank_gap` ranks, so `A B … D E F` is one block (two at `3`). Its direction then rests on those two genes. The same value is the minimum collinear run of the two-sided rule (off by default), where 2 is a weak bar.
 
@@ -982,10 +984,15 @@ A constraint violation that only the module rules made is a bug: the run stops b
 
 By default the pipeline aborts at startup if `--home_species` is empty AND can't be inferred from the genome filename — that empty value used to cascade silently into `phylo_sort.py` and the parameter advisor (removed 2026-10-22), producing kingdom=Unknown and broken phylo distances (the §1i incident on the luciferase run). Set to true to opt out of that gate when you genuinely don't know the species (e.g. a draft assembly with a meaningless stem). The pipeline then proceeds with a loud `WARN` and degraded phylogenetic ordering. Always prefer fixing `--home_species`; this flag exists for the rare case where you can't.
 
+### `strong_synteny_min_flanking`
+**Type:** `auto` or Integer | **Default:** `auto`
+
+A cluster of the region scorer that holds at least this many HIGH-confidence flanking genes and no GOI model becomes a `goi_missing_but_strong_synteny` region (up to two beyond the region cap), which the strong-synteny rescue searches. `auto` is half of `n_flanking_genes`, rounded up: 5 at the default of 10, the fixed default until 2026-10-23. `0` switches the region class off.
+
 ### `disable_strong_synteny_rescue`
 **Type:** Boolean | **Default:** `false`
 
-§1e rescue pass: when a syntenic block has ≥5 HIGH-confidence flanking genes but no GOI annotation (a "right neighbourhood, missed GOI" case), SynVoy runs a relaxed-stringency `miniprot` pass over the block window to emit a LOW-confidence rescue GOI model (`EvidenceType=relaxed_miniprot_rescue`). Set true to skip this — useful when you're already running many loci and don't want extra LOW-confidence noise in the report.
+§1e rescue pass: when a syntenic block has at least `strong_synteny_min_flanking` HIGH-confidence flanking genes but no GOI annotation (a "right neighbourhood, missed GOI" case), SynVoy runs a relaxed-stringency `miniprot` pass over the block window to emit a LOW-confidence rescue GOI model (`EvidenceType=relaxed_miniprot_rescue`). Set true to skip this — useful when you're already running many loci and don't want extra LOW-confidence noise in the report.
 
 ### `strong_synteny_rescue_miniprot_outc`
 **Type:** Float | **Default:** `0.05` (5 % query coverage)
@@ -1073,6 +1080,11 @@ It is off by default because it has not been run on the large families of the be
 **Type:** Boolean | **Default:** `false`
 
 A target gene is the ortholog of at most one home gene. Where hits of different flanking genes cover the same target DNA (overlap of at least half of the shorter hit: two kinases, a tandem pair), only the best-scoring one counts as an anchor. Before, one target gene could count as two flanking genes, which let a place with a single gene pass the "at least two flanking genes" test of a block and raised the flanking support of calls. `true` counts every hit, as before 2026-10-08.
+
+### `goi_hull_min_flanking`
+**Type:** `auto` or Integer | **Default:** `auto`
+
+The hull rescue runs on a sequence only when its hull holds at least this many HIGH-confidence flanking genes. `auto` is round(0.4 × `n_flanking_genes`): 4 at the default of 10, the fixed default until 2026-10-23.
 
 ### `goi_hull_cluster_max_gap` / `goi_hull_window_pad` / `goi_hull_max_window`
 **Type:** `auto` or Integer (bp) | **Default:** `auto`

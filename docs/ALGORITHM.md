@@ -406,6 +406,14 @@ walk and a GOI marker of its own, so a tandem array of three copies gave three w
    GOI's own position is never taken.
 4. Genes without CDS are kept for the figures but do not count towards the 10.
 
+Five counts follow `n_flanking_genes` = n (constraint C9; each is `auto` by default, resolved
+in `lib/FlankingCounts.groovy` and `lib/LocusGap.groovy`): the bridge limit, 2n pitches
+(§7.3); the HIGH flanking models of a strong-synteny region, n / 2 rounded up (§8); those
+in the hull of the hull rescue, round(0.4 n) (§9); the gene gap between home loci,
+⌊n / 2⌋ (§5.4); and the walk's limit above, 5n. At n = 10 they are 20, 5, 4, 5 and 50,
+the fixed values they had (until 2026-10-23; the locus gap until 2026-10-15). A number
+sets a count directly.
+
 Without a home GFF, a substitute annotation is built first. Genes are predicted
 around the query's hits (`prodigal_on_regions.py`, Augustus or Prodigal), and
 `borrow_annotations.py` transfers the genes of one annotated target genome (batch HG-5b):
@@ -575,7 +583,7 @@ largest deviation of 33 % (a run of 6 anchors over 30 kb); the median was within
 | block gap (§7.2) | `block_gap_genes` 7, and at least 1.25 × the largest gap between neighbouring anchors at home | `cluster_distance` | 150 kb |
 | window margin (§7.4, §7.5) | `window_margin_genes` 7 | `region_padding` | 150 kb, adapted per block to 50–200 kb |
 | GOI margin (§7.5) | `goi_margin_genes` 2 | `goi_margin` | 50 kb |
-| bridge limit (§7.3) | `synteny_bridge_max_gap_genes` 20 | `synteny_bridge_max_gap` | 6 Mb |
+| bridge limit (§7.3) | `synteny_bridge_max_gap_genes` 20 (2 × `n_flanking_genes`) | `synteny_bridge_max_gap` | 6 Mb |
 | envelope margin (§7.11) | `dispersed_envelope_margin_genes` 9 | `dispersed_envelope_margin` | 200 kb |
 
 A bp parameter set to a number is used as it is. A query set without home coordinates
@@ -604,8 +612,8 @@ region scorer (§8) and the hull rescue (§9) read.
 A rearrangement or an insertion can put a long stretch between two parts of one
 neighbourhood. A block continues across a gap when all of these hold (`_can_bridge`):
 
-- same scaffold, and the gap is below the bridge limit ([Distances](#distances-in-gene-units): 20 pitches,
-  the length of a home neighbourhood of 10 genes per side);
+- same scaffold, and the gap is below the bridge limit ([Distances](#distances-in-gene-units): 2 ×
+  `n_flanking_genes` = 20 pitches, the length of a home neighbourhood of n genes per side);
 - the block has bridged fewer than `synteny_bridge_max_per_block` (2) gaps so far;
 - the block already holds at least `synteny_bridge_min_anchors` (2; 3 until
   2026-10-14) distinct flanking genes;
@@ -1135,7 +1143,7 @@ are written from the top until one has both a score below the floor
 one and at most 6 are written.
 
 **Strong synteny without a gene.** A cluster holding at least
-`strong_synteny_min_flanking` (5) HIGH flanking models but no GOI call is written as
+`strong_synteny_min_flanking` (⌈`n_flanking_genes`/2⌉ = 5) HIGH flanking models but no GOI call is written as
 `goi_missing_but_strong_synteny`. Up to two such regions are added beyond the cap,
 unless they lie inside a selected GOI region.
 
@@ -1157,7 +1165,7 @@ flanking genes alone. Both apply the start/stop refinement of §7.7.
 | | Strong-synteny rescue | Hull rescue |
 |---|---|---|
 | Script | `rescue_strong_synteny.py` | `rescue_goi_hull.py` |
-| Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ 4 HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
+| Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ `goi_hull_min_flanking` (round(0.4 × `n_flanking_genes`) = 4) HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
 | Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ 0.5 of the query length (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
 | Confidence | always LOW | the judge of the main search (§7.8): E-value in the genome-wide place, specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
@@ -1282,8 +1290,8 @@ Consequences of the rules above that a reader of the results should know.
 **Search**
 
 - A stretch between two blocks that is neither bridged nor merged is not searched by
-  the main path. The hull rescue covers it only when the scaffold has at least 4 HIGH
-  flanking models.
+  the main path. The hull rescue covers it only when the scaffold has at least
+  `goi_hull_min_flanking` (4) HIGH flanking models.
 - Every block that passes the filter and the cap of §7.4 is searched; there is no
   early stop. Most windows hold no GOI model, and each can add LOW rows.
 - A genome whose MMseqs2 search fails for lack of memory, after retries, is skipped
@@ -1385,7 +1393,7 @@ of 9 without.
 | `min_hit_identity` / `min_hit_length` | 10 / 10 | §7.1 |
 | `max_intron` | 20,000 (floor of the per-gene limit) | §7.2 |
 | `block_gap_genes` / `cluster_distance` | 7 pitches / auto | §7.2, §8 |
-| `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap` | 20 pitches / auto | §7.3 |
+| `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap` | auto (2 × n_flanking_genes = 20 pitches) / auto | §7.3 |
 | `synteny_bridge_min_anchors` / `_max_rank_gap` / `_max_per_block` | 2 / 5 / 2 | §7.3 |
 | `window_margin_genes` / `region_padding` | 7 pitches / auto | §7.4, §7.5 |
 | `goi_margin_genes` / `goi_margin` | 2 pitches / auto | §7.5 |
@@ -1401,9 +1409,9 @@ of 9 without.
 | `synteny_weight_base` / `_consistency` / `_strand` | 0.4 / 0.3 / 0.3 | §8 |
 | `synteny_goi_overlap_bonus` | 0.15 | §8 |
 | `adaptive_score_floor_frac` / `_abs` / `adaptive_max_regions` | 0.30 / 0.03 / 6 | §8 |
-| `strong_synteny_min_flanking` | 5 | §8, §9 |
+| `strong_synteny_min_flanking` | auto (⌈n_flanking_genes/2⌉ = 5) | §8, §9 |
 | `min_synteny_score` | 0.6 | §8 |
-| `goi_hull_min_flanking` / `_min_identity` / `_min_coverage` | 4 / 40 / 0.5 | §9 |
+| `goi_hull_min_flanking` / `_min_identity` / `_min_coverage` | auto (round(0.4 × n_flanking_genes) = 4) / 40 / 0.5 | §9 |
 | `goi_hull_window_pad` / `_max_window` / `_cluster_max_gap` | auto / auto / auto | §9 |
 | `paralog_panel_min_identity` / `_max_family` | 28 / 15 | §10 |
 | `locus_ownership_tiebreak_gap` | 10 | §10 |
