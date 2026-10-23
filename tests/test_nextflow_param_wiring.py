@@ -248,16 +248,34 @@ def test_plot_extra_args_passthrough_is_wired():
     assert "params.plot_extra_args" in text and "${plot_extra_args}" in text
 
 
-def test_llm_key_is_not_exported_as_an_empty_env_var():
-    """`env { LLM_API_KEY = ... ?: '' }` made Nextflow warn about an empty variable
-    for every task (12,929 of 16,528 console lines in one cluster run)."""
+LLM_ADVISOR_PARAMS = ("auto_params", "force_disable_advanced_search", "llm_provider",
+                      "llm_api_key", "llm_api_base_url", "llm_model")
+
+
+def test_the_llm_advisor_is_gone():
+    """Stage 7 of the profile handoff (2026-10-22): the LLM parameter advisor applied nothing
+    on Nextflow >= 25 and the preset modules set the gene-dependent values, so it was removed.
+    Its six params warn when still set (LRZ payloads and gate scripts pass --auto_params false,
+    a stop would end every one of their runs); no process, script or config refers to it;
+    the env block still pins the hash seed and exports no API key."""
+    main_nf = (ROOT / "main.nf").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1].split("noEffectNote:")[0]))
+    assert set(LLM_ADVISOR_PARAMS) <= no_effect
+    declared = _declared_params()
+    assert not set(LLM_ADVISOR_PARAMS) & set(declared)
+    for gone in ("bin/llm_param_advisor.py", "bin/build_llm_context.py", "modules/estimate_params.nf"):
+        assert not (ROOT / gone).exists(), gone
+    sources = [ROOT / "main.nf", CONFIG] + sorted((ROOT / "modules").glob("*.nf")) \
+        + sorted((ROOT / "subworkflows").glob("*.nf")) + sorted((ROOT / "conf").rglob("*.config"))
+    for path in sources:
+        code = "\n".join(_code(path)) if path.suffix == ".config" else path.read_text()
+        assert "ESTIMATE_PARAMS" not in code and "llm_param_advisor" not in code, path.name
+        assert "LLM_API_KEY" not in code, path.name
     text = "\n".join(_code(CONFIG))
     m = re.search(r"^env\s*\{(.*?)^\}", text, re.S | re.M)
     assert m, "env {} block not found"
-    assert "LLM_API_KEY" not in m.group(1)
     assert "PYTHONHASHSEED" in m.group(1)
-    for scope in ("docker", "singularity", "apptainer"):
-        assert re.search(rf"^{scope}\.envWhitelist\s*=.*LLM_API_KEY", text, re.M), scope
 
 
 # ---- options a script accepts but never reads --------------------------------------

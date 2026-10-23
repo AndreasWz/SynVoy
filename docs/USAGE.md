@@ -175,7 +175,7 @@ Don't combine two execution backends (e.g. `docker,singularity`) or two memory t
 
 | Profile | Executor | Environment | Description |
 |---|---|---|---|
-| `auto` | local | Conda | **Recommended zero-config default.** Like `standard`, plus it pins the full auto-tuning stack on (auto preset selection, locus cap, strong-synteny rescue, paralog check). Best when you don't want to hand-pick a preset. Does *not* enable the LLM advisor (`--auto_params true` is still opt-in). |
+| `auto` | local | Conda | **Recommended zero-config default.** Like `standard`, plus it pins the full auto-tuning stack on (auto preset selection, locus cap, strong-synteny rescue, paralog check). Best when you don't want to hand-pick a preset. |
 | `standard` | local | Conda | Default. 2 CPUs / 10 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
 | `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
@@ -455,7 +455,6 @@ These control per-process resource allocation. Override them for your hardware.
 | `--gpu_partition` | _(empty)_ | SLURM partition for the GPU-requiring steps (PLM / structural search). Only used by the SLURM profiles. |
 | `--gpu_cluster_options` | `--gres=gpu:1` | Extra `sbatch` options for those steps. A GPU job without a `--gres` request sits permanently pending. |
 | `--allow_missing_smith_waterman` | `false` | Proceed with Smith-Waterman disabled when parasail is unavailable, instead of failing loud. Degrades divergent-GOI recall — see [§8 parasail](#parasail-import-error-on-startup). |
-| `--force_disable_advanced_search` | `false` | Prevent `--auto_params` from switching on the optional PLM / structural search layers, whatever the estimated evolutionary distance. |
 | `--rank_wave_binning` | `true` | Bin search waves by phylo-distance **rank** rather than absolute distance, so a tight clade whose distances all saturate near 1.0 still grades close→far. `false` restores the pre-2026-07-26 binning. |
 | `--disable_wavefront` | `false` | Measurement control, not a performance option: search every genome against the initial database only (one parallel wave), to test whether the expanding wavefront changes a result. |
 | `--synteny_bridge_two_sided` | `false` | **(opt-in, unmeasured)** Weigh the flanking genes on both sides of a gap when deciding to bridge it, instead of only the left side. Bigger blocks raise flanking support, so this can promote more calls. |
@@ -563,58 +562,14 @@ orthologs that are invisible to sequence search. Requires the ML overlay
 |---|---|---|
 | `--outdir` | `results` | Directory for pipeline output |
 
-### Automatic Parameter Estimation (LLM)
+### Automatic Parameter Estimation (LLM): removed
 
-SynVoy can suggest values for a few search parameters from the kingdom of the home species and the evolutionary distance to the targets. Without an API key it uses built-in rules.
-
-**Disabled by default** (requires an API key to be useful). Enable with `--auto_params true`.
-
-> **The estimate is advisory on current Nextflow.** Nextflow 25 and later no longer let a
-> pipeline change its parameters after launch, so the estimated values cannot be applied
-> inside the run that computed them. SynVoy prints a warning with the exact flags to
-> re-run with, and saves the estimate to
-> `intermediate/estimate_params/estimated_params.json`. (Before 2026-10-05 it logged every
-> value as applied while every step kept its launch-time value.)
-
-| Parameter | Default | Description |
-|---|---|---|
-| `--auto_params` | `false` | Enable parameter estimation: from the kingdom and the evolutionary distance to the targets, SynVoy suggests values for up to 10 search parameters (advisory, see the note above). |
-| `--llm_provider` | `google` | LLM provider: `google` (Google Gemini) or `openai` (OpenAI or any OpenAI-compatible API). |
-| `--llm_api_key` | _(empty)_ | API key for the chosen provider. Also read from `LLM_API_KEY`, `GOOGLE_API_KEY` (for google), or `OPENAI_API_KEY` (for openai) in the environment you launch from; those three are passed into Docker / Singularity / Apptainer containers automatically. |
-| `--llm_api_base_url` | _(empty)_ | Custom API base URL for OpenAI-compatible providers (Together, Groq, LM Studio, etc.). Ignored for google. |
-| `--llm_model` | _(empty)_ | Model override. Defaults: `gemini-2.5-flash-lite` (google), `gpt-4o-mini` (openai). |
-
-**Setup:**
-
-```bash
-# Option A: Google Gemini (free tier at aistudio.google.com/apikey)
-export GOOGLE_API_KEY=your_key_here
-./run_synvoy.sh ... --auto_params true
-
-# Option B: OpenAI
-export OPENAI_API_KEY=your_key_here
-./run_synvoy.sh ... --auto_params true --llm_provider openai
-
-# Option C: OpenAI-compatible endpoint (Together, Groq, LM Studio, etc.)
-export LLM_API_KEY=your_key_here
-./run_synvoy.sh ... --auto_params true --llm_provider openai \
-    --llm_api_base_url https://api.together.xyz \
-    --llm_model meta-llama/Llama-3.1-8B-Instruct-Turbo
-```
-
-> **No API key?** `--auto_params true` still runs but uses built-in rules: the number of
-> flanking genes by kingdom, and search sensitivity by evolutionary distance.
-
-**What gets estimated (10 parameters):**
-- **Number of anchors**: `n_flanking_genes` (and `min_flanking_size`, `exon_level_search` for prokaryotes)
-- **Search sensitivity**: `mmseqs_sensitivity`, `search_evalue` — relaxed for distant searches
-- **Blocks**: `max_blocks_per_genome`, `min_block_genes`
-- **Search layers**: `enable_smith_waterman`, `enable_plm_search`, `enable_structural_search` — the last two for very distant species (>400 Mya)
-
-**What is no longer estimated**
-- Distances (block gap, window margin, bridge limit, intron limit): derived from the home locus and each target genome, see [Distances in gene units](#distances-in-gene-units).
-- Hit floors (`min_hit_identity`, `min_hit_length`, `sw_min_score`, `sw_min_identity`): lowering them changes nothing, because the E-value filters of the search are stricter (PARAMETERS.md, `sw_min_score`).
-- Family options (`expand_goi_similar`, `max_flanking_distance`): the first lowered recall where it was measured, the second is a distance in base pairs. Relatives of the gene of interest are kept out of the anchors by an alignment E-value (`goi_relative_evalue`).
+The LLM parameter advisor (`--auto_params`, `--force_disable_advanced_search` and the four
+`--llm_*` options) was removed on 2026-10-22. On Nextflow 25.10 and later it could not
+change a parameter after launch, so it only printed suggested flags. The settings that depend
+on the gene come from the preset modules (`--modules`), the distances from the run itself
+([Distances in gene units](#distances-in-gene-units)). A run that still sets one of the six
+prints a warning and goes on ([PARAMETERS.md § 20](PARAMETERS.md#20-removed-parameters)).
 
 ---
 
@@ -870,30 +825,6 @@ conda install -c bioconda fasta3
 > produced quietly degraded results; that behaviour was removed deliberately. To
 > proceed anyway — accepting worse recall on divergent queries — pass
 > `--allow_missing_smith_waterman true`.
-
-### LLM parameter advisor: API key error / no key set
-
-**Symptom:** `LLM_PARAM_ADVISOR` logs "No LLM API key provided" and uses heuristics,
-or fails with an HTTP 401 / 403 error.
-
-**Cause:** `--auto_params true` is set but no API key was provided, or the key is invalid.
-
-**Fix (pick one):**
-- **Recommended for students / reproducibility:** disable LLM auto-params entirely:
-  ```
-  --auto_params false
-  ```
-  (This is the default.)
-- **Google Gemini** (free tier available at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)):
-  ```
-  export GOOGLE_API_KEY=your_api_key
-  ./run_synvoy.sh ... --auto_params true
-  ```
-- **OpenAI:**
-  ```
-  export OPENAI_API_KEY=your_api_key
-  ./run_synvoy.sh ... --auto_params true --llm_provider openai
-  ```
 
 ### GPU out-of-memory (OOM) during STRUCTURAL_SEARCH / ESMFold
 

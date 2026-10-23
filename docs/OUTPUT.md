@@ -526,7 +526,6 @@ rescue logs `miniprot timed out in K of M window(s)` at its end (its GFF is unch
 | `initial_db/` | The starting query set (flanking proteins + GOI) |
 | `qc/` | The targets that passed assembly QC |
 | `phylo_placement/` | Per-locus phylogenetic-placement table |
-| `estimate_params/` | Only with `--auto_params true`: `estimated_params.json` |
 
 These files are worth knowing on a healthy run:
 

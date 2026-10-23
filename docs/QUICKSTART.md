@@ -64,7 +64,7 @@ Notes on the flags:
 
 On a powerful machine, add `-profile standard` for full speed and the
 phylogenetic tree: `./run_synvoy.sh -profile standard --mode easy ...`.
-For the full parameter and profile reference (LLM advisor, presets, HPC),
+For the full parameter and profile reference (presets, HPC),
 see [USAGE.md](USAGE.md) and [PARAMETERS.md](PARAMETERS.md).
 
 ## What you should see
@@ -181,24 +181,6 @@ file is for is in [OUTPUT.md](OUTPUT.md).
 - **Switch to Pro Mode** to supply your own genomes and a home GFF —
   see [USAGE.md § 1](USAGE.md#pro-mode). Pro Mode is reproducible
   (no taxonomy walk) and is what the paper's benchmarks use.
-- **Enable the LLM parameter advisor** for harder queries by providing
-  a cloud API key:
-  ```bash
-  # Google Gemini (free tier available at aistudio.google.com)
-  export GOOGLE_API_KEY=your_key
-  ./run_synvoy.sh ... --auto_params true
-
-  # OpenAI
-  export OPENAI_API_KEY=your_key
-  ./run_synvoy.sh ... --auto_params true --llm_provider openai
-  ```
-  Without an API key, `--auto_params true` falls back to built-in
-  heuristics (still useful, just not LLM-quality).
-
-  On current Nextflow the estimate is **advisory**: SynVoy cannot change its
-  own parameters mid-run, so it prints the suggested flags (and saves them
-  to `intermediate/estimate_params/estimated_params.json`) for you to re-run
-  with.
 
 ## Troubleshooting
 

@@ -456,8 +456,8 @@ def test_removed_label_parameters_are_set_nowhere():
 
 
 def test_no_preset_sets_a_parameter_that_does_nothing():
-    """`min_query_length` is checked before a preset can be chosen, `auto_params` cannot
-    change after launch, `multi_profile` was never implemented."""
+    """`min_query_length` is checked before a preset can be chosen, `auto_params` belonged to
+    the LLM advisor (removed 2026-10-22), `multi_profile` was never implemented."""
     for name, overrides in rep.PRESET_OVERRIDES.items():
         for dead in ("min_query_length", "auto_params", "multi_profile",
                      "max_flanking_goi_similarity") + REMOVED_LABEL_PARAMS:

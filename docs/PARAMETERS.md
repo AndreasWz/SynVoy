@@ -78,7 +78,7 @@ The Python `PRESET_OVERRIDES` table in `bin/resolve_effective_params.py` is the 
 14. [Structural Search (ESMFold + Foldseek)](#14-structural-search-esmfold--foldseek)
 15. [Visualization](#15-visualization)
 16. [Resource Tuning](#16-resource-tuning)
-17. [LLM Parameter Estimation](#17-llm-parameter-estimation)
+17. [LLM Parameter Estimation (removed)](#17-llm-parameter-estimation-removed)
 18. [Advanced & Output](#18-advanced--output)
 19. [Auto-Apply Preset, Self-Consistency & Rescue](#19-auto-apply-preset-self-consistency--rescue)
 20. [Removed parameters](#20-removed-parameters)
@@ -107,7 +107,7 @@ Path to a local query protein FASTA file. This is the primary input for Pro Mode
 ### `query_id`
 **Type:** String | **Default:** `null`
 
-A UniProt accession (e.g., `P01501`, `Q16553`) or NCBI protein ID used in Easy Mode to automatically fetch the query protein sequence, its annotation, and associated metadata. When SynVoy receives a `query_id`, it contacts the UniProt API (or NCBI Protein if UniProt fails) to download the full protein sequence, identify the source organism (which becomes the home species unless overridden), and gather functional annotations including signal peptides, domain families, and gene family size estimates. This metadata feeds into the LLM parameter estimation system, allowing the pipeline to tailor search parameters to the specific biology of your query protein. Using `query_id` is the simplest way to run SynVoy — a single accession plus a target species list is enough to launch a complete analysis.
+A UniProt accession (e.g., `P01501`, `Q16553`) or NCBI protein ID used in Easy Mode to automatically fetch the query protein sequence, its annotation, and associated metadata. When SynVoy receives a `query_id`, it contacts the UniProt API (or NCBI Protein if UniProt fails) to download the full protein sequence, identify the source organism (which becomes the home species unless overridden), and gather functional annotations including signal peptides, domain families, and gene family size estimates. Using `query_id` is the simplest way to run SynVoy — a single accession plus a target species list is enough to launch a complete analysis.
 
 ### `query_seq`
 **Type:** String | **Default:** `null`
@@ -263,7 +263,7 @@ The statistic of the relative test above. `sw`: the Smith–Waterman E-value. `b
 ### `max_flanking_distance`
 **Type:** Integer (bp) | **Default:** `0` (unlimited) | **Range:** 0–5,000,000
 
-The maximum distance in base pairs from the GOI center that the flanking gene extractor will walk to find synteny anchors. When set to 0 (default), there is no distance limit — the extractor walks as far as needed along the chromosome to collect `n_flanking_genes` anchors per side. This can be problematic when the GOI sits adjacent to a large tandem gene array: one direction fills up entirely with relatives of the GOI (which are skipped, see `goi_relative_evalue`), forcing the extractor to walk far into a distant genomic region to find enough non-similar anchors. These distant anchors may belong to a different synteny block entirely, confusing downstream analysis. Setting a distance cap (e.g., 500,000 bp) prevents this pathological case. If fewer than `n_flanking_genes` anchors are found within the distance window, the pipeline proceeds with whatever was found. This parameter is automatically adjusted by the LLM estimator for known gene family cases.
+The maximum distance in base pairs from the GOI center that the flanking gene extractor will walk to find synteny anchors. When set to 0 (default), there is no distance limit — the extractor walks as far as needed along the chromosome to collect `n_flanking_genes` anchors per side. This can be problematic when the GOI sits adjacent to a large tandem gene array: one direction fills up entirely with relatives of the GOI (which are skipped, see `goi_relative_evalue`), forcing the extractor to walk far into a distant genomic region to find enough non-similar anchors. These distant anchors may belong to a different synteny block entirely, confusing downstream analysis. Setting a distance cap (e.g., 500,000 bp) prevents this pathological case. If fewer than `n_flanking_genes` anchors are found within the distance window, the pipeline proceeds with whatever was found.
 
 ### `expand_goi_similar`
 **Type:** Boolean | **Default:** `false` (was `true` until 2026-04-25)
@@ -633,7 +633,7 @@ Selects the ab initio gene prediction tool used to identify open reading frames 
 ### `augustus_species`
 **Type:** String | **Default:** `'fly'`
 
-The species model used by Augustus for gene prediction. Augustus uses pre-trained statistical models that capture species-specific gene structure patterns (splice site signals, intron length distributions, codon usage, etc.). The model must match the target organism as closely as possible for accurate predictions. The default `'fly'` (Drosophila melanogaster) is a reasonable general-purpose model for insects and other arthropods. For vertebrate genomes, use `'human'` or `'chicken'`. For nematodes, use `'caenorhabditis'`. For fungi, use `'aspergillus_nidulans'` or another fungal model. Run `augustus --species=help` to see all available models. Using an inappropriate model (e.g., `'fly'` for a mammalian genome) causes Augustus to predict incorrect exon-intron boundaries, which can fragment gene models or merge adjacent genes. When using `--auto_params`, the LLM estimator does not currently adjust this parameter — manual selection based on your organisms is recommended.
+The species model used by Augustus for gene prediction. Augustus uses pre-trained statistical models that capture species-specific gene structure patterns (splice site signals, intron length distributions, codon usage, etc.). The model must match the target organism as closely as possible for accurate predictions. The default `'fly'` (Drosophila melanogaster) is a reasonable general-purpose model for insects and other arthropods. For vertebrate genomes, use `'human'` or `'chicken'`. For nematodes, use `'caenorhabditis'`. For fungi, use `'aspergillus_nidulans'` or another fungal model. Run `augustus --species=help` to see all available models. Using an inappropriate model (e.g., `'fly'` for a mammalian genome) causes Augustus to predict incorrect exon-intron boundaries, which can fragment gene models or merge adjacent genes. Choose the model by hand from your organisms.
 
 ### `pred_flank_window`
 **Type:** Integer (bp) | **Default:** `50000`
@@ -904,34 +904,9 @@ The memory allocated to the LOCATE_GENE process. This should accommodate the MMs
 
 ---
 
-## 17. LLM Parameter Estimation
+## 17. LLM Parameter Estimation (removed)
 
-### `auto_params`
-**Type:** Boolean | **Default:** `false`
-
-> **Advisory on Nextflow ≥ 25.** Current Nextflow does not allow a pipeline to change its parameters after launch, so the estimated values cannot be applied within the run that computed them. SynVoy prints a warning with the exact flags to re-run with and writes the estimate to `intermediate/estimate_params/estimated_params.json`. Until 2026-10-05 the log claimed every value was applied while every step kept its launch-time value. To use an estimate: run once with `--auto_params true`, copy the suggested flags, re-run with them.
-
-Master switch for parameter estimation (default off). From the kingdom of the home species and the evolutionary distance to the targets, SynVoy suggests values for up to 10 search parameters: the number of flanking genes, search sensitivity and E-value, the block limits, and the optional search layers. With an API key (`llm_api_key` or the relevant environment variable) a cloud LLM makes the suggestion; without one, built-in rules do. Distances, hit floors and the family options are not estimated: distances are derived from the run (see "Distances in gene units"), and lowering a hit floor changes nothing (see `sw_min_score`).
-
-### `llm_provider`
-**Type:** String | **Default:** `'google'` | **Options:** `'google'`, `'openai'`
-
-The LLM provider for parameter estimation. `'google'` uses Google Gemini (default model: `gemini-2.5-flash-lite`). `'openai'` uses OpenAI's chat completions API (default model: `gpt-4o-mini`) or any OpenAI-compatible endpoint when `llm_api_base_url` is set — this covers Together, Groq, Fireworks, LM Studio, and similar services. The API key is resolved from `llm_api_key`, then from the provider-specific env vars (`GOOGLE_API_KEY` for google, `OPENAI_API_KEY` for openai), then from the generic `LLM_API_KEY` env var.
-
-### `llm_api_key`
-**Type:** String | **Default:** `''` (empty)
-
-The API key for the chosen LLM provider. Can be provided here or (recommended) via environment variable to avoid exposing the key in command history or Nextflow logs. The key is resolved in this order: `--llm_api_key` CLI flag → `LLM_API_KEY` env var → `GOOGLE_API_KEY` env var (for google provider) → `OPENAI_API_KEY` env var (for openai provider). Each call uses approximately 1,000–2,000 tokens, negligible cost on any provider's free or standard tier. **Never commit API keys to version control.**
-
-### `llm_api_base_url`
-**Type:** String | **Default:** `''` (empty)
-
-Custom API base URL for OpenAI-compatible providers. Leave empty to use the default endpoint for the chosen provider (`https://api.openai.com` for openai, Google's endpoint for google). Set this to use Together (`https://api.together.xyz`), Groq (`https://api.groq.com/openai`), LM Studio (`http://localhost:1234`), or any other OpenAI-compatible service. Ignored for the google provider.
-
-### `llm_model`
-**Type:** String | **Default:** `''` (empty = provider default)
-
-Model name override. When empty, uses the provider default: `gemini-2.5-flash-lite` for google, `gpt-4o-mini` for openai. Set this when using an OpenAI-compatible provider with a specific model name (e.g. `meta-llama/Llama-3.1-8B-Instruct-Turbo` on Together). The model receives a detailed system prompt with SynVoy-specific biological reasoning — any instruction-following model with JSON output support works.
+The LLM parameter advisor (`auto_params`, `force_disable_advanced_search`, `llm_provider`, `llm_api_key`, `llm_api_base_url`, `llm_model`) was removed on 2026-10-22. On the Nextflow versions SynVoy runs on (25.10 and later) it could not change a parameter after launch, so it only printed suggested flags; the settings that depend on the gene come from the preset modules (`--modules`), the distances from the run itself. A run that still sets one of the six prints a warning and goes on ([§ 20](#20-removed-parameters)).
 
 ---
 
@@ -989,7 +964,7 @@ A constraint violation that only the module rules made is a bug: the run stops b
 ### `allow_unknown_species`
 **Type:** Boolean | **Default:** `false`
 
-By default the pipeline aborts at startup if `--home_species` is empty AND can't be inferred from the genome filename — that empty value used to cascade silently into `phylo_sort.py` and `auto_params`, producing kingdom=Unknown and broken phylo distances (the §1i incident on the luciferase run). Set to true to opt out of that gate when you genuinely don't know the species (e.g. a draft assembly with a meaningless stem). The pipeline then proceeds with a loud `WARN` and degraded phylogenetic ordering. Always prefer fixing `--home_species`; this flag exists for the rare case where you can't.
+By default the pipeline aborts at startup if `--home_species` is empty AND can't be inferred from the genome filename — that empty value used to cascade silently into `phylo_sort.py` and the parameter advisor (removed 2026-10-22), producing kingdom=Unknown and broken phylo distances (the §1i incident on the luciferase run). Set to true to opt out of that gate when you genuinely don't know the species (e.g. a draft assembly with a meaningless stem). The pipeline then proceeds with a loud `WARN` and degraded phylogenetic ordering. Always prefer fixing `--home_species`; this flag exists for the rare case where you can't.
 
 ### `disable_strong_synteny_rescue`
 **Type:** Boolean | **Default:** `false`
@@ -1127,7 +1102,7 @@ Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints 
 
 ## 20. Removed parameters
 
-Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and context-promotion options on 2026-10-14, the parameters of the identity-based GOI label on 2026-10-15). Passing one of the first group stops the run at start with the replacement named; one of the second group prints a warning and is ignored.
+Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and context-promotion options on 2026-10-14, the parameters of the identity-based GOI label on 2026-10-15, the LLM parameter advisor on 2026-10-22). Passing one of the first group stops the run at start with the replacement named; one of the other two groups prints a warning and is ignored.
 
 **Replaced**
 
@@ -1164,6 +1139,14 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and conte
 | `distance_autotune_close_pct`, `distance_autotune_far_pct`, `distance_autotune_max_relax`, `distance_autotune_min_flanking`, `distance_autotune_high_floor`, `distance_autotune_medium_floor` | settings of the per-genome relaxation of the identity thresholds (2026-10-15), removed with it |
 | `disable_ambiguous_tier` | the switch that took AMBIGUOUS out of the label (2026-10-15). AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
 | `disable_distance_autotune` | the switch of the per-genome relaxation of the identity thresholds (§1g; 2026-10-15), which went with the thresholds. The judge computes each call's E-value in the expected place of its own genome |
+
+**The LLM parameter advisor** (2026-10-22; read only by the advisor, which was removed with them)
+
+| Parameter | What it did |
+|---|---|
+| `auto_params` | ran the advisor (ESTIMATE_PARAMS): suggested values for up to 10 search parameters from the kingdom of the home species and the distance to the targets, with a cloud LLM or built-in rules. On Nextflow 25.10 and later none could be applied after launch, so it printed the flags to re-run with and wrote `intermediate/estimate_params/estimated_params.json` |
+| `force_disable_advanced_search` | kept the advisor from suggesting the PLM or structural search |
+| `llm_provider`, `llm_api_key`, `llm_api_base_url`, `llm_model` | provider, key, endpoint and model of the LLM. The containers no longer receive `LLM_API_KEY`, `GOOGLE_API_KEY` or `OPENAI_API_KEY` |
 
 `plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette` (all were parsed and never read) and, since 2026-10-13, `--pub_svg` (its figure was removed). A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`. `plot_synteny_matrix.py` no longer exists.
 

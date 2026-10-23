@@ -30,7 +30,6 @@ include { RESOLVE_SETTINGS } from './subworkflows/resolve_settings.nf'
 include { BORROW_ANNOTATIONS } from './modules/borrow_annotations.nf'
 include { NORMALIZE_QUERY } from './modules/normalize_query.nf'
 include { FILTER_SORTED_GENOMES } from './modules/filter_targets.nf'
-include { ESTIMATE_PARAMS } from './modules/estimate_params.nf'
 
 // ==============================================================================
 // Console UI helpers
@@ -145,8 +144,8 @@ def looksLikeInlineSequence(value) {
 
 // Derive a home-species proxy from the home-genome filename when --home_species
 // is not given (Pro mode). Genomes are usually named after the organism
-// (Photinus_pyralis.fna -> "Photinus_pyralis"), which phylo_sort and
-// build_llm_context normalize to a binomial. Returns '' when nothing usable
+// (Photinus_pyralis.fna -> "Photinus_pyralis"), which phylo_sort normalizes
+// to a binomial. Returns '' when nothing usable
 // remains after stripping FASTA suffixes. See docs/TODO.md §1i.
 def homeSpeciesStem(genomePath) {
     if (!genomePath) {
@@ -160,7 +159,7 @@ def homeSpeciesStem(genomePath) {
 
 // A filename stem is only a usable species proxy if it could plausibly be an
 // organism name. Reject empty strings, generic placeholders, and bare assembly
-// accessions (which carry a taxid but no name for the LLM context).
+// accessions (which carry a taxid but no name).
 def isUsableSpeciesName(name) {
     if (!name) {
         return false
@@ -221,6 +220,7 @@ def homeLocusMode() {
 //              longer do in that form;
 //   no effect  the run goes on with a warning: the parameter changed nothing when it was removed.
 def removedParams() {
+    def advisor = "the LLM parameter advisor was removed on 2026-10-22: on the Nextflow versions SynVoy runs on (25.10 and later) it only printed suggested flags and applied none, and the settings that depend on the gene come from the preset modules (--modules)"
     return [
         replaced: [
             max_flanking_goi_similarity: "use --goi_relative_evalue (an alignment E-value, default 1e-5; 0 switches the test off)",
@@ -248,12 +248,16 @@ def removedParams() {
             'disable_ambiguous_tier', 'disable_distance_autotune',
             'distance_autotune_close_pct', 'distance_autotune_far_pct', 'distance_autotune_max_relax',
             'distance_autotune_min_flanking', 'distance_autotune_high_floor', 'distance_autotune_medium_floor',
+            'auto_params', 'force_disable_advanced_search',
+            'llm_provider', 'llm_api_key', 'llm_api_base_url', 'llm_model',
         ],
         // Said in the warning of a noEffect parameter, after "It had no effect".
         noEffectNote: [
             strict_goi_family: "the family-name check is annotation only now: --goi_family_tokens writes GoiFamilyConsistent and GoiFamilyReason on every GOI row and changes no label",
             disable_ambiguous_tier: "AMBIGUOUS (needs curation, never counted) is part of the one label now, with Basis=not_specific or gene_order_only (docs/ALGORITHM.md 7.8); it cannot be switched off",
             disable_distance_autotune: "the per-genome relaxation of the identity thresholds went with the thresholds; the judge computes each call's E-value in the expected place of its own genome (docs/ALGORITHM.md 7.8)",
+            auto_params: advisor, force_disable_advanced_search: advisor,
+            llm_provider: advisor, llm_api_key: advisor, llm_api_base_url: advisor, llm_model: advisor,
         ],
     ]
 }
@@ -859,20 +863,19 @@ workflow {
         } else if (!params.home_gff && params.home_genome) {
             validationWarnings << "No --home_gff provided. Flanking-gene extraction will fall back to Prodigal gene prediction on the home genome, which is substantially less reliable than a curated GFF. Supply --home_gff if you have one."
         }
-        // home_species drives taxonomy sorting (phylo_sort) and the LLM parameter
-        // advisor's biological context. Missing it silently degrades the run to
-        // kingdom=Unknown / phylo distance 999 and mis-tunes per-target stringency
+        // home_species drives taxonomy sorting (phylo_sort). Missing it silently degrades
+        // the run to kingdom=Unknown / phylo distance 999 and mis-tunes per-target stringency
         // (docs/TODO.md §1i). Infer from the genome filename when plausible; refuse
         // to start otherwise (overridable with --allow_unknown_species for users who
         // genuinely don't care, e.g. the integration test on generic fixtures).
         if (params.home_genome && !params.home_species) {
             def stem = homeSpeciesStem(params.home_genome)
             if (isUsableSpeciesName(stem)) {
-                validationWarnings << "No --home_species provided; inferring \"${stem}\" from the home-genome filename for taxonomy sorting and LLM context. Pass --home_species \"Genus species\" explicitly if that is wrong."
+                validationWarnings << "No --home_species provided; inferring \"${stem}\" from the home-genome filename for taxonomy sorting. Pass --home_species \"Genus species\" explicitly if that is wrong."
             } else if (paramBool(params.allow_unknown_species)) {
                 validationWarnings << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). --allow_unknown_species is set, so the run will proceed with kingdom=Unknown / phylo distance 999, which mis-tunes per-target search stringency. Outputs will still be produced."
             } else {
-                validationErrors << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). SynVoy refuses to start because taxonomy sorting and the parameter advisor would silently degrade to kingdom=Unknown / phylo distance 999. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\"), or set --allow_unknown_species true if you genuinely don't need taxonomic context."
+                validationErrors << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). SynVoy refuses to start because taxonomy sorting would silently degrade to kingdom=Unknown / phylo distance 999. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\"), or set --allow_unknown_species true if you genuinely don't need taxonomic context."
             }
         }
         if (!params.target_genomes) {
@@ -1033,120 +1036,11 @@ workflow {
     normalized_gene_ch = NORMALIZE_QUERY.out.fasta
     normalized_gene_ch.subscribe { f -> shortQueryNote(f) }
 
-    // ========== LLM PARAMETER ESTIMATION (Phase 0.5) ==========
-    // When auto_params is enabled, analyze the query/species context and
-    // estimate optimal pipeline parameters via Gemma 4 (or heuristic fallback).
-    if (paramBool(params.auto_params)) {
-        uiPhase(0, 'Automatic Parameter Estimation')
-        uiStatus('RUN ', 'ESTIMATE_PARAMS', 'Estimating optimal parameters for this search')
-
-        // Determine inputs for the estimator
-        // Pro mode: reuse the same filename-stem fallback as PHYLO_SORT instead of an
-        // empty string, which previously cascaded to kingdom=Unknown / genome=0Mb in
-        // build_llm_context and mis-tuned the parameter advisor (docs/TODO.md §1i).
-        def est_home_species = params.mode == 'easy' ? home_species_ch : home_species_for_sort_ch
-        def est_target_species = channel.value(params.target_species ?: '')
-
-        // Resolved metadata JSON is available in easy mode; create a stub for pro mode
-        if (params.mode == 'easy') {
-            est_metadata_ch = RESOLVE_GENE_INPUT.out.metadata
-        } else {
-            // Create a minimal resolved_input.json for pro mode
-            est_metadata_ch = normalized_gene_ch.map { fasta ->
-                def meta = file("${workDir}/resolved_input_stub.json")
-                meta.text = "{\"source\": \"file\", \"fasta_path\": \"${fasta}\", \"species\": \"${params.home_species ?: ''}\"}"
-                return meta
-            }
-        }
-
-        ESTIMATE_PARAMS(
-            est_metadata_ch,
-            est_home_species,
-            est_target_species,
-            normalized_gene_ch
-        )
-
-        // Apply estimated parameters synchronously via .map{} (not .view{})
-        // .view{} is asynchronous and can race with downstream processes.
-        params_applied_ch = ESTIMATE_PARAMS.out.params_json.map { json_file ->
-            try {
-                def est = new groovy.json.JsonSlurper().parse(json_file)
-                def overrides = est.get('parameters', [:])
-                def backend = est.get('backend', 'unknown')
-                def count = overrides.size()
-                def summary = est.get('context_summary', [:])
-
-                // Log what was estimated
-                def msg = "${count} parameter(s) estimated via ${backend}"
-                if (summary) {
-                    msg += " (kingdom=${summary.get('kingdom','?')}, genome=${summary.get('genome_size_mb',0)}Mb, query=${summary.get('query_length_aa',0)}aa)"
-                }
-
-                // Apply overrides to params
-                // Only allow known Tier 1+2 parameters to be overridden
-                // The distances of the search are not in this list: they are derived
-                // from the run itself (gene pitches), which an estimate by kingdom and
-                // genome size cannot improve on.
-                def allowed = [
-                    'n_flanking_genes', 'search_evalue', 'mmseqs_sensitivity',
-                    'enable_smith_waterman', 'enable_plm_search', 'enable_structural_search',
-                    'max_blocks_per_genome', 'min_block_genes',
-                    'min_flanking_size', 'exon_level_search'
-                ] as Set
-
-                // Safety lock: prevent LLM from auto-enabling advanced ML structural/PLM searches
-                if (paramBool(params.force_disable_advanced_search)) {
-                    allowed.remove('enable_plm_search')
-                    allowed.remove('enable_structural_search')
-                }
-
-                // Nextflow >= 25 no longer lets params change after launch: params.put()
-                // returns quietly and the value stays what it was. This block used to log
-                // every estimate as applied while no process ever saw one. Check instead,
-                // and when an estimate did not take, hand the user the flags to re-run with.
-                def notApplied = [:]
-                overrides.each { key, value ->
-                    if (allowed.contains(key)) {
-                        def old_val = params.get(key)
-                        params.put(key, value)
-                        if (params.get(key)?.toString() == value?.toString()) {
-                            log.info "${c.dim}  [auto] ${key}: ${old_val} → ${value}${c.reset}"
-                        } else {
-                            notApplied[key] = value
-                        }
-                    }
-                }
-                if (notApplied) {
-                    msg += " — ADVISORY ONLY, ${notApplied.size()} value(s) NOT applied"
-                    log.warn "ESTIMATE_PARAMS: this Nextflow version does not allow parameters to change after launch, so ${notApplied.size()} estimated value(s) were NOT applied and this run uses the launch-time values. To use the estimate, re-run with: ${notApplied.collect { k, v -> "--${k} ${v}" }.join(' ')}   (also saved to ${params.outdir}/intermediate/estimate_params/estimated_params.json)"
-                }
-
-                // Log any warnings/issues
-                def warnings = est.get('warnings', [])
-                warnings.each { w -> log.info "${c.yellow}  [auto-warn] ${w}${c.reset}" }
-                def issues = est.get('issues', [])
-                issues.each { iss -> log.info "${c.red}  [auto-issue] ${iss}${c.reset}" }
-
-                log.info "${c.green}[OK  ]${c.reset} ${c.white}${'ESTIMATE_PARAMS'.padRight(24)}${c.reset} ${msg}"
-            } catch (Exception e) {
-                log.warn "${c.yellow}[WARN]${c.reset} ${c.white}${'ESTIMATE_PARAMS'.padRight(24)}${c.reset} Could not apply estimated params: ${e.message}"
-            }
-            return true  // gate signal
-        }
-    } else {
-        uiStatus('SKIP', 'ESTIMATE_PARAMS', 'Auto parameter estimation disabled (--auto_params false)')
-        params_applied_ch = channel.value(true)
-    }
-
-    normalized_gene_ready_ch = normalized_gene_ch
-        .combine(params_applied_ch)
-        .map { fasta, _ready -> fasta }
-
     // PHASE 1: Core Localization
     uiPhase(1, 'Gene Localization in Home Genome')
     
     uiStatus('RUN ', 'LOCATE_GENE', 'Locating GOI in home genome')
-    LOCATE_GENE(normalized_gene_ready_ch, home_genome_ch, home_gff_ch, modulesSelect('short_query'))
+    LOCATE_GENE(normalized_gene_ch, home_genome_ch, home_gff_ch, modulesSelect('short_query'))
 
     LOCATE_GENE.out.bed.view { bed ->
         def lines = bed.readLines().findAll { it.trim() && !it.startsWith('#') }
@@ -1168,7 +1062,7 @@ workflow {
     def effective_query_id = inline_query_mode ? '' : (params.query_id ?: '')
     
     ANNOTATE_GOI(
-        normalized_gene_ready_ch.first(),
+        normalized_gene_ch.first(),
         home_genome_ch,
         home_gff_ch,
         LOCATE_GENE.out.blast_hits,
@@ -1182,7 +1076,7 @@ workflow {
     }
 
     // 4c. Settings of the run: the preset or the preset modules (§1f; subworkflows/resolve_settings.nf).
-    RESOLVE_SETTINGS(normalized_gene_ready_ch.first(), home_genome_ch, home_gff_ch,
+    RESOLVE_SETTINGS(normalized_gene_ch.first(), home_genome_ch, home_gff_ch,
         ANNOTATE_GOI.out.bed, ANNOTATE_GOI.out.info, LOCATE_GENE.out.hit_profile, LOCATE_GENE.out.auto_preset,
         groovy.json.JsonOutput.toJson(presetDefaultKeys().collectEntries { k -> [(k): params[k]] }),
         params.preset_override ?: '', !paramBool(params.auto_apply_preset), modulesSpec())
@@ -1280,7 +1174,7 @@ workflow {
         home_genome_ch.first(),
         params.n_flanking_genes,
         params.min_flanking_size,
-        normalized_gene_ready_ch.first(),  // GOI protein: its relatives are not used as anchors
+        normalized_gene_ch.first(),  // GOI protein: its relatives are not used as anchors
         LOCATE_GENE.out.blast_hits.first(),
         LOCATE_GENE.out.mmseqs_hits.first(),
         effective_settings_ch              // §1f: resolved preset-affected params
@@ -1545,7 +1439,7 @@ workflow {
             ITERATIVE_SEARCH.out.hits,
             CLUSTER_REGIONS.out.scores,
             genomes_dir_ch.first(),
-            normalized_gene_ready_ch.first(),
+            normalized_gene_ch.first(),
             effective_home_gff_ch,
             home_proteome_db_ch,
             SPLIT_LOCI.out.beds,

@@ -140,6 +140,3 @@ figures now hide fragment hits by default.)
   spacings of the home locus (2.4 kb here), so a block is a neighbourhood of some tens of
   kb (the largest: 130 to 630 kb) instead of one to two megabases. The log prints the
   distances used, one line per genome.
-- **`--auto_params true` is advisory.** On yeast its built-in rules suggest
-  `--n_flanking_genes 8` and print it as a flag to re-run with; it cannot change the
-  running pipeline's parameters.

@@ -28,7 +28,6 @@ sys.path.insert(0, str(ROOT / "bin"))
 import auto_select_preset as asp  # noqa: E402
 import generate_report  # noqa: E402
 import home_context as hc  # noqa: E402
-import llm_param_advisor  # noqa: E402
 import profile_hits  # noqa: E402
 import query_features as qf  # noqa: E402
 import resolve_effective_params as rep  # noqa: E402
@@ -389,15 +388,6 @@ def test_switches_n_and_the_mechanism_are_forbidden_to_the_rules():
     assert {"n_flanking_genes", "decoy_mode", "expand_goi_similar", "modules", "tandem_copy_parent",
             "goi_genome_wide_path", "sw_method"} <= sm.FORBIDDEN_FOR_MODULES
     assert not set(sm.RULES_BY_KEY) & sm.FORBIDDEN_FOR_MODULES
-
-
-def test_the_llm_advisor_writes_no_rule_key():
-    """Until the advisor goes (stage 7 of the profile handoff), it must not compete with a
-    rule: neither what it estimates nor what main.nf would let it apply is a rule key."""
-    rule_keys = set(sm.RULES_BY_KEY)
-    assert not set(llm_param_advisor.ESTIMABLE_PARAMS) & rule_keys
-    allowed = re.search(r"def allowed = \[(.*?)\] as Set", (ROOT / "main.nf").read_text(), re.S).group(1)
-    assert not set(re.findall(r"'([a-z_]+)'", allowed)) & rule_keys
 
 
 def test_merge_does_not_depend_on_the_order_of_the_modules():
