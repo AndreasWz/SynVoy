@@ -9,7 +9,7 @@ because line numbers drift.
 It does not explain how to run the pipeline ([USAGE.md](USAGE.md)), what the output
 files contain ([OUTPUT.md](OUTPUT.md)) or what every parameter does
 ([PARAMETERS.md](PARAMETERS.md)). Measurements behind several of the rules are in
-[ALGORITHM_AUDIT_2026-09.md](ALGORITHM_AUDIT_2026-09.md).
+[notes/ALGORITHM_AUDIT_2026-09.md](notes/ALGORITHM_AUDIT_2026-09.md).
 
 Contents: [1 Idea](#1-the-idea) · [2 Terms](#2-terms) · [3 Overview](#3-overview) ·
 [4 Inputs](#4-inputs) · [5 Home locus](#5-the-home-locus) ·

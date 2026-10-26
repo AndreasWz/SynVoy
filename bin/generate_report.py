@@ -1568,7 +1568,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
       (parasail SW vs every sequence in the multi-FASTA query) differs from the
       modal best at the same (genome, locus) and the bitscore gap to the runner-up
       exceeds ``paralog_min_gap``. Catches TP53/63/73-style sibling leakage at
-      MEDIUM confidence (the residual issue from docs/TP53_PARALOG_ASSESSMENT.md).
+      MEDIUM confidence (the residual issue from docs/notes/TP53_PARALOG_ASSESSMENT.md).
 
     For single-paralog queries the §1j check is a no-op and ``paralog_flags`` is
     empty; for multi-paralog runs the RECIPROCAL_BEST_PARALOG process produces a

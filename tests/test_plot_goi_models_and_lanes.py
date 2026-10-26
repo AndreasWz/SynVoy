@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the 2026-09 figure pass (docs/VIZ_REVIEW_2026-09.md).
+"""Regression tests for the 2026-09 figure pass (docs/notes/VIZ_REVIEW_2026-09.md).
 
 - the ribbon plot uses at most 3 lanes per genome, placing the GOI and
   ribbon-bearing genes first, and widening never adds a lane;

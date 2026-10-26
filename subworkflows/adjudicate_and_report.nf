@@ -79,7 +79,7 @@ workflow ADJUDICATE_AND_REPORT {
     // each recovered GOI target protein against every paralog in the home
     // query FASTA. generate_report.py uses the result to flag MEDIUM-confidence
     // calls whose best home paralog differs from the modal best at the same
-    // locus — the TP63 ↔ TP73 bleed observed in docs/TP53_PARALOG_ASSESSMENT.md.
+    // locus — the TP63 ↔ TP73 bleed observed in docs/notes/TP53_PARALOG_ASSESSMENT.md.
     // No-op when params.query has a single sequence (nothing reciprocal).
     paralog_faa_ch = iter_region_genes.transpose()
         .map { locus_id, faa ->

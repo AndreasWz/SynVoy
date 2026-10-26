@@ -109,7 +109,7 @@ A guide to every output file is in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ## Scope
 
-SynVoy is for **divergent, low-copy genes** located by conserved gene order. It is validated on cases like melittin and LY6, and on a benchmark of ten curated venom-gene families across 33 ant genomes: in the four near-single-copy families it recovered 30/31, 28/28, 32/32 and 31/32 of the genes that are reachable from the honeybee seed ([details](docs/NEXT_SESSION_FAMILY_BENCHMARK.md)).
+SynVoy is for **divergent, low-copy genes** located by conserved gene order. It is validated on cases like melittin and LY6, and on a benchmark of ten curated venom-gene families across 33 ant genomes: in the four near-single-copy families it recovered 30/31, 28/28, 32/32 and 31/32 of the genes that are reachable from the honeybee seed.
 
 Know its limits:
 
