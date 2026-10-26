@@ -91,7 +91,7 @@ def gt_goi_type(gt_file: Path, regex: re.Pattern) -> str:
 def run_validator(gt_file: Path, pred_file: Path, bed_file: Optional[Path], goi_type: str) -> dict:
     cmd = [
         "python",
-        "scripts/validate_ly6_results.py",
+        "scripts/benchmark/validate_ly6_results.py",
         "--ground-truth",
         str(gt_file),
         "--pred-gff",

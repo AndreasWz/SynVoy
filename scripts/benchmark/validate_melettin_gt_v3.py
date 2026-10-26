@@ -2,7 +2,7 @@
 """Compare a fresh melittin run output against the pinned v3 fixture.
 
 Usage:
-    python3 scripts/validate_melettin_gt_v3.py --outdir results/melettin_gt_v4
+    python3 scripts/benchmark/validate_melettin_gt_v3.py --outdir results/melettin_gt_v4
 
 Exits 0 if the new output matches the fixture within tolerances.
 Exits 1 with a per-check breakdown otherwise.
@@ -18,8 +18,6 @@ Checks:
 Not checked (too noisy for regression, but reported informationally):
   - Numeric score deltas (scoring is sensitive to minor tweaks).
   - Branch lengths in the tree.
-
-See tests/ground_truth_test/melettin_gt_v3/README.md for details.
 """
 
 import argparse
@@ -29,7 +27,7 @@ import re
 import sys
 
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "ground_truth_test", "melettin_gt_v3")
 FIXTURE_REGIONS = os.path.join(FIXTURE_DIR, "regions")
 FIXTURE_TREE = os.path.join(FIXTURE_DIR, "locus_1_tree.nwk")

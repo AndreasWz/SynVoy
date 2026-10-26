@@ -8,8 +8,7 @@ invoked by `main.nf`. There are two benchmarks:
    *coordinate overlap* with curated gene models (see below — the second exists
    because the first let two overclaims through).
 2. **Family recovery** — ten curated venom-gene families across 33 ant genomes from
-   one honeybee seed each, with the reachable set fixed in advance. Design and
-   results: [`docs/NEXT_SESSION_FAMILY_BENCHMARK.md`](../../docs/NEXT_SESSION_FAMILY_BENCHMARK.md).
+   one honeybee seed each, with the reachable set fixed in advance.
 
 The curated coordinates (`tests/benchmark_truth/`) are unpublished and git-ignored,
 so both scorers need the truth files on your machine; the scoring *logic* is tested
@@ -50,6 +49,9 @@ scripts/benchmark/
 ├── family_recovery.py          # family benchmark harness: plan / stage / seedcheck / score / callcheck
 ├── run_family.sh               # one family end to end: stage -> SynVoy -> score -> callcheck
 ├── score_runs.sh               # re-score finished family runs with the current harness
+├── validate_melettin_gt_v3.py  # a melittin run vs the pinned fixture in tests/ground_truth_test/melettin_gt_v3/
+├── run_ly6_ground_truth_check.py # LY6 ground-truth check of finished runs (calls validate_ly6_results.py)
+├── validate_ly6_results.py     # GOI calls vs a ground-truth GFF: CDS tracked, false positives
 └── _archived_proteome_tools/   # dropped v1 wrappers (OrthoFinder, SonicParanoid,
                                 #   MMseqs2-RBH, GENESPACE) — kept for reference
 

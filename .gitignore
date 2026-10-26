@@ -9,34 +9,22 @@ results/
 results_*/
 test_results/
 test_data/
-test_out/
-test_home_db/
 
-# Local data (genomes, caches, archives, queries, docs, etc.)
+# Local data (genomes, caches) and local run outputs
 local_data/
-
-# Bachelor-cohort / user run outputs (zips, plots) staged at the repo root
-BAs_output/
 local_runs/
+genomes/
 
 # Environment and logs
 *.log
 *.tmp
 tmp/
-.synvoy_logs/
 .pytest_cache/
 
 # Conda/Python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-genomes/
-results_from_local_genomes/
-
-# Test outputs (generated, not source)
-tests/ground_truth_test/output/
-tests/ground_truth_test/output_recheck/
-tests/ground_truth_test/output_unified/
 
 # Secrets / API keys — NEVER commit these
 .env
@@ -44,42 +32,18 @@ tests/ground_truth_test/output_unified/
 *.key
 secrets/
 
-# Personal / binary files
-LRZ_CHEATSHEET.md
-melettin_paper.pdf
-ideas_from_human_user.txt
-feature_ideas.txt
-TODO.md
+# Personal material (notes, talks, literature, backups) lives in _local/, not part of the pipeline
+_local/
+*.pptx
 CLAUDE.md
-docs/AI_analysis_md
-scratch/
-docs/LOCAL_PLAN.md
-docs/BENCHMARK_PLAN.md
+.claude/
 docs/TODO.md
 docs/HOW_IT_WORKS.md
 docs/STATE_OF_THE_PROJECT.md
-docs/analysis/
-# Presentation assets (slide figures, talk material) — not part of the pipeline.
-figures/
+
+# Benchmark outputs and truth files stay ignored (large/curated); scripts/benchmark/ is tracked
 benchmark_results/
-# scripts/benchmark/ is now tracked — wrappers are part of the paper-supporting code.
-# Genome data + truth files stay ignored (large/curated, kept out of git).
 tests/benchmark_truth/
-tmp/
-.claude/
-CLAUDE.md
-meeting_notes.txt
-
-# Talk material and one-off backups — same category as figures/, not pipeline code.
-*.pptx
-*_slide.png
-lrz_backup_*/
-
-# Input handed over from cloud Claude sessions (patches, reports, bug hunts); kept locally
-cloud_claude_input/
-
-# Paper / manuscript drafts and reading notes; kept local, not part of the pipeline.
-manuscript/
 
 # LRZ scripts (local, not part of the pipeline)
 scripts/lrz/

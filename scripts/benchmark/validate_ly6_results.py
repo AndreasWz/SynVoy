@@ -8,7 +8,7 @@ This script is intentionally lightweight (no pandas) and focuses on:
   - Optional locus boundary deltas (GT anchors vs predicted locus)
 
 Example:
-  python scripts/validate_ly6_results.py \
+  python scripts/benchmark/validate_ly6_results.py \
     --ground-truth ground_truth/ly6_3ftx/Ly6/Hosa_NC_000008.gff \
     --pred-gff results/ly6e_definitive_pro/plot_inputs_synteny_block_locus_1/GCF_000001635.27.fna.gff \
     --gt-goi-regex 'LY6E|PSCA|LYPD2' \
