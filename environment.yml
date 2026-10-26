@@ -31,13 +31,9 @@ dependencies:
   - entrez-direct
 
   # Python packages
-  - biopython
-  - plotly >=5.0.0
   - ete3                  # tree I/O in plot_synteny & phylo_sort
-  - taxopy >=0.11.0       # phylogenetic sorting
   - parasail-python       # Smith-Waterman via parasail (GOI search)
   - numpy
-  - psutil                # system resource detection for LLM model selection
 
   # Utilities
   - unzip

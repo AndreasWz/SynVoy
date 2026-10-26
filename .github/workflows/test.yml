@@ -38,7 +38,7 @@ jobs:
           # Minimum set for tests/ — bioinformatics CLIs (mmseqs2, blast+,
           # miniprot, augustus, etc.) are not exercised by pytest, so we skip
           # the heavy conda env here. Keeps CI under a minute.
-          pip install pytest biopython parasail
+          pip install pytest parasail
 
       - name: Run pytest
         # NOTE: tests/benchmark_truth/ is gitignored (unpublished curated coordinates),

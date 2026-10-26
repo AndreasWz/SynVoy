@@ -4,15 +4,13 @@ import os
 import shutil
 import tempfile
 import sys
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
 
 # Add bin directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'bin'))
 
 # Import the function to test
 from smith_waterman_search import smith_waterman_ssearch
+from sequence_utils import write_fasta
 
 class TestSWSearch(unittest.TestCase):
     def setUp(self):
@@ -23,8 +21,7 @@ class TestSWSearch(unittest.TestCase):
 
         # Create a simple protein query
         self.query_seq = "MQIFVKTLTGKTITLEVEPSDTIE" * 2 # 48 AA
-        SeqIO.write(SeqRecord(Seq(self.query_seq), id="query1", description="test query"), 
-                   self.query_file, "fasta")
+        write_fasta([("query1 test query", self.query_seq)], self.query_file)
 
     def tearDown(self):
         shutil.rmtree(self.test_dir)
@@ -52,8 +49,7 @@ class TestSWSearch(unittest.TestCase):
         spacer = "N" * 100
         full_target = spacer + dna_seq + spacer + dna_seq + spacer
         
-        SeqIO.write(SeqRecord(Seq(full_target), id="chr1", description="tandem target"), 
-                   self.target_file, "fasta")
+        write_fasta([("chr1 tandem target", full_target)], self.target_file)
 
         # convert to string path for subprocess
         smith_waterman_ssearch(self.query_file, self.target_file, self.output_file, threads=1)

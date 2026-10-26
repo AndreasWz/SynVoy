@@ -4,8 +4,6 @@ import sys
 import os
 import shutil
 import tempfile
-from Bio.SeqRecord import SeqRecord
-from Bio.Seq import Seq
 
 # Add bin to path
 sys.path.append(os.path.abspath("bin"))
@@ -34,11 +32,11 @@ class TestRBH(unittest.TestCase):
         
     def test_rbh_filtering(self):
         # Case 1: GeneA -> hits GeneA (Valid)
-        rec1 = SeqRecord(Seq("MKLLLL"), id="GeneA|Variant1", description="")
+        rec1 = {"id": "GeneA|Variant1", "seq": "MKLLLL"}
         
         # Case 2: GeneB -> hits GeneX (Invalid, mismatch)
         # Note: GeneB expects to find GeneB. But best hit is GeneX (seq match).
-        rec2 = SeqRecord(Seq("MKVVVV"), id="GeneB|Variant1", description="")
+        rec2 = {"id": "GeneB|Variant1", "seq": "MKVVVV"}
         
         candidates = [rec1, rec2]
         unique_map = {

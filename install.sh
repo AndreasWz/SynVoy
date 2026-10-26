@@ -146,12 +146,12 @@ else
 fi
 
 # Python packages (granular — a bundled check hides which one is missing)
-if python -c "import Bio, plotly, ete3, taxopy, psutil, numpy" 2>/dev/null; then
-    echo "  [ok] Python packages (biopython, plotly, ete3, taxopy, psutil, numpy)"
+if python -c "import ete3, numpy" 2>/dev/null; then
+    echo "  [ok] Python packages (ete3, numpy)"
     PASS=$((PASS + 1))
 else
-    echo "  [FAIL] One or more of biopython/plotly/ete3/taxopy/psutil/numpy is missing:"
-    for pkg in Bio plotly ete3 taxopy psutil numpy; do
+    echo "  [FAIL] One or more of ete3/numpy is missing:"
+    for pkg in ete3 numpy; do
         python -c "import $pkg" 2>/dev/null || echo "         - $pkg NOT importable"
     done
     FAIL=$((FAIL + 1))

@@ -63,7 +63,7 @@ augustus --version
 iqtree2 --version || iqtree --version
 datasets version
 esearch -version
-python -c "import Bio, plotly, ete3, taxopy, psutil, numpy; print('Python deps OK')"
+python -c "import ete3, numpy; print('Python deps OK')"
 
 # parasail deserves a functional test, not just an import: it can import fine and
 # still fail to load its C extension, and it is the dep most often shadowed by a
