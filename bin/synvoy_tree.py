@@ -626,28 +626,35 @@ def color_for_clade(clade_id: int) -> str:
 # ─────────────────────────────── species helpers ─────────────────────────────
 
 _SPECIES_TAIL_SUFFIXES = ("_exon_ann", "_fallback", "_flank_ann", "_full")
+# The block and locus of a search model: _b<block>_l<locus> (_l1m2 = second model of a
+# locus, _r1 = found with a relative's model as query, _fl2 = a flanking gene's locus).
+_BLOCK_TOKEN = re.compile(r"_b\d+_(?:[lr]\d+(?:m\d+)?|fl\d+)")
 
 
 def species_from_leaf(leaf: str) -> Optional[str]:
     """`GOI_Melt|Apis_florea_fna_b0_l1_exon_ann` → `Apis_florea`.
 
-    Also strips the ``_extraN`` suffix attached by the iterative-search
-    tandem-copy renamer in ``iterative_search_runner.py`` (e.g.
-    ``Apis_florea_fna_b0_l1_extra3`` → ``Apis_florea``). Without this,
-    every renamed copy looks like its own species and downstream
-    species-level collapses leak duplicate rows into the matrix
-    cladogram.
+    Everything from the last block token on names the model, not the genome,
+    and is cut: ``_exon_ann``, ``_fallback`` or ``_fallback_<h>``, ``_extraN``,
+    ``_flank_ann``, and a tandem copy's ``_tc<n>`` (``--tandem_copy_parent
+    home``) or ``_by_<parent>`` (``seed``, since 2026-10-23: the parent comes
+    last and holds no block token). Without this, every such model looks like
+    its own species and downstream species-level collapses leak duplicate rows
+    into the tree and the grid. A leaf without a block token keeps the older
+    rule (the known suffixes, ``_extraN`` and trailing block/locus tags).
     """
     if not leaf or "|" not in leaf:
         return None
     tail = leaf.split("|", 1)[1]
-    for suf in _SPECIES_TAIL_SUFFIXES:
-        if tail.endswith(suf):
-            tail = tail[: -len(suf)]
-    # Strip optional _extraN tag (tandem-copy disambiguator), then block/locus
-    # IDs (_b0/_l1/_fl2 in any order; _l1m2 = second model of a locus, _r1 = found
-    # with a relative's model as query), then the genome-extension stub.
-    tail = re.sub(r"_extra\d+$", "", tail)
-    tail = re.sub(r"(_(b|fl|l|r)\d+(m\d+)?)+$", "", tail)
+    tokens = list(_BLOCK_TOKEN.finditer(tail))
+    if tokens:
+        tail = tail[: tokens[-1].start()]
+    else:
+        for suf in _SPECIES_TAIL_SUFFIXES:
+            if tail.endswith(suf):
+                tail = tail[: -len(suf)]
+        tail = re.sub(r"_extra\d+$", "", tail)
+        tail = re.sub(r"(_(b|fl|l|r)\d+(m\d+)?)+$", "", tail)
+    # then the genome-extension stub
     tail = re.sub(r"_(fa|fna|fasta)$", "", tail)
     return tail

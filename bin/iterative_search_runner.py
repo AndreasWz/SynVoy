@@ -844,8 +844,8 @@ def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
     decoy case calibrates both paths of the window search. Shuffles are seeded by the id,
     so a rerun repeats them. A query that is not a home protein or its relative's query
     gets none: the model of an earlier genome that is a query of its own (a GOI known only
-    from models, such as a seeded tandem copy ``GOI_copy_1|<genome>_b0_l1``) would give
-    ``GOI_copy_1|...~shuf1``, whose hits are filed under the real parent ``GOI_copy_1``
+    from models, such as a seeded tandem copy ``GOI_copy_1|<genome>_b0_l1_by_<parent>``) would
+    give ``GOI_copy_1|...~shuf1``, whose hits are filed under the real parent ``GOI_copy_1``
     (extract_base_gene_id cuts at the first ``|``) and whose models then count as real.
     ``home_ids``: the home GOI record ids (args.home_goi_ids); without them a query is a
     home protein when its id is its parent id."""
@@ -1464,6 +1464,49 @@ def judge_candidates(candidates) -> None:
             int(cand.get('start', 0) or 0), (cand.get('record') or {}).get('id', ''))
 
 
+def record_judge_numbers(numbers: Dict[str, Dict[str, Any]], cands,
+                         writers: Optional[Dict[str, List[str]]] = None) -> int:
+    """Keep the full-precision terms of each judged candidate (``cand['judge_numbers']``) in
+    the genome's table ``numbers`` under its model id, for the genome-end label, Eeff, the
+    block table and the seed rule (RF-1f). Returns the number of writes whose id another
+    candidate's entry already held: the table keeps the last one, so each such write hands
+    one model's numbers to another (writes are counted, a dict hides repeats). ``writers``
+    collects the SynVoy_Parent of every candidate written under an id
+    (log_judge_number_repeats)."""
+    repeats = 0
+    for c in cands:
+        gff = c.get('gff') or []
+        cols = gff[0].split('\t') if gff else []
+        if len(cols) < 9 or not c.get('judge_numbers'):
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        key = a.get('ID', '')
+        held = numbers.get(key)
+        if held is c['judge_numbers']:
+            continue
+        if held is not None:
+            repeats += 1
+        numbers[key] = c['judge_numbers']
+        if writers is not None:
+            writers.setdefault(key, []).append(a.get('SynVoy_Parent', ''))
+    return repeats
+
+
+def log_judge_number_repeats(args, genome_name: str) -> None:
+    """At a genome's end: one line with the writes to the judge-number table whose model id
+    another candidate already held (record_judge_numbers; INFO when 0, else WARNING), then
+    one line per such id with the SynVoy_Parent of each candidate written under it. Logged
+    for every genome the worker reaches, also one that ends before its blocks (0 then).
+    Log only."""
+    ctx = getattr(args, 'genome_ctx', None) or {}
+    n = int(ctx.get('judge_repeats', 0) or 0)
+    (logger.warning if n else logger.info)(f"[{genome_name}] judge_numbers: {n} repeated model ids")
+    for key, parents in sorted((ctx.get('judge_writers') or {}).items()):
+        if len(parents) > 1:
+            logger.warning(f"[{genome_name}] judge_numbers: {key} written by "
+                           f"{len(parents)} candidates, SynVoy_Parent {', '.join(parents)}")
+
+
 def relabel_goi_lines(gff_lines: List[str],
                       numbers_by_id: Optional[Dict[str, Dict[str, Any]]] = None) -> Tuple[List[str], Dict[str, int]]:
     """The label of every GOI row with an Eeff (label rework, step 4): synvoy_label.judge
@@ -1507,21 +1550,39 @@ def relabel_goi_lines(gff_lines: List[str],
     return out, dict(counts)
 
 
+# A copy's parent ends its seed-form id; these would mislead the readers of the id's tail.
+_COPY_PARENT_UNSAFE = re.compile(r'\s|\||_b\d+_[lr]\d+')
+_WARNED_COPY_PARENTS: set = set()
+
+
 def tandem_copy_record_id(copy_name: str, parent_id: str, genome_tag: str, block_idx: int,
                           locus_idx: int, parent_mode: str = 'seed') -> str:
     """Record id of a single-segment tandem copy (detect_tandem_duplications names it
-    ``GOI_copy_<n>``).
+    ``GOI_copy_<n>``, n counted from 1 for each parent, block and locus).
 
-    ``seed`` (until the measured switch): ``GOI_copy_<n>|<genome>_b<block>_l<locus>``. Once
-    such a copy seeds, its base id ``GOI_copy_<n>`` is a GOI of its own in the next wave: its
-    models are judged against the seed, not against the home protein (label rework, REPORT
-    finding 6). ``home``: ``<parent>|<genome>_b<block>_l<locus>_tc<n>``, a model of the home
-    GOI like any other, so a seeded copy can become that GOI's relative query and every
-    model it finds is reported and judged against the home protein."""
+    ``seed`` (until the measured switch): ``GOI_copy_<n>|<genome>_b<block>_l<locus>_by_<parent>``.
+    Once such a copy seeds, its base id ``GOI_copy_<n>`` is a GOI of its own in the next wave:
+    its models are judged against the seed, not against the home protein (label rework, REPORT
+    finding 6), and every ``GOI_copy_<n>`` of the query set is one pool, as before. The parent
+    comes last, behind ``_by_`` (2026-10-23): without it, copies of different parents (the home
+    GOI, a seeded copy, a home tandem copy, a decoy) at the same block, locus and n shared one
+    id, and the genome-end readers of the judge numbers, which are kept per id, gave each of
+    them the numbers and the label of the one judged last. ``home``:
+    ``<parent>|<genome>_b<block>_l<locus>_tc<n>``, a model of the home GOI like any other, so a
+    seeded copy can become that GOI's relative query and every model it finds is reported and
+    judged against the home protein.
+
+    The readers of the part behind ``|`` (_model_genome_tag, block_index_of, species_from_leaf,
+    the renaming of a relative's model) need a parent without whitespace, ``|`` or a block-like
+    token ``_b<d>_l<d>`` / ``_b<d>_r<d>``; a parent that holds one is logged once."""
+    if _COPY_PARENT_UNSAFE.search(parent_id) and parent_id not in _WARNED_COPY_PARENTS:
+        _WARNED_COPY_PARENTS.add(parent_id)
+        logger.warning(f"tandem copy parent {parent_id!r} holds whitespace, '|' or a block-like "
+                       "token: the genome, block or species read from its copies' ids can be wrong")
     if parent_mode == 'home':
         n = copy_name[len('GOI_copy_'):] if copy_name.startswith('GOI_copy_') else copy_name
         return f"{parent_id}|{genome_tag}_b{block_idx}_l{locus_idx}_tc{n}"
-    return f"{copy_name}|{genome_tag}_b{block_idx}_l{locus_idx}"
+    return f"{copy_name}|{genome_tag}_b{block_idx}_l{locus_idx}_by_{parent_id}"
 
 
 def context_truncation(block_start: int, block_end: int, pad: int, scaffold_len: int) -> str:
@@ -5939,13 +6000,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 logger.info(f"[{genome_name}] block {block_idx}: {n_joined} leftover hit(s) joined "
                             f"into gene models (--goi_join_leftover_hits)")
         # The full-precision terms for the genome-end label and the seed rule (RF-1f).
-        _numbers = (args.genome_ctx.setdefault('judge_numbers', {})
-                    if getattr(args, 'genome_ctx', None) is not None else {})
-        for c in cands:
-            _g = c.get('gff') or []
-            _cols = _g[0].split('\t') if _g else []
-            if len(_cols) >= 9 and c.get('judge_numbers'):
-                _numbers[_parse_gff_attr_string(_cols[8]).get('ID', '')] = c['judge_numbers']
+        _ctx = getattr(args, 'genome_ctx', None)
+        if _ctx is not None:
+            _ctx['judge_repeats'] = _ctx.get('judge_repeats', 0) + record_judge_numbers(
+                _ctx.setdefault('judge_numbers', {}), cands, _ctx.setdefault('judge_writers', {}))
         return greedy_select(cands)
 
     if decoy_candidates:
@@ -8042,6 +8100,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         error_message = str(e)
         logger.error(f"[{genome_name}] Error processing: {error_message}")
     finally:
+        log_judge_number_repeats(args, genome_name)
         if os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -8484,9 +8543,11 @@ def main():
     parser.add_argument("--max_intron", type=int, default=20000)
     parser.add_argument("--tandem_copy_parent", choices=["seed", "home"], default="seed",
                         help="Whose model a single-segment tandem copy is: 'seed' (default, as "
-                             "until 2026-10-15) names it GOI_copy_<n>, which becomes a GOI of its "
-                             "own once it seeds and is then judged against the seed; 'home' names "
-                             "it under the home GOI, so it is judged against the home protein")
+                             "until 2026-10-15) names it GOI_copy_<n> (record id "
+                             "GOI_copy_<n>|<genome>_b<k>_l<j>_by_<parent>), which becomes a GOI of "
+                             "its own once it seeds and is then judged against the seed; 'home' "
+                             "names it under the home GOI (<parent>|<genome>_b<k>_l<j>_tc<n>), so "
+                             "it is judged against the home protein")
     parser.add_argument("--target_genetic_codes", default="",
                         help="Genetic codes of target genomes, 'genome=table,...' (the genome "
                              "as its file name with or without the extension); others use "

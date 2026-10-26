@@ -176,6 +176,10 @@ IDS = [
     ("GOI_STE2|Lachancea_thermotolerans_fna_b15_r1_fallback", "Lachancea_thermotolerans"),
     ("GOI_X|Apis_florea_fa_b3_r2m3_exon_ann", "Apis_florea"),
     ("GOI_copy_1|Apis_cerana_fna_b0_l1", "Apis_cerana"),
+    ("GOI_copy_1|Apis_cerana_fna_b0_l1_by_GOI_Melt", "Apis_cerana"),
+    ("GOI_copy_2|Apis_cerana_fna_b1_r2_by_GOI_orf19.3940.1", "Apis_cerana"),
+    ("GOI_Melt|Apis_florea_fna_b0_l1_tc2", "Apis_florea"),
+    ("GOI_Melt|Apis_florea_fna_b0_l1_fallback_3", "Apis_florea"),
     ("GOI_Melt|Apis_florea_fna_b0_l1_extra3", "Apis_florea"),
     ("GOI_A|Apis_florea_fna_b2_fl1_flank_ann", "Apis_florea"),
 ]

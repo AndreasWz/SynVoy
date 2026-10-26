@@ -1,9 +1,10 @@
 """Whose model a seeded tandem copy is (label rework REPORT finding 6; fixed behind
 ``--tandem_copy_parent``, default ``seed`` until the measured switch of the preset plan).
 
-``seed``: a single-segment tandem copy is recorded as ``GOI_copy_<n>|<genome>_b..._l...``;
-once it seeds the next wave, ``GOI_copy_<n>`` is a GOI of its own and its models are judged
-against the seed. ``home``: it is recorded under the home GOI and is one of its models.
+``seed``: a single-segment tandem copy is recorded as
+``GOI_copy_<n>|<genome>_b..._l..._by_<parent>``; once it seeds the next wave, ``GOI_copy_<n>``
+is a GOI of its own and its models are judged against the seed. ``home``: it is recorded under
+the home GOI and is one of its models.
 """
 import os
 import random
@@ -23,7 +24,8 @@ def _protein(n, seed):
 
 
 def test_record_ids_of_the_two_modes():
-    assert isr.tandem_copy_record_id("GOI_copy_2", "GOI_X", "GenA_fna", 3, 1) == "GOI_copy_2|GenA_fna_b3_l1"
+    assert isr.tandem_copy_record_id("GOI_copy_2", "GOI_X", "GenA_fna", 3, 1) == \
+        "GOI_copy_2|GenA_fna_b3_l1_by_GOI_X"
     assert isr.tandem_copy_record_id("GOI_copy_2", "GOI_X", "GenA_fna", 3, 1, "home") == \
         "GOI_X|GenA_fna_b3_l1_tc2"
     # a copy found with the relative query is renamed to the home GOI by the rebase step

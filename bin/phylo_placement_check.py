@@ -52,7 +52,9 @@ logger = setup_logging(name="phylo_placement_check")
 # Observed forms (enumerated from real run GFFs, 2026-09-09):
 #     GOI_Melt|Colletes_gigas_fa_b0_l1_fallback      seeded block, fallback span
 #     GOI_Melt|Apis_florea_fna_b0_l1_exon_ann        seeded block, exon model
-#     GOI_copy_1|Apis_cerana_fna_b0_l1               tandem copy  <-- NO trailing token
+#     GOI_copy_1|Apis_cerana_fna_b0_l1               tandem copy before 2026-10-23  <-- NO trailing token
+#     GOI_copy_1|Apis_cerana_fna_b0_l1_by_GOI_Melt   tandem copy since then (its parent comes last)
+#     GOI_Melt|Apis_florea_fna_b0_l1_tc1             tandem copy, --tandem_copy_parent home
 #     GOI_Melt|Apis_florea_fna_b0_l1m2_exon_ann      second model of the same locus
 #     GOI_Melt|Apis_florea_fna_b0_r1_fallback        found with the relative's model as query
 #     GOI_Melt|Colletes_gigas_WUUM01000001.1_hull_rescue   hull rescue (chrom, not block)

@@ -180,6 +180,12 @@ built (`exon_ann` = miniprot model, `fallback` = hit chain). Two additions since
 2026-10-09: `l1m2`, `l1m3` … are further gene models of the same locus (the other
 copies of a tandem array; before, only the first was reported), and `r<n>` in place of
 `l<n>` marks a model found only with a relative's model as query (see `SearchQuery`).
+A single-segment tandem copy (`EvidenceType=tandem_copy`, a `gene` row) has
+`Name=GOI_copy_<n>` (the figures label it "GOI #n") and `SynVoy_Parent=<parent>`, the
+query it was found with; its id has one of two forms (`--tandem_copy_parent`):
+`GOI_copy_<n>|<genome>_b<block>_l<locus>_by_<parent>` (`seed`, the default; the parent at
+the end since 2026-10-23, before that copies of different parents could share an id) or
+`<parent>|<genome>_b<block>_l<locus>_tc<n>` (`home`).
 
 **The distances of the search.** The first lines of each `<species>.gff` hold a
 comment with the distances used for that genome, in base pairs, and how they were

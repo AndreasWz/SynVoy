@@ -1026,7 +1026,10 @@ three genomes, margins of −339 to −363 bits); the opt-in `--seed_on_flanking
 was removed. A seeded single-segment tandem copy is, by default (`tandem_copy_parent
 seed`), recorded as `GOI_copy_<n>` and therefore a gene of its own in the following waves,
 judged against the seed; with `--tandem_copy_parent home` it is a model of the home gene
-and can be its relative query.
+and can be its relative query. Its record id ends with the query it was found with
+(`GOI_copy_<n>|<genome>_b<k>_l<j>_by_<parent>`, since 2026-10-23): `n` is counted per
+parent, block and locus, and the judge's terms are kept per id until the genome's end, so
+copies of two parents with one id were given the E-values and label of one of them.
 
 The window search keeps the hits of the home protein and of the relative's model apart
 when it removes overlapping hits (since 2026-10-14): pooled, the relative's hit at a
