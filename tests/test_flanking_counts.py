@@ -1,9 +1,10 @@
 """Counts tied to n_flanking_genes (profile handoff, stage 6, constraint C9): the bridge limit in
 pitches (2n), the HIGH flanking genes of a strong-synteny region (n / 2, rounded up) and those in
 the hull of the hull rescue (round(0.4 n)) are 'auto' by default, resolved in Nextflow
-(lib/FlankingCounts.groovy) because the scripts take numbers. At the default n = 10 they are 20, 5
-and 4, the fixed defaults before, so such a run passes the same command lines. The Nextflow runs
-are skipped without Nextflow on PATH (CI has none)."""
+(lib/FlankingCounts.groovy) because the scripts take numbers. Stage 4 added the fourth, the HIGH
+flanking models at which the report flags strong_synteny_no_goi (2n). At the default n = 10 they
+are 20, 5, 4 and 20, the fixed defaults before, so such a run passes the same command lines. The
+Nextflow runs are skipped without Nextflow on PATH (CI has none)."""
 from __future__ import annotations
 
 import re
@@ -22,6 +23,7 @@ COUNTS = {
     "synteny_bridge_max_gap_genes": ("iterative_search.nf", "--synteny_bridge_max_gap_genes"),
     "strong_synteny_min_flanking": ("cluster_regions.nf", "--strong_synteny_min_flanking"),
     "goi_hull_min_flanking": ("rescue_goi_hull.nf", "--min_flanking"),
+    "strong_synteny_no_goi_min_flanking": ("generate_report.nf", "--strong_flanking_min"),
 }
 
 
@@ -56,9 +58,9 @@ def test_the_resolved_values(tmp_path):
     proc = subprocess.run([NEXTFLOW, "run", "t.nf", "-ansi-log", "false"], cwd=tmp_path,
                           capture_output=True, text=True, timeout=300)
     rows = [line[len("RESULT "):] for line in proc.stdout.splitlines() if line.startswith("RESULT ")]
-    # bridge 2n | strong ceil(n / 2) | hull round(0.4 n); a number passes as given
-    assert rows == ["10|20|5|4", "10|20|5|4", "20|40|10|8", "5|10|3|2", "3|6|2|1", "15|30|8|6",
-                    "1|2|1|0", "20|7|7|7", "20|0|0|0"], proc.stdout + proc.stderr
+    # bridge 2n | strong ceil(n / 2) | hull round(0.4 n) | report 2n; a number passes as given
+    assert rows == ["10|20|5|4|20", "10|20|5|4|20", "20|40|10|8|40", "5|10|3|2|10", "3|6|2|1|6",
+                    "15|30|8|6|30", "1|2|1|0|2", "20|7|7|7|7", "20|0|0|0|0"], proc.stdout + proc.stderr
 
 
 def _preview(tmp_path: Path, *extra: str) -> tuple[int, str]:
@@ -80,6 +82,9 @@ def _preview(tmp_path: Path, *extra: str) -> tuple[int, str]:
     ("strong_synteny_min_flanking", "3", True),
     ("goi_hull_min_flanking", "-1", False),
     ("synteny_bridge_max_gap_genes", "x", False),
+    ("strong_synteny_no_goi_min_flanking", "auto", True),
+    ("strong_synteny_no_goi_min_flanking", "30", True),
+    ("strong_synteny_no_goi_min_flanking", "-2", False),
 ])
 def test_validation_takes_auto_and_numbers(tmp_path, name, value, ok):
     code, text = _preview(tmp_path, f"--{name}", value)

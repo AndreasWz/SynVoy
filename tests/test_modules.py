@@ -32,6 +32,7 @@ import profile_hits  # noqa: E402
 import query_features as qf  # noqa: E402
 import resolve_effective_params as rep  # noqa: E402
 import select_modules as sm  # noqa: E402
+import synvoy_settings  # noqa: E402
 import synvoy_specificity  # noqa: E402
 
 # UniProt P01501 (melittin precursor) and Q16553 (LY6E), public sequences.
@@ -127,18 +128,34 @@ def _preset_default_keys():
         r"def presetDefaultKeys\(\) \{\s*return \[(.*?)\]", (ROOT / "main.nf").read_text(), re.S).group(1)))
 
 
+def _nf_texts():
+    return {p.name: p.read_text() for d in ("modules", "subworkflows") for p in (ROOT / d).glob("*.nf")}
+
+
 def test_every_rule_has_owners_a_default_a_settings_reader_and_no_params_reader():
-    """A rule reaches the search only through the settings map: main.nf feeds its key
-    (presetDefaultKeys) and a process reads ${settings.x}. A ${params.x} reader in a process
-    would win over the rule without a word (main.nf's start-up check of the value a user
-    passes is not a reader)."""
+    """A rule reaches its step only through the run's settings: main.nf feeds its key
+    (presetDefaultKeys), and a process reads ${settings.x}, or a script reads the key from
+    effective_params.json through bin/synvoy_settings.py (READERS: key -> scripts; stage 4),
+    which the module that runs the script hands it. A ${params.x} reader in a process would
+    win over the rule without a word (main.nf's start-up check of the value a user passes is
+    not a reader)."""
     keys = _preset_default_keys()
-    readers = "".join(p.read_text() for d in ("modules", "subworkflows") for p in (ROOT / d).glob("*.nf"))
+    nf = _nf_texts()
+    readers = "".join(nf.values())
     ids = {m.id for m in sm.MODULES}
     for r in sm.RULES:
         assert r.owners and set(r.owners) <= ids, r.key
         assert r.key in keys, r.key
-        assert f"settings.{r.key}" in readers, r.key
+        scripts = synvoy_settings.READERS.get(r.key, ())
+        assert f"settings.{r.key}" in readers or scripts, r.key
+        for script in scripts:
+            source = (ROOT / "bin" / script).read_text()
+            assert re.search(rf"synvoy_settings\.pick\(.{{0,200}}?[\"']{r.key}[\"']", source, re.S), (r.key, script)
+            modules = [t for t in nf.values() if re.search(rf"(?<![\w.]){re.escape(script)}\b", t)]
+            assert modules, (r.key, script)
+            for text in modules:            # the module gets the file and passes it on
+                assert re.search(r"path\(?\s*effective_params\b", text), (r.key, script)
+                assert "--effective_params ${effective_params}" in text, (r.key, script)
         assert not re.search(rf"params\.{r.key}\b", readers), r.key
         assert r.key not in sm.FORBIDDEN_FOR_MODULES, r.key
         assert r.evidence in sm.EVIDENCE and r.text and r.doc, r.key
@@ -182,38 +199,97 @@ def test_the_regions_rule_at_its_cap(copies, want, capped):
     assert ("uncapped" in d) is capped and d.get("uncapped", want) == int(copies) + 1
 
 
-# Settings keys that no rule writes: no preset or module has set them since 2026-10-09/15, so
-# they are params read through the settings map. The profile handoff (§7.4) wants the map to
-# hold the rule keys only; moving these readers to ${params.x} changes the report's
-# run_settings, so it waits for stage 4. This set may only shrink.
-SETTINGS_KEYS_WITHOUT_A_RULE = {"sw_min_score", "sw_min_identity", "min_hit_identity", "min_hit_length",
-                                "expand_goi_similar", "goi_family_tokens", "adaptive_unique_gene_floor"}
+def test_the_settings_map_holds_the_rule_keys_and_the_pass_through_keys():
+    """Stage 4: presetDefaultKeys() is exactly the rule keys and the declared pass-through
+    keys (fixed values that travel in the settings map, so run_settings and every step read
+    one file); no rule writes a pass-through key, and each says why it has no rule. Their
+    readers stay ${settings.x}."""
+    assert _preset_default_keys() == set(sm.RULES_BY_KEY) | set(sm.PASS_THROUGH_KEYS)
+    assert not set(sm.PASS_THROUGH_KEYS) & set(sm.RULES_BY_KEY)
+    assert len(sm.PASS_THROUGH_KEYS) == 7 and all(sm.PASS_THROUGH_KEYS.values())
+    readers = "".join(_nf_texts().values())
+    for key in sm.PASS_THROUGH_KEYS:
+        assert f"settings.{key}" in readers, key
+        assert not re.search(rf"params\.{key}\b", readers), key
+    assert set(synvoy_settings.READERS) <= _preset_default_keys()
+    shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), sm.PASS_THROUGH_KEYS)
+    assert set(shipped) == set(sm.PASS_THROUGH_KEYS)
 
 
-def test_the_settings_map_holds_the_rule_keys_and_known_leftovers_only():
-    assert _preset_default_keys() == set(sm.RULES_BY_KEY) | SETTINGS_KEYS_WITHOUT_A_RULE
-    assert not SETTINGS_KEYS_WITHOUT_A_RULE & set(sm.RULES_BY_KEY)
+# Stage 4: the rules of the steps after the search, at the edge of each formula and at its cap.
+@pytest.mark.parametrize("key,floor", [("locus_ownership_max_genes_per_locus", 5), ("max_goi_per_genome", 10)])
+@pytest.mark.parametrize("c", [None, 4, 5, 9, 10, 59, 60, 61])
+def test_the_a1_rules_of_stage_4_at_the_edge_and_the_cap(key, floor, c):
+    """max(5, c + 1) moves from c = 5 on, max(10, c + 1) from c = 10 on; both stop at 60, and
+    an unknown c gives the default."""
+    p = sm.design_profile({} if c is None else {"primary_copies": float(c)})
+    assert p["c"] == c
+    settings, source, derivation = sm.apply_rules({"A1"}, p)
+    want = max(floor, (c or 1) + 1)
+    assert settings[key] == min(want, 60) and source[key] == "module:A1"
+    assert ("uncapped" in derivation[key]) is (want > 60)
+    assert derivation[key]["line"].startswith(f"{key} {min(want, 60)} = max({floor}, c + 1), c = ")
+    assert key not in sm.apply_rules({"A2", "B1", "B3", "C1"}, p)[0]
 
 
-def test_the_rules_of_stages_1_and_3():
+@pytest.mark.parametrize("fam,want,capped", [(None, 15, False), (14, 15, False), (15, 16, False),
+                                             (49, 50, False), (50, 50, True), (80, 50, True)])
+def test_the_family_panel_rule_at_the_edge_and_the_cap(fam, want, capped):
+    settings, source, derivation = sm.apply_rules({"A2"}, sm.design_profile({"n_independent_loci": fam}))
+    d = derivation["paralog_panel_max_family"]
+    assert settings["paralog_panel_max_family"] == want and source["paralog_panel_max_family"] == "module:A2"
+    assert ("uncapped" in d) is capped and d.get("uncapped", want) == max(15, (fam or 1) + 1)
+    assert "paralog_panel_max_family" not in sm.apply_rules({"A1", "B1"}, sm.design_profile({}))[0]
+
+
+def test_the_hull_coverage_follows_b1_and_never_moves_under_legacy():
+    short = sm.flat_features(_profile(query_len=99), None, None)
+    res = rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=short)
+    assert res["settings"]["goi_hull_min_coverage"] == 0.3
+    assert res["derivation"]["goi_hull_min_coverage"]["line"] == "goi_hull_min_coverage 0.3 (B1)"
+    long = rep.resolve(FULL, auto_preset=None, modules_spec="auto",
+                       features=sm.flat_features(_profile(query_len=100), None, None))
+    assert long["settings"]["goi_hull_min_coverage"] == 0.5 and long["source"]["goi_hull_min_coverage"] == "default"
+    legacy = rep.resolve(FULL, auto_preset={"preset": "preset_short_peptide"}, modules_spec="legacy",
+                         features=short)
+    assert legacy["preset_applied"] == "preset_short_peptide"
+    for key in ("goi_hull_min_coverage", "locus_ownership_max_genes_per_locus", "paralog_panel_max_family",
+                "max_goi_per_genome"):
+        assert legacy["settings"][key] == FULL[key] and legacy["source"][key] == "default", key
+
+
+def test_the_rules_of_stages_1_3_and_4():
     """Stage 1 of the profile handoff moved the 15 module keys of 2026-10-15 into rules
     without changing a value; stage 3 added the search's rules (A1: models, GOI margin;
     A1 / C1: Smith-Waterman alignments per piece; B1: the short-piece floors; B1 / C1: the
-    dispersed rescue's floor) and raised the regions cap to 40. C1 stops being advisory."""
+    dispersed rescue's floor) and raised the regions cap to 40. C1 stops being advisory.
+    Stage 4 added the rules of the steps after the search: A1 the ownership panel's genes per
+    home locus and the GOI models that steer a figure, A2 the panel's relatives, B1 the hull
+    rescue's coverage filter."""
     assert {m.id: sm.rule_keys(m.id) for m in sm.MODULES} == {
         "A1": ["goi_relative_evalue", "goi_candidate_regions_per_query", "goi_max_models_per_locus",
-               "goi_margin_genes", "sw_max_alignments_per_piece", "report_copies_in_slot"],
-        "A2": ["adaptive_score_floor_frac", "adaptive_score_floor_abs", "adaptive_max_regions"],
+               "goi_margin_genes", "sw_max_alignments_per_piece", "report_copies_in_slot",
+               "locus_ownership_max_genes_per_locus", "max_goi_per_genome"],
+        "A2": ["adaptive_score_floor_frac", "adaptive_score_floor_abs", "adaptive_max_regions",
+               "paralog_panel_max_family"],
         "A3": [],
         "B1": ["classify_complete_min_qcov", "classify_fragment_max_qcov", "window_tblastn_word_size",
                "window_tblastn_comp_stats", "window_mmseqs_min_length", "miniprot_short_orf_max_len",
-               "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen"],
+               "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen",
+               "goi_hull_min_coverage"],
         "B2": ["goi_relative_statistic", "report_low_complexity"],
         "B3": ["core_completeness"],
         "B4": [], "C1": ["sw_max_alignments_per_piece", "dispersed_goi_min_alnlen"], "C2": [],
     }
     assert {k: r.cap for k, r in sm.RULES_BY_KEY.items() if r.cap is not None} == {
-        "goi_candidate_regions_per_query": 40, "goi_max_models_per_locus": 60}
+        "goi_candidate_regions_per_query": 40, "goi_max_models_per_locus": 60,
+        "locus_ownership_max_genes_per_locus": 60, "max_goi_per_genome": 60,
+        "paralog_panel_max_family": 50}
+    assert {k: sm.RULES_BY_KEY[k].evidence for k in (
+        "locus_ownership_max_genes_per_locus", "max_goi_per_genome", "paralog_panel_max_family",
+        "goi_hull_min_coverage")} == dict.fromkeys(
+        ("locus_ownership_max_genes_per_locus", "max_goi_per_genome", "paralog_panel_max_family",
+         "goi_hull_min_coverage"), "inferred")
 
 
 def test_a_rule_applies_when_any_owner_is_applied_and_its_formula_alone_decides():
@@ -244,6 +320,8 @@ def _rule(key, owners, **kw):
     ([_rule("decoy_mode", ("B2",))], "forbidden"),
     ([_rule("n_flanking_genes", ("A1",))], "forbidden"),
     ([_rule("tandem_copy_parent", ("A1",))], "forbidden"),
+    ([_rule("sw_min_score", ("B1",))], "pass-through"),
+    ([_rule("adaptive_unique_gene_floor", ("A2",))], "pass-through"),
     ([_rule("goi_relative_evalue", ("Z9",))], "not module ids"),
     ([_rule("goi_relative_evalue", ())], "not module ids"),
     ([_rule("goi_relative_evalue", ("A1",), inputs=("Lmystery",))], "does not have"),
@@ -319,7 +397,8 @@ FULL = dict(DEFAULTS, goi_candidate_regions_per_query=2, report_copies_in_slot=F
             miniprot_short_orf_max_len=60, goi_relative_statistic="sw", report_low_complexity=False,
             core_completeness=False, goi_max_models_per_locus=10, goi_margin_genes=2,
             sw_max_alignments_per_piece=1, aug_relaxed_length_min=15, fallback_short_min_aln_aa=15,
-            dispersed_goi_min_alnlen=50)
+            dispersed_goi_min_alnlen=50, locus_ownership_max_genes_per_locus=5,
+            paralog_panel_max_family=15, goi_hull_min_coverage=0.5, max_goi_per_genome=10)
 
 
 def test_the_derivation_says_what_set_each_key_and_from_what():
@@ -360,6 +439,53 @@ def test_a_binding_cap_is_named_and_is_no_violation():
     assert _constraint(res, "C11")["ok"]
     legacy = rep.resolve(FULL, auto_preset={"preset": "preset_tandem_family"}, modules_spec="legacy", features=f)
     assert not _constraint(legacy, "C3")["applies"] and not _constraint(legacy, "C11")["applies"]
+
+
+def test_c4_and_c5_hold_every_home_copy_with_a1():
+    """C4 and C5 (stage 4), checked like C3: with A1 the ownership panel's genes per home locus
+    and the GOI models that steer a figure reach the home copies + 1, or the cap of 60, which is
+    then named; they do not apply without A1."""
+    f = sm.flat_features(_profile(copies=7.0), None, None)
+    res = rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=f)
+    assert (res["settings"]["locus_ownership_max_genes_per_locus"], res["settings"]["max_goi_per_genome"]) == (8, 10)
+    assert res["derivation"]["locus_ownership_max_genes_per_locus"]["line"] == (
+        "locus_ownership_max_genes_per_locus 8 = max(5, c + 1), c = 7 (A1)")
+    c4, c5 = _constraint(res, "C4"), _constraint(res, "C5")
+    assert c4["ok"] and c4["detail"] == "locus_ownership_max_genes_per_locus 8, home copies + 1 = 8"
+    assert c5["ok"] and c5["detail"] == "max_goi_per_genome 10, home copies + 1 = 8"
+    big = rep.resolve(FULL, auto_preset=None, modules_spec="auto",
+                      features=sm.flat_features(_profile(copies=75.0), None, None))
+    for cid, key in (("C4", "locus_ownership_max_genes_per_locus"), ("C5", "max_goi_per_genome")):
+        c = _constraint(big, cid)
+        assert c["ok"] and c["detail"] == f"{key} 60, home copies + 1 = 76: the cap of 60 binds", cid
+        assert big["derivation"][key]["uncapped"] == 76
+    assert _constraint(big, "C11")["ok"]
+    legacy = rep.resolve(FULL, auto_preset={"preset": "preset_tandem_family"}, modules_spec="legacy", features=f)
+    assert not _constraint(legacy, "C4")["applies"] and not _constraint(legacy, "C5")["applies"]
+
+
+def test_c4_and_c5_warn_on_a_value_the_user_set_and_stop_on_a_rule_bug(monkeypatch):
+    f = sm.flat_features(_profile(copies=12.0), None, None)
+    mine = {"locus_ownership_max_genes_per_locus": 3, "max_goi_per_genome": "4"}
+    res = rep.resolve(dict(FULL, **mine), auto_preset=None, modules_spec="auto", features=f, user_set=mine)
+    for cid in ("C4", "C5"):
+        c = _constraint(res, cid)
+        assert c["applies"] and not c["ok"] and c["on_violation"] == "warn", cid
+    assert res["settings"]["max_goi_per_genome"] == "4" and res["user_set_kept"] == sorted(mine)
+    bug = sm.Rule("max_goi_per_genome", ("A1",), lambda p, on: 10, "10", cap=60, doc="a bug")
+    monkeypatch.setattr(sm, "RULES", [bug if r.key == bug.key else r for r in sm.RULES])
+    c5 = _constraint(rep.resolve(FULL, auto_preset=None, modules_spec="auto", features=f), "C5")
+    assert not c5["ok"] and c5["on_violation"] == "stop"
+    assert c5["detail"] == "max_goi_per_genome 10, home copies + 1 = 13"
+
+
+@pytest.mark.parametrize("key,value,owner", [("locus_ownership_max_genes_per_locus", 61, "A1"),
+                                             ("max_goi_per_genome", 61, "A1"),
+                                             ("paralog_panel_max_family", 51, "A2")])
+def test_c11_holds_the_panel_and_figure_caps(key, value, owner):
+    over = sm.check_constraints({key: value}, {key: f"module:{owner}"}, {"c": 3}, {owner})
+    c11 = {c["id"]: c for c in over}["C11"]
+    assert (c11["ok"], c11["on_violation"], c11["detail"]) == (False, "stop", f"above the cap: {key}")
 
 
 def test_a_value_the_user_set_against_a_rule_is_a_warning():
@@ -423,7 +549,9 @@ KEYS_AFTER_V1 = {"goi_candidate_regions_per_query", "report_copies_in_slot",
                  "window_tblastn_word_size", "window_tblastn_comp_stats",
                  "window_mmseqs_min_length", "miniprot_short_orf_max_len",
                  "goi_max_models_per_locus", "goi_margin_genes", "sw_max_alignments_per_piece",
-                 "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen"}
+                 "aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen",
+                 "locus_ownership_max_genes_per_locus", "max_goi_per_genome",
+                 "paralog_panel_max_family", "goi_hull_min_coverage"}
 
 
 def test_the_old_presets_are_module_sets_with_the_same_values():
@@ -617,6 +745,14 @@ def test_report_reads_the_run_settings(tmp_path):
     p.write_text(json.dumps(eff))
     rs = generate_report.load_run_settings(str(p))
     assert rs["modules_would_fire"] == [{"id": "B3"}] and rs["features"] == {"sp": True}
+    assert (rs["profile"], rs["derivation"], rs["constraints"]) == (None, None, None)
+    # stage 4: run_settings shows how each value came about
+    eff.update(profile={"c": 3}, derivation={"max_goi_per_genome": {"line": "max_goi_per_genome 10"}},
+               constraints=[{"id": "C5", "applies": True, "ok": True}])
+    p.write_text(json.dumps(eff))
+    rs = generate_report.load_run_settings(str(p))
+    assert rs["profile"] == {"c": 3} and rs["constraints"][0]["id"] == "C5"
+    assert rs["derivation"]["max_goi_per_genome"]["line"] == "max_goi_per_genome 10"
     (tmp_path / "NO_EFFECTIVE_PARAMS").write_text("sentinel: none\n")
     assert generate_report.load_run_settings(str(tmp_path / "NO_EFFECTIVE_PARAMS")) is None
 

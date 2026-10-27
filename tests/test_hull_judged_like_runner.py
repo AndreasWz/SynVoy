@@ -81,7 +81,9 @@ def test_the_hull_process_hands_over_the_home_database_folder():
     assert "--home_db_dir ${home_db}" in module
     assert "--goi_info ${goi_info}" in module                    # RF-2b: the own home gene
     sub = open(os.path.join(root, "subworkflows", "adjudicate_and_report.nf")).read()
-    assert "RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db, goi_info)" in sub
+    assert ("RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db, goi_info, "
+            "effective_params)") in sub                   # profile stage 4: the run's settings
+    assert "--effective_params ${effective_params}" in module
     main_nf = open(os.path.join(root, "main.nf")).read()
     assert "RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first()\n        )" in main_nf
     assert "home_db.map { d -> d.resolve('home_proteome.faa') }" in sub

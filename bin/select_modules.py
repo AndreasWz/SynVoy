@@ -84,6 +84,24 @@ FORBIDDEN_FOR_MODULES = frozenset({
     "modules", "preset_override", "auto_apply_preset",
 }) | SWITCHES
 
+# Settings keys without a rule (profile handoff, stage 4): fixed values that travel in the
+# settings map like the rule keys, so the report's run_settings and the steps that read the
+# map see one file. No rule may write one (validate_registry); main.nf's presetDefaultKeys()
+# is exactly the rule keys and these. Why each has no rule:
+PASS_THROUGH_KEYS: Dict[str, str] = {
+    "sw_min_score": "lets Smith-Waterman candidates in; the E <= 1 filter behind it is stricter, "
+                    "and lowering it changed nothing (2026-10-09)",
+    "sw_min_identity": "lets Smith-Waterman candidates in, as sw_min_score; the judge decides",
+    "min_hit_identity": "lets window hits in; the E-value filters behind it are stricter (2026-10-09)",
+    "min_hit_length": "lets window hits in; 10 aa is also the lowest per-hit floor of every rule (C7)",
+    "expand_goi_similar": "forbidden to the rules (C10): with it on, LY6 scaffold recall fell from "
+                          "8/9 to 0/9",
+    "goi_family_tokens": "names the user gives for the annotation check (GoiFamilyConsistent); an "
+                         "input, it changes no label",
+    "adaptive_unique_gene_floor": "figure regions, fixed at 3; the figure-scoring work replaces the "
+                                  "region selection, and the A2 floors with it",
+}
+
 
 # ----------------------------------------------------------------------------- features
 def _real_exons(goi_info: Optional[dict]) -> Optional[List[dict]]:
@@ -380,7 +398,9 @@ def _sw_alignments(p: Dict[str, Any], _on: FrozenSet[str]) -> int:
 # Stage 1 of the profile handoff: the 15 keys the modules set on 2026-10-15, each as a
 # rule with the value it had. Stage 3 adds the search's rules (the model and region caps,
 # the GOI margin, Smith-Waterman alignments per piece, the short-piece length floors) and
-# raises the regions cap from 10 to 40. Registry order = documentation order.
+# raises the regions cap from 10 to 40. Stage 4 adds the rules of the steps after the
+# search (the ownership panel, the hull rescue, the figures), whose scripts read them
+# through bin/synvoy_settings.py. Registry order = documentation order.
 RULES: List[Rule] = [
     Rule("goi_relative_evalue", ("A1",), _const(1e-3), "1e-3",
          doc="family members next to the GOI: weaker relatives are kept out of the anchors too "
@@ -403,6 +423,14 @@ RULES: List[Rule] = [
              "switch from --tandem_copy_parent home in arm A, so it is a rule, not a default)"),
     Rule("report_copies_in_slot", ("A1",), _const(True), "on", evidence="report only",
          doc="CopiesInSlot / SlotRank on the GOI models, copies_in_slot in the report"),
+    Rule("locus_ownership_max_genes_per_locus", ("A1",),
+         lambda p, _on: max(5, (p["c"] or 1) + 1), "max(5, c + 1)", inputs=("c",), cap=60,
+         doc="home genes per home locus in the ownership panel: each home copy of an array, plus "
+             "one, so no copy is missing when a call is aligned to the panel (C4)"),
+    Rule("max_goi_per_genome", ("A1",),
+         lambda p, _on: max(10, (p["c"] or 1) + 1), "max(10, c + 1)", inputs=("c",), cap=60,
+         doc="GOI models of a genome that steer which neighbourhood the figures draw: each home "
+             "copy, plus one, so the figure can draw every copy the search may model (C5)"),
     Rule("adaptive_score_floor_frac", ("A2",), _const(0.45), "0.45",
          doc="figure regions, relatives elsewhere in the genome: a higher relative score floor "
              "(the old preset_paralog_discrimination)"),
@@ -410,6 +438,10 @@ RULES: List[Rule] = [
          doc="figure regions: a higher absolute score floor (the old preset_paralog_discrimination)"),
     Rule("adaptive_max_regions", ("A2",), _const(4), "4",
          doc="figure regions: at most 4 per genome (the old preset_paralog_discrimination)"),
+    Rule("paralog_panel_max_family", ("A2",),
+         lambda p, _on: max(15, (p["Fam"] or 1) + 1), "max(15, Fam + 1)", inputs=("Fam",), cap=50,
+         doc="home relatives added to the ownership panel by homology: one for each home locus of "
+             "the family, plus one, so a call on a relative is aligned to that relative"),
     Rule("classify_complete_min_qcov", ("B1",), _const(0.5), "0.5",
          doc="ModelStatus only: one missed exon is a large share of a short protein "
              "(the old preset_short_peptide)"),
@@ -437,6 +469,9 @@ RULES: List[Rule] = [
          "min(50, max(10, round(0.6 x Lpiece)))", inputs=("Lpiece",), evidence="found in the code",
          doc="the dispersed rescue judged each hit against 50 aa, so no piece of a gene whose "
              "exons are shorter could be rescued; its E <= 1e-10 and 40 % identity stay (C7)"),
+    Rule("goi_hull_min_coverage", ("B1",), _const(0.3), "0.3",
+         doc="the hull rescue's cost filter at B1's fragment bound: a hull model that B1 would "
+             "not call a fragment reaches the judge (at 0.5, models of 0.3-0.5 never did)"),
     Rule("goi_relative_statistic", ("B2",), _const("blastp_cbs"), "blastp_cbs",
          doc="the flank walk's relative test with composition statistics: a low-complexity "
              "look-alike is no relative (a constructed PEPEP protein: SW E 4e-8, blastp_cbs no hit)"),
@@ -449,8 +484,9 @@ RULES: List[Rule] = [
 
 
 def validate_registry(rules: Sequence[Rule], modules: Sequence[Module]) -> Dict[str, Rule]:
-    """{key: rule}; ValueError for two rules of one key, a forbidden key, an unknown or
-    missing owner, an unknown profile input or evidence, or a rule without text or doc."""
+    """{key: rule}; ValueError for two rules of one key, a forbidden or pass-through key, an
+    unknown or missing owner, an unknown profile input or evidence, or a rule without text or
+    doc."""
     ids = {m.id for m in modules}
     by_key: Dict[str, Rule] = {}
     for r in rules:
@@ -458,6 +494,8 @@ def validate_registry(rules: Sequence[Rule], modules: Sequence[Module]) -> Dict[
             raise ValueError(f"two rules for {r.key}")
         if r.key in FORBIDDEN_FOR_MODULES:
             raise ValueError(f"a rule writes the forbidden key {r.key}")
+        if r.key in PASS_THROUGH_KEYS:
+            raise ValueError(f"a rule writes the pass-through key {r.key}")
         if not r.owners or set(r.owners) - ids:
             raise ValueError(f"rule {r.key}: owners {r.owners} are not module ids")
         if set(r.inputs) - set(PROFILE_SYMBOLS):
@@ -531,9 +569,9 @@ def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 
 # ----------------------------------------------------------------------------- constraints
 # How the settings must relate to each other, checked after the rules and the values the
-# user set (profile handoff, section 4). The later stages add theirs with their rules
-# (C2 is a code fix of the dispersed rescue, C4/C5 the panels and the figure copies, C6 one
-# coverage basis, C9 counts tied to n). C8 (composition statistics kept for a low-complexity
+# user set (profile handoff, section 4). C2 is a code fix of the dispersed rescue (stage 3b);
+# C6, one coverage basis, is a fix-phase item; C9, the counts tied to n, are resolved in
+# lib/FlankingCounts.groovy (stage 6). C8 (composition statistics kept for a low-complexity
 # short query) was tried in stage 3 and taken out again; see window_tblastn_comp_stats. C10,
 # no rule writes a forbidden key, is enforced when this module loads (validate_registry).
 def _num(v: Any) -> float:
@@ -550,22 +588,25 @@ def _c1_goi_margin_within_window(settings, _source, p, _on):
             f"{key} {settings[key]}, window margin {w} (no DNA is searched beyond it)")
 
 
-def _c3_caps_reach_the_copies(settings, _source, p, on):
-    keys = [k for k in ("goi_candidate_regions_per_query", "goi_max_models_per_locus")
-            if k in settings]
-    if "A1" not in on or not keys:
-        return None
-    ok, parts = True, []
-    for key in keys:
-        cap = RULES_BY_KEY[key].cap
-        need = (p.get("c") or 1) + 1
-        part = f"{key} {settings[key]}, home copies + 1 = {need}"
-        if cap is not None and need > cap:
-            part += f": the cap of {cap} binds"
-            need = cap
-        ok = ok and _num(settings[key]) >= need
-        parts.append(part)
-    return ok, tuple(keys), "; ".join(parts)
+def _reach_the_copies(*candidates: str) -> Callable:
+    """A check that, with A1, each of these keys reaches the home copies + 1, or its rule's
+    cap when that is lower (the cap that binds is named): C3, C4, C5."""
+    def check(settings, _source, p, on):
+        keys = [k for k in candidates if k in settings]
+        if "A1" not in on or not keys:
+            return None
+        ok, parts = True, []
+        for key in keys:
+            cap = RULES_BY_KEY[key].cap
+            need = (p.get("c") or 1) + 1
+            part = f"{key} {settings[key]}, home copies + 1 = {need}"
+            if cap is not None and need > cap:
+                part += f": the cap of {cap} binds"
+                need = cap
+            ok = ok and _num(settings[key]) >= need
+            parts.append(part)
+        return ok, tuple(keys), "; ".join(parts)
+    return check
 
 
 C7_KEYS = ("aug_relaxed_length_min", "fallback_short_min_aln_aa", "dispersed_goi_min_alnlen")
@@ -606,10 +647,18 @@ CONSTRAINTS: List[Tuple[str, str, Callable]] = [
     ("C1", "the GOI margin lies within the window margin, where the DNA searched ends",
      _c1_goi_margin_within_window),
     ("C3", "with A1, the GOI loci kept per query and the models per GOI locus reach the home "
-           "copies + 1, within their caps (a cap that binds is named)", _c3_caps_reach_the_copies),
+           "copies + 1, within their caps (a cap that binds is named)",
+     _reach_the_copies("goi_candidate_regions_per_query", "goi_max_models_per_locus")),
+    ("C4", "with A1, the ownership panel's genes per home locus reach the home copies + 1, "
+           "within the cap (a cap that binds is named)",
+     _reach_the_copies("locus_ownership_max_genes_per_locus")),
+    ("C5", "with A1, the GOI models that steer a figure reach the home copies + 1, within the "
+           "cap (a cap that binds is named)", _reach_the_copies("max_goi_per_genome")),
     ("C7", "a per-hit length floor a rule sets is at least 10 and at most max(10, 0.6 x Lpiece)",
      _c7_one_length_rule),
-    ("C11", "a value set by a rule stays within the rule's cap", _c11_caps),
+    ("C11", "a value set by a rule stays within the rule's cap (40 GOI loci per query, 60 models "
+            "per GOI locus, 60 panel genes per home locus, 50 panel relatives, 60 GOI models "
+            "steering a figure)", _c11_caps),
     ("C12", "ModelStatus: the fragment bound lies below the complete bound", _c12_model_status_order),
 ]
 

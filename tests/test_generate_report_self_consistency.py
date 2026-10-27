@@ -13,8 +13,10 @@ The reciprocal-best paralog check (TODO §1j first bullet) is deferred; that's
 documented in build_self_consistency.deferred_checks.
 """
 
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -113,6 +115,25 @@ class TestStrongSyntenyNoGoiFlag(unittest.TestCase):
         flags = [f for f in report["self_consistency"]["flags"]
                  if f["type"] == "strong_synteny_no_goi"]
         self.assertEqual(flags, [])
+
+    def test_the_threshold_is_the_pipeline_count(self):
+        # Profile stage 4: GENERATE_REPORT passes strong_synteny_no_goi_min_flanking (2 x
+        # n_flanking_genes by default, lib/FlankingCounts.groovy) as --strong_flanking_min:
+        # 25 HIGH flanking models are flagged at n = 10 (20) and not at n = 15 (30).
+        flanks = [_flank_mrna("chrA", 1000 + i*5000, 1500 + i*5000, f"flA{i}")
+                  for i in range(25)]
+        self._write("regions/locus_1__GCA_666.1.fna.gff", _gff(flanks))
+        for count, flagged in ((20, 1), (30, 0)):
+            out = os.path.join(self.dir, f"report_{count}.json")
+            proc = subprocess.run(
+                [sys.executable, os.path.join(BIN_DIR, "generate_report.py"), "--results_dir", self.dir,
+                 "--strong_flanking_min", str(count), "--output", out, "--allow-empty"],
+                capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(out) as fh:
+                report = json.load(fh)
+            self.assertEqual(report["self_consistency"]["thresholds"]["strong_flanking_min"], count)
+            self.assertEqual(report["summary"]["strong_synteny_no_goi_flags"], flagged)
 
     def test_dedup_of_high_flank_by_gene_name(self):
         # Same gene appearing twice (e.g. annotation + hit-span) counts once.

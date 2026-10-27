@@ -104,6 +104,7 @@ process GENERATE_REPORT {
         --locus_ownership_tiebreak_gap ${params.locus_ownership_tiebreak_gap} \\
         --identity_decoupled_min_identity ${params.identity_decoupled_min_identity} \\
         --identity_decoupled_max_qcov ${params.identity_decoupled_max_qcov} \\
+        --strong_flanking_min ${FlankingCounts.value(params, 'strong_synteny_no_goi_min_flanking')} \\
         ${params.disable_coverage_demotion.toString().toBoolean() ? '--disable_coverage_demotion' : ''} \\
         --phylo_placement_dir staged_results/phylo_placement \\
         ${params.phylo_placement_promote.toString().toBoolean() ? '--phylo_placement_promote' : ''} \\

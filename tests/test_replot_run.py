@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -183,6 +184,30 @@ def test_a_failed_locus_fails_the_run_and_the_others_are_drawn(tmp_path):
     assert _goi_states(_figures(out)[0]) == ["placed"]
     assert (f"  [plot_inputs_synteny_block_locus_2] no print grid was drawn, see {out}/plot_inputs_synteny_block_locus_2.log"
             in proc.stdout)
+
+
+def test_a_redraw_uses_the_runs_settings_file(tmp_path):
+    """Profile stage 4: PLOT_SYNTENY copies the run's effective_params.json into plot_inputs_*,
+    and replot.sh passes it on, so a re-draw uses the run's max_goi_per_genome. A folder without
+    it is drawn with the default, at the default the file changes no figure, and an option
+    given on the command line wins over it."""
+    run = _current_run(tmp_path / "run")
+    d = run / LOCUS
+
+    def draw(name, *options):
+        proc = _redraw(REPLOT, d, tmp_path / name, *options)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return proc.stdout, {p.name: p.read_bytes() for p in sorted((tmp_path / name).iterdir())}
+
+    plain_log, plain = draw("plain")
+    assert "GOI models steering the view" not in plain_log
+    (d / "effective_params.json").write_text(json.dumps({"settings": {"max_goi_per_genome": 10}}))
+    same_log, same = draw("same")
+    assert "GOI models steering the view per genome: 10 (settings)" in same_log
+    assert same == plain
+    (d / "effective_params.json").write_text(json.dumps({"settings": {"max_goi_per_genome": "1"}}))
+    assert "GOI models steering the view per genome: 1 (settings)" in draw("one")[0]
+    assert "GOI models steering the view per genome: 3 (option)" in draw("opt", "--max_goi_per_genome", "3")[0]
 
 
 # --- 2026-10-26: what a student runs into ----------------------------------------------------

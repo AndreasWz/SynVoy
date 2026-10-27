@@ -1758,7 +1758,8 @@ def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35):
 def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
                  locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
                  identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
-                 phylo_placement_dir=None, phylo_placement_promote=False):
+                 phylo_placement_dir=None, phylo_placement_promote=False,
+                 strong_flanking_min=20):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -1930,6 +1931,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     goi_dedup["coverage_demotion"] = coverage_demotion_summary
     self_consistency = build_self_consistency(
         goi_annotations, goi_dedup, flanking_per_locus,
+        strong_flanking_min=strong_flanking_min,
         paralog_flags=paralog_flags,
         paralog_per_call=paralog_per_call,
         paralog_modal_per_locus=paralog_modal,
@@ -2118,7 +2120,7 @@ def format_empty_staging_message(diagnostics):
 
 RUN_SETTINGS_KEYS = ("modules_mode", "modules_applied", "modules_would_fire", "preset_applied",
                      "apply_reason", "legacy_preset", "user_set_kept", "settings", "source",
-                     "features", "home_copies")
+                     "features", "home_copies", "profile", "derivation", "constraints")
 
 
 def copies_in_slot_by_genome(records, home_copies):
@@ -2179,8 +2181,9 @@ def load_home_annotation(folder):
 def load_run_settings(path):
     """What decided the run's settings (effective_params.json of RESOLVE_EFFECTIVE_PARAMS):
     the preset or the preset modules that were applied and why, the triggers that fire, the
-    resulting settings and the features the triggers read. None without the file (or for a
-    sentinel)."""
+    resulting settings and the features the triggers read, the design quantities the module
+    rules read (profile), how each value that is not the default came about (derivation) and
+    the constraint checks. None without the file (or for a sentinel)."""
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
     try:
@@ -2251,6 +2254,12 @@ def main():
         help="Query coverage below which a high-identity GOI call is demoted.",
     )
     parser.add_argument(
+        "--strong_flanking_min", type=int, default=20,
+        help="HIGH flanking models of a (genome, locus, scaffold) with no HIGH GOI call at "
+             "which self_consistency flags strong_synteny_no_goi (the pipeline passes "
+             "strong_synteny_no_goi_min_flanking: 2 x n_flanking_genes by default).",
+    )
+    parser.add_argument(
         "--effective_params", default=None,
         help="effective_params.json of RESOLVE_EFFECTIVE_PARAMS, written into the report as "
              "run_settings: which preset or preset modules ran, why, and on which features.",
@@ -2279,6 +2288,7 @@ def main():
         phylo_placement_promote=args.phylo_placement_promote,
         identity_decoupled_min_identity=args.identity_decoupled_min_identity,
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
+        strong_flanking_min=args.strong_flanking_min,
     )
     report["run_settings"] = load_run_settings(args.effective_params)
     home_annotation = load_home_annotation(args.home_db_dir)

@@ -14,6 +14,10 @@ process PLOT_SYNTENY {
     path genome_qc   // genome_qc_summary.json: a target that failed the check is marked in the figures
     path report      // synvoy_report.json (or NO_REPORT): what the report drops, the GFFs and figures leave out
     path block_tables   // the search's <locus>_<genome>.blocks.tsv of this locus ([] when none)
+    // effective_params.json of the run: the figures read max_goi_per_genome from its settings
+    // (bin/synvoy_settings.py). Copied into plot_inputs_*, where a re-draw (scripts/replot.sh)
+    // finds it; a --max_goi_per_genome in plot_extra_args still wins over it.
+    path effective_params
 
     output:
     path "*_synteny_plot.html", emit: plot
@@ -60,6 +64,7 @@ process PLOT_SYNTENY {
     // beside the plot inputs, where a re-draw (scripts/replot.sh) finds them; off, none is.
     def tables_str = (params.plot_block_selection.toString().toBoolean() && block_tables) ? block_tables.join(' ') : ''
     def tables_arg = tables_str ? "--block_tables \$block_tables_in" : ""
+    def settings_arg = effective_params.name != 'NO_EFFECTIVE_PARAMS' ? "--effective_params ${effective_params}" : ""
     def plot_extra_args = params.plot_extra_args ?: ''
     
     """
@@ -116,6 +121,9 @@ process PLOT_SYNTENY {
     if [ "$genome_qc" != "NO_GENOME_QC" ]; then
         cp $genome_qc "\$inputs_dir/genome_qc_summary.json" || true
     fi
+    if [ "$effective_params" != "NO_EFFECTIVE_PARAMS" ]; then
+        cp $effective_params "\$inputs_dir/effective_params.json"
+    fi
 
     ${projectDir}/bin/plot_synteny.py \\
         --query_bed $query_bed \\
@@ -135,6 +143,7 @@ process PLOT_SYNTENY {
         --flank_fallback_bp ${params.flank_fallback_bp} \\
         --scale_bar_len ${params.scale_bar_len} \\
         --plot_width ${params.plot_width} \\
+        ${settings_arg} \\
         ${plot_extra_args} \\
         --output ${home_bed.baseName}_synteny_plot.html
 

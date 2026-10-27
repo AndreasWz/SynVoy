@@ -285,7 +285,7 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     """If nextflow.config changes shape and a key stops being parsed, user-set
     detection silently stops working for it. Fail here instead."""
     keys = _preset_default_keys_from_main_nf()
-    assert len(keys) == 28
+    assert len(keys) == 32
     shipped = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), keys)
     assert sorted(shipped) == sorted(keys), sorted(set(keys) - set(shipped))
     # Spot-check literals and that trailing comments/quotes are stripped.
@@ -299,6 +299,11 @@ def test_shipped_defaults_are_found_for_every_preset_key():
     assert rep._norm(shipped["window_tblastn_comp_stats"]) == ("num", 2)
     assert rep._norm(shipped["miniprot_short_orf_max_len"]) == ("num", 60)
     assert shipped["goi_relative_statistic"] == "sw"
+    # stage 4: the keys of the steps after the search
+    assert rep._norm(shipped["locus_ownership_max_genes_per_locus"]) == ("num", 5)
+    assert rep._norm(shipped["paralog_panel_max_family"]) == ("num", 15)
+    assert rep._norm(shipped["goi_hull_min_coverage"]) == ("num", 0.5)
+    assert rep._norm(shipped["max_goi_per_genome"]) == ("num", 10)
 
 
 def test_every_preset_key_is_fed_by_main_nf():

@@ -376,6 +376,7 @@ The confidence label (HIGH / MEDIUM / AMBIGUOUS / LOW, with `Basis`) of a GOI ca
 | `--identity_decoupled_min_identity` | `50.0` | With the next row: a call at or above this identity … |
 | `--identity_decoupled_max_qcov` | `0.35` | … whose *recorded* query coverage is below this is relabelled `identity_coverage_decoupled` and dropped from the headline counts (a 10 aa window at 100 % is not an ortholog). |
 | `--disable_coverage_demotion` | `false` | `true` keeps that rule advisory only (a flag in `self_consistency`, no demotion). |
+| `--strong_synteny_no_goi_min_flanking` | `auto` | The report flags a genome, home locus and scaffold with at least this many HIGH flanking models and no HIGH GOI call (`strong_synteny_no_goi` in `self_consistency`; advisory). `auto` = 2 × `--n_flanking_genes` (20 at the default). |
 | `--classify_fragment_max_qcov` | `0.4` | Query coverage below this marks a gene model as `fragment` in the ModelStatus field |
 | `--classify_complete_min_qcov` | `0.7` | Query coverage above this (with multi-exon evidence) marks a model as `complete` |
 
@@ -413,6 +414,7 @@ The region score is **coverage-dominated**: `synteny_score = Q × C` with `Q = 0
 | `--scale_bar_len` | `auto` | Scale bar of the ribbon plot: `auto` = a round length about 120 px wide at the scale of the drawing, or a length in bp |
 | `--hide_goi_absent_tracks` | `false` | Leave genomes without any GOI call out of the figures. By default every searched genome is drawn |
 | `--plot_block_selection` | `false` | A target row shows the search's blocks chosen by the label's scoring (the blocks of HIGH, MEDIUM and AMBIGUOUS GOI calls, then the significant blocks, up to 6) instead of the candidate regions; see [PARAMETERS.md](PARAMETERS.md#plot_block_selection) |
+| `--max_goi_per_genome` | `10` | How many GOI models of a genome steer the choice of the neighbourhood its row shows (every GOI model inside the chosen view is drawn regardless). Settings key: the `local_family` module (A1) sets max(10, home copies + 1), at most 60. Until 2026-10-26 a `--plot_extra_args` option, which still works and wins. |
 | `--plot_extra_args` | _(empty)_ | Extra options passed verbatim to `bin/plot_synteny.py`, for the figure controls below. Quote the whole value: `--plot_extra_args '--print_grid_numbers --no_fragment_variant'`. |
 
 Figure controls available through `--plot_extra_args`, or after the run with `scripts/replot.sh <outdir>/plot_inputs_synteny_block_locus_1 <new_folder> [options]`, which re-draws the figures of a finished run without re-running the search:
@@ -424,14 +426,14 @@ Figure controls available through `--plot_extra_args`, or after the run with `sc
 | `--print_height_mm` | `170` | Largest height of the print grid; rows are packed tighter before it is exceeded. |
 | `--no_print_grid` | off | Do not write the print grid. |
 | `--grid_variants` | _(none)_ | Also write try-out versions of the print grid, comma-separated or `all`: `compact` (the flanking genes of each side as one grey stack with how many were placed; every GOI copy's exon model in the GOI column), `compact_panel` (the same with the exon panel on the right), `clades_muted` (the print grid with the flanking genes in muted colours and the GOI copies in GOI-tree clade colours). See [OUTPUT.md](OUTPUT.md). |
-| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid; a longer tandem array shows `+N more`. |
+| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid; a longer tandem array shows `+N more` (every copy keeps its arrow). A drawing setting, set by no preset module. |
 | `--no_fragment_variant` | off | Do not write the `*_with_fragments` figures. By default `ModelStatus=fragment` GOI models are hidden in the main figures and drawn in these siblings. |
 | `--no_orient_to_home` | off | Do not flip scaffolds that read in the opposite direction to the home genome. |
 | `--no_anchor_grid` | off | Skip the anchor grid. |
 | `--gene_names_tsv` | _(none)_ | Names table that sets the label of the home genes it lists (`gene_id`, `label`, optional `full_name`, `source`). Start from the `<locus>_gene_names.tsv` a run writes. In `--plot_extra_args` give an absolute path. See [OUTPUT.md § Gene names in the figures](OUTPUT.md#gene-names-in-the-figures). |
 | `--no_gene_legend` | off | Do not draw the "Gene names" table under the figures. |
 | `--no_network` | off | Skip the NCBI lookups of the plot step: species common names, and the current gene symbols of home genes the GFF does not name. |
-| `--max_goi_per_genome` | `10` | How many GOI models steer the choice of neighbourhood to draw (all models inside the chosen view are drawn regardless). |
+| `--max_goi_per_genome` | the run's | Wins over the parameter `--max_goi_per_genome` above; a re-draw uses the run's value from `plot_inputs_*/effective_params.json`, else 10. |
 | `--goi_zoom`, `--goi_min_px`, `--caption_file` | — | Tandem-array figure controls. |
 
 `--grid_goi_style` and `--grid_goi_max_models` were removed on 2026-10-07 and are now rejected; see [PARAMETERS.md § `plot_extra_args`](PARAMETERS.md#plot_extra_args).
@@ -499,7 +501,7 @@ already recovered.
 | `--goi_hull_window_pad` | `auto` | bp padding around the hull window. `auto` = the GOI margin of the search (100000 before). |
 | `--goi_hull_max_window` | `auto` | Skip hulls longer than this (bp). `auto` = twice the home neighbourhood × expansion (20000000 before). |
 | `--goi_hull_min_identity` | `40.0` | Min miniprot % identity for a rescue model to be judged (a cost filter). |
-| `--goi_hull_min_coverage` | `0.5` | Min CDS aa / query length for a rescue model to be judged (a cost filter; the label reads the query span of the alignment). |
+| `--goi_hull_min_coverage` | `0.5` | Min CDS aa / query length for a rescue model to be judged (a cost filter; the label reads the query span of the alignment). Settings key: the `short_query` module (B1) sets 0.3, its fragment bound. |
 | `--enable_dispersed_goi_rescue` | `true` | Seed a block from a strong GOI hit that landed *outside* every flanking-seeded block, provided the chromosome carries enough flanking anchors to define an envelope around it. |
 | `--dispersed_goi_min_identity` | `40.0` | Min % identity for a dispersed GOI hit to qualify. |
 | `--dispersed_goi_max_evalue` | `1e-10` | Max e-value for a dispersed GOI hit. |
@@ -517,9 +519,9 @@ paralog — the decorin-vs-biglycan class of error.
 | `--disable_locus_ownership` | `false` | Turn off reciprocal-best-hit assignment of each recovered gene to a home locus. With it on, a call whose best home match is a *family paralog* rather than the GOI is relabelled `paralog_not_goi` and excluded from the headline HIGH/MEDIUM counts. |
 | `--require_paralog_panel` | `true` | Fail loud if the home-paralog panel cannot be built (e.g. parasail missing) instead of silently skipping ownership. Set `false` to tolerate a missing panel. |
 | `--paralog_panel_min_identity` | `28.0` | Min % identity (query vs a home protein, with a coverage guard) for that protein to enter the paralog panel. The panel is built from the whole home proteome, not just the split-loci spans — otherwise the real paralogs are missing and only spurious domain cross-hits are present. |
-| `--paralog_panel_max_family` | `15` | Cap on homology-derived family entries (closest paralogs by identity). |
+| `--paralog_panel_max_family` | `15` | Cap on homology-derived family entries (closest paralogs by identity). Settings key: the `dispersed_family` module (A2) sets max(15, home loci of the family + 1), at most 50. |
 | `--locus_ownership_pad` | `2000` | bp padding when intersecting genes with a locus span. |
-| `--locus_ownership_max_genes_per_locus` | `5` | Cap panel entries per locus (keeps tandem clusters from dominating). |
+| `--locus_ownership_max_genes_per_locus` | `5` | Cap panel entries per locus (the annotated genes overlapping the locus most). Settings key: the `local_family` module (A1) sets max(5, home copies + 1), at most 60, so every copy of a home array is in the panel. |
 | `--locus_ownership_tiebreak_gap` | `10.0` | SW-score margin below which the RBH result counts as ambiguous and the synteny tiebreak decides. |
 | `--disable_paralog_check` | `false` | Turn off the reciprocal-best paralog check. Automatically a no-op for single-sequence queries. |
 | `--paralog_confusion_min_gap` | `5` | Min bitscore gap before a call whose best-matching paralog differs from the per-cell modal paralog is flagged `paralog_confusion` in `self_consistency`. |
@@ -902,7 +904,8 @@ Check these in order:
    `--enable_name_locus`) stops the run at start and names its replacement. The list is in
    [PARAMETERS.md § 20](PARAMETERS.md#20-removed-parameters).
 3. **Is it a script-level option?** Figure controls such as `--print_grid_numbers` belong to
-   `bin/plot_synteny.py`; pass them through `--plot_extra_args '…'`.
+   `bin/plot_synteny.py`; pass them through `--plot_extra_args '…'`. (`--max_goi_per_genome`
+   is a parameter of its own since 2026-10-26; given in `--plot_extra_args` it still wins.)
 4. **Did you pass `false` to switch something off?** That works since 2026-10-05. On an
    older checkout `--require_paralog_panel false`, `--disable_goi_hull_rescue false` and
    a few others were read as *true*, because Nextflow hands every command-line value over

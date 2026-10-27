@@ -37,6 +37,9 @@ process RESCUE_GOI_HULL {
     // goi_info.json of ANNOTATE_GOI: the home gene the home step took as the query's is its
     // own gene in the specificity terms, as in the main search (review fix RF-2b).
     path(goi_info)
+    // effective_params.json of the run: goi_hull_min_coverage is a settings key, which the
+    // script reads from it (bin/synvoy_settings.py).
+    path(effective_params)
 
     output:
     tuple val(locus_id), path("${genome_name}.hull_rescue.gff"), emit: gff
@@ -76,7 +79,7 @@ process RESCUE_GOI_HULL {
         --window_pad ${params.goi_hull_window_pad} \\
         --max_window ${params.goi_hull_max_window} \\
         --min_identity ${params.goi_hull_min_identity} \\
-        --min_coverage ${params.goi_hull_min_coverage} \\
+        --effective_params ${effective_params} \\
         --n_flanking_genes ${params.n_flanking_genes} \\
         --home_db_dir ${home_db} \\
         --goi_info ${goi_info} ${GeneticCodes.targetArgs(params)}

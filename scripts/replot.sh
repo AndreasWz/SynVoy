@@ -30,13 +30,17 @@
 #  request). To change a label, edit a copy of the table and pass it with
 #  --gene_names_tsv <file>.
 #
+#  Settings: when the folder holds the run's effective_params.json (newer runs),
+#  it is passed on, so the figures use the run's max_goi_per_genome; a folder
+#  without it is drawn with the default of 10. A --max_goi_per_genome given wins.
+#
 #  Run it with the SynVoy environment active (conda activate synvoy_env).
 #  All options: python3 bin/plot_synteny.py --help
 # =============================================================================
 set -euo pipefail
 
 if [ $# -lt 2 ]; then
-    sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,39p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 
@@ -80,6 +84,7 @@ args=(--home_bed "$home_bed" --target_gffs "${target_gffs[@]}")
 [ ${#trees[@]} -ge 1 ]      && args+=(--tree "${trees[0]}")
 [ -f "$IN/species_mapping.tsv" ] && args+=(--species_map "$IN/species_mapping.tsv")
 [ -f "$IN/genome_qc_summary.json" ] && args+=(--genome_qc "$IN/genome_qc_summary.json")
+[ -f "$IN/effective_params.json" ] && args+=(--effective_params "$IN/effective_params.json")
 if [ -f "$IN/gene_names.tsv" ] && ! grep -qE '^# NCBI Gene lookup: (FAILED|skipped)' "$IN/gene_names.tsv"; then
     args+=(--gene_names_tsv "$IN/gene_names.tsv")
 else

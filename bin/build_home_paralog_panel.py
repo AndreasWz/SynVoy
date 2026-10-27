@@ -46,6 +46,7 @@ from sequence_utils import (  # noqa: E402
     sw_align,
     setup_logging,
 )
+import synvoy_settings  # noqa: E402
 
 logger = setup_logging(name="build_home_paralog_panel")
 
@@ -190,16 +191,30 @@ def main() -> None:
                     help="bp padding added to each locus span when intersecting genes")
     ap.add_argument("--fallback_window", type=int, default=20000,
                     help="bp window for the nearest-gene fallback when nothing overlaps")
-    ap.add_argument("--max_genes_per_locus", type=int, default=5,
-                    help="Cap panel entries per locus (tandem clusters)")
+    ap.add_argument("--max_genes_per_locus", type=int, default=None,
+                    help="Cap panel entries per locus (tandem clusters). Default: the run's "
+                         "locus_ownership_max_genes_per_locus (--effective_params), else 5")
     ap.add_argument("--paralog_min_identity", type=float, default=28.0,
                     help="Min %%identity (query vs a home protein) to include a gene in the "
                          "homology-based paralog FAMILY panel (default 28). Captures the SLRP "
                          "family (BGN/ASPN/OMD ~38-55%%) that split_loci spans miss.")
-    ap.add_argument("--max_family_paralogs", type=int, default=15,
+    ap.add_argument("--max_family_paralogs", type=int, default=None,
                     help="Cap homology-based family entries added beyond the per-locus genes "
-                         "(default 15; ranked by identity → the closest paralogs).")
+                         "(ranked by identity → the closest paralogs). Default: the run's "
+                         "paralog_panel_max_family (--effective_params), else 15")
+    ap.add_argument("--effective_params", default=None,
+                    help="effective_params.json of the run (RESOLVE_EFFECTIVE_PARAMS): the two "
+                         "caps above come from its settings unless given here; a sentinel or "
+                         "a missing file = the defaults")
     args = ap.parse_args()
+    settings = synvoy_settings.load_settings(args.effective_params)
+    max_genes_per_locus, genes_from = synvoy_settings.pick(
+        args.max_genes_per_locus, settings, "locus_ownership_max_genes_per_locus", 5,
+        synvoy_settings.whole)
+    max_family_paralogs, family_from = synvoy_settings.pick(
+        args.max_family_paralogs, settings, "paralog_panel_max_family", 15, synvoy_settings.whole)
+    logger.info(f"Panel caps: {max_genes_per_locus} genes per locus ({genes_from}), "
+                f"{max_family_paralogs} family paralogs ({family_from}).")
 
     gene_index = load_gene_index(args.home_gff)
     proteome = {clean_id: seq for _h, clean_id, seq in parse_fasta(args.home_proteome)}
@@ -254,7 +269,7 @@ def main() -> None:
             logger.warning(f"[{lid}] empty/unreadable BED — skipped.")
             continue
         gids = genes_for_locus(chrom, s, e, gene_index,
-                               args.pad, args.fallback_window, args.max_genes_per_locus)
+                               args.pad, args.fallback_window, max_genes_per_locus)
         kept = 0
         for gid in gids:
             seq = proteome.get(gid)
@@ -277,7 +292,7 @@ def main() -> None:
         already = {gid for _pid, (gid, *_rest) in panel.items()}
         family = find_family_paralogs(
             query_seq, proteome, already,
-            args.paralog_min_identity, args.max_family_paralogs,
+            args.paralog_min_identity, max_family_paralogs,
         )
         for gid, seq, ident in family:
             gchrom = gid_chrom.get(gid, "")

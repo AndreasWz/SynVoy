@@ -28,6 +28,10 @@ process BUILD_HOME_PARALOG_PANEL {
     path home_proteome
     path locus_beds
     path query
+    // effective_params.json of the run: the panel's two caps (locus_ownership_max_genes_per_locus,
+    // paralog_panel_max_family) are settings keys, which the script reads from it
+    // (bin/synvoy_settings.py), so a preset module's rule reaches the panel.
+    path effective_params
 
     output:
     path "home_paralog_panel.faa", emit: faa
@@ -45,9 +49,8 @@ process BUILD_HOME_PARALOG_PANEL {
         --locus_beds ${locus_beds} \\
         ${query_arg} \\
         --pad ${params.locus_ownership_pad} \\
-        --max_genes_per_locus ${params.locus_ownership_max_genes_per_locus} \\
         --paralog_min_identity ${params.paralog_panel_min_identity} \\
-        --max_family_paralogs ${params.paralog_panel_max_family} \\
+        --effective_params ${effective_params} \\
         --output home_paralog_panel.faa
 
     # Guarantee both outputs exist even if the panel came out empty, so the

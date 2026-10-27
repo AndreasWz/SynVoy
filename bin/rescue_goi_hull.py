@@ -33,6 +33,7 @@ from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_geneti
 import synvoy_evalue  # noqa: E402
 import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
+import synvoy_settings  # noqa: E402
 import synvoy_specificity  # noqa: E402
 from rescue_strong_synteny import (  # noqa: E402
     _refine_rescue_termini,
@@ -374,9 +375,14 @@ def main() -> int:
     ap.add_argument("--min_identity", type=float, default=40.0,
                     help="Min miniprot %%identity for a model to be judged (a cost filter in "
                          "front of the judge, kept by decision of 2026-10-15)")
-    ap.add_argument("--min_coverage", type=float, default=0.5,
+    ap.add_argument("--min_coverage", type=float, default=None,
                     help="Min CDS aa / query length for a model to be judged (a cost filter; "
-                         "the judge reads the query span of the alignment)")
+                         "the judge reads the query span of the alignment). Default: the run's "
+                         "goi_hull_min_coverage (--effective_params), else 0.5")
+    ap.add_argument("--effective_params", default=None,
+                    help="effective_params.json of the run (RESOLVE_EFFECTIVE_PARAMS): "
+                         "--min_coverage comes from its settings unless given here; a sentinel "
+                         "or a missing file = the default")
     ap.add_argument("--home_proteome",
                     help="Home proteome FASTA (one protein per gene): the rescue model's "
                          "specificity, as in the main search (synvoy_specificity)")
@@ -408,6 +414,11 @@ def main() -> int:
 
     import re
     resolve_hull_distances(args)
+    min_coverage, coverage_from = synvoy_settings.pick(
+        args.min_coverage, synvoy_settings.load_settings(args.effective_params),
+        "goi_hull_min_coverage", 0.5, float)
+    print(f"[hull] cost filters: identity >= {args.min_identity:g} %, CDS >= {min_coverage:g} "
+          f"of the query ({coverage_from})", file=sys.stderr)
     flanking, high_goi = collect_features(args.region_gff)
     query_id, query_seq = _read_query(args.query)
     # Sanitise for GFF IDs (UniProt headers carry pipes, e.g. sp|P07585|PGS2_HUMAN).
@@ -479,7 +490,7 @@ def main() -> int:
             for mrna, cds_rows in _parse_miniprot_gff(gff_text):
                 ident = _identity_pct(mrna[8])
                 cov = _cds_coverage(cds_rows, qlen)
-                if ident < args.min_identity or cov < args.min_coverage:
+                if ident < args.min_identity or cov < min_coverage:
                     continue
                 # Same terminal refinement as the main path: a rescue model otherwise stops
                 # where the alignment stopped, a few codons inside the gene (CLAUDE.md §21).

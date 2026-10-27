@@ -237,7 +237,7 @@ The same number decides the GOI's own home neighbourhood in the specificity chec
 
 The flanking genes are also the unit of every distance of the search ([Distances in gene units](#distances-in-gene-units)): the pitch is their mean spacing, and the expansion of a target genome is measured on them. That measurement needs five of them in a row in the target, so with `n_flanking_genes` of 2 or less (at most four anchors) the ratio of the genome sizes is always used instead.
 
-Four counts follow it (constraint C9; `auto`, the default of each): the largest gap a block may bridge, `synteny_bridge_max_gap_genes` = 2 × `n_flanking_genes` pitches; the HIGH flanking genes of a strong-synteny region, `strong_synteny_min_flanking` = `n_flanking_genes` / 2, rounded up; those in the hull of the hull rescue, `goi_hull_min_flanking` = round(0.4 × `n_flanking_genes`); and the gene gap between home loci, `locus_gap_genes` = floor(`n_flanking_genes` / 2). At the default of 10 they are 20, 5, 4 and 5, the fixed defaults they had (until 2026-10-23; `locus_gap_genes` until 2026-10-15), so a different `n_flanking_genes` moves them together. A number sets a count directly. The flank walk's limit of 5 × `n_flanking_genes` visited genes per side follows it as well.
+Five counts follow it (constraint C9; `auto`, the default of each): the largest gap a block may bridge, `synteny_bridge_max_gap_genes` = 2 × `n_flanking_genes` pitches; the HIGH flanking genes of a strong-synteny region, `strong_synteny_min_flanking` = `n_flanking_genes` / 2, rounded up; those in the hull of the hull rescue, `goi_hull_min_flanking` = round(0.4 × `n_flanking_genes`); the HIGH flanking models at which the report flags `strong_synteny_no_goi`, `strong_synteny_no_goi_min_flanking` = 2 × `n_flanking_genes`; and the gene gap between home loci, `locus_gap_genes` = floor(`n_flanking_genes` / 2). At the default of 10 they are 20, 5, 4, 20 and 5, the fixed defaults they had (until 2026-10-23; the report's count until 2026-10-26; `locus_gap_genes` until 2026-10-15), so a different `n_flanking_genes` moves them together. A number sets a count directly. The flank walk's limit of 5 × `n_flanking_genes` visited genes per side follows it as well.
 ### `min_flanking_size`
 **Type:** Integer (bp) | **Default:** `500` | **Range:** 100–5000
 
@@ -857,6 +857,11 @@ What a target genome's row shows. With `false` the figures show the candidate re
 
 The tables are copied into `plot_inputs_<locus>/`, so `scripts/replot.sh` and `scripts/replot_run.sh` draw a re-draw of such a run by the same rule; a run without tables in that folder keeps the candidate regions, and only the console says so. The cap of 6 and the significance threshold are fixed in the figure code (presets change `adaptive_max_regions`, and no setting reaches a re-draw). A run made with `false` (or between 2026-10-19 and 2026-10-21) has its tables in `blocks/` only; to draw it by its blocks: `scripts/replot_run.sh <run> --block_tables <run>/blocks/*/*.blocks.tsv` (each locus takes its own tables).
 
+### `max_goi_per_genome`
+**Type:** Integer | **Default:** `10`
+
+How many GOI models of a genome steer the choice of the neighbourhood its row shows: the best ones, by label (HIGH first), then the strength of the match. Every GOI model inside the chosen view is drawn regardless, so the cap hides no copy there; it keeps hundreds of weak calls elsewhere in a genome from pulling the view away (lifting it outright changed the chosen neighbourhood in 19 of 33 genomes of one benchmark family). A settings key since 2026-10-26: the `local_family` preset module (A1) sets max(10, home copies + 1), at most 60 (constraint C5), so a tandem array larger than ten steers the view with every copy. Before, it was reachable only as `--plot_extra_args '--max_goi_per_genome N'`; that still works and wins over the parameter. The figures read the value from `effective_params.json`, which the plot step also copies into each `plot_inputs_*` folder, so a re-draw with `scripts/replot.sh` uses the run's value; a folder without the file (a run from before 2026-10-26) is drawn with 10.
+
 ### `plot_extra_args`
 **Type:** String | **Default:** `''`
 
@@ -872,17 +877,16 @@ Extra options appended verbatim to the `bin/plot_synteny.py` call. Use it for th
 | `--print_width_mm` | `183` | Width of the print grid in mm: 183 for two journal columns, 89 for one. When the grid does not fit, the spacing shrinks first; then the columns with the fewest orthologs are left out and named in the log and in `_print.legend.txt`. Text stays at 5 to 7 pt. |
 | `--print_height_mm` | `170` | Largest height of the print grid in mm. Rows are packed tighter before it is exceeded; a grid that still does not fit is written anyway and the log says so. |
 | `--no_print_grid` | off | Do not write the print grid. |
-| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid. A longer tandem array shows the first ten and `+N more`; every copy keeps its small arrow and its row in `_print.source.tsv`. |
+| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid. A longer tandem array shows the first ten and `+N more`; every copy keeps its small arrow and its row in `_print.source.tsv`. A drawing setting: no preset module changes it, because it drops no copy (unlike `max_goi_per_genome`, a parameter of its own). |
 | `--no_fragment_variant` | off | Skip the `*_with_fragments` figures. By default GOI models with `ModelStatus=fragment` are hidden in the main ribbon plot and grid (they are single-exon hits that otherwise stack into extra lanes) and drawn in these sibling files. |
 | `--no_orient_to_home` | off | By default a scaffold whose flanking genes run opposite to the home genome is mirrored so the ribbons run straight. This switches the mirroring off. |
 | `--no_anchor_grid` | off | Do not write the anchor grid. |
 | `--gene_names_tsv` | _(none)_ | Names table (`gene_id`, `label`, optional `full_name`, `source`) that sets the label of the home genes it lists; give an absolute path. Without it a home gene is labelled with its symbol in the home GFF, else its current symbol at NCBI Gene, else an abbreviation of its product name (marked `*`), else its ID. Each run writes the table it used to `<locus>_gene_names.tsv`. |
 | `--no_gene_legend` | off | Do not draw the "Gene names" table (label, full name, gene ID, source) under the figures. |
 | `--no_network` | off | Skip the plot step's NCBI lookups: species common names, and gene symbols of home genes the GFF leaves unnamed. |
-| `--max_goi_per_genome` | `10` | How many GOI models steer the choice of which neighbourhood to draw. Every GOI model inside the chosen view is drawn regardless. |
 | `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Controls for tandem-array figures; see `bin/plot_synteny.py --help`. |
 
-Do not repeat an option the pipeline already sets (`--plot_width`, `--gap_threshold`, …); use the parameter instead. You can also re-render any figure by hand from a finished run's `plot_inputs_*` folder.
+Do not repeat an option the pipeline already sets (`--plot_width`, `--gap_threshold`, …); use the parameter instead. `--max_goi_per_genome` became the parameter `max_goi_per_genome` on 2026-10-26; given here it still wins over the parameter (and over the value a preset module set), because an option on the command line of `plot_synteny.py` wins over the run's settings. You can also re-render any figure by hand from a finished run's `plot_inputs_*` folder.
 
 **Removed on 2026-10-07: `--grid_goi_style` and `--grid_goi_max_models`.** They belonged to the earlier anchor grid: the first chose one of four ways to draw a GOI cell (`cds`, `cds_aligned`, `genomic`, `notched`), the second set how many models a cell drew before it showed the best one plus `×N`. The grid now has one GOI layout ([OUTPUT.md § The GOI column of the anchor grid](OUTPUT.md#the-goi-column-of-the-anchor-grid)), so neither has anything left to control. `plot_synteny.py` stops with `unrecognized arguments` when it gets one, and a pipeline run then ends at the plot step: take the option out of `--plot_extra_args` and re-run with `-resume` (the search is not repeated). `--grid_max_models` is the nearest equivalent of the second.
 
@@ -975,9 +979,11 @@ Besides the settings, `intermediate/locate_gene/effective_params.json` records:
 
 - `profile`: the design quantities the rules read. These are `c` (home copies), `R` (reach of the home array in genes: the largest distance, in gene ranks, of a family member next to the home gene), `Fam` (home loci of the family), `Lq` (query length), `Lx` (longest real exon of the home gene), `Lpiece` (min(`Lq`, `Lx`)), `Lcore` (the query without signal peptide and GPI tail), `nx` (real exons of the home gene), `n` (`n_flanking_genes`) and `W` (`window_margin_genes`).
 - `derivation`: for every value that a module rule, the preset or you set, the value, the default and what set it. For a rule it also gives the formula and its inputs, for example `goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`. The console prints these lines after `[INFO] settings from the module rules`.
-- `constraints`: the checks of how the settings relate. C1: the GOI margin lies within the window margin. C3: with A1, the GOI loci kept per query and the gene models per GOI locus reach the home copies + 1, within their caps (a cap that binds is named). C7: a per-hit length floor a rule sets lies between 10 and max(10, 0.6 × Lpiece). C11: a value a rule set stays within its cap. C12: the fragment bound of the model status lies below the complete bound.
+- `constraints`: the checks of how the settings relate. C1: the GOI margin lies within the window margin. C3: with A1, the GOI loci kept per query and the gene models per GOI locus reach the home copies + 1, within their caps (a cap that binds is named). C4: with A1, the ownership panel's genes per home locus reach the home copies + 1, within the cap of 60. C5: with A1, the GOI models that steer a figure reach the home copies + 1, within the cap of 60. C7: a per-hit length floor a rule sets lies between 10 and max(10, 0.6 × Lpiece). C11: a value a rule set stays within its cap (40 GOI loci per query, 60 models per GOI locus, 60 panel genes per home locus, 50 panel relatives, 60 GOI models that steer a figure). C12: the fragment bound of the model status lies below the complete bound.
 
-A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept.
+A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept. The report copies `profile`, `derivation` and `constraints` into its `run_settings`.
+
+The settings map holds 32 parameters: the 25 a module rule may set, and 7 fixed ones that no rule sets but that travel with them, so the report and every step read one file (`sw_min_score`, `sw_min_identity`, `min_hit_identity`, `min_hit_length`, `expand_goi_similar`, `goi_family_tokens`, `adaptive_unique_gene_floor`; why each has no rule: `PASS_THROUGH_KEYS` in `bin/select_modules.py`). The flank walk, the search and the region scorer read the map directly. The steps after the search read it from `effective_params.json` (since 2026-10-26): the hull rescue `goi_hull_min_coverage`, the ownership panel `locus_ownership_max_genes_per_locus` and `paralog_panel_max_family`, the figures `max_goi_per_genome`.
 
 ### `allow_unknown_species`
 **Type:** Boolean | **Default:** `false`
@@ -988,6 +994,11 @@ By default the pipeline aborts at startup if `--home_species` is empty AND can't
 **Type:** `auto` or Integer | **Default:** `auto`
 
 A cluster of the region scorer that holds at least this many HIGH-confidence flanking genes and no GOI model becomes a `goi_missing_but_strong_synteny` region (up to two beyond the region cap), which the strong-synteny rescue searches. `auto` is half of `n_flanking_genes`, rounded up: 5 at the default of 10, the fixed default until 2026-10-23. `0` switches the region class off.
+
+### `strong_synteny_no_goi_min_flanking`
+**Type:** `auto` or Integer | **Default:** `auto`
+
+The report's `self_consistency` flags a genome, home locus and scaffold with at least this many HIGH-confidence flanking models and no HIGH GOI call (`strong_synteny_no_goi`; advisory: the neighbourhood is there, but no model in it was called HIGH). `auto` is 2 × `n_flanking_genes`: 20 at the default of 10, the fixed value until 2026-10-26. The value a run used is in the report under `self_consistency.thresholds.strong_flanking_min`.
 
 ### `disable_strong_synteny_rescue`
 **Type:** Boolean | **Default:** `false`
@@ -1020,6 +1031,11 @@ Per-block timeout for the rescue miniprot invocation. Bumps to `300` are reasona
 **Type:** Float | **Default:** `5.0`
 
 Minimum bitscore-gap (best vs second-best paralog) before a paralog-confusion flag fires. The default of 5 keeps borderline ties off the report. Raise to `15`/`20` for stricter flagging (only clear-cut paralog reassignments), lower to `2` if you want every disagreeing call surfaced.
+
+### `locus_ownership_max_genes_per_locus` / `paralog_panel_max_family`
+**Type:** Integer | **Defaults:** `5` / `15`
+
+The size of the home-paralog panel of locus ownership ([ALGORITHM.md § 10](ALGORITHM.md#10-adjudication-and-the-report)): every recovered GOI protein is aligned to the panel, and a call whose best match is a relative of the GOI, not the GOI, is relabelled `paralog_not_goi`. `locus_ownership_max_genes_per_locus` is the number of annotated home genes per home locus in the panel (those overlapping the locus most); `paralog_panel_max_family` the number of home proteins added by their similarity to the query (identity ≥ `paralog_panel_min_identity`, the closest first). Settings keys since 2026-10-26: the `local_family` preset module (A1) sets max(5, home copies + 1), at most 60 (constraint C4), so every copy of a home array is in the panel; the `dispersed_family` module (A2) sets max(15, home loci of the family + 1), at most 50. Both rules are inferred, not measured.
 
 ### `disable_phylo_placement`
 **Type:** Boolean | **Default:** `false`
@@ -1086,6 +1102,11 @@ A target gene is the ortholog of at most one home gene. Where hits of different 
 
 The hull rescue runs on a sequence only when its hull holds at least this many HIGH-confidence flanking genes. `auto` is round(0.4 × `n_flanking_genes`): 4 at the default of 10, the fixed default until 2026-10-23.
 
+### `goi_hull_min_coverage`
+**Type:** Float | **Default:** `0.5`
+
+A cost filter of the hull rescue in front of the judge (as `goi_hull_min_identity`, 40 %): a miniprot model whose coding sequence covers less than this share of the query is not judged. A settings key since 2026-10-26: the `short_query` preset module (B1) sets 0.3, its own fragment bound (`classify_fragment_max_qcov`), so a hull model that B1 would not call a fragment reaches the judge. With `core_completeness` on, the share is still taken of the whole query, not of its core (constraint C6, not fixed yet).
+
 ### `goi_hull_cluster_max_gap` / `goi_hull_window_pad` / `goi_hull_max_window`
 **Type:** `auto` or Integer (bp) | **Default:** `auto`
 
@@ -1104,7 +1125,7 @@ Calibration of the labels without a truth set. In every search window the revers
 ### `core_completeness`
 **Type:** Boolean | **Default:** `false`
 
-HIGH needs a call that covers at least 0.7 of the home protein (a constant of the label). For a secreted or GPI-anchored protein, the signal peptide and the GPI tail are often the parts a model misses or that are least conserved, so a model of the whole mature protein can fall below 0.7 of the precursor. With this switch a gene model also carries `CoreCoverage=` (the share of the protein without its signal peptide and GPI tail covered by the model's exons) and the label reads the larger of `QueryCoverage` and `CoreCoverage`. MEDIUM needs no completeness and is unaffected; the hull rescue keeps full coverage. The `signal_anchor` preset module (B3) turns it on. Note: in conotoxins, three-finger toxins and PLA2s the signal peptide is the most conserved part. Settings key.
+HIGH needs a call that covers at least 0.7 of the home protein (a constant of the label). For a secreted or GPI-anchored protein, the signal peptide and the GPI tail are often the parts a model misses or that are least conserved, so a model of the whole mature protein can fall below 0.7 of the precursor. With this switch a gene model also carries `CoreCoverage=` (the share of the protein without its signal peptide and GPI tail covered by the model's exons) and the label reads the larger of `QueryCoverage` and `CoreCoverage`. MEDIUM needs no completeness and is unaffected. Only the label reads the core so far: the model status (`ModelStatus`), the hull rescue (its cost filter `goi_hull_min_coverage` and the coverage its label reads) and the report's coverage demotion (`identity_decoupled_max_qcov`) still read the whole protein (constraint C6, one coverage basis; not fixed yet). The `signal_anchor` preset module (B3) turns it on. Note: in conotoxins, three-finger toxins and PLA2s the signal peptide is the most conserved part. Settings key.
 
 ### `report_low_complexity`
 **Type:** Boolean | **Default:** `false`

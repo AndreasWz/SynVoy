@@ -50,6 +50,7 @@ from synvoy_evalue import SIGNIFICANT_BLOCK_ESYN  # noqa: E402
 import synvoy_gene_names as _gnames  # noqa: E402
 import synvoy_grid as _grid  # noqa: E402
 import synvoy_legend as _legend  # noqa: E402
+import synvoy_settings  # noqa: E402
 
 try:
     from ete3 import Tree
@@ -987,8 +988,8 @@ def _home_gene_label(gene_id, fallback=None):
         return _gnames.display_label(row)
     return clean_gene_label(gene_id) if fallback is None else fallback
 
-# Max GOI/toxin entries drawn per genome (set from --max_goi_per_genome in main()).
-# Raise for tandem-array loci (e.g. a 31-copy GR1 toxin cluster) so the array isn't truncated.
+# GOI models of a genome that steer which neighbourhood is drawn (set in main() from the run's
+# max_goi_per_genome, or --max_goi_per_genome); every GOI model inside the chosen view is drawn.
 _MAX_GOI_PER_GENOME = 10
 
 # Draw ModelStatus=fragment GOI models (set per figure variant in main()).
@@ -5295,9 +5296,15 @@ def main():
     ap.add_argument("--caption_file",   default=None,
                     help="Path to a UTF-8 text file whose lines are rendered as a caption "
                          "block at the bottom of the figure (e.g. conserved-locus/no-toxin notes).")
-    ap.add_argument("--max_goi_per_genome", type=int, default=10,
-                    help="Max GOI/toxin genes drawn per genome (default 10). Raise for tandem-array "
-                         "loci so large copy-number clusters (e.g. 31-copy GR1) aren't truncated.")
+    ap.add_argument("--max_goi_per_genome", type=int, default=None,
+                    help="GOI models of a genome that steer which neighbourhood is drawn (every "
+                         "GOI model inside the chosen view is drawn). Default: the run's "
+                         "max_goi_per_genome (--effective_params), else 10. Given here, it wins "
+                         "over the run's value.")
+    ap.add_argument("--effective_params", default=None,
+                    help="effective_params.json of the run (the pipeline copies it into "
+                         "plot_inputs_*): --max_goi_per_genome comes from its settings unless "
+                         "given; without it the default")
     ap.add_argument("--goi_zoom",       type=float, default=1.0,
                     help="Local magnification factor for the GOI/toxin window only: the genomic "
                          "scale (px/bp) is multiplied by this factor inside the band spanned by GOI "
@@ -5382,7 +5389,12 @@ def main():
     args = ap.parse_args()
 
     global _MAX_GOI_PER_GENOME
-    _MAX_GOI_PER_GENOME = max(1, args.max_goi_per_genome)
+    max_goi, max_goi_from = synvoy_settings.pick(
+        args.max_goi_per_genome, synvoy_settings.load_settings(args.effective_params),
+        "max_goi_per_genome", 10, synvoy_settings.whole)
+    _MAX_GOI_PER_GENOME = max(1, max_goi)
+    if max_goi_from != "default":
+        print(f"[plot] GOI models steering the view per genome: {_MAX_GOI_PER_GENOME} ({max_goi_from})")
 
     # Initialize common-name resolver up front (cheap; just reads cache).
     if args.common_names != "off":

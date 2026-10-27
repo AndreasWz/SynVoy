@@ -227,10 +227,10 @@ distance to the scaffold end).
 
 | Id | Module | Trigger | What it changes (today) |
 |---|---|---|---|
-| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 40, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; gene models per GOI locus (`goi_max_models_per_locus`) 10 → max(10, home copies + 1), at most 60; the GOI margin (`goi_margin_genes`) 2 → min(`window_margin_genes`, max(2, R + 1)); Smith-Waterman alignments per piece 1 → 3; `report_copies_in_slot` on (§7.13) |
-| A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`) |
+| A1 | `local_family` | `primary_copies` ≥ 1.5, or a family member within the flank walk | `goi_relative_evalue` 1e-3 (= `preset_tandem_family`); GOI loci kept per query in a window (`goi_candidate_regions_per_query`) 2 → home copies + 1, at most 40, where home copies = the larger of `primary_copies` (rounded half up) and 1 + the family members within the flank walk; gene models per GOI locus (`goi_max_models_per_locus`) 10 → max(10, home copies + 1), at most 60; the GOI margin (`goi_margin_genes`) 2 → min(`window_margin_genes`, max(2, R + 1)); Smith-Waterman alignments per piece 1 → 3; `report_copies_in_slot` on (§7.13); after the search: home genes per home locus in the ownership panel (`locus_ownership_max_genes_per_locus`) 5 → max(5, home copies + 1), at most 60 (§10), GOI models that steer a figure (`max_goi_per_genome`) 10 → max(10, home copies + 1), at most 60 (§12) |
+| A2 | `dispersed_family` | ≥ 2 strong loci and `secondary_full_length` | region floors 0.45 / 0.08 / 4 regions (= `preset_paralog_discrimination`); relatives in the ownership panel (`paralog_panel_max_family`) 15 → max(15, home loci of the family + 1), at most 50 (§10) |
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
-| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); the length floors of window hits and of the short-query fallback 15 → 10 aa, the dispersed rescue's 50 → 0.6 × `Lpiece` (10-50); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`) |
+| B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); the length floors of window hits and of the short-query fallback 15 → 10 aa, the dispersed rescue's 50 → 0.6 × `Lpiece` (10-50); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`); the hull rescue's coverage filter (`goi_hull_min_coverage`) 0.5 → 0.3, B1's fragment bound (§9) |
 | B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | stricter only: the relative test of the flank walk with blastp and composition-based statistics (`goi_relative_statistic blastp_cbs`); `LowComplexity=` on GOI models |
 | B3 | `signal_anchor` | a signal peptide or a GPI tail | completeness for HIGH also on the core of the home protein (`core_completeness`: `CoreCoverage=` on gene models, the judge reads the larger of the two coverages; §7.8) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
@@ -257,19 +257,23 @@ hold for every module:
   table above: max(2, `c` + 1) for the GOI loci per query (cap 40), max(10, `c` + 1) for the models per GOI locus (cap 60),
   min(`W`, max(2, `R` + 1)) for the GOI margin, 3 Smith-Waterman alignments per piece when
   `c` ≥ 2 or `nx` ≥ 2, min(50, max(10, round(0.6 × `Lpiece`))) for the dispersed rescue's
-  floor; every other rule is a constant. No rule may write a switch (a whole step on or off,
-  such as `decoy_mode`,
-  a run-level option, or `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`,
-  or the module mechanism itself (`FORBIDDEN_FOR_MODULES`).
+  floor; and, for the steps after the search (since 2026-10-26), max(5, `c` + 1) home genes
+  per home locus in the ownership panel (cap 60), max(10, `c` + 1) GOI models that steer a
+  figure (cap 60), max(15, `Fam` + 1) relatives in the panel (A2, cap 50) and the hull
+  rescue's coverage filter 0.3 (B1); every other rule is a constant. No rule may write a
+  switch (a whole step on or off, such as `decoy_mode`, a run-level option, or
+  `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`, or the module mechanism
+  itself (`FORBIDDEN_FOR_MODULES`).
 - **Constraints** (`check_constraints`, after the rules and the values the user set): the
   GOI margin lies within the window margin, where the DNA searched ends (C1); with A1, the
   GOI loci kept per query and the models per GOI locus reach `c` + 1 within their caps (a
-  cap that binds is named; C3); a per-hit length floor a rule sets lies between 10 and
-  max(10, 0.6 × `Lpiece`) (C7); a value a rule set stays within its cap (C11); the
-  ModelStatus fragment bound lies below the complete bound (C12). A violation that the rules
-  alone made is a bug and stops the run before
-  the search; one that involves a value the user set is a warning, and the user's value is
-  kept.
+  cap that binds is named; C3), as do the ownership panel's genes per home locus (C4) and
+  the GOI models that steer a figure (C5); a per-hit length floor a rule sets lies between
+  10 and max(10, 0.6 × `Lpiece`) (C7); a value a rule set stays within its cap (C11); the
+  ModelStatus fragment bound lies below the complete bound (C12). C6, one coverage basis
+  under `core_completeness`, is not met yet: only the label reads the core (§14). A
+  violation that the rules alone made is a bug and stops the run before the search; one
+  that involves a value the user set is a warning, and the user's value is kept.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
   under `legacy`, or `--preset_override` in any mode) < a value the user set at launch
   (a `-profile preset_X` included) < `--user_override`.
@@ -285,8 +289,15 @@ retry follows the `--modules` value itself: `auto` (unless it removes `short_que
 list that names it; never `legacy` or `none`. A run without home hits stops today, so the
 retry can only rescue a run.
 
-The chosen values travel to the later steps as a `settings` map of 28 parameters
-(`presetDefaultKeys()` in `main.nf`). A value the user changed at launch is kept over a
+The chosen values travel to the later steps as a `settings` map of 32 parameters
+(`presetDefaultKeys()` in `main.nf`): the 25 a rule may set and 7 fixed pass-through keys
+that no rule sets (`PASS_THROUGH_KEYS`: the hit floors `sw_min_score`, `sw_min_identity`,
+`min_hit_identity`, `min_hit_length`, the forbidden `expand_goi_similar`, the annotation
+input `goi_family_tokens` and the figure-region floor `adaptive_unique_gene_floor`), so
+one file holds every value the run used. The flank walk, the search and the region scorer
+read the map directly; the hull rescue, the ownership panel and the figures read their keys
+from `effective_params.json` (`bin/synvoy_settings.py`, read-only; an option on the
+script's own command line wins). A value the user changed at launch is kept over a
 preset or a module. `--auto_apply_preset false` leaves the defaults in place;
 `--preset_override` picks a preset by hand. `effective_params.json` records the mode,
 the modules applied and why, the triggers that fire, the source of every value and the
@@ -294,7 +305,7 @@ features, and the report copies these as `run_settings`. The same file also hold
 design quantities (`profile`), the derivation of every value a rule, the preset or the
 user set (`derivation`; for a rule its formula and inputs, e.g.
 `goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`), and the constraint
-checks (`constraints`).
+checks (`constraints`); the report's `run_settings` carries these three as well.
 
 ### 5.4 Splitting into home loci
 
@@ -406,13 +417,14 @@ walk and a GOI marker of its own, so a tandem array of three copies gave three w
    GOI's own position is never taken.
 4. Genes without CDS are kept for the figures but do not count towards the 10.
 
-Five counts follow `n_flanking_genes` = n (constraint C9; each is `auto` by default, resolved
+Six counts follow `n_flanking_genes` = n (constraint C9; each is `auto` by default, resolved
 in `lib/FlankingCounts.groovy` and `lib/LocusGap.groovy`): the bridge limit, 2n pitches
 (§7.3); the HIGH flanking models of a strong-synteny region, n / 2 rounded up (§8); those
-in the hull of the hull rescue, round(0.4 n) (§9); the gene gap between home loci,
-⌊n / 2⌋ (§5.4); and the walk's limit above, 5n. At n = 10 they are 20, 5, 4, 5 and 50,
-the fixed values they had (until 2026-10-23; the locus gap until 2026-10-15). A number
-sets a count directly.
+in the hull of the hull rescue, round(0.4 n) (§9); those at which the report flags strong
+synteny without a HIGH GOI call, 2n (§10); the gene gap between home loci, ⌊n / 2⌋
+(§5.4); and the walk's limit above, 5n. At n = 10 they are 20, 5, 4, 20, 5 and 50, the
+fixed values they had (until 2026-10-23; the report's until 2026-10-26; the locus gap
+until 2026-10-15). A number sets a count directly.
 
 Without a home GFF, a substitute annotation is built first. Genes are predicted
 around the query's hits (`prodigal_on_regions.py`, Augustus or Prodigal), and
@@ -1170,7 +1182,7 @@ flanking genes alone. Both apply the start/stop refinement of §7.7.
 | Script | `rescue_strong_synteny.py` | `rescue_goi_hull.py` |
 | Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ `goi_hull_min_flanking` (round(0.4 × `n_flanking_genes`) = 4) HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
-| Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ 0.5 of the query length (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
+| Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ `goi_hull_min_coverage` (0.5; the `short_query` module 0.3) of the query length (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
 | Confidence | always LOW | the judge of the main search (§7.8): E-value in the genome-wide place, specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
 | Evidence type | `relaxed_miniprot_rescue` | `synteny_hull_rescue` |
 
@@ -1204,12 +1216,14 @@ this order:
    has diverged more than its species should have, which is what a paralog looks
    like. The check needs calls from at least 4 species and is advisory.
 3. **Locus ownership** (`build_home_paralog_panel.py`, `build_locus_ownership`). A
-   panel of home proteins is built: the annotated gene at each home locus, plus up to
-   15 proteins of the home proteome that align to the query with identity ≥ 28 % and
-   a Smith-Waterman score of at least a quarter of the query's self-score. Each
-   recovered protein is aligned to the panel. If its best match is a paralog and not
-   the GOI, the call is relabelled `paralog_not_goi`. If the two best scores differ
-   by less than 10, the locus with more HIGH flanking models decides.
+   panel of home proteins is built: the annotated genes at each home locus (up to
+   `locus_ownership_max_genes_per_locus`, 5; the `local_family` module max(5, `c` + 1)),
+   plus up to `paralog_panel_max_family` (15; the `dispersed_family` module
+   max(15, `Fam` + 1)) proteins of the home proteome that align to the query with
+   identity ≥ 28 % and a Smith-Waterman score of at least a quarter of the query's
+   self-score. Each recovered protein is aligned to the panel. If its best match is a
+   paralog and not the GOI, the call is relabelled `paralog_not_goi`. If the two best
+   scores differ by less than 10, the locus with more HIGH flanking models decides.
 4. **Coverage demotion** (`apply_coverage_demotion`). A HIGH or MEDIUM call with
    identity ≥ 50 % and a recorded coverage below 0.35 is relabelled
    `identity_coverage_decoupled`.
@@ -1220,8 +1234,10 @@ this order:
    a genome whose only call steps 3–4 then relabelled had lost its candidate as well.
 6. **Headline.** HIGH and MEDIUM calls are counted without the two relabelled classes.
    AMBIGUOUS and LOW calls are reported separately.
-7. **Self-consistency flags**: strong synteny without a GOI, the same gene found from
-   several home loci, and the flags of steps 2–4.
+7. **Self-consistency flags**: strong synteny without a GOI (a genome, home locus and
+   scaffold with at least 2 × `n_flanking_genes` HIGH flanking models and no HIGH GOI
+   call; `strong_synteny_no_goi_min_flanking`), the same gene found from several home
+   loci, and the flags of steps 2–4.
 
 ## 11. Tree
 
@@ -1242,7 +1258,9 @@ from those copies.
   its class (a HIGH tandem copy was drawn as unresolved, an AMBIGUOUS call as resolved
   until 2026-10-15); AMBIGUOUS calls are drawn in the needs-curation style. The best GOI
   call of a row, the overlap dedup and the GOI cap rank by label, then by the strength of
-  the match (E in its place, the block's E_syn, bits).
+  the match (E in its place, the block's E_syn, bits). The GOI cap (`max_goi_per_genome`,
+  10; the `local_family` module max(10, `c` + 1)) only steers which neighbourhood a row
+  shows: every GOI model inside the chosen view is drawn.
 
 - **Home row.** The GOI is drawn from the home annotation: the transcript whose CDS
   covers the hits best. Only coding exons are drawn.
@@ -1251,8 +1269,10 @@ from those copies.
 - **Synteny plot.** Genes are stacked in at most 3 lanes; fragment models are hidden
   in the default figure and shown in a `_with_fragments` variant.
 - **Anchor grid.** One row per species, one column per home gene. `×N` above a
-  flanking arrow counts copies on the same scaffold within the neighbourhood; a GOI
-  cell with more than 3 models shows the best one and `×N`.
+  flanking arrow counts copies on the same scaffold within the neighbourhood. The GOI
+  column has one small arrow per copy; a genome with more than ten copies shows the
+  first ten models and `+N more` (`--grid_max_models`, a drawing setting that drops no
+  copy, so no rule sets it).
 
 ## 13. Reproducibility
 
@@ -1273,7 +1293,13 @@ Consequences of the rules above that a reader of the results should know.
 - HIGH needs a query coverage of at least 0.7, whatever the number of exons (until
   2026-10-14 a one-exon model could be HIGH only when the home gene had one exon).
 - The hull rescue's models are judged like the main search's (§7.8). Its 40 % identity
-  and 0.5 CDS-coverage gates only decide which models are judged.
+  and 0.5 CDS-coverage gates (0.3 with the `short_query` module) only decide which models
+  are judged.
+- With `core_completeness` (the `signal_anchor` module) only the label reads the core of
+  the home protein. The model status, the hull rescue's coverage gate and the coverage its
+  label reads, and the report's coverage demotion and `identity_coverage_decoupled` flag
+  still read the whole protein (constraint C6, one coverage basis; not fixed yet), so a
+  signal peptide can count against a call there and not in the label.
 - Flanking support is a property of the window (every candidate in a window has the
   same value, also a copy at the edge of the window), and the label does not read it.
 - Two GOI row types are not judged: `relaxed_miniprot_rescue` rows of the strong-synteny
@@ -1414,9 +1440,12 @@ of 9 without.
 | `adaptive_score_floor_frac` / `_abs` / `adaptive_max_regions` | 0.30 / 0.03 / 6 | §8 |
 | `strong_synteny_min_flanking` | auto (⌈n_flanking_genes/2⌉ = 5) | §8, §9 |
 | `min_synteny_score` | 0.6 | §8 |
-| `goi_hull_min_flanking` / `_min_identity` / `_min_coverage` | auto (round(0.4 × n_flanking_genes) = 4) / 40 / 0.5 | §9 |
+| `goi_hull_min_flanking` / `_min_identity` / `_min_coverage` | auto (round(0.4 × n_flanking_genes) = 4) / 40 / 0.5 (B1: 0.3) | §9 |
 | `goi_hull_window_pad` / `_max_window` / `_cluster_max_gap` | auto / auto / auto | §9 |
-| `paralog_panel_min_identity` / `_max_family` | 28 / 15 | §10 |
+| `paralog_panel_min_identity` / `_max_family` | 28 / 15 (A2: max(15, Fam + 1), at most 50) | §10 |
+| `locus_ownership_max_genes_per_locus` | 5 (A1: max(5, c + 1), at most 60) | §10 |
 | `locus_ownership_tiebreak_gap` | 10 | §10 |
+| `strong_synteny_no_goi_min_flanking` | auto (2 × n_flanking_genes = 20) | §10 |
+| `max_goi_per_genome` | 10 (A1: max(10, c + 1), at most 60) | §12 |
 | `identity_decoupled_min_identity` / `_max_qcov` | 50 / 0.35 | §10 |
 | `phylo_placement_min_calls` / `_z_threshold` | 4 / 2.0 | §10 |

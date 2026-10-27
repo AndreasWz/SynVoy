@@ -262,10 +262,12 @@ def removedParams() {
     ]
 }
 
-// The params a preset or a preset module may set (bin/resolve_effective_params.py). They
-// reach EXTRACT_FLANKING / ITERATIVE_SEARCH / CLUSTER_REGIONS through the `settings` map of
-// RESOLVE_SETTINGS (subworkflows/resolve_settings.nf), never as ${params.x}: a key read as
-// a param there would win over the module. A key a module writes is listed here.
+// The params of the settings map (bin/resolve_effective_params.py): the keys a preset module's
+// rule may set (bin/select_modules.py, RULES) and the fixed pass-through keys (PASS_THROUGH_KEYS).
+// EXTRACT_FLANKING / ITERATIVE_SEARCH / CLUSTER_REGIONS read them as ${settings.x} from
+// RESOLVE_SETTINGS (subworkflows/resolve_settings.nf); the hull rescue, the ownership panel
+// and the figures get effective_params.json and read them through bin/synvoy_settings.py.
+// Never as ${params.x}: a key read as a param would win over the module.
 def presetDefaultKeys() {
     return [
         'sw_min_score', 'sw_min_identity',
@@ -280,6 +282,8 @@ def presetDefaultKeys() {
         'aug_relaxed_length_min', 'fallback_short_min_aln_aa', 'dispersed_goi_min_alnlen',
         'adaptive_score_floor_frac', 'adaptive_score_floor_abs',
         'adaptive_max_regions', 'adaptive_unique_gene_floor',
+        'locus_ownership_max_genes_per_locus', 'paralog_panel_max_family',
+        'goi_hull_min_coverage', 'max_goi_per_genome',
     ]
 }
 
@@ -1475,7 +1479,8 @@ workflow {
             home_species_for_sort_ch,         // home species label of the home row
             qc_summary_ch,                    // genome quality summary (value channel)
             ADJUDICATE_AND_REPORT.out.report_for_plot,  // drawn after the report: leave out what it drops
-            plot_inputs_split.block_tables    // the search's block tables (used with plot_block_selection)
+            plot_inputs_split.block_tables,   // the search's block tables (used with plot_block_selection)
+            RESOLVE_SETTINGS.out.json         // effective_params.json (max_goi_per_genome)
         )
 
         PLOT_SYNTENY.out.plot.view { plot ->
