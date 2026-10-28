@@ -18,8 +18,9 @@ profile sets every parameter they touch (profile handoff of 2026-10-20, stage 1)
 * after the rules, check_constraints tests how the settings must relate to each other; a
   violation that only the rules made is a bug and stops the run before the search;
 * no rule writes a label threshold: one judge (synvoy_label) labels every call, and the
-  judge's constants are not parameters at all. Switches, n_flanking_genes and the module
-  mechanism itself are forbidden to the rules (FORBIDDEN_FOR_MODULES).
+  judge's constants are not parameters at all. Switches, n_flanking_genes, the module
+  mechanism itself and the genome axis (GENOME_AXIS_KEYS, set per target genome in the
+  search) are forbidden to the rules (FORBIDDEN_FOR_MODULES).
 
 `--modules` (nextflow.config):
   legacy   the default until the measured switch: the old chooser's preset is applied
@@ -74,15 +75,19 @@ SWITCHES = frozenset({
     "goi_chain_query_aware", "tandem_query_restart", "goi_first_exon_guard",
     "goi_join_leftover_hits", "decoy_mode",
 })
+# The genome axis (profile stage 5): keys whose value differs per target genome. The search
+# sets them for each genome (iterative_search_runner.GENOME_AXIS_PLACES, lib/GenomeAxis.groovy)
+# with any --modules other than legacy; a module sees only the home side and never sets one.
+GENOME_AXIS_KEYS = frozenset({"anchor_max_places"})
 # Keys no rule may write (constraint C10): the home side (anchors, home loci), what a
-# measurement banned, the module mechanism itself, and every switch.
+# measurement banned, the module mechanism itself, every switch and the genome axis.
 # expand_goi_similar: with it on, LY6 scaffold recall fell from 8/9 to 0/9.
 # decoy_mode: a calibration switch of the run; B2 fires on 47 % of the Candida genes, so as
 # a module key it would add the decoy searches to about half of all runs.
 FORBIDDEN_FOR_MODULES = frozenset({
     "n_flanking_genes", "expand_goi_similar", "expand_goi_similar_distance",
     "modules", "preset_override", "auto_apply_preset",
-}) | SWITCHES
+}) | SWITCHES | GENOME_AXIS_KEYS
 
 # Settings keys without a rule (profile handoff, stage 4): fixed values that travel in the
 # settings map like the rule keys, so the report's run_settings and the steps that read the

@@ -442,6 +442,9 @@ def validateNumericParams(validationErrors, validationWarnings) {
             validationErrors << "Invalid --${name} (${params[name]}). Must be 'auto' or >= 0."
         }
     }
+    if (params.anchor_max_places.toString().trim() != 'auto' && num.call('anchor_max_places', params.anchor_max_places, 0) < 0) {
+        validationErrors << "Invalid --anchor_max_places (${params.anchor_max_places}). Must be 'auto' or >= 0."
+    }
     def relativeEvalue = num.call('goi_relative_evalue', params.goi_relative_evalue, 0)
     if (relativeEvalue < 0) {
         validationErrors << "Invalid --goi_relative_evalue (${params.goi_relative_evalue}). Must be >= 0 (0 switches the test off)."

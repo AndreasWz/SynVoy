@@ -3159,7 +3159,7 @@ def resolve_anchor_hits(hits, min_overlap=0.5):
     return keep
 
 
-def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000):
+def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000, keep=()):
     """Flanking hits restricted to the ``max_places`` best places of each flanking gene.
 
     A place is a run of hits of one flanking gene on one target sequence whose neighbours
@@ -3173,13 +3173,19 @@ def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000):
     not yet run on the family benchmark.
 
     Only the seeding of blocks uses the result. The other hits still count inside a
-    window (flanking support, flanking gene models).
+    window (flanking support, flanking gene models). The hits of the genes in ``keep`` (the
+    GOI proxies of the genome axis's rebuild: the GOI's own home gene among the anchors,
+    whose further places are copies of the GOI) all pass, in their places.
     """
     if not max_places or int(max_places) <= 0:
         return list(hits)
+    keep = set(keep or ())
     by_gene_seq = defaultdict(list)
     for h in hits:
-        by_gene_seq[(extract_base_gene_id(h.get('query', '')), h.get('chrom'))].append(h)
+        gene = extract_base_gene_id(h.get('query', ''))
+        if gene in keep:
+            continue
+        by_gene_seq[(gene, h.get('chrom'))].append(h)
     places = defaultdict(list)
     for (gene, _seq), gene_hits in by_gene_seq.items():
         limit = gap_limit(gene) if gap_limit else default_gap
@@ -3195,14 +3201,14 @@ def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000):
                 places[gene].append(current)
                 current, current_end = [h], end
         places[gene].append(current)
-    keep = set()
+    kept = set()
     for gene, gene_places in places.items():
         ranked = sorted(gene_places, key=lambda pl: (
             -sum(float(x.get('bits', 0) or 0) for x in pl),
             str(pl[0].get('chrom')), min(pl[0]['start'], pl[0]['end'])))
         for place in ranked[:int(max_places)]:
-            keep.update(id(x) for x in place)
-    return [h for h in hits if id(h) in keep]
+            kept.update(id(x) for x in place)
+    return [h for h in hits if id(h) in kept or extract_base_gene_id(h.get('query', '')) in keep]
 
 
 def identify_synteny_blocks(hits, max_intron=20000, cluster_distance=50000,
@@ -3464,6 +3470,14 @@ def bp_or_auto(value):
     if text in ('auto', ''):
         return None
     return int(float(text))
+
+
+def count_or_auto(value):
+    """argparse type of a count that is either 'auto' (None: the search sets it) or given."""
+    text = str(value).strip().lower()
+    if text in ('auto', ''):
+        return None
+    return int(text)
 
 
 def _expansion_note(source, run_anchors):
@@ -6478,6 +6492,52 @@ TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 
                          'significant_blocks', 'best_block_esyn', 'best_block_context',
                          'truncated_blocks', 'genetic_code']
 
+# The genome axis (profile stage 5). The preset modules run once per query and see only the
+# home side, so a setting that should differ per target genome is set here, in the search,
+# where each genome's distances are derived (genome_scale_args). On with --genome_axis, which
+# the pipeline passes with any --modules other than legacy (lib/GenomeAxis.groovy); without it
+# no column, header or log line below is written. A value the user set is used for every
+# genome. Each genome's values are logged, written to target_policy.tsv with their source
+# (default / genome_axis / user_set) and to the result GFF (GENOME_AXIS_HEADER).
+#   anchor_max_places  every place (0), unless the block cap (max_blocks_per_genome) binds in
+#                      the genome: its blocks are then rebuilt once from the
+#                      GENOME_AXIS_PLACES best places of each flanking gene, and the cap cuts
+#                      as before if it still binds. Five places: the same ortholog calls from
+#                      18 windows instead of 101 in yeast and from 9 instead of 238 in four
+#                      plant genomes, ants unchanged (local runs, 2026-10-09/11).
+GENOME_AXIS_PLACES = 5
+GENOME_AXIS_COLUMNS = ['anchor_max_places', 'anchor_max_places_source', 'blocks_before_cap',
+                       'blocks_rebuilt']
+GENOME_AXIS_HEADER = '##synvoy-genome-axis'
+
+
+def genome_axis_values(args) -> Dict[str, Dict[str, Any]]:
+    """This genome's values on the genome axis, {key: {'value', 'source', ...}}: what the
+    search set (``genome_ctx['axis']``), else the value the genome starts from, the user's
+    (source user_set) or the default (source default)."""
+    ctx = getattr(args, 'genome_ctx', None) or {}
+    if ctx.get('axis'):
+        return ctx['axis']
+    places = getattr(args, 'anchor_max_places', None)
+    return {'anchor_max_places': {'value': 0 if places is None else int(places),
+                                  'source': 'default' if places is None else 'user_set'}}
+
+
+def genome_axis_columns(values) -> Dict[str, Any]:
+    """The GENOME_AXIS_COLUMNS of target_policy.tsv for genome_axis_values: the value of
+    anchor_max_places, its source, the blocks the cap saw in the first build and, after a
+    rebuild, in the rebuild ('' when not counted)."""
+    places = values.get('anchor_max_places') or {}
+    return {'anchor_max_places': places.get('value', ''),
+            'anchor_max_places_source': places.get('source', ''),
+            'blocks_before_cap': places.get('blocks_before_cap', ''),
+            'blocks_rebuilt': places.get('blocks_rebuilt', '')}
+
+
+def format_genome_axis_header(values) -> str:
+    """The result GFF's header line of genome_axis_values, next to the distances header."""
+    return f"{GENOME_AXIS_HEADER} {json.dumps(values, sort_keys=True, separators=(',', ':'))}"
+
 # What every limit that can drop a result dropped in a genome's search (profile handoff,
 # stage 2: counted, nothing changes). Written as limit_<key> columns of target_policy.tsv,
 # logged in one INFO line per genome, summed by the report into its `limits` block. Hits and
@@ -6576,6 +6636,190 @@ def log_capped_blocks(args, genome_name: str, dropped, first_rank: int, goi_seed
         count_limit(args, 'blocks_capped_without_home_order', int(not home_order))
 
 
+def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene_gap,
+                        goi_seeded, proxy_parents, gw_any_genome, cap=True):
+    """The search blocks of one target genome from its seed hits: identify, merge, filter
+    (min_block_genes; a GOI-seeded block stays whatever its gene count), the fallback to the
+    unfiltered blocks, the sort (GOI-seeded first, then the most collinear; with the home
+    order only) and the per-genome cap (max_blocks_per_genome). In one place so that the
+    genome axis's rebuild (GENOME_AXIS_PLACES) runs the same code. ``bridge`` holds the
+    bridge_* options of identify_synteny_blocks.
+
+    Returns (blocks, n), n = the number of blocks the cap saw, or (None, 0) when no block was
+    found and the genome-wide path does not search the genome (the caller ends it). cap=False
+    leaves the cap, its log lines and its counts out and returns every block: the genome axis
+    looks at n before it decides."""
+    synteny_blocks = identify_synteny_blocks(
+        seed_hits,
+        max_intron=args.max_intron,
+        cluster_distance=args.cluster_distance,
+        home_rank=home_rank,
+        gene_gap_limit=gene_gap,
+        **bridge,
+    )
+    if home_rank:
+        _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
+        if _n_bridged:
+            logger.info(
+                f"[{genome_name}] §1m collinearity: bridged a flanking gap in "
+                f"{_n_bridged} block(s) (home-order continuation across rearrangement)."
+            )
+        for _b in synteny_blocks:
+            if _b.get('bridge_anchors'):
+                # One line per bridged block: the anchors it held at each bridge (a
+                # bridge on 2 is one the floor of 3 refused until 2026-10-14).
+                logger.info(
+                    f"[{genome_name}] bridged block {_b['chrom']}:{_b['start']}-{_b['end']}: "
+                    f"anchors before each gap {','.join(map(str, _b['bridge_anchors']))}; "
+                    f"genes {','.join(_b.get('genes', []))}")
+
+    if not synteny_blocks:
+        logger.info(f"[{genome_name}] No valid syntenic region found."
+                    + (" The genome-wide path searches it (--goi_genome_wide_without_blocks)."
+                       if gw_any_genome else ""))
+        if not gw_any_genome:
+            return None, 0
+
+    # Optimization: Merge overlapping search regions
+    pre_merge_count = len(synteny_blocks)
+    synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
+    if len(synteny_blocks) < pre_merge_count:
+        logger.info(f"[{genome_name}] Merged {pre_merge_count} blocks into {len(synteny_blocks)} discrete search regions.")
+    else:
+        logger.info(f"[{genome_name}] Found {len(synteny_blocks)} discrete syntenic blocks.")
+
+    # Keep only blocks with enough anchor genes to avoid spending hours
+    # on singleton/noise loci in fragmented genomes.
+    # Exception: single-gene blocks seeded by a GOI proxy (e.g., gene-LY6E)
+    # are retained so the full GOI search runs on the correct scaffold.
+    if args.min_block_genes > 1:
+        pre_filter_count = len(synteny_blocks)
+        filtered_blocks = []
+        proxy_blocks = []
+        for _b in synteny_blocks:
+            if _b.get('genes_count', 0) >= args.min_block_genes:
+                filtered_blocks.append(_b)
+            elif goi_seeded(_b):
+                # A GOI proxy among the anchors, or §1o: a GOI-seeded (dispersed-rescue)
+                # block is single-gene by construction — keep it despite min_block_genes.
+                proxy_blocks.append(_b)
+        synteny_blocks = filtered_blocks + proxy_blocks
+        logger.info(
+            f"[{genome_name}] Block filter (min_block_genes={args.min_block_genes}): "
+            f"{len(filtered_blocks)} standard + {len(proxy_blocks)} GOI-proxy "
+            f"= {len(synteny_blocks)}/{pre_filter_count} retained."
+        )
+
+    # Fallback: if filtering removed everything, still keep top blocks by score.
+    if not synteny_blocks:
+        logger.info(
+            f"[{genome_name}] No blocks after filtering. "
+            f"Falling back to top {args.max_blocks_per_genome} unfiltered blocks."
+        )
+        synteny_blocks = identify_synteny_blocks(
+            seed_hits,
+            max_intron=args.max_intron,
+            cluster_distance=args.cluster_distance,
+            home_rank=home_rank,
+            gene_gap_limit=gene_gap,
+            **bridge,
+        )
+        synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
+
+    # §1m: when capping bites, keep the most collinear blocks (merge re-sorted
+    # by position). GOI-proxy blocks (e.g. gene-LY6E) are protected first so a
+    # low-collinearity proxy seed is never dropped by the cap.
+    if home_rank and len(synteny_blocks) > 1:
+        def _cap_key(b):
+            return (1 if goi_seeded(b) else 0,
+                    b.get('collinear_chain_len', 0),
+                    b.get('genes_count', 0))
+        synteny_blocks.sort(key=_cap_key, reverse=True)
+
+    n_blocks = len(synteny_blocks)
+    if cap:
+        synteny_blocks = cap_genome_blocks(synteny_blocks, args, genome_name, goi_seeded,
+                                           proxy_parents, home_rank)
+    return synteny_blocks, n_blocks
+
+
+def cap_genome_blocks(synteny_blocks, args, genome_name, goi_seeded, proxy_parents, home_rank):
+    """The per-genome cap (max_blocks_per_genome, 0 = none) on blocks in build_genome_blocks'
+    order: the blocks beyond it are logged, counted and dropped."""
+    # Hard cap per genome to prevent pathological runtimes.
+    if args.max_blocks_per_genome > 0 and len(synteny_blocks) > args.max_blocks_per_genome:
+        logger.info(
+            f"[{genome_name}] Capping blocks: {len(synteny_blocks)} -> "
+            f"{args.max_blocks_per_genome} (max_blocks_per_genome)."
+        )
+        log_capped_blocks(args, genome_name, synteny_blocks[args.max_blocks_per_genome:],
+                          args.max_blocks_per_genome, goi_seeded,
+                          proxy_parents, bool(home_rank))
+        synteny_blocks = synteny_blocks[:args.max_blocks_per_genome]
+    return synteny_blocks
+
+
+def genome_axis_blocks(seed_hits, flanking_hits, rescue_seeds, args, genome_name, **block_opts):
+    """The blocks of one target genome (build_genome_blocks) and, with --genome_axis, its
+    genome-axis values (genome_axis_values; None without the axis). ``seed_hits`` are the seeds
+    as the search made them (flanking hits, limited when the user set anchor_max_places, plus
+    ``rescue_seeds``, the rescued GOI hits); ``flanking_hits`` all flanking hits.
+
+    With the axis on and anchor_max_places 'auto' (None), a genome whose blocks exceed the cap
+    is built again once from the GENOME_AXIS_PLACES best places of each flanking gene; the first
+    build is then left uncapped (its cap would drop blocks the rebuild may keep), and the
+    rebuild is filtered, sorted and capped as any build. The GOI proxies (the GOI's own home
+    gene among the anchors) keep every place and the rescued GOI hits stay seeds, so each seed
+    of a GOI-seeded block is a seed of the rebuild too; the E-value terms
+    (genome_ctx['places']) are counted on all hits before and do not change. Where the cap does
+    not bind, the first build is the result, as without the axis. Returns (blocks, values), or
+    (None, None) when no block was found and the genome-wide path does not search the genome.
+    """
+    axis = bool(getattr(args, 'genome_axis', False))
+    cap = int(args.max_blocks_per_genome)
+    may_rebuild = (axis and getattr(args, 'anchor_max_places', None) is None
+                   and bool(flanking_hits) and cap > 0)
+    blocks, n_blocks = build_genome_blocks(seed_hits, args, genome_name, cap=not may_rebuild,
+                                           **block_opts)
+    if blocks is None:
+        return None, None
+    if not axis:
+        return blocks, None
+    places = dict(genome_axis_values(args)['anchor_max_places'], blocks_before_cap=n_blocks)
+    if may_rebuild and n_blocks > cap:
+        limited = limit_anchor_places(flanking_hits, GENOME_AXIS_PLACES, block_opts.get('gene_gap'),
+                                      keep=block_opts.get('proxy_parents') or ())
+        logger.info(
+            f"[{genome_name}] genome axis: the block cap ({cap}) bound at {n_blocks} blocks; "
+            f"rebuilding them from the {GENOME_AXIS_PLACES} best places of each flanking gene "
+            f"({len(limited)} of {len(flanking_hits)} flanking hits"
+            + (f", {len(rescue_seeds)} rescued GOI hit(s)" if rescue_seeds else "") + ").")
+        rebuilt, n_rebuilt = build_genome_blocks(list(limited) + list(rescue_seeds or []), args,
+                                                 genome_name, cap=True, **block_opts)
+        if rebuilt is None:
+            # Not expected (each flanking gene keeps its best place): cap the first build.
+            blocks = cap_genome_blocks(blocks, args, genome_name, block_opts['goi_seeded'],
+                                       block_opts.get('proxy_parents'), block_opts.get('home_rank'))
+            note = "the rebuild found no block; the first build was capped"
+        else:
+            blocks = rebuilt
+            places.update(value=GENOME_AXIS_PLACES, source='genome_axis', blocks_rebuilt=n_rebuilt)
+            note = (f"the cap of {cap} bound at {n_blocks} blocks; rebuilt from the "
+                    f"{GENOME_AXIS_PLACES} best places: {n_rebuilt} blocks"
+                    + (f", capped to {cap}" if n_rebuilt > cap else ""))
+    elif places['source'] == 'user_set':
+        note = f"set by the user, for every genome: {n_blocks} blocks"
+    elif not flanking_hits:
+        note = f"every place: no flanking anchors, so no places to limit; {n_blocks} blocks"
+    elif cap <= 0:
+        note = f"every place: {n_blocks} blocks, no block cap"
+    else:
+        note = f"every place: {n_blocks} blocks, the cap of {cap} not reached"
+    logger.info(f"[{genome_name}] genome axis: anchor_max_places {places['value']} "
+                f"({places['source']}; {note}).")
+    return blocks, {'anchor_max_places': places}
+
+
 def log_genome_limits(args, genome_name: str) -> None:
     """At a genome's end: add the miniprot counts of this worker task and the dead zone (the
     near-anchor GOI hits the dispersed rescue skipped that lie in no searched GOI core) to
@@ -6605,7 +6849,8 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
     (left/right/both, '' = complete), and how many windows did. Written as soon as the
     median is known and again when the genome is done, so it exists for every genome the
     search reached, also one without a model. The limit_* columns (LIMIT_KEYS) count what
-    each limit dropped (0 until the genome's end)."""
+    each limit dropped (0 until the genome's end). With --genome_axis the GENOME_AXIS_COLUMNS
+    follow: this genome's genome-axis values and their sources."""
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.target_policy.tsv")
     ctx = ctx or {}
     esyn = ctx.get('block_esyn') or {}
@@ -6623,6 +6868,9 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         'genetic_code': get_genetic_code(),
     }
     columns = list(TARGET_POLICY_COLUMNS)
+    if getattr(args, 'genome_axis', False):
+        row.update(genome_axis_columns(genome_axis_values(args)))
+        columns += GENOME_AXIS_COLUMNS
     if getattr(args, 'decoy_mode', False):
         # Decoy cases of this genome: searched ones only (a genome with a search window,
         # with or without a decoy model; 0 before the genome end and without a window);
@@ -7327,10 +7575,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},
                            'decoy_lines': []}
         count_limit(args, 'mmseqs_maxseqs_genome', queries_at_max_seqs(hits_file))
-        c_dist = args.cluster_distance
-        _bridge_max_gap = args.synteny_bridge_max_gap
+        _bridge = {'bridge_max_gap': args.synteny_bridge_max_gap,
+                   'bridge_max_rank_gap': _bridge_max_rank_gap,
+                   'bridge_min_anchors': _bridge_min_anchors,
+                   'bridge_two_sided': _bridge_two_sided,
+                   'bridge_max_per_block': _bridge_max_per_block}
         _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
-        _max_places = int(getattr(args, 'anchor_max_places', 0) or 0)
+        # None = 'auto': every place, unless the genome axis rebuilds (genome_axis_blocks).
+        _max_places = int(getattr(args, 'anchor_max_places', None) or 0)
         if _max_places > 0 and flanking_seed_hits:
             seed_hits = limit_anchor_places(flanking_seed_hits, _max_places, _gene_gap)
             logger.info(
@@ -7342,6 +7594,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # the normal machinery models it. No-op unless the neighbourhood is
         # shattered (rearrangement gate) — protects well-conserved benchmarks.
         rescue_goi_genes = set()
+        _disp_seeds = []
         # §1x: collect the strong-but-non-syntenic candidates the gate refuses, so the
         # run can distinguish "no ortholog here" from "found one, could not place it".
         _nonsyntenic = [] if getattr(args, 'report_nonsyntenic_candidates', True) else None
@@ -7389,113 +7642,17 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n)
         _write_block_table(args, prefix, genome_name)
 
-        synteny_blocks = identify_synteny_blocks(
-            seed_hits,
-            max_intron=args.max_intron,
-            cluster_distance=c_dist,
-            home_rank=home_rank,
-            bridge_max_gap=_bridge_max_gap,
-            bridge_max_rank_gap=_bridge_max_rank_gap,
-            bridge_min_anchors=_bridge_min_anchors,
-            bridge_two_sided=_bridge_two_sided,
-            bridge_max_per_block=_bridge_max_per_block,
-            gene_gap_limit=_gene_gap,
-        )
-        if home_rank:
-            _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
-            if _n_bridged:
-                logger.info(
-                    f"[{genome_name}] §1m collinearity: bridged a flanking gap in "
-                    f"{_n_bridged} block(s) (home-order continuation across rearrangement)."
-                )
-            for _b in synteny_blocks:
-                if _b.get('bridge_anchors'):
-                    # One line per bridged block: the anchors it held at each bridge (a
-                    # bridge on 2 is one the floor of 3 refused until 2026-10-14).
-                    logger.info(
-                        f"[{genome_name}] bridged block {_b['chrom']}:{_b['start']}-{_b['end']}: "
-                        f"anchors before each gap {','.join(map(str, _b['bridge_anchors']))}; "
-                        f"genes {','.join(_b.get('genes', []))}")
-
         _gw_any_genome = (getattr(args, 'goi_genome_wide_path', False)
                           and getattr(args, 'goi_genome_wide_without_blocks', False))
-        if not synteny_blocks:
-            logger.info(f"[{genome_name}] No valid syntenic region found."
-                        + (" The genome-wide path searches it (--goi_genome_wide_without_blocks)."
-                           if _gw_any_genome else ""))
-            if not _gw_any_genome:
-                return genome_name, [], [], None
-
-        # Optimization: Merge overlapping search regions
-        pre_merge_count = len(synteny_blocks)
-        synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
-        if len(synteny_blocks) < pre_merge_count:
-            logger.info(f"[{genome_name}] Merged {pre_merge_count} blocks into {len(synteny_blocks)} discrete search regions.")
-        else:
-            logger.info(f"[{genome_name}] Found {len(synteny_blocks)} discrete syntenic blocks.")
-
-        # Keep only blocks with enough anchor genes to avoid spending hours
-        # on singleton/noise loci in fragmented genomes.
-        # Exception: single-gene blocks seeded by a GOI proxy (e.g., gene-LY6E)
-        # are retained so the full GOI search runs on the correct scaffold.
-        if args.min_block_genes > 1:
-            pre_filter_count = len(synteny_blocks)
-            filtered_blocks = []
-            proxy_blocks = []
-            for _b in synteny_blocks:
-                if _b.get('genes_count', 0) >= args.min_block_genes:
-                    filtered_blocks.append(_b)
-                elif _goi_seeded(_b):
-                    # A GOI proxy among the anchors, or §1o: a GOI-seeded (dispersed-rescue)
-                    # block is single-gene by construction — keep it despite min_block_genes.
-                    proxy_blocks.append(_b)
-            synteny_blocks = filtered_blocks + proxy_blocks
-            logger.info(
-                f"[{genome_name}] Block filter (min_block_genes={args.min_block_genes}): "
-                f"{len(filtered_blocks)} standard + {len(proxy_blocks)} GOI-proxy "
-                f"= {len(synteny_blocks)}/{pre_filter_count} retained."
-            )
-
-        # Fallback: if filtering removed everything, still keep top blocks by score.
-        if not synteny_blocks:
-            logger.info(
-                f"[{genome_name}] No blocks after filtering. "
-                f"Falling back to top {args.max_blocks_per_genome} unfiltered blocks."
-            )
-            synteny_blocks = identify_synteny_blocks(
-                seed_hits,
-                max_intron=args.max_intron,
-                cluster_distance=c_dist,
-                home_rank=home_rank,
-                bridge_max_gap=_bridge_max_gap,
-                bridge_max_rank_gap=_bridge_max_rank_gap,
-                bridge_min_anchors=_bridge_min_anchors,
-                bridge_two_sided=_bridge_two_sided,
-                bridge_max_per_block=_bridge_max_per_block,
-                gene_gap_limit=_gene_gap,
-            )
-            synteny_blocks = merge_synteny_blocks(synteny_blocks, args.region_padding)
-
-        # §1m: when capping bites, keep the most collinear blocks (merge re-sorted
-        # by position). GOI-proxy blocks (e.g. gene-LY6E) are protected first so a
-        # low-collinearity proxy seed is never dropped by the cap.
-        if home_rank and len(synteny_blocks) > 1:
-            def _cap_key(b):
-                return (1 if _goi_seeded(b) else 0,
-                        b.get('collinear_chain_len', 0),
-                        b.get('genes_count', 0))
-            synteny_blocks.sort(key=_cap_key, reverse=True)
-
-        # Hard cap per genome to prevent pathological runtimes.
-        if args.max_blocks_per_genome > 0 and len(synteny_blocks) > args.max_blocks_per_genome:
-            logger.info(
-                f"[{genome_name}] Capping blocks: {len(synteny_blocks)} -> "
-                f"{args.max_blocks_per_genome} (max_blocks_per_genome)."
-            )
-            log_capped_blocks(args, genome_name, synteny_blocks[args.max_blocks_per_genome:],
-                              args.max_blocks_per_genome, _goi_seeded,
-                              goi_proxy_flanking_parents, bool(home_rank))
-            synteny_blocks = synteny_blocks[:args.max_blocks_per_genome]
+        _block_opts = dict(home_rank=home_rank, bridge=_bridge, gene_gap=_gene_gap,
+                           goi_seeded=_goi_seeded, proxy_parents=goi_proxy_flanking_parents,
+                           gw_any_genome=_gw_any_genome)
+        synteny_blocks, _axis_values = genome_axis_blocks(seed_hits, flanking_seed_hits, _disp_seeds,
+                                                          args, genome_name, **_block_opts)
+        if synteny_blocks is None:
+            return genome_name, [], [], None
+        if _axis_values is not None:
+            args.genome_ctx['axis'] = _axis_values
         
         all_genes = []
         all_gff_lines = []
@@ -8007,6 +8164,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                  gf.write("##gff-version 3\n")
                  if getattr(args, 'distances', None):
                      gf.write(synvoy_scale.format_gff_header(args.distances) + "\n")
+                 if getattr(args, 'genome_axis', False):
+                     gf.write(format_genome_axis_header(genome_axis_values(args)) + "\n")
                  if get_genetic_code() != 1:
                      gf.write(f"##synvoy-genetic-code {get_genetic_code()}\n")
                  for gl in all_gff_lines:
@@ -8596,9 +8755,18 @@ def main():
     parser.add_argument("--disable_anchor_resolution", type=str2bool, default=False,
                         help="Count every flanking gene with a hit, also where several "
                              "flanking genes hit the same target DNA (behaviour before 2026-10-08)")
-    parser.add_argument("--anchor_max_places", type=int, default=0,
+    parser.add_argument("--anchor_max_places", type=count_or_auto, default=None,
                         help="Each flanking gene seeds blocks only at its N best places in a "
-                             "target genome (by summed bit score); 0 = at every place (default)")
+                             "target genome (by summed bit score); 0 = at every place. 'auto' "
+                             "(default): every place; with --genome_axis, a genome whose blocks "
+                             "exceed --max_blocks_per_genome is rebuilt from the "
+                             f"{GENOME_AXIS_PLACES} best places")
+    parser.add_argument("--genome_axis", type=str2bool, default=False,
+                        help="Set the values of the genome axis per target genome (today "
+                             "anchor_max_places 'auto'); each is logged and written to "
+                             "hits/<genome>.target_policy.tsv with its source and to the "
+                             "result GFF (##synvoy-genome-axis). The pipeline passes it with "
+                             "any --modules other than legacy")
     parser.add_argument("--goi_max_models_per_locus", type=int, default=10,
                         help="Gene models kept per GOI locus of a window: every miniprot model "
                              "that does not lie on a better one, up to this number; 1 = the "
@@ -9118,8 +9286,8 @@ def main():
     if args.max_blocks_per_genome < 0:
         logger.error("max_blocks_per_genome must be >= 0")
         sys.exit(1)
-    if args.anchor_max_places < 0:
-        logger.error("anchor_max_places must be >= 0 (0 = every place)")
+    if args.anchor_max_places is not None and args.anchor_max_places < 0:
+        logger.error("anchor_max_places must be >= 0 (0 = every place) or 'auto'")
         sys.exit(1)
     if args.min_block_genes < 1:
         logger.error("min_block_genes must be >= 1")
@@ -9292,6 +9460,9 @@ def main():
     else:
         logger.info(f"  Structural search: disabled")
     logger.info(f"  Max blocks/genome:{args.max_blocks_per_genome}")
+    if args.genome_axis:
+        logger.info(f"  Genome axis:      on (anchor_max_places "
+                    f"{'auto' if args.anchor_max_places is None else args.anchor_max_places})")
     logger.info(f"  Region padding:   {args.padding_min}-{args.padding_max} bp")
     if args.prefix:
         logger.info(f"  Locus prefix:     {args.prefix}")

@@ -505,7 +505,7 @@ The length floor of a window hit is the larger of `aug_relaxed_length_min` and `
 ### `max_blocks_per_genome`
 **Type:** Integer | **Default:** `80` | **Range:** 5–500
 
-A safety cap on the total number of candidate syntenic blocks evaluated per target genome. In genomes with many repetitive regions or large gene families, flanking gene hits may cluster into hundreds of candidate blocks. Evaluating each block involves gene prediction, tblastn, SW alignment, and classification — so the cost is approximately linear in block count. The default of 80 is sufficient for even complex genomes with multiple GOI loci (e.g., a gene family with 10 tandem copies on 5 chromosomes = 50 blocks). For very large gene families or whole-genome searches, increase to 120–200. For quick exploratory runs, decrease to 20–30. When the cap is hit, blocks are prioritized by synteny score (highest first), so the most promising regions are always evaluated. The cap prevents runaway searches in pathological genomes from stalling the entire pipeline for hours.
+A safety cap on the total number of candidate syntenic blocks evaluated per target genome. In genomes with many repetitive regions or large gene families, flanking gene hits may cluster into hundreds of candidate blocks. Evaluating each block involves gene prediction, tblastn, SW alignment, and classification — so the cost is approximately linear in block count. The default of 80 is sufficient for even complex genomes with multiple GOI loci (e.g., a gene family with 10 tandem copies on 5 chromosomes = 50 blocks). For very large gene families or whole-genome searches, increase to 120–200. For quick exploratory runs, decrease to 20–30. When the cap is hit, blocks are prioritized by synteny score (highest first), so the most promising regions are always evaluated. The cap prevents runaway searches in pathological genomes from stalling the entire pipeline for hours. On the genome axis (any `--modules` other than `legacy`, `anchor_max_places` `auto`) a genome in which the cap binds is first built again from the 5 best places of each flanking gene, and the cap then applies to that rebuild (see `anchor_max_places`).
 
 ### `min_block_genes`
 **Type:** Integer | **Default:** `2` | **Range:** 1–10
@@ -983,6 +983,8 @@ Besides the settings, `intermediate/locate_gene/effective_params.json` records:
 
 A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept. The report copies `profile`, `derivation` and `constraints` into its `run_settings`.
 
+**The genome axis** (since 2026-10-27). The modules run once per query and see only the home side. A value that should differ per target genome is set in the search instead, where each genome's distances are derived, with any `--modules` other than `legacy`; under `legacy` the search gets the arguments it had before. Today the axis holds `anchor_max_places` (`auto`: every place, and the 5 best places of each flanking gene in a genome where the block cap binds). A value you set is used for every genome. Each genome's value is logged (`genome axis: anchor_max_places N (source; ...)`), written to `hits/<genome>.target_policy.tsv` with its source and the block counts, which the report's `target_policy` block carries, and written to the genome's result GFF (`##synvoy-genome-axis`). No module rule may set an axis value.
+
 The settings map holds 32 parameters: the 25 a module rule may set, and 7 fixed ones that no rule sets but that travel with them, so the report and every step read one file (`sw_min_score`, `sw_min_identity`, `min_hit_identity`, `min_hit_length`, `expand_goi_similar`, `goi_family_tokens`, `adaptive_unique_gene_floor`; why each has no rule: `PASS_THROUGH_KEYS` in `bin/select_modules.py`). The flank walk, the search and the region scorer read the map directly. The steps after the search read it from `effective_params.json` (since 2026-10-26): the hull rescue `goi_hull_min_coverage`, the ownership panel `locus_ownership_max_genes_per_locus` and `paralog_panel_max_family`, the figures `max_goi_per_genome`.
 
 ### `allow_unknown_species`
@@ -1072,7 +1074,9 @@ Inside a window the gene of interest is searched with the **home protein**, and 
 Until 2026-10-08 a window was searched with ONE sequence per gene, the longest of the home protein and all earlier models. A model three residues longer than the home protein then replaced it for the rest of the run, and identity and coverage of every later call referred to that model. Calls of later genomes can therefore show a lower identity than in older runs.
 
 ### `anchor_max_places`
-**Type:** Integer | **Default:** `0` (= every place)
+**Type:** `auto` or Integer | **Default:** `auto`
+
+`auto` is every place (the old default 0), except on the genome axis (any `--modules` other than `legacy`, since 2026-10-27; see [`modules`](#modules)): a target genome in which the block cap `max_blocks_per_genome` binds is built again once from the 5 best places of each flanking gene, and the cap cuts that rebuild as before if it still binds. The GOI's own home gene among the anchors keeps every place there, and rescued GOI hits stay seeds. A number (0 included) is used for every genome. Each genome's value and its source (`default`, `genome_axis` or `user_set`) are in the search log, in `hits/<genome>.target_policy.tsv` and in the header line `##synvoy-genome-axis` of the genome's result GFF.
 
 Each flanking gene seeds blocks only at its N best places in a target genome. A place is a run of hits of that gene within its own gap limit; the best places are those with the largest summed bit score. The ortholog of a flanking gene is one place; its further places are relatives and shared domains, and they are what puts two anchors near each other by chance, which is how most searched blocks arise. The hits that are left out still count inside a window (flanking support, flanking gene models); only the seeding of blocks changes.
 
@@ -1086,11 +1090,11 @@ Measured by replaying the saved genome-wide hits of 31 genome searches (yeasts, 
 | fly Adh in three *Drosophila* and a mosquito | 45 / 23 | 4.6 / 3.8 min |
 | apyrase in seven ants and a hornet | 35 / 35 | unchanged |
 
-The limit matters where flanking genes have many places: about 2 per gene in an ant genome (nothing changes), 7 to 9 in a yeast, and 92 hits per flanking gene in *Arabidopsis lyrata*, where the default search reaches the cap of 80 blocks per genome and cuts out a fifth of the genome for one home locus. **For plant genomes, and whenever the log says `Capping blocks`, use `--anchor_max_places 5`.**
+The limit matters where flanking genes have many places: about 2 per gene in an ant genome (nothing changes), 7 to 9 in a yeast, and 92 hits per flanking gene in *Arabidopsis lyrata*, where the default search reaches the cap of 80 blocks per genome and cuts out a fifth of the genome for one home locus. **For plant genomes, and whenever the log says `Capping blocks`, use `--anchor_max_places 5`** under `--modules legacy`; with any other `--modules` the genome axis does it for each genome where the cap binds.
 
 One side effect. Where a target genome has no conserved neighbourhood, its blocks with two anchors are chance blocks, and the limit removes them all. The search then falls back to every block with one anchor, as it always does when no block passes `min_block_genes` (up to `max_blocks_per_genome`). Fruit fly against mosquito: 3 windows without the limit, 19 with it.
 
-It is off by default because it has not been run on the large families of the benchmark.
+A fixed N is not the default because it has not been run on the large families of the benchmark; the genome axis uses 5 only where the cap would otherwise cut blocks without regard to their places.
 
 ### `disable_anchor_resolution`
 **Type:** Boolean | **Default:** `false`

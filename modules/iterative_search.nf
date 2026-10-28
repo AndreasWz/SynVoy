@@ -38,6 +38,9 @@ process ITERATIVE_SEARCH {
     script:
     // The target genomes' genetic codes (lib/GeneticCodes.groovy); '' when all use table 1.
     def gc_args = GeneticCodes.targetArgs(params)
+    // The genome axis (lib/GenomeAxis.groovy): '' and anchor_max_places 'auto' as 0 under
+    // --modules legacy, so a legacy task is the one it was before.
+    def axis_args = GenomeAxis.args(params)
     """
     ${projectDir}/bin/iterative_search_runner.py \\
         --initial_db $initial_db \\
@@ -91,7 +94,7 @@ process ITERATIVE_SEARCH {
         --synteny_bridge_max_gap_genes ${FlankingCounts.value(params, 'synteny_bridge_max_gap_genes')} \\
         --synteny_bridge_max_gap ${params.synteny_bridge_max_gap} \\
         --disable_anchor_resolution ${params.disable_anchor_resolution} \\
-        --anchor_max_places ${params.anchor_max_places} \\
+        --anchor_max_places ${GenomeAxis.anchorMaxPlaces(params)}${axis_args} \\
         --disable_relative_query ${params.disable_relative_query} \\
         --goi_chain_query_aware ${params.goi_chain_query_aware} \\
         --tandem_query_restart ${params.tandem_query_restart} \\

@@ -262,8 +262,9 @@ hold for every module:
   figure (cap 60), max(15, `Fam` + 1) relatives in the panel (A2, cap 50) and the hull
   rescue's coverage filter 0.3 (B1); every other rule is a constant. No rule may write a
   switch (a whole step on or off, such as `decoy_mode`, a run-level option, or
-  `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`, or the module mechanism
-  itself (`FORBIDDEN_FOR_MODULES`).
+  `tandem_copy_parent`), `n_flanking_genes`, `expand_goi_similar`, the module mechanism
+  itself, or a value of the genome axis, which the search sets per target genome (§7.1)
+  (`FORBIDDEN_FOR_MODULES`).
 - **Constraints** (`check_constraints`, after the rules and the values the user set): the
   GOI margin lies within the window margin, where the DNA searched ends (C1); with A1, the
   GOI loci kept per query and the models per GOI locus reach `c` + 1 within their caps (a
@@ -528,8 +529,8 @@ most one home gene; two flanking genes that are relatives of each other would
 otherwise count one target gene as two anchors. `--disable_anchor_resolution` keeps
 every hit.
 
-**Optional: the best places of each anchor** (`limit_anchor_places`, `anchor_max_places`,
-off by default). A flanking gene usually hits more than its ortholog: relatives and
+**The best places of each anchor** (`limit_anchor_places`, `anchor_max_places`; `auto`,
+the default, is every place, see the genome axis below). A flanking gene usually hits more than its ortholog: relatives and
 shared domains give further places, and those are what puts two anchors near each other
 by chance. With `--anchor_max_places N` a gene seeds blocks only at its N best places (a
 place = its hits within its own gap limit; best = largest summed bit score). The other
@@ -541,7 +542,23 @@ test cases run with N = 5 the ortholog calls were the same (yeast: 18 windows in
 neighbourhood the limit removes every block with two anchors (they were chance blocks),
 and the search falls back to the blocks with one anchor, as it does whenever no block
 passes `min_block_genes`: 19 windows instead of 3 for fruit fly against mosquito. It has
-not been run on the large families of the benchmark, which is why it is not the default.
+not been run on the large families of the benchmark, which is why a fixed N is not the default.
+
+**The genome axis** (`genome_axis_blocks`, since 2026-10-27). The preset modules run once
+per query and see only the home side; a value that should differ per target genome is set
+here, in the search, with any `--modules` other than `legacy` (`lib/GenomeAxis.groovy`
+passes `--genome_axis`). Under `legacy` the search gets the arguments it had before. Today the
+axis holds one value, `anchor_max_places`: with `auto`, a genome whose blocks exceed the cap
+(§7.4) is built again once from the 5 best places of each flanking gene, and the cap then
+cuts the rebuild as before if it still binds; where the cap does not bind, every place
+counts, as without the axis. The GOI's own home gene among the anchors (a GOI proxy) keeps
+every place and the rescued GOI hits (§7.11) stay seeds, so each seed of a GOI-seeded block
+is a seed of the rebuild too; the places counted for E_syn (§7.13) are taken from all hits
+before the blocks and do not change. A number the user gives is used for every genome.
+Each genome's value is logged (`genome axis: anchor_max_places N (source; ...)`), written to
+`hits/<genome>.target_policy.tsv` with its source (`default`, `genome_axis`, `user_set`) and
+the block counts before and after a rebuild, and to the result GFF (`##synvoy-genome-axis`).
+The modules may not set an axis value (`GENOME_AXIS_KEYS`, part of `FORBIDDEN_FOR_MODULES`).
 
 Only hits of flanking genes are used to build blocks. GOI hits are not, with one
 exception ([§7.11](#711-goi-hits-far-from-their-anchors)). If no flanking gene has a
@@ -663,7 +680,9 @@ ranking off.
    dropped. A block is kept regardless when it was seeded by the GOI's own home gene
    or by a rescued GOI hit (§7.11). If no block is left, all blocks are used.
 3. **Cap.** At most `max_blocks_per_genome` (80) blocks are searched: GOI-seeded
-   blocks first, then by collinear run, then by gene count.
+   blocks first, then by collinear run, then by gene count. On the genome axis (§7.1) a
+   genome where the cap binds is first built again from the 5 best places of each flanking
+   gene; the same steps (`build_genome_blocks`) then filter, sort and cap the rebuild.
 
 ### 7.5 Windows
 
@@ -1353,7 +1372,8 @@ Consequences of the rules above that a reader of the results should know.
   an ant genome that is about 2 per gene; in *Arabidopsis lyrata* a flanking gene of
   *A. thaliana* has 92 hits, the cap of 80 blocks per genome is reached, and one home
   locus cuts out a fifth of the genome (the FT orthologs are still found).
-  `--anchor_max_places 5` (§7.1) brings that to one window.
+  `--anchor_max_places 5` (§7.1) brings that to one window; on the genome axis
+  (`--modules` other than `legacy`) a genome where the cap binds gets it on its own.
 - Where the gene order between home and target is lost (no five anchors in a row), the
   expansion is the ratio of the genome sizes, a coarse stand-in for the spacing of
   genes.
@@ -1427,6 +1447,7 @@ of 9 without.
 | `window_margin_genes` / `region_padding` | 7 pitches / auto | §7.4, §7.5 |
 | `goi_margin_genes` / `goi_margin` | 2 pitches / auto | §7.5 |
 | `min_block_genes` / `max_blocks_per_genome` | 2 / 80 | §7.4 |
+| `anchor_max_places` | `auto` (every place; on the genome axis 5 where the cap binds) | §7.1, §7.4 |
 | `gap_search_window` | 50,000 (floor) | §7.7 |
 | `goi_max_models_per_locus` | 10 | §7.7 |
 | `sw_min_score` / `sw_min_identity` | 20 / 10 | §7.6 |
