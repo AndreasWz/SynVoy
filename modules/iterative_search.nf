@@ -1,6 +1,10 @@
 process ITERATIVE_SEARCH {
     tag "iterative"
     label 'process_long'
+    // The memory request grows with the target genomes searched at once, x the attempt, and under the
+    // local executor stays within its memory (lib/SearchMemory.groovy, profile stage 5b); the console
+    // prints it. Set here, not in nextflow.config, which cannot reach a lib/ class.
+    memory { def m = SearchMemory.request(params, genomes, task); log.info m.line; m.memory }
     // Decoy calls (--decoy_mode) are published as they are written; the report reads only their
     // counts (columns of hits/<genome>.target_policy.tsv).
     publishDir path: { "${params.outdir}/decoys/${locus_id}" }, mode: 'copy',

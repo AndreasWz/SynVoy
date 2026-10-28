@@ -176,7 +176,7 @@ Don't combine two execution backends (e.g. `docker,singularity`) or two memory t
 | Profile | Executor | Environment | Description |
 |---|---|---|---|
 | `auto` | local | Conda | **Recommended zero-config default.** Like `standard`, plus it pins the full auto-tuning stack on (auto preset selection, locus cap, strong-synteny rescue, paralog check). Best when you don't want to hand-pick a preset. |
-| `standard` | local | Conda | Default. 2 CPUs / 10 GB RAM per iterative-search task, single-fork. Good baseline for workstations. |
+| `standard` | local | Conda | Default. 2 CPUs / at least 10 GB RAM per iterative-search task (more for large target genomes and on a retry, see `iterative_search_memory`), single-fork. Good baseline for workstations. |
 | `conda` | local | Conda | Same as `standard` but explicitly disables Docker/Singularity. |
 | `docker` | local | Docker | Runs all processes inside the `synvoy-local:latest` container. Build it first with `docker build -t synvoy-local:latest .` |
 | `docker_max` | local | Docker | Auto-detects all host CPUs and RAM. Allocates nearly everything to the heaviest tasks (MMseqs2, ITERATIVE_SEARCH). Single-fork to avoid OOM. Ideal for dedicated machines. |
@@ -196,7 +196,7 @@ The defaults assume a workstation with at least ~12 GB free RAM. On laptops, low
 
 | Profile | Target machine | `iterative_search_memory` | `mmseqs_split_memory_limit` | `mmseqs_sensitivity` |
 |---|---|---|---|---|
-| (none — uses defaults) | ≥16 GB free RAM | 10 GB | 8G | 9.5 |
+| (none — uses defaults) | ≥16 GB free RAM | `auto` (at least 10 GB; more for large genomes, x the attempt) | 8G | 9.5 |
 | `laptop_safe` | ~16 GB RAM laptop | 8 GB | 4G | 8.0 |
 | `low_mem` | ~8 GB RAM laptop | 4 GB | 2G | 7.0 |
 
@@ -445,7 +445,7 @@ These control per-process resource allocation. Override them for your hardware.
 | Parameter | Default | Description |
 |---|---|---|
 | `--iterative_search_cpus` | `2` | CPUs for ITERATIVE_SEARCH tasks |
-| `--iterative_search_memory` | `10 GB` | RAM for ITERATIVE_SEARCH tasks (lowered to 8 GB / 4 GB by the `laptop_safe` / `low_mem` tiers; `docker_max` sizes it from host RAM) |
+| `--iterative_search_memory` | `auto` | RAM for ITERATIVE_SEARCH tasks: `auto` = max(10 GB, what the largest target genomes searched at once need), x the attempt, at most the local executor's memory; a size is used as it is (8 GB / 4 GB in the `laptop_safe` / `low_mem` tiers; `docker_max` sizes it from host RAM) |
 | `--iterative_search_max_forks` | `1` | Max parallel ITERATIVE_SEARCH tasks |
 | `--locate_gene_cpus` | `1` | CPUs for LOCATE_GENE |
 | `--locate_gene_memory` | `3 GB` | RAM for LOCATE_GENE |
@@ -667,6 +667,7 @@ nextflow clean -f
 **Cause:** Out of memory. MMseqs2's translated target database and tBLASTN's index can be RAM-intensive — especially on vertebrate-scale genomes (1-3 GB FASTA → 3-9 GB 6-frame translated DB).
 
 **Fix:**
+- A retry of ITERATIVE_SEARCH asks for more memory each time (`iterative_search_memory` `auto`; the console prints `ITERATIVE_SEARCH memory: ...` per attempt). On a laptop the request stops at the machine's memory, so there the next points matter.
 - Use the right memory tier — `-profile standard,laptop_safe` (16 GB RAM) or `-profile standard,low_mem` (8 GB RAM). See [§2 — Memory tiers](#memory-tiers-combine-with-an-execution-backend).
 - If the error message is `cannot fit database into ... / not enough memory to keep dbreader/write in memory`, drop `--mmseqs_split_memory_limit` further (try `1G`).
 - Increase available memory or switch to an HPC profile.
