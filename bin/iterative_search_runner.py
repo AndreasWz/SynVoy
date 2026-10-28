@@ -3194,8 +3194,10 @@ def limit_anchor_places(hits, max_places, gap_limit=None, default_gap=20000, kee
 
     Only the seeding of blocks uses the result. The other hits still count inside a
     window (flanking support, flanking gene models). The hits of the genes in ``keep`` (the
-    GOI proxies of the genome axis's rebuild: the GOI's own home gene among the anchors,
-    whose further places are copies of the GOI) all pass, in their places.
+    GOI proxies: the GOI's own home gene among the anchors, whose further places are copies
+    of the GOI) all pass, in their places: in the genome axis's rebuild and, since
+    2026-10-28 (fix-phase item 15), under a limit the user sets, where a proxy seed at its
+    (N+1)-th place formed no GOI-seeded block.
     """
     if not max_places or int(max_places) <= 0:
         return list(hits)
@@ -7604,7 +7606,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # None = 'auto': every place, unless the genome axis rebuilds (genome_axis_blocks).
         _max_places = int(getattr(args, 'anchor_max_places', None) or 0)
         if _max_places > 0 and flanking_seed_hits:
-            seed_hits = limit_anchor_places(flanking_seed_hits, _max_places, _gene_gap)
+            # The GOI proxies keep every place, as in the genome axis's rebuild (item 15).
+            seed_hits = limit_anchor_places(flanking_seed_hits, _max_places, _gene_gap,
+                                            keep=goi_proxy_flanking_parents)
             logger.info(
                 f"[{genome_name}] Anchor places: blocks are seeded from {len(seed_hits)} of "
                 f"{len(flanking_seed_hits)} flanking hits (the {_max_places} best places of each gene).")

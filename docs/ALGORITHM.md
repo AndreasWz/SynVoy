@@ -545,7 +545,8 @@ every hit.
 the default, is every place, see the genome axis below). A flanking gene usually hits more than its ortholog: relatives and
 shared domains give further places, and those are what puts two anchors near each other
 by chance. With `--anchor_max_places N` a gene seeds blocks only at its N best places (a
-place = its hits within its own gap limit; best = largest summed bit score). The other
+place = its hits within its own gap limit; best = largest summed bit score); the GOI's own
+home gene among the anchors (a GOI proxy) keeps every place (since 2026-10-28). The other
 hits still count inside a window. Replayed on the saved hits of 31 genome searches
 (yeasts, flies, bees, ants, plants), N = 5 left 121 of 512 windows, and the one call that
 was no longer in a searched block was a relative of the gene, not an ortholog. In five
