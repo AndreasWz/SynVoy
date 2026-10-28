@@ -22,6 +22,7 @@ Usage:
                         predictor="augustus", augustus_species="fly")
 """
 
+import difflib
 import logging
 import os
 import re
@@ -66,7 +67,10 @@ def check_predictor_available(predictor: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # Common Augustus species models grouped by clade.
-# Used by auto-detection and as documentation for users.
+# Used by auto-detection and as documentation for users. resolve_augustus_species stops a
+# prediction whose model is not installed (fix-phase item 16, 2026-10-28): the Augustus 3.5 of
+# synvoy_env has no Bombyx (silkworm) and no Mus (mouse) model, so those two hints stop with the
+# nearest installed models.
 AUGUSTUS_SPECIES_MAP = {
     # Insects
     "fly": "fly",
@@ -77,7 +81,7 @@ AUGUSTUS_SPECIES_MAP = {
     "tribolium": "tribolium2012",
     "mosquito": "aedes",
     "aedes": "aedes",
-    "bombus": "bombus_terrestris1",
+    "bombus": "bombus_terrestris2",  # was bombus_terrestris1, which is not installed
     "butterfly": "heliconius_melpomene1",
     "silkworm": "bombyx_mori",
     "ant": "nasonia",  # nasonia is a close hymenoptera model
@@ -100,6 +104,12 @@ AUGUSTUS_SPECIES_MAP = {
 }
 
 
+class AugustusModelNotInstalled(ValueError):
+    """An Augustus model that the installed Augustus cannot load (fix-phase item 16). Until
+    2026-10-28 Augustus then exited 1, predict_genes fell back to Prodigal with one warning,
+    and the task went on with Prodigal's intron-blind models."""
+
+
 def resolve_augustus_species(species_hint: str) -> str:
     """
     Resolve a user-friendly species hint to an Augustus --species parameter.
@@ -108,11 +118,77 @@ def resolve_augustus_species(species_hint: str) -> str:
       - Direct Augustus species names (e.g., "honeybee1", "nasonia")
       - Common names from AUGUSTUS_SPECIES_MAP (e.g., "fly", "honeybee")
       - Falls back to the hint as-is (user may have a custom model)
+
+    Raises AugustusModelNotInstalled when Augustus is installed and cannot load the model
+    (augustus_model_installed): the message names the hint, the model and the nearest
+    installed models. Without Augustus nothing is checked (the prediction then falls back to
+    Prodigal, as before).
     """
     if not species_hint:
         return "fly"  # safe default for eukaryotes
     hint_lower = species_hint.strip().lower()
-    return AUGUSTUS_SPECIES_MAP.get(hint_lower, species_hint)
+    name = AUGUSTUS_SPECIES_MAP.get(hint_lower, species_hint.strip())
+    config_dir = augustus_config_dir() if check_augustus_available() else None
+    if config_dir and not augustus_model_installed(name, config_dir):
+        raise AugustusModelNotInstalled(not_installed_message(species_hint, name, config_dir))
+    return name
+
+
+def augustus_model_installed(name: str, config_dir: str) -> bool:
+    """True when Augustus can load the model ``name`` from ``config_dir``: its parameter file
+    species/<name>/<name>_parameters.cfg, where Augustus looks first, or <name>_parameters.cfg
+    in the config folder itself, where it looks next. The aliases of the help list
+    (saccharomyces, maize5) and a model the user installed under any name have that file."""
+    if not name or os.path.basename(name) != name:
+        return False
+    return (os.path.isfile(os.path.join(config_dir, "species", name, f"{name}_parameters.cfg"))
+            or os.path.isfile(os.path.join(config_dir, f"{name}_parameters.cfg")))
+
+
+def nearest_installed_models(hint: str, name: str, models: Dict[str, str],
+                             taxonomy=None, n: int = 3) -> List[str]:
+    """The installed models to name when ``name`` (resolved from ``hint``) is not installed:
+    the model nearest in the NCBI taxonomy on disk when the name or the hint is a taxon there
+    (nearest_augustus_model, as for a home without a GFF; the name is read without the version
+    digits that end a model id, so bombus_terrestris1 is the species Bombus terrestris), then the
+    closest by spelling."""
+    out: List[str] = []
+    if taxonomy is not None:
+        for candidate in dict.fromkeys((re.sub(r"\d+$", "", name), name, hint)):
+            model, info = nearest_augustus_model(candidate, models, taxonomy)
+            if model:
+                out.append(f"{model} ({models[model]}; nearest by taxon, shared taxon "
+                           f"{info.get('shared_taxon')})")
+                break
+    taken = {entry.split()[0] for entry in out}
+    for model in difflib.get_close_matches(name, sorted(models), n=n, cutoff=0.6):
+        if model not in taken and len(out) < n:
+            out.append(f"{model} ({models[model]})")
+            taken.add(model)
+    return out
+
+
+def not_installed_message(hint: str, name: str, config_dir: str) -> str:
+    """The message of a model that is not installed: the hint, the model it maps to, where
+    Augustus looked, and the nearest installed models."""
+    models = installed_augustus_models(config_dir=config_dir)
+    ncbi = offline_ncbi_taxa()
+    near = nearest_installed_models(hint, name, models,
+                                    TaxonomyLookup(ncbi) if ncbi is not None else None)
+    species_dir = os.path.join(config_dir, "species")
+    cfg = os.path.join(species_dir, name, f"{name}_parameters.cfg")
+    what = (f"maps to the Augustus model '{name}', which is not installed"
+            if name != hint.strip() else "is not an installed Augustus model")
+    near_text = (f"Nearest installed models: {'; '.join(near)}." if near else
+                 "No installed model is near it by taxon or by spelling.")
+    env_text = ("" if os.path.isdir(species_dir) else
+                f" Augustus reads its models only from $AUGUSTUS_CONFIG_PATH ({config_dir}) when it "
+                f"is set, and that folder holds no species folder.")
+    return (f"augustus_species '{hint}' {what} (there is no {cfg}).{env_text} {near_text} "
+            f"{len(models)} models are installed: the identifiers `augustus --species=help` lists "
+            f"(not its aliases in parentheses) and the Genus_species folders in {species_dir} that "
+            f"the list leaves out; set one with --augustus_species, or install the model in "
+            f"{species_dir}.")
 
 
 def list_augustus_species() -> List[str]:
@@ -149,16 +225,15 @@ EUKARYOTA_TAXID = 2759
 
 
 def augustus_config_dir() -> Optional[str]:
-    """Augustus's config folder: $AUGUSTUS_CONFIG_PATH, else <prefix>/config next to the
-    binary (the conda layout); None when neither holds a species folder."""
-    candidates = []
-    if os.environ.get("AUGUSTUS_CONFIG_PATH"):
-        candidates.append(os.environ["AUGUSTUS_CONFIG_PATH"])
+    """Augustus's config folder, the one Augustus itself reads: $AUGUSTUS_CONFIG_PATH when it
+    is set (Augustus then reads no other folder, also when this one holds no species folder,
+    and an empty value is the root; fix-phase item 16), else <prefix>/config next to the
+    binary (the conda layout) when it holds a species folder; None otherwise."""
+    if "AUGUSTUS_CONFIG_PATH" in os.environ:
+        return os.environ["AUGUSTUS_CONFIG_PATH"] or "/"
     binary = shutil.which("augustus")
     if binary:
-        candidates.append(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(binary))),
-                                       "config"))
-    for path in candidates:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(binary))), "config")
         if os.path.isdir(os.path.join(path, "species")):
             return path
     return None

@@ -878,6 +878,26 @@ def decoy_cases(candidates) -> List[List[Dict[str, Any]]]:
     return [cases[k] for k in sorted(cases)]
 
 
+def augustus_steps_model_error(args) -> Optional[str]:
+    """The message when a step that predicts ORFs in target windows with Augustus is on and
+    Augustus cannot load the model (gene_predictor.resolve_augustus_species, fix-phase item
+    16); None otherwise. One step does: the structural discovery (run_gpu_augment_phase),
+    which runs only with the PLM or the structural search on (all three off by default); the
+    window searches of plm_search / structural_search would too, but only with GPU_IN_WORKER.
+    Discovery catches every error of a window and goes on without its ORFs, so main stops
+    here instead. Either search without discovery runs no Augustus and stops nothing."""
+    plm_or_structural = (getattr(args, "enable_plm_search", False)
+                         or getattr(args, "enable_structural_search", False))
+    if not (plm_or_structural and (getattr(args, "enable_structural_discovery", False) or GPU_IN_WORKER)):
+        return None
+    import gene_predictor
+    try:
+        gene_predictor.resolve_augustus_species(getattr(args, "augustus_species", "fly"))
+    except gene_predictor.AugustusModelNotInstalled as exc:
+        return str(exc)
+    return None
+
+
 def read_home_exons(goi_info_path) -> Tuple[Optional[str], List[int]]:
     """``(method, exon lengths in aa)`` of the home gene model (goi_info.json of ANNOTATE_GOI),
     tandem copies of the home model left out, in exon order; ``(None, [])`` without the file.
@@ -9380,6 +9400,10 @@ def main():
     # Gene predictor validation
     if args.gene_predictor not in ("auto", "augustus", "prodigal"):
         logger.error(f"gene_predictor must be 'auto', 'augustus', or 'prodigal' (got '{args.gene_predictor}')")
+        sys.exit(1)
+    augustus_error = augustus_steps_model_error(args)
+    if augustus_error:
+        logger.error(augustus_error)
         sys.exit(1)
 
     # PLM search validation & availability check

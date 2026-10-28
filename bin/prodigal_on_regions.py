@@ -20,10 +20,12 @@ except ImportError:
     )
 
 try:
-    from gene_predictor import predict_genes, check_predictor_available
+    from gene_predictor import (AugustusModelNotInstalled, check_predictor_available, predict_genes,
+                                resolve_augustus_species)
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from gene_predictor import predict_genes, check_predictor_available
+    from gene_predictor import (AugustusModelNotInstalled, check_predictor_available, predict_genes,
+                                resolve_augustus_species)
 
 
 def parse_bed(path):
@@ -228,6 +230,13 @@ def main():
                         help="NCBI genetic code of the genome (default 1, the standard code)")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    # An Augustus model that is not installed stops here (fix-phase item 16): Augustus exited 1
+    # and the prediction fell back to Prodigal, which cannot predict genes with introns.
+    if args.gene_predictor != "prodigal":
+        try:
+            resolve_augustus_species(args.augustus_species)
+        except AugustusModelNotInstalled as exc:
+            sys.exit(f"ERROR: {exc}")
 
     genome_seqs = load_genome(args.genome)
     regions = parse_bed(args.goi_bed)

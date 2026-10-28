@@ -23,10 +23,10 @@ except ImportError:
     )
 
 try:
-    from gene_predictor import predict_genes
+    from gene_predictor import AugustusModelNotInstalled, predict_genes, resolve_augustus_species
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from gene_predictor import predict_genes
+    from gene_predictor import AugustusModelNotInstalled, predict_genes, resolve_augustus_species
 
 def parse_gff_for_genes(gff_file):
     """
@@ -517,6 +517,13 @@ def main():
         augustus_sp = getattr(args, 'augustus_species', 'fly')
         print(f"No GFF provided. Running gene prediction on flanking regions "
               f"(predictor={predictor_name}, augustus_species={augustus_sp})...")
+        # An Augustus model that is not installed stops here (fix-phase item 16): the loop below
+        # turns a failed prediction into a printed line, and Augustus fell back to Prodigal.
+        if predictor_name != "prodigal":
+            try:
+                resolve_augustus_species(augustus_sp)
+            except AugustusModelNotInstalled as exc:
+                sys.exit(f"ERROR: {exc}")
 
         # For each target region, extract a window (e.g. +/- 50kb)
         FLANK_WINDOW = max(0, int(args.pred_flank_window))
