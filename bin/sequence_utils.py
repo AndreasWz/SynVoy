@@ -767,6 +767,36 @@ def strip_species_qualifier(species_name):
     return out or species_name
 
 
+DEFAULT_TAXA_DB = os.path.expanduser("~/.etetoolkit/taxa.sqlite")
+
+
+def offline_ncbi_taxa(dbfile: Optional[str] = None):
+    """ete3's NCBITaxa on the NCBI taxonomy database already on disk (``~/.etetoolkit/
+    taxa.sqlite``, the one synvoy_tree reads), never a download: None without ete3 or the
+    database. ete3's web plugin imports the stdlib ``cgi`` module, which Python 3.13 removed,
+    so a stub stands in for it during the import, as in synvoy_tree."""
+    path = dbfile or DEFAULT_TAXA_DB
+    if not os.path.exists(path):
+        return None
+    try:
+        import sys as _sys
+        import types as _types
+        import warnings as _warnings
+        if "cgi" not in _sys.modules:
+            try:
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter("ignore", DeprecationWarning)   # 3.11-3.12
+                    import cgi  # noqa: F401
+            except ModuleNotFoundError:
+                _shim = _types.ModuleType("cgi")
+                _shim.escape = lambda s, quote=True: s
+                _sys.modules["cgi"] = _shim
+        from ete3 import NCBITaxa  # type: ignore
+        return NCBITaxa(dbfile=path)
+    except Exception:
+        return None
+
+
 def str2bool(value: Any) -> bool:
     """
     Argparse-friendly boolean parser.

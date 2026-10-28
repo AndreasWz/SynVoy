@@ -363,8 +363,8 @@ One search per window (the names date from a design with several relaxed rounds)
 | `--pred_flank_window` | `50000` | Prodigal prediction window around locus |
 | `--pred_keep_pct` | `0.10` | Fraction of Prodigal predictions to keep |
 | `--prodigal_full_genome_fallback` | `false` | Run Prodigal on entire genome if windowed prediction fails |
-| `--gene_predictor` | `auto` | Gene predictor for unannotated genomes: `auto`, `augustus`, or `prodigal` |
-| `--augustus_species` | `fly` | Augustus species model used when Augustus is selected |
+| `--gene_predictor` | `auto` | Gene predictor for a home genome without a GFF (and the optional ML steps): `auto`, `augustus`, or `prodigal`. With any `--modules` other than `legacy`, `auto` stops the run when a eukaryotic home would fall back to Prodigal |
+| `--augustus_species` | `auto` | Augustus species model. `auto`: `fly` under `--modules legacy`; otherwise, for a home without a GFF, the installed model nearest the home species (e.g. `candida_albicans`, `honeybee1`, `human`), recorded in `effective_params.json`. A model name is used as given |
 
 ### Gene Model Classification
 

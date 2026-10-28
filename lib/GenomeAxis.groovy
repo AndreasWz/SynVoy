@@ -7,6 +7,8 @@
 // genome.
 //   anchor_max_places  'auto': every place (0), unless the block cap binds in a genome, which is
 //                      then rebuilt from the 5 best places of each flanking gene (axis on only)
+// The same switch gates the Augustus model of a home genome without a GFF (lib/HomeGenes.groovy,
+// stage 5c), which is set per home, not per genome, by the same rule: not under legacy.
 class GenomeAxis {
 
     // bin/select_modules.parse_spec: an empty --modules is legacy, else its first word is the mode

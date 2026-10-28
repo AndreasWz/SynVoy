@@ -10,7 +10,10 @@
 // extract_flanking.nf), and that the report reads as its run_settings. It also holds the
 // profile the module rules read, the derivation of every key a module rule, the preset or
 // the user set, and the constraint checks; a violation that only the rules made exits 2
-// (the run stops before the search).
+// (the run stops before the search). With any --modules other than legacy and a home genome
+// without a GFF it also chooses the Augustus model of the home's gene prediction
+// (augustus_species, stage 5c), and stops the run when a eukaryotic home would fall back to
+// Prodigal.
 //
 // We intentionally keep this process tiny + cheap (cache 'deep'): the
 // resolution logic lives in bin/resolve_effective_params.py for testability.
@@ -34,6 +37,8 @@ process RESOLVE_EFFECTIVE_PARAMS {
     val preset_override
     val disable_auto_apply
     val modules_spec
+    val home_species        // for the Augustus model of a home without a GFF (stage 5c)
+    val home_gff_present
 
     output:
     path "effective_params.json", emit: json
@@ -41,6 +46,8 @@ process RESOLVE_EFFECTIVE_PARAMS {
     script:
     def override_arg = preset_override ? "--preset_override ${preset_override}" : ''
     def disable_arg  = disable_auto_apply ? '--disable_auto_apply' : ''
+    // lib/HomeGenes.groovy: '' under --modules legacy, so that task is the one it was before.
+    def home_args = HomeGenes.resolverArgs(params, home_species, home_gff_present)
     """
     # The defaults map comes in as a Groovy/JSON string. Write it to a sidecar
     # so we don't have to worry about quoting in the python invocation.
@@ -55,7 +62,7 @@ __SYNVOY_DEFAULTS__
         --home_context ${home_context} \\
         --modules '${modules_spec}' \\
         --n_flanking_genes ${params.n_flanking_genes} \\
-        --window_margin_genes ${params.window_margin_genes} \\
+        --window_margin_genes ${params.window_margin_genes}${home_args} \\
         --defaults defaults.json \\
         --shipped_config ${projectDir}/nextflow.config \\
         ${override_arg} \\

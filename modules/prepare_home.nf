@@ -5,6 +5,7 @@ process PREPARE_HOME_PROTEOME {
     path home_genome
     path home_gff
     path goi_bed
+    val settings    // augustus_species of a home without a GFF (lib/HomeGenes.groovy, stage 5c)
     
     output:
     path "home_proteome.faa", emit: faa
@@ -13,6 +14,7 @@ process PREPARE_HOME_PROTEOME {
     
     script:
     def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
+    def augustus = HomeGenes.augustusSpecies(params, settings)
     """
     if [ "$home_gff" != "NO_GFF" ]; then
         echo "Extracting proteins from Home GFF..."
@@ -30,7 +32,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome ${params.prodigal_full_genome_fallback} \\
             --gene_predictor ${params.gene_predictor} \\
-            --augustus_species ${params.augustus_species} ${gc_arg}
+            --augustus_species ${augustus} ${gc_arg}
     fi
 
     # Guard: if GFF extraction produced an empty file, fall back to gene prediction
@@ -44,7 +46,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome true \\
             --gene_predictor ${params.gene_predictor} \\
-            --augustus_species ${params.augustus_species} ${gc_arg}
+            --augustus_species ${augustus} ${gc_arg}
     fi
 
     # Create MMseqs DB for fast searching

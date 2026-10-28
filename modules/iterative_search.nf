@@ -133,7 +133,7 @@ process ITERATIVE_SEARCH {
         --goi_family_tokens "${settings.goi_family_tokens}" \\
         --tandem_copy_parent ${params.tandem_copy_parent} \\
         --gene_predictor ${params.gene_predictor} \\
-        --augustus_species ${params.augustus_species} \\
+        --augustus_species ${HomeGenes.augustusSpecies(params, settings)} \\
         --enable_plm_search ${params.enable_plm_search} \\
         --plm_device ${params.plm_device} \\
         --plm_similarity_threshold ${params.plm_similarity_threshold} \\

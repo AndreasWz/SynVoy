@@ -61,6 +61,8 @@ try:
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import select_modules
+import gene_predictor
+from sequence_utils import offline_ncbi_taxa, str2bool
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -314,6 +316,67 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
     }
 
 
+# A home genome without a GFF (profile stage 5c; not under --modules legacy). Its genes are
+# predicted (PREPARE_HOME_PROTEOME with prodigal_on_regions.py; extract_flanking_genes.py when the
+# borrowed annotation holds none), until 2026-10-27 with Augustus's model for the fruit fly
+# for every home species.
+HOME_GENE_MODEL_DEFAULT = "fly"
+
+
+def home_gene_model(home_species: str, augustus_species: str, gene_predictor_value: str, *,
+                    models: dict, taxonomy, augustus_present: bool) -> dict:
+    """How the genes of a home genome without a GFF are predicted. Returns
+    {'value', 'source', 'derivation', 'warning', 'stop'}:
+      value   the Augustus model: the one the user named (augustus_species other than 'auto',
+              source user_set), else the installed model nearest the home species in the NCBI
+              taxonomy on disk (gene_predictor.nearest_augustus_model; source home_lineage), else
+              'fly' with a warning (source default)
+      stop    a message when the run must stop: the home is a eukaryote, gene_predictor is
+              'auto' and Augustus is not installed, where the predictor would fall back to
+              Prodigal, which cannot predict genes with introns; None otherwise
+    ``models`` is gene_predictor.installed_augustus_models(), ``taxonomy`` a
+    gene_predictor.TaxonomyLookup (None without the database)."""
+    species = " ".join(str(home_species or "").replace("_", " ").split())
+    model, info = gene_predictor.nearest_augustus_model(species, models, taxonomy)
+    warning = None
+    user = str(augustus_species or "auto").strip()
+    if user != "auto":
+        value, source, line = user, "user_set", f"augustus_species {user} (set by the user)"
+    elif model:
+        value, source = model, "home_lineage"
+        how = ("the same species" if info.get("same_species")
+               else f"{info.get('model_species')}, sharing the {info.get('shared_rank') or 'taxon'} "
+                    f"{info.get('shared_taxon')}")
+        line = (f"augustus_species {model} (the installed Augustus model nearest the home species "
+                f"{info.get('home_taxon') or species}: {how})")
+    else:
+        value, source = HOME_GENE_MODEL_DEFAULT, "default"
+        if not models:
+            reason = "Augustus is not installed here"
+        elif taxonomy is None:
+            reason = "the NCBI taxonomy database is not on disk (~/.etetoolkit/taxa.sqlite)"
+        else:
+            reason = info.get("reason") or "no taxonomy"
+        line = f"augustus_species {value} (the former default: {reason})"
+        warning = (f"the home genome has no GFF; no Augustus model could be chosen for "
+                   f"'{species or '?'}' ({reason}), so augustus_species stays '{value}'")
+    stop = None
+    if (str(gene_predictor_value or "auto").strip() == "auto" and info.get("eukaryote")
+            and not augustus_present):
+        stop = (f"the home genome has no GFF, so its genes are predicted, and {species} is a "
+                f"eukaryote: that needs Augustus, because Prodigal cannot predict genes with "
+                f"introns. Augustus is not installed here. Install it (conda install -c bioconda "
+                f"augustus), give the home genome's GFF (--home_gff), or set --gene_predictor "
+                f"prodigal to accept Prodigal's predictions")
+    derivation = {"value": value, "default": HOME_GENE_MODEL_DEFAULT, "rule": source, "line": line,
+                  "home_species": species, "eukaryote": info.get("eukaryote")}
+    for k in ("home_taxon", "model_species", "shared_taxon", "shared_rank"):
+        if info.get(k):
+            derivation[k] = info[k]
+    return {"value": value, "source": source, "derivation": derivation, "warning": warning,
+            "stop": stop}
+
+
 def _read_json_or_empty(path: str) -> dict | None:
     """Return the JSON, or None for a sentinel/missing/unparseable file."""
     if not path or not os.path.exists(path):
@@ -366,6 +429,18 @@ def main() -> None:
     ap.add_argument("--window_margin_genes", type=float, default=None,
                     help="window_margin_genes of the run: the profile's W, the cap of the GOI "
                          "margin rule (constraint C1)")
+    ap.add_argument("--home_gff_present", type=str2bool, default=None,
+                    help="Whether the home genome has a GFF (the pipeline passes it with any "
+                         "--modules other than legacy). false: its genes are predicted, and the "
+                         "Augustus model is chosen here (settings and derivation: augustus_species)")
+    ap.add_argument("--home_species", default="",
+                    help="The home species, a scientific name ('_' read as ' '), for the model")
+    ap.add_argument("--augustus_species", default="auto",
+                    help="The run's augustus_species: 'auto' = the installed model nearest the "
+                         "home species; a model name is used as given")
+    ap.add_argument("--gene_predictor", default="auto",
+                    help="The run's gene_predictor: with 'auto' a eukaryotic home without a GFF "
+                         "and without Augustus stops the run (exit 2)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -436,6 +511,18 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
+    home_genes = None
+    if result["modules_mode"] != "legacy" and args.home_gff_present is False:
+        ncbi = offline_ncbi_taxa()
+        home_genes = home_gene_model(
+            args.home_species, args.augustus_species, args.gene_predictor,
+            models=gene_predictor.installed_augustus_models(),
+            taxonomy=gene_predictor.TaxonomyLookup(ncbi) if ncbi is not None else None,
+            augustus_present=gene_predictor.check_augustus_available())
+        result["settings"]["augustus_species"] = home_genes["value"]
+        result["source"]["augustus_species"] = home_genes["source"]
+        result["derivation"]["augustus_species"] = home_genes["derivation"]
+
     with open(args.output, "w") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
 
@@ -460,10 +547,17 @@ def main() -> None:
             else:
                 print(f"WARN: {msg}; kept, because a value the user set (or a default) is involved",
                       file=sys.stderr)
+    if home_genes:
+        print(f"HOME-GENES: {home_genes['derivation']['line']}")
+        if home_genes["warning"]:
+            print(f"WARN: {home_genes['warning']}", file=sys.stderr)
     if errors:
         for msg in errors:
             print(f"ERROR: {msg}. The module rules made it: a bug, the run stops before the search.",
                   file=sys.stderr)
+        sys.exit(2)
+    if home_genes and home_genes["stop"]:
+        print(f"ERROR: {home_genes['stop']}.", file=sys.stderr)
         sys.exit(2)
 
 

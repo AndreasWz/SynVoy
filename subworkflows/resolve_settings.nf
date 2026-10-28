@@ -22,6 +22,7 @@ workflow RESOLVE_SETTINGS {
     preset_override // val
     disable_auto    // val: auto_apply_preset = false
     modules_spec    // val: --modules
+    home_species    // value channel: the home species (stage 5c, a home without a GFF)
 
     main:
     HOME_CONTEXT(query, home_genome, home_gff, goi_bed)
@@ -34,7 +35,9 @@ workflow RESOLVE_SETTINGS {
         defaults_json,
         preset_override,
         disable_auto,
-        modules_spec
+        modules_spec,
+        home_species,
+        home_gff.map { g -> g.name != 'NO_GFF' }
     )
 
     settings = RESOLVE_EFFECTIVE_PARAMS.out.json
@@ -50,6 +53,11 @@ workflow RESOLVE_SETTINGS {
             def ruled = (parsed.derivation ?: [:]).findAll { k, d -> (parsed.source ?: [:])[k]?.toString()?.startsWith('module:') }
             if (ruled) {
                 log.info "[INFO] settings from the module rules: ${ruled.collect { k, d -> d.line }.sort().join('; ')}"
+            }
+            // The Augustus model of a home genome without a GFF (stage 5c; none under legacy).
+            def homeGenes = (parsed.derivation ?: [:]).augustus_species
+            if (homeGenes) {
+                log.info "[INFO] home genome without a GFF, gene prediction: ${homeGenes.line}"
             }
             (parsed.constraints ?: []).findAll { con -> con.applies && !con.ok }.each { con ->
                 log.warn "constraint ${con.id} (${con.doc}): ${con.detail}; kept, a value you set or a default is involved"

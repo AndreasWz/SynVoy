@@ -429,7 +429,19 @@ until 2026-10-15). A number sets a count directly.
 
 Without a home GFF, a substitute annotation is built first. Genes are predicted
 around the query's hits (`prodigal_on_regions.py`, Augustus or Prodigal), and
-`borrow_annotations.py` transfers the genes of one annotated target genome (batch HG-5b):
+`borrow_annotations.py` transfers the genes of one annotated target genome (batch HG-5b).
+Augustus's model (`augustus_species`, `auto`) is the fruit-fly model under `--modules legacy`,
+as for every home before 2026-10-27; with any other `--modules` it is the installed model
+nearest the home species in the NCBI taxonomy on disk (`gene_predictor.nearest_augustus_model`:
+the model whose species shares the deepest taxon with the home species, so the species' own
+model first; *Candida albicans* gets `candida_albicans`, a firefly `tribolium2012` through the
+suborder Polyphaga), chosen by `resolve_effective_params.py` and recorded in
+`effective_params.json` (`settings`, `source` `home_lineage`, `derivation`); without the
+taxonomy database it stays `fly`, with a warning. There a eukaryotic home with
+`gene_predictor` `auto` and no Augustus stops the run before the search, where the predictor
+would fall back to Prodigal, which cannot predict genes with introns. Target genomes are not
+gene-predicted in the default search (their models come from miniprot); only the optional
+PLM, structural and discovery steps run Augustus on target windows, with the same model.
 
 1. the home locus is the best interval of the primary home locus (§5.4), with a window of
    `pred_flank_window` (50 kb) around it, widened until it holds 2 × `n_flanking_genes`

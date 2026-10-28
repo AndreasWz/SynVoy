@@ -882,7 +882,7 @@ workflow {
         if (params.home_gff && !file(params.home_gff).exists()) {
             validationErrors << "Home GFF not found: ${params.home_gff}"
         } else if (!params.home_gff && params.home_genome) {
-            validationWarnings << "No --home_gff provided. Flanking-gene extraction will fall back to Prodigal gene prediction on the home genome, which is substantially less reliable than a curated GFF. Supply --home_gff if you have one."
+            validationWarnings << "No --home_gff provided. The home genome's genes will be predicted (Augustus; Prodigal without it) and borrowed from an annotated target, which is less reliable than a curated GFF. Supply --home_gff if you have one."
         }
         // home_species drives taxonomy sorting (phylo_sort). Missing it silently degrades
         // the run to kingdom=Unknown / phylo distance 999 and mis-tunes per-target stringency
@@ -1100,7 +1100,7 @@ workflow {
     RESOLVE_SETTINGS(normalized_gene_ch.first(), home_genome_ch, home_gff_ch,
         ANNOTATE_GOI.out.bed, ANNOTATE_GOI.out.info, LOCATE_GENE.out.hit_profile, LOCATE_GENE.out.auto_preset,
         groovy.json.JsonOutput.toJson(presetDefaultKeys().collectEntries { k -> [(k): params[k]] }),
-        params.preset_override ?: '', !paramBool(params.auto_apply_preset), modulesSpec())
+        params.preset_override ?: '', !paramBool(params.auto_apply_preset), modulesSpec(), home_species_for_sort_ch)
     effective_settings_ch = RESOLVE_SETTINGS.out.settings
     
     // 5. SPLIT LOCI. The annotated home gene that matches the query is the primary
@@ -1132,7 +1132,7 @@ workflow {
 
         // Prepare Home Proteome (Run once, used for RBH + borrowing)
         uiStatus('RUN ', 'PREPARE_HOME', 'Preparing home proteome database')
-        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first())
+        PREPARE_HOME_PROTEOME(home_genome_ch, home_gff_ch, LOCATE_GENE.out.bed.first(), effective_settings_ch)
         PREPARE_HOME_PROTEOME.out.db.view { db ->
             "${c.green}[OK  ]${c.reset} ${c.white}${'PREPARE_HOME'.padRight(24)}${c.reset} home proteome ready"
         }

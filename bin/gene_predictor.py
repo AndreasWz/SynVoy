@@ -32,10 +32,10 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from sequence_utils import get_genetic_code
+    from sequence_utils import get_genetic_code, offline_ncbi_taxa, strip_species_qualifier
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import get_genetic_code
+    from sequence_utils import get_genetic_code, offline_ncbi_taxa, strip_species_qualifier
 
 logger = logging.getLogger(__name__)
 _WARNED_PRODIGAL_CODE = set()
@@ -135,6 +135,143 @@ def list_augustus_species() -> List[str]:
         return species
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return []
+
+
+# ---------------------------------------------------------------------------
+# The Augustus model nearest the home species (profile stage 5c)
+# ---------------------------------------------------------------------------
+
+# A row of `augustus --species=help`: "identifier | species" (an alias is in parentheses).
+_HELP_ROW_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9_.\-]*)\s*\|\s*(\S.*?)\s*$")
+# A model folder named after its species, which the help list does not name.
+_GENUS_SPECIES_RE = re.compile(r"^[A-Z][a-z]+_[a-z]+$")
+EUKARYOTA_TAXID = 2759
+
+
+def augustus_config_dir() -> Optional[str]:
+    """Augustus's config folder: $AUGUSTUS_CONFIG_PATH, else <prefix>/config next to the
+    binary (the conda layout); None when neither holds a species folder."""
+    candidates = []
+    if os.environ.get("AUGUSTUS_CONFIG_PATH"):
+        candidates.append(os.environ["AUGUSTUS_CONFIG_PATH"])
+    binary = shutil.which("augustus")
+    if binary:
+        candidates.append(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(binary))),
+                                       "config"))
+    for path in candidates:
+        if os.path.isdir(os.path.join(path, "species")):
+            return path
+    return None
+
+
+def installed_augustus_models(help_text: Optional[str] = None,
+                              config_dir: Optional[str] = None) -> Dict[str, str]:
+    """{model id: species name} of the Augustus models installed here: the rows of
+    `augustus --species=help` (aliases left out) and the folders of config/species named
+    Genus_species, which that list does not name (Anopheles_gambiae, Xenopus_tropicalis, ...).
+    With a config folder, a listed model without its parameter file there is left out. Empty
+    without Augustus."""
+    if help_text is None:
+        if not check_augustus_available():
+            return {}
+        try:
+            result = subprocess.run(["augustus", "--species=help"], capture_output=True,
+                                    text=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            return {}
+        help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+        config_dir = config_dir or augustus_config_dir()
+    species_dir = os.path.join(config_dir, "species") if config_dir else None
+
+    def installed(model):
+        return species_dir is None or os.path.isfile(
+            os.path.join(species_dir, model, f"{model}_parameters.cfg"))
+
+    models: Dict[str, str] = {}
+    for line in help_text.splitlines():
+        m = _HELP_ROW_RE.match(line)
+        if m and m.group(1) != "identifier" and m.group(1) not in models and installed(m.group(1)):
+            models[m.group(1)] = m.group(2)
+    if species_dir and os.path.isdir(species_dir):
+        for name in sorted(os.listdir(species_dir)):
+            if _GENUS_SPECIES_RE.match(name) and name not in models and installed(name):
+                models[name] = name.replace("_", " ")
+    return models
+
+
+class TaxonomyLookup:
+    """Lineages of scientific names in the NCBI taxonomy on disk (offline_ncbi_taxa)."""
+
+    def __init__(self, ncbi):
+        self.ncbi = ncbi
+        self._cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def lineage(self, name: str) -> Optional[Dict[str, Any]]:
+        """{'lineage': taxids root -> taxon, 'matched': the name found} of a scientific name
+        ('_' read as ' ', a strain qualifier dropped), tried as given, as genus + species, then
+        as the genus; None when none of them is known."""
+        key = " ".join(strip_species_qualifier(str(name or "")).replace("_", " ").split())
+        if key not in self._cache:
+            words = key.split()
+            tries = [key] + ([" ".join(words[:2])] if len(words) > 2 else []) \
+                + ([words[0]] if len(words) > 1 else [])
+            found = None
+            for t in tries:
+                try:
+                    ids = self.ncbi.get_name_translator([t]).get(t)
+                    lineage = list(self.ncbi.get_lineage(ids[0])) if ids else None
+                except Exception:
+                    lineage = None
+                if lineage:
+                    found = {"lineage": lineage, "matched": t}
+                    break
+            self._cache[key] = found
+        return self._cache[key]
+
+    def describe(self, taxid: int) -> Tuple[str, str]:
+        """(name, rank) of a taxid; ('', '') when unknown."""
+        try:
+            name = self.ncbi.get_taxid_translator([taxid]).get(taxid, "")
+            rank = self.ncbi.get_rank([taxid]).get(taxid, "")
+            return str(name), str(rank)
+        except Exception:
+            return "", ""
+
+
+def nearest_augustus_model(home_species: str, models: Dict[str, str],
+                           taxonomy) -> Tuple[Optional[str], Dict[str, Any]]:
+    """The installed Augustus model nearest the home species: the one whose species shares the
+    deepest ancestor with it in the NCBI taxonomy, so a model of the species itself first;
+    ties by model id. ``taxonomy`` has lineage(name) and describe(taxid) (TaxonomyLookup).
+    Returns (model id, info) or (None, info) when the home species or no model has a lineage;
+    info names the home taxon, the model's species, the shared taxon and its rank, and whether
+    the home is a eukaryote (None when unknown)."""
+    info: Dict[str, Any] = {"home_species": home_species, "eukaryote": None}
+    home = taxonomy.lineage(home_species) if taxonomy is not None else None
+    if not home:
+        info["reason"] = "the home species is not in the taxonomy on disk"
+        return None, info
+    info.update(home_taxon=home["matched"], eukaryote=EUKARYOTA_TAXID in home["lineage"])
+    best = None
+    for model in sorted(models):
+        lineage = taxonomy.lineage(models[model])
+        if not lineage:
+            continue
+        depth = 0
+        for a, b in zip(home["lineage"], lineage["lineage"]):
+            if a != b:
+                break
+            depth += 1
+        if best is None or depth > best[0]:
+            best = (depth, model)
+    if best is None or best[0] == 0:
+        info["reason"] = "no installed Augustus model is in the taxonomy on disk"
+        return None, info
+    depth, model = best
+    shared, rank = taxonomy.describe(home["lineage"][depth - 1])
+    info.update(model_species=models[model], shared_taxon=shared, shared_rank=rank,
+                same_species=depth == len(home["lineage"]))
+    return model, info
 
 
 # ---------------------------------------------------------------------------
