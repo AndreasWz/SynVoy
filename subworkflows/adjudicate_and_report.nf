@@ -41,7 +41,10 @@ workflow ADJUDICATE_AND_REPORT {
     sorted_genomes      // value channel: PHYLO_SORT sorted_genomes.txt (species distances)
     effective_params    // value channel: effective_params.json (RESOLVE_SETTINGS) -> run_settings, and
                         // the settings keys of the hull rescue and the ownership panel
-    goi_info            // value channel: goi_info.json (ANNOTATE_GOI) -> the hull's own home gene
+    goi_info            // value channel: goi_info.json (ANNOTATE_GOI) -> the own home gene of the hull
+                        // rescue and of the ownership panel's GOI entry
+    goi_exons           // value channel: goi_exons.faa (ANNOTATE_GOI) -> the GOI's home protein, q of
+                        // the ownership panel's GOI entry
 
     main:
 
@@ -121,7 +124,9 @@ workflow ADJUDICATE_AND_REPORT {
         home_db.map { d -> d.resolve('home_proteome.faa') },
         locus_beds.flatten().collect(),
         query_faa,
-        effective_params
+        effective_params,
+        goi_info,
+        goi_exons
     )
 
     // Rescue models are mixed into the region GFFs at STAGE_REGION_GFF, which is

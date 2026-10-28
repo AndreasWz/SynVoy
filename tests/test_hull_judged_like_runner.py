@@ -85,5 +85,6 @@ def test_the_hull_process_hands_over_the_home_database_folder():
             "effective_params)") in sub                   # profile stage 4: the run's settings
     assert "--effective_params ${effective_params}" in module
     main_nf = open(os.path.join(root, "main.nf")).read()
-    assert "RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first()\n        )" in main_nf
+    assert ("RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first(),\n"
+            "            ANNOTATE_GOI.out.exons.first()\n        )") in main_nf   # item 17: the panel's q
     assert "home_db.map { d -> d.resolve('home_proteome.faa') }" in sub

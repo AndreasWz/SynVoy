@@ -25,17 +25,27 @@ tandem cluster locus (chr9 OGN+OMD+ASPN within one split locus) contributes one
 panel entry per overlapping gene, all sharing the same locus label.
 
 A sidecar ``<output>.meta.tsv`` records panel_id -> (locus, gene, coords,
-is_goi_gene) so the report knows which panel gene is the GOI itself (the one the
-query aligns to best) and which are paralogs.
+is_goi_gene, goi_found_by) so the report knows which panel entry is the GOI itself and
+which are paralogs. The GOI entry is q's own home gene, found as the search's
+specificity check finds it (synvoy_specificity: the gene the home step took, from
+goi_info.json, else the home protein >= 95 % identical over >= 90 % of q); when no home
+gene is q's own, q itself is added as the GOI entry at the primary home locus (fix-phase
+item 17, 2026-10-28). q is the search's q: the GOI's home protein, the full-length GOI
+record of goi_exons.faa (--home_goi), with the query as the fallback. Until then the GOI
+was the panel gene the query aligned to best, with no minimum: without a home GFF the
+GOI's own gene is never in the home proteome (borrow_annotations.write_home_proteome
+leaves it out on purpose), so a neighbour became the "GOI" and the true orthologs were
+relabelled paralog_not_goi.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
@@ -47,6 +57,7 @@ from sequence_utils import (  # noqa: E402
     setup_logging,
 )
 import synvoy_settings  # noqa: E402
+import synvoy_specificity  # noqa: E402
 
 logger = setup_logging(name="build_home_paralog_panel")
 
@@ -58,6 +69,94 @@ def locus_id_from_path(path: str) -> str:
     base = os.path.basename(path)
     m = _LOCUS_ID_RE.search(base)
     return f"locus_{m.group(1)}" if m else os.path.splitext(base)[0]
+
+
+def _bed_index(path: str) -> int:
+    """A locus BED's index, as lib/HomeLoci.groovy reads it: the number at the end of the file
+    name without its extension; a name without one comes last."""
+    m = re.search(r"(\d+)$", os.path.splitext(os.path.basename(path))[0])
+    return int(m.group(1)) if m else sys.maxsize
+
+
+def primary_locus_bed(beds: List[str]) -> Optional[str]:
+    """The primary home locus BED, as lib/HomeLoci.groovy picks it: the lowest index, the
+    first of equal ones."""
+    return min(beds, key=_bed_index) if beds else None
+
+
+def locus_holding(beds: List[str], chrom: str, start: int, end: int, pad: int) -> Optional[str]:
+    """The id of the home locus whose span, padded as genes_for_locus pads it, overlaps a gene
+    at chrom:start-end; the lowest index first. None when no locus span holds the gene."""
+    for bed in sorted(beds, key=_bed_index):
+        b_chrom, b_s, b_e = locus_span(bed)
+        if chrom and b_chrom == chrom and _overlap(b_s - pad, b_e + pad, start, end) > 0:
+            return locus_id_from_path(bed)
+    return None
+
+
+def panel_name(query_id: str) -> str:
+    """q's id as the gene part of a panel id: no '|' (the report splits a panel id at its
+    first '|', and a UniProt-style id holds two) and no whitespace (a FASTA header ends at
+    the first blank)."""
+    return re.sub(r"[|\s]+", "_", query_id.strip()) or "query"
+
+
+def home_goi_record(path: Optional[str]) -> Optional[Tuple[str, str]]:
+    """The GOI's home protein in goi_exons.faa of ANNOTATE_GOI, picked as the search picks its
+    home GOI query (iterative_search_runner.select_goi_queries): a full-length GOI record, a
+    GOI_ id that is no exon (|exon_), fragment (|frag_) or GOI_copy_ record (a query id can hold
+    '|': GOI_lcl|ORF1), an id without '|' first, then the longest. ANNOTATE_GOI writes one, the
+    annotated gene's protein or the home model, before its exons. It is the q of the search's
+    specificity check. None without a file or such a record."""
+    if not path or not os.path.isfile(path):
+        return None
+    records = [(cid, seq) for _h, cid, seq in parse_fasta(path)
+               if seq and cid.startswith("GOI_") and not cid.startswith("GOI_copy_")
+               and "|exon_" not in cid and "|frag_" not in cid]
+    if not records:
+        return None
+    records.sort(key=lambda kv: ("|" in kv[0], -len(kv[1]), kv[0]))
+    return records[0]
+
+
+def _goi_info_gives_no_gene(goi_info: Optional[str], info_gene: Optional[str]) -> str:
+    """Why goi_info.json names no gene of q's own for the search (for the log)."""
+    if info_gene:
+        return f"goi_info.json names {info_gene}, which the home proteome does not hold"
+    try:
+        with open(goi_info) as fh:
+            raw = json.load(fh)
+    except (OSError, TypeError, ValueError):
+        raw = {}
+    gene = raw.get("gene_id") if isinstance(raw, dict) else None
+    if not gene:
+        return "goi_info.json names no home gene"
+    if raw.get("home_gene_ambiguous"):
+        return f"goi_info.json names {gene}, which the home step flagged as ambiguous"
+    return f"goi_info.json names {gene}, found by {raw.get('found_by')}, which the search does not take"
+
+
+def goi_entry(proteome: Dict[str, str], query_id: str, query_seq: str,
+              goi_info: Optional[str]) -> Tuple[Optional[str], str, str]:
+    """q's own home gene, found as the search's specificity check finds it
+    (synvoy_specificity.HomeProteome.own_gene): the gene the home step took as q's
+    (own_gene_id_from_goi_info: found by name or by position, not flagged ambiguous) when
+    the proteome holds it, else the home protein >= 95 % identical over >= 90 % of q.
+    Returns (gene id or None, how: 'goi_info' / 'identity_rule' / 'query', a note for the
+    log); None = no home gene is q's own, so q itself is the GOI entry."""
+    info_gene = (synvoy_specificity.own_gene_id_from_goi_info(goi_info)
+                 if goi_info and os.path.exists(goi_info) else None)
+    home = synvoy_specificity.HomeProteome(
+        [(gid, seq.upper().rstrip("*")) for gid, seq in proteome.items()], {})
+    own = home.own_gene(query_id, query_seq, info_gene)
+    rule = (f">= {synvoy_specificity.OWN_GENE_MIN_IDENTITY:.0f} % identity over >= "
+            f"{synvoy_specificity.OWN_GENE_MIN_COVERAGE * 100:.0f} % of q")
+    if own and own == info_gene:
+        return own, "goi_info", "q's own home gene, the one the home step took (goi_info.json)"
+    if own:
+        return own, "identity_rule", f"q's own home gene by the identity rule: {rule}"
+    why = _goi_info_gives_no_gene(goi_info, info_gene)
+    return None, "query", f"no home gene is q's own: {why}, and no home protein has {rule}"
 
 
 def load_gene_index(gff_path: str) -> Dict[str, List[Tuple[int, int, str]]]:
@@ -184,8 +283,16 @@ def main() -> None:
     ap.add_argument("--locus_beds", required=True, nargs="+",
                     help="Per-locus GOI-hit BEDs from split_loci (locus_*.bed)")
     ap.add_argument("--query", default=None,
-                    help="Normalised GOI query FASTA — used to flag which panel gene IS the GOI "
-                         "(the panel entry the query aligns to best). Optional.")
+                    help="Normalised GOI query FASTA: the homology family, and q of the GOI entry "
+                         "when --home_goi gives no home GOI protein. Optional.")
+    ap.add_argument("--goi_info", default=None,
+                    help="goi_info.json of ANNOTATE_GOI: the home gene the home step took as q's "
+                         "is the panel's GOI entry (as for the search's specificity check); "
+                         "without one, the home protein near-identical to q, else q itself")
+    ap.add_argument("--home_goi", default=None,
+                    help="goi_exons.faa of ANNOTATE_GOI: its full-length GOI record, the GOI's home "
+                         "protein, is q for the GOI entry, as in the search's specificity check; "
+                         "without it, the query")
     ap.add_argument("--output", required=True, help="Panel FASTA (>locus_<id>|<gene>)")
     ap.add_argument("--pad", type=int, default=2000,
                     help="bp padding added to each locus span when intersecting genes")
@@ -224,12 +331,12 @@ def main() -> None:
     )
 
     # Load the query once (longest record = the full protein, not an exon fragment).
-    query_seq = ""
+    query_id, query_seq = "", ""
     if args.query:
         q_records = [(cid, seq) for _h, cid, seq in parse_fasta(args.query) if seq]
         if q_records:
             q_records.sort(key=lambda kv: len(kv[1]), reverse=True)
-            query_seq = q_records[0][1]
+            query_id, query_seq = q_records[0]
 
     # Fail loud on a missing parasail *before* doing the panel work: with a query present we
     # will Smith-Waterman-align (find_family_paralogs + GOI-gene identification), and a silent
@@ -270,17 +377,19 @@ def main() -> None:
             continue
         gids = genes_for_locus(chrom, s, e, gene_index,
                                args.pad, args.fallback_window, max_genes_per_locus)
-        kept = 0
+        kept, no_protein = [], []
         for gid in gids:
             seq = proteome.get(gid)
             if not seq:
+                no_protein.append(gid)
                 continue
             panel_id = f"{lid}|{gid}"
             gchrom = gid_chrom.get(gid, chrom)
             _, gstart, gend = gene_meta.get(gid, (None, s, e))
             panel[panel_id] = (gid, seq, lid, gchrom, gstart, gend)
-            kept += 1
-        logger.info(f"[{lid}] {chrom}:{s}-{e} -> {kept} panel gene(s): {gids[:kept]}")
+            kept.append(gid)
+        logger.info(f"[{lid}] {chrom}:{s}-{e} -> {len(kept)} panel gene(s): {kept}"
+                    + (f"; without a protein in the home proteome: {no_protein}" if no_protein else ""))
 
     n_locus_entries = len(panel)
 
@@ -305,25 +414,71 @@ def main() -> None:
                 f"{', '.join(f'{g}({i:.0f}%)' for g, _s, i in family)}"
             )
 
-    if not panel:
-        logger.warning("No panel entries built (no annotated home genes overlap any locus "
-                       "and no homology-based paralogs found). Writing empty panel — locus "
-                       "ownership will be a no-op.")
+    n_family_entries = len(panel) - n_locus_entries
 
-    # Identify the GOI's own home gene: the panel gene the query aligns to best
-    # (now across BOTH locus and family entries — DCN itself wins at ~100%).
+    # The GOI entry (fix-phase item 17): q's own home gene as the search's specificity check
+    # finds it (goi_entry), not the panel gene q aligns to best. Without a home GFF the GOI's
+    # own gene is never in this proteome, so the best-aligning gene was a neighbour, and the
+    # neighbours then "owned" the true orthologs. q's own gene that the gene cap per locus left
+    # out joins the locus whose span holds it; one outside every locus span is at the family
+    # augmentation's pseudo-locus home_<gene>, as before, so a call it owns is marked as found
+    # from another home locus. q itself, when no home gene is q's own, is added at the primary
+    # home locus.
     goi_genes: set = set()
-    if query_seq and panel:
-        best_gene, best_score = None, -1.0
-        for _pid, (gid, seq, _lid, _c, _gs, _ge) in panel.items():
-            score, _ident = sw_align(query_seq, seq)
-            if score > best_score:
-                best_score, best_gene = score, gid
-        if best_gene is not None:
-            goi_genes.add(best_gene)
-            logger.info(f"GOI home gene identified as {best_gene} (SW score {best_score:.0f}).")
-    logger.info(f"Panel: {n_locus_entries} locus + {len(panel) - n_locus_entries} family = "
+    goi_found_by = ""
+    added = ""
+    if query_seq:
+        # q is the search's q: the GOI's home protein (goi_exons.faa), not the query file. The two
+        # are the same protein for a query of the home species; for a query of another species
+        # the identity rule on the query names no gene where the search names the home gene.
+        home = home_goi_record(args.home_goi)
+        q_id, q_seq = home if home else (query_id, query_seq)
+        if home:
+            q_from = "the GOI's home protein from goi_exons.faa"
+        elif args.home_goi and os.path.isfile(args.home_goi):
+            q_from = "the query; goi_exons.faa holds no full-length GOI record"
+        else:
+            q_from = "the query; no home GOI protein given"
+        logger.info(f"q for the GOI entry: {q_id} ({len(q_seq)} aa, {q_from})")
+        own, goi_found_by, how = goi_entry(proteome, q_id, q_seq, args.goi_info)
+        primary = primary_locus_bed(args.locus_beds)
+        p_lid = locus_id_from_path(primary) if primary else "locus_1"
+        p_chrom, p_s, p_e = locus_span(primary) if primary else ("", 0, 0)
+        if own:
+            goi_genes.add(own)
+            where = ""
+            family_id = f"home_{own}|{own}"
+            if not any(gid == own and pid != family_id for pid, (gid, *_rest) in panel.items()):
+                o_chrom = gid_chrom.get(own, "")
+                _, o_s, o_e = gene_meta.get(own, (None, 0, 0))
+                o_lid = locus_holding(args.locus_beds, o_chrom, o_s, o_e, args.pad)
+                if o_lid:
+                    if panel.pop(family_id, None) is not None:
+                        n_family_entries -= 1
+                    panel[f"{o_lid}|{own}"] = (own, proteome[own], o_lid, o_chrom, o_s, o_e)
+                    added = " + q's own gene"
+                    where = f"; left out by the gene cap per locus, added at {o_lid}, whose span holds it"
+                else:
+                    if family_id not in panel:
+                        panel[family_id] = (own, proteome[own], f"home_{own}", o_chrom, o_s, o_e)
+                        added = " + q's own gene"
+                    where = f"; in no locus span, at home_{own}"
+            logger.info(f"GOI entry: {own}, {how}{where}.")
+        else:
+            name = panel_name(q_id)
+            while f"{p_lid}|{name}" in panel:
+                name += "_query"
+            panel[f"{p_lid}|{name}"] = (name, q_seq, p_lid, p_chrom, p_s, p_e)
+            goi_genes.add(name)
+            added = " + q"
+            logger.info(f"GOI entry: q itself ({q_id}), as {p_lid}|{name}; {how}.")
+    logger.info(f"Panel: {n_locus_entries} locus + {n_family_entries} family{added} = "
                 f"{len(panel)} entries.")
+    if len(panel) < 2:
+        logger.warning(f"The panel holds {len(panel)} entr{'y' if len(panel) == 1 else 'ies'}: "
+                       "locus ownership compares a call with two or more, so it changes nothing "
+                       "in this run (no other home gene in a locus span, and no home protein "
+                       "close enough to the query).")
 
     # Write panel FASTA + meta sidecar.
     with open(args.output, "w") as fh:
@@ -334,10 +489,12 @@ def main() -> None:
 
     meta_path = args.output + ".meta.tsv"
     with open(meta_path, "w") as fh:
-        fh.write("panel_id\tlocus_id\tgene\tchrom\tstart\tend\tis_goi_gene\n")
+        fh.write("panel_id\tlocus_id\tgene\tchrom\tstart\tend\tis_goi_gene\tgoi_found_by\n")
         for panel_id, (gid, _seq, lid, gchrom, gstart, gend) in sorted(panel.items()):
-            is_goi = "1" if gid in goi_genes else "0"
-            fh.write(f"{panel_id}\t{lid}\t{gid}\t{gchrom}\t{gstart}\t{gend}\t{is_goi}\n")
+            is_goi = gid in goi_genes
+            found_by = goi_found_by if is_goi else ""
+            fh.write(f"{panel_id}\t{lid}\t{gid}\t{gchrom}\t{gstart}\t{gend}\t"
+                     f"{'1' if is_goi else '0'}\t{found_by}\n")
 
     logger.info(f"Wrote {len(panel)} panel entries -> {args.output} (+ {os.path.basename(meta_path)}).")
 

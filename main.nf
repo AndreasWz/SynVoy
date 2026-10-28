@@ -1468,7 +1468,8 @@ workflow {
             ITERATIVE_SEARCH.out.goi_for_tree,
             FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first(),
             RESOLVE_SETTINGS.out.json,
-            ANNOTATE_GOI.out.info.first()
+            ANNOTATE_GOI.out.info.first(),
+            ANNOTATE_GOI.out.exons.first()
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

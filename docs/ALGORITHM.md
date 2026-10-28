@@ -1036,7 +1036,8 @@ The GOI's own home gene is the gene the home step took as the query's (`gene_id`
 `goi_info.json`, found by name or by position, [§5.6](#56-the-home-gene-model)). Without
 one, or when the home step flagged its choice as ambiguous (with a warning: the gene it
 took may be a relative of the query's own gene), it is the home protein near-identical to
-the query (≥ 95 % identity over ≥ 90 % of it). Until 2026-10-16 (review fix RF-2b) only that
+the GOI's home protein, the GOI record of the query set (§5.8; ≥ 95 % identity over ≥ 90 %
+of it; the hull rescue compares the query). Until 2026-10-16 (review fix RF-2b) only that
 identity rule existed, so where the home annotation differs from the query (an extra exon,
 a partial model) the GOI's own gene was p*.
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
@@ -1252,9 +1253,22 @@ this order:
    plus up to `paralog_panel_max_family` (15; the `dispersed_family` module
    max(15, `Fam` + 1)) proteins of the home proteome that align to the query with
    identity ≥ 28 % and a Smith-Waterman score of at least a quarter of the query's
-   self-score. Each recovered protein is aligned to the panel. If its best match is a
-   paralog and not the GOI, the call is relabelled `paralog_not_goi`. If the two best
-   scores differ by less than 10, the locus with more HIGH flanking models decides.
+   self-score. The panel's GOI entry is the GOI's own home gene, found as the
+   specificity check of §7.12 finds it: the gene the home step took (`goi_info.json`, by
+   name or by position, not flagged ambiguous), else the home protein ≥ 95 % identical
+   over ≥ 90 % of the GOI's home protein (the GOI record of `goi_exons.faa`, §5.8). When
+   no home gene is the GOI's own (a home genome without a GFF, whose proteome leaves out
+   the gene over the GOI's home model; an unannotated ORF), the GOI's home protein itself
+   is the GOI entry, at the primary home locus. A GOI gene that the gene cap leaves out of
+   its locus is added there; one outside every locus span is entered at a locus of its own
+   (`home_<gene>`), from which no search started, so a call it owns is marked as found from
+   another home locus (`locus_reattributed`, and `goi_owner_search_fumble`). Each recovered
+   protein is aligned to the
+   panel. If its best match is a paralog and not the GOI, the call is relabelled
+   `paralog_not_goi`. If the two best scores differ by less than 10, the locus with more
+   HIGH flanking models decides. Until 2026-10-28 the GOI entry was the panel protein the
+   query aligned to best, with no minimum: without a home GFF that was a neighbour, and the
+   true orthologs that aligned best to another neighbour were relabelled `paralog_not_goi`.
 4. **Coverage demotion** (`apply_coverage_demotion`). A HIGH or MEDIUM call with
    identity ≥ 50 % and a recorded coverage below 0.35 is relabelled
    `identity_coverage_decoupled`.

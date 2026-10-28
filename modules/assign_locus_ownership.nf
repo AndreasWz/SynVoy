@@ -7,7 +7,9 @@
 // GOI target to the home locus it TRULY belongs to:
 //
 //   BUILD_HOME_PARALOG_PANEL — one protein per home GOI-paralog, labelled
-//       ``>locus_<id>|<gene>`` (the home gene overlapping each split locus).
+//       ``>locus_<id>|<gene>`` (the home gene overlapping each split locus); the GOI
+//       entry is q's own home gene (goi_info.json, as the search's specificity check
+//       finds it), or q itself (the GOI's home protein) when no home gene is q's own.
 //   ASSIGN_LOCUS_OWNERSHIP   — reuses reciprocal_best_paralog_check.py to SW-align
 //       each recovered GOI target against the panel; best panel entry = owning locus.
 //
@@ -32,6 +34,13 @@ process BUILD_HOME_PARALOG_PANEL {
     // paralog_panel_max_family) are settings keys, which the script reads from it
     // (bin/synvoy_settings.py), so a preset module's rule reaches the panel.
     path effective_params
+    // goi_info.json of ANNOTATE_GOI: the home gene the home step took as the query's is the
+    // panel's GOI entry (fix-phase item 17); without a home GFF there is none, and q itself
+    // becomes the GOI entry.
+    path goi_info
+    // goi_exons.faa of ANNOTATE_GOI: its full-length GOI record, the GOI's home protein, is q,
+    // as in the search's specificity check (the query file is q only for the rescue passes).
+    path home_goi
 
     output:
     path "home_paralog_panel.faa", emit: faa
@@ -51,6 +60,8 @@ process BUILD_HOME_PARALOG_PANEL {
         --pad ${params.locus_ownership_pad} \\
         --paralog_min_identity ${params.paralog_panel_min_identity} \\
         --effective_params ${effective_params} \\
+        --goi_info ${goi_info} \\
+        --home_goi ${home_goi} \\
         --output home_paralog_panel.faa
 
     # Guarantee both outputs exist even if the panel came out empty, so the

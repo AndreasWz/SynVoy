@@ -1247,10 +1247,12 @@ def build_paralog_confusion_flags(paralog_rows, min_gap):
 def load_panel_meta(panel_meta_path):
     """Read ``home_paralog_panel.faa.meta.tsv`` (build_home_paralog_panel.py, §1m).
 
-    Returns {panel_id: {locus, gene, chrom, start, end, is_goi}} so the report can
+    Returns {panel_id: {locus, gene, chrom, is_goi, goi_found_by}} so the report can
     map an ownership row's ``best_paralog`` (a ``locus_<id>|<gene>`` panel label)
-    back to its home locus / gene / GOI-ness. Tolerates a missing file (ownership
-    becomes label-only / advisory)."""
+    back to its home locus / gene / GOI-ness. ``goi_found_by`` (GOI entry only, since
+    2026-10-28): how the GOI entry was found, 'goi_info', 'identity_rule' or 'query';
+    '' in a meta file written before. Tolerates a missing file (ownership becomes
+    label-only / advisory)."""
     meta = {}
     if not panel_meta_path or not os.path.isfile(panel_meta_path):
         return meta
@@ -1265,10 +1267,25 @@ def load_panel_meta(panel_meta_path):
                     "gene": row.get("gene", ""),
                     "chrom": row.get("chrom", ""),
                     "is_goi": _is_true(row.get("is_goi_gene")),
+                    "goi_found_by": row.get("goi_found_by") or "",
                 }
     except OSError:
         pass
     return meta
+
+
+def goi_panel_entry(panel_meta):
+    """The panel's GOI entry as the report records it (``locus_ownership_summary.goi_entry``):
+    {gene, panel_ids, found_by}; found_by is 'goi_info' (the home gene the home step took),
+    'identity_rule' (the home protein near-identical to the query), 'query' (no home gene is
+    the query's own, so the query itself), or 'unrecorded' (a panel built before
+    2026-10-28). None without a panel or without a GOI entry."""
+    goi = sorted(pid for pid, m in (panel_meta or {}).items() if m.get("is_goi"))
+    if not goi:
+        return None
+    first = panel_meta[goi[0]]
+    return {"gene": first.get("gene", ""), "panel_ids": goi,
+            "found_by": first.get("goi_found_by") or "unrecorded"}
 
 
 def _panel_locus(panel_label):
@@ -1393,7 +1410,8 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
     records = goi_dedup.get("records", [])
     if not records or not ownership_rows:
         return [], {"n_reattributed": 0, "n_paralog_misassignment": 0,
-                    "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0}
+                    "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0,
+                    "goi_entry": goi_panel_entry(panel_meta)}
 
     # Index ownership rows by genome+chrom for coordinate matching.
     # canonical_genome_id() on the row's genome is load-bearing: the rescue-pass
@@ -1535,6 +1553,7 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         "n_paralog_misassignment": n_paralog,
         "n_owner_search_fumble": n_fumble,
         "n_tiebreak_applied": n_tiebreak,
+        "goi_entry": goi_panel_entry(panel_meta),
     }
     return flags, summary
 
