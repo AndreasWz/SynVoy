@@ -62,7 +62,7 @@ except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import select_modules
 import gene_predictor
-from sequence_utils import offline_ncbi_taxa, str2bool
+from sequence_utils import StepFailed, offline_ncbi_taxa, str2bool
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -324,7 +324,8 @@ HOME_GENE_MODEL_DEFAULT = "fly"
 
 
 def home_gene_model(home_species: str, augustus_species: str, gene_predictor_value: str, *,
-                    models: dict, taxonomy, augustus_present: bool) -> dict:
+                    models: dict, taxonomy, augustus_present: bool,
+                    models_error: str | None = None) -> dict:
     """How the genes of a home genome without a GFF are predicted. Returns
     {'value', 'source', 'derivation', 'warning', 'stop'}:
       value   the Augustus model: the one the user named (augustus_species other than 'auto',
@@ -335,7 +336,8 @@ def home_gene_model(home_species: str, augustus_species: str, gene_predictor_val
               'auto' and Augustus is not installed, where the predictor would fall back to
               Prodigal, which cannot predict genes with introns; None otherwise
     ``models`` is gene_predictor.installed_augustus_models(), ``taxonomy`` a
-    gene_predictor.TaxonomyLookup (None without the database)."""
+    gene_predictor.TaxonomyLookup (None without the database), ``models_error`` the failure of
+    that list when it failed (then ``models`` is empty)."""
     species = " ".join(str(home_species or "").replace("_", " ").split())
     model, info = gene_predictor.nearest_augustus_model(species, models, taxonomy)
     warning = None
@@ -351,7 +353,9 @@ def home_gene_model(home_species: str, augustus_species: str, gene_predictor_val
                 f"{info.get('home_taxon') or species}: {how})")
     else:
         value, source = HOME_GENE_MODEL_DEFAULT, "default"
-        if not models:
+        if models_error:
+            reason = f"the installed Augustus gave no model list: {models_error}"
+        elif not models:
             reason = "Augustus is not installed here"
         elif taxonomy is None:
             reason = "the NCBI taxonomy database is not on disk (~/.etetoolkit/taxa.sqlite)"
@@ -514,9 +518,22 @@ def main() -> None:
     home_genes = None
     if result["modules_mode"] != "legacy" and args.home_gff_present is False:
         ncbi = offline_ncbi_taxa()
+        models_error = None
+        try:
+            models = gene_predictor.installed_augustus_models()
+        except StepFailed as exc:
+            # An installed Augustus whose model list fails stops the run (fix-phase item 18),
+            # unless the home genes are predicted with Prodigal (--gene_predictor prodigal); the
+            # model then reaches only the structural discovery, which checks it at its start.
+            if str(args.gene_predictor or "auto").strip() != "prodigal":
+                raise
+            print(f"WARNING: {exc}; the home genes are predicted with Prodigal "
+                  f"(--gene_predictor prodigal), so no Augustus model is chosen for them",
+                  file=sys.stderr)
+            models, models_error = {}, str(exc)
         home_genes = home_gene_model(
             args.home_species, args.augustus_species, args.gene_predictor,
-            models=gene_predictor.installed_augustus_models(),
+            models=models, models_error=models_error,
             taxonomy=gene_predictor.TaxonomyLookup(ncbi) if ncbi is not None else None,
             augustus_present=gene_predictor.check_augustus_available())
         result["settings"]["augustus_species"] = home_genes["value"]

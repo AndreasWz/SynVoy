@@ -439,7 +439,9 @@ suborder Polyphaga), chosen by `resolve_effective_params.py` and recorded in
 `effective_params.json` (`settings`, `source` `home_lineage`, `derivation`); without the
 taxonomy database it stays `fly`, with a warning. There a eukaryotic home with
 `gene_predictor` `auto` and no Augustus stops the run before the search, where the predictor
-would fall back to Prodigal, which cannot predict genes with introns. Target genomes are not
+would fall back to Prodigal, which cannot predict genes with introns; since 2026-10-29 a
+failed Augustus run stops the prediction instead of falling back to Prodigal, and a run that
+does not finish within `gene_prediction_timeout` stops the task. Target genomes are not
 gene-predicted in the default search (their models come from miniprot); only the optional
 PLM, structural and discovery steps run Augustus on target windows, with the same model.
 

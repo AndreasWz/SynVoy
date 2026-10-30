@@ -1,7 +1,9 @@
 """Stage 2 of the profile handoff: every limit that can drop a result is counted, and the
 counts change nothing (iterative_search_runner.LIMIT_KEYS, the limit_* columns of
 hits/<genome>.target_policy.tsv, the report's `limits` block; annotate_goi_exons.LIMIT_COUNTS;
-split_loci's --max_loci WARNING; rescue_strong_synteny's timeout line).
+split_loci's --max_loci WARNING). Since fix-phase item 18 (2026-10-29) a tool run that does not
+finish within its guard stops the task (StepFailed) instead of being counted: the
+limit_*timeout* columns stay, at 0.
 
 Each counter: one case that trips it and one that does not.
 """
@@ -74,12 +76,14 @@ def miniprot_on(monkeypatch):
 
 
 @pytest.mark.parametrize("sensitive,kind", [(True, "goi"), (False, "flanking")])
-def test_miniprot_timeout_is_counted_per_kind(miniprot_on, sensitive, kind):
+def test_a_miniprot_run_beyond_its_guard_stops_the_task(miniprot_on, sensitive, kind):
     def boom(cmd, **k):
         raise subprocess.TimeoutExpired(cmd, 120)
     miniprot_on.setattr(age.subprocess, "run", boom)
-    assert age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=sensitive) == []
-    assert age.LIMIT_COUNTS == {f"miniprot_timeout_{kind}": 1}
+    with pytest.raises(age.StepFailed, match=rf"miniprot \({kind} model: a 4-aa protein against 120 bp "
+                                             rf"of c1\) did not finish .*--{kind}_miniprot_timeout"):
+        age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=sensitive)
+    assert age.LIMIT_COUNTS == {}
 
 
 def test_miniprot_failure_and_no_alignment_are_counted_apart(miniprot_on):
@@ -95,15 +99,22 @@ def test_miniprot_failure_and_no_alignment_are_counted_apart(miniprot_on):
 
 
 def test_a_decoy_querys_miniprot_calls_are_not_counted(miniprot_on):
-    def boom(cmd, **k):
-        raise subprocess.TimeoutExpired(cmd, 120)
-    miniprot_on.setattr(age.subprocess, "run", boom)
+    miniprot_on.setattr(age.subprocess, "run", lambda cmd, **k: _Proc(returncode=1, stderr="bad"))
     with isr.miniprot_counting(False):
         age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=True)
     assert age.LIMIT_COUNTS == {} and age.LIMIT_COUNTING is True
     with isr.miniprot_counting(True):
         age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=True)
-    assert age.LIMIT_COUNTS == {"miniprot_timeout_goi": 1}
+    assert age.LIMIT_COUNTS == {"miniprot_failed_goi": 1}
+
+
+def test_a_call_without_miniprot_stops_instead_of_a_hit_chain_model(monkeypatch):
+    """Fix-phase item 18: without miniprot every gene became a hit-chain model, with a
+    warning per call only."""
+    monkeypatch.setattr(age, "MINIPROT_AVAILABLE", False)
+    with pytest.raises(age.StepFailed, match="miniprot is not installed"):
+        age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=True)
+    assert age._run_miniprot("", "ACGT" * 30, "c1") == []       # nothing to align: no call
 
 
 def test_a_miniprot_model_counts_nothing(miniprot_on):
@@ -119,7 +130,7 @@ def _model(start, end, score):
 
 
 def _fake_models(monkeypatch, rounds):
-    """_run_miniprot returns rounds[i] in round i (a callable may count a timeout)."""
+    """_run_miniprot returns rounds[i] in round i (a callable may raise, as a guard does)."""
     calls = {"n": 0}
 
     def run(query, target, chrom, max_intron, sensitive):
@@ -187,16 +198,16 @@ def test_kept_model_near_the_bound_is_counted(monkeypatch):
     assert age.LIMIT_COUNTS["goi_models_near_outs"] == 1
 
 
-def test_timeout_that_ends_the_masked_rounds_is_counted(monkeypatch):
-    def timeout():
-        age.LIMIT_COUNTS["miniprot_timeout_goi"] = age.LIMIT_COUNTS.get("miniprot_timeout_goi", 0) + 1
-        return []
-    calls = _fake_models(monkeypatch, [[_model(0, 300, 100)], timeout, [_model(1500, 1600, 90)]])
-    kept = age.miniprot_gene_models("M" * 100, "A" * 2000, "c1", sensitive=True, max_models=5,
-                                    evidence=[(1500, 1600)])
-    # The timeout ends the copy search: the third round never runs.
-    assert len(kept) == 1 and calls["n"] == 2
-    assert age.LIMIT_COUNTS["goi_model_rounds_ended_by_timeout"] == 1
+def test_no_masked_round_ends_on_time(monkeypatch):
+    """Fix-phase item 18: a guard in a masked round stops the task; until 2026-10-28 a timeout
+    there ended the copy search with the copies found so far (goi_model_rounds_ended_by_timeout)."""
+    def guard():
+        raise age.StepFailed("miniprot (goi model) did not finish within 1 s")
+    _fake_models(monkeypatch, [[_model(0, 300, 100)], guard, [_model(1500, 1600, 90)]])
+    with pytest.raises(age.StepFailed):
+        age.miniprot_gene_models("M" * 100, "A" * 2000, "c1", sensitive=True, max_models=5,
+                                 evidence=[(1500, 1600)])
+    assert "goi_model_rounds_ended_by_timeout" not in age.LIMIT_COUNTS
 
 
 def test_masked_round_without_alignment_is_no_timeout(monkeypatch):
@@ -540,14 +551,18 @@ def test_max_loci_warning_whenever_the_cap_drops_a_locus(tmp_path, capsys):
     assert "--max_loci" not in capsys.readouterr().err
 
 
-def test_rescue_logs_its_miniprot_timeouts(tmp_path, monkeypatch, capsys):
+def test_a_rescue_window_beyond_its_guard_stops_the_rescue(tmp_path, monkeypatch):
+    """Fix-phase item 18: until 2026-10-28 the window was skipped, its GFF comment read like a
+    real "no model", and the timeouts were only logged."""
     import rescue_strong_synteny as rss
-    monkeypatch.setattr(rss, "TIMEOUTS", {"windows": 0, "runs": 0})
 
     def boom(cmd, **k):
         raise subprocess.TimeoutExpired(cmd, 5)
     monkeypatch.setattr(rss.subprocess, "run", boom)
-    assert rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 5) == ""
+    with pytest.raises(age.StepFailed, match=r"within 5 s \(--strong_synteny_rescue_miniprot_timeout\)"):
+        rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 5)
+    with pytest.raises(age.StepFailed, match=r"--goi_miniprot_timeout"):
+        rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 5, "goi_miniprot_timeout")
     monkeypatch.setattr(rss.subprocess, "run", lambda cmd, **k: _Proc(stdout="##gff\n"))
     assert rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 5) == "##gff\n"
-    assert rss.TIMEOUTS == {"windows": 1, "runs": 2}
+    assert not hasattr(rss, "TIMEOUTS")

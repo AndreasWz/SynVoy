@@ -915,6 +915,24 @@ def require_binary(name: str, install_hint: Optional[str] = None) -> str:
     raise FileNotFoundError(msg)
 
 
+# The exit code of a script whose StepFailed must end the run although its module ignores
+# other failures (the rescue passes: errorStrategy maps this code to 'terminate').
+STEP_FAILED_EXIT = 3
+
+
+def exit_step_failed(main_fn) -> None:
+    """Run a script's main() and exit with its return value; a StepFailed is printed and ends the
+    script with STEP_FAILED_EXIT (for a module whose errorStrategy turns that code into the
+    run's end while it ignores other failures: the rescue passes)."""
+    try:
+        rc = main_fn()
+    except StepFailed as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(STEP_FAILED_EXIT)
+    sys.exit(rc)
+
+
+
 def setup_logging(
     level: Union[int, str] = logging.INFO,
     *,

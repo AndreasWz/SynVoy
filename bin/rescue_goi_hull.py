@@ -30,6 +30,7 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
 from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
+from sequence_utils import exit_step_failed  # noqa: E402
 import synvoy_evalue  # noqa: E402
 import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
@@ -399,7 +400,10 @@ def main() -> int:
                          "query's names the query's own gene in the specificity terms, as in the "
                          "main search (review fix RF-2b); without it, the identity rule")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
-    ap.add_argument("--miniprot_timeout", type=int, default=600)
+    ap.add_argument("--miniprot_timeout", type=int, default=3600,
+                    help="Guard of the miniprot run of one hull window, in seconds (pipeline: "
+                         "goi_miniprot_timeout): a run that does not finish ends the run (exit "
+                         "STEP_FAILED_EXIT; until 2026-10-28 the window was skipped after 600 s)")
     ap.add_argument("--target_genetic_codes", default="",
                     help="Genetic codes of target genomes, 'genome=table,...'; the table of "
                          "--target_genome is used (lib/GeneticCodes.groovy builds this)")
@@ -479,7 +483,9 @@ def main() -> int:
             with open(win_fa, "w") as fh:
                 fh.write(f">{chrom}\n{window}\n")
             gff_text = _run_miniprot_relaxed(win_fa, query_fa, args.miniprot_outc,
-                                             args.miniprot_timeout)
+                                             args.miniprot_timeout, "goi_miniprot_timeout",
+                                             f"{args.genome_name} hull {chrom}:{ws}-{we} "
+                                             f"({len(window):,} bp)")
             # Every model that clears the coverage and identity gates is judged like a
             # candidate of the main search (judge_hull_model); the one the judge ranks
             # first is kept (label, E, bits, shorter span). Until 2026-10-14: the model of
@@ -539,4 +545,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A miniprot run beyond its guard exits STEP_FAILED_EXIT (3), which the module turns into
+    # the run's end; it ignores the other failures of the rescue (errorStrategy).
+    exit_step_failed(main)

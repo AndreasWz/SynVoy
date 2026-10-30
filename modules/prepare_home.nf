@@ -32,6 +32,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome ${params.prodigal_full_genome_fallback} \\
             --gene_predictor ${params.gene_predictor} \\
+            --gene_prediction_timeout ${params.gene_prediction_timeout} \\
             --augustus_species ${augustus} ${gc_arg}
     fi
 
@@ -46,6 +47,7 @@ process PREPARE_HOME_PROTEOME {
             --output_gff home_predicted.gff \\
             --fallback_full_genome true \\
             --gene_predictor ${params.gene_predictor} \\
+            --gene_prediction_timeout ${params.gene_prediction_timeout} \\
             --augustus_species ${augustus} ${gc_arg}
     fi
 

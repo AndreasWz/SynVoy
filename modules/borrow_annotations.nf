@@ -31,6 +31,7 @@ process BORROW_ANNOTATIONS {
         --n_flanking $n_flanking \\
         --window ${params.pred_flank_window} \\
         --target_flank ${params.borrow_target_flank} \\
+        --miniprot_timeout ${params.flanking_miniprot_timeout} \\
         --output_gff merged_home_annotations.gff \\
         --output_proteins borrowed_proteins.faa \\
         --output_db_dir home_proteome_db ${GeneticCodes.homeArg(params)} ${GeneticCodes.targetArgs(params)}

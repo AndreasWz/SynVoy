@@ -228,8 +228,15 @@ def main():
                         help="Augustus species model (default: fly)")
     parser.add_argument("--genetic_code", type=int, default=1,
                         help="NCBI genetic code of the genome (default 1, the standard code)")
+    parser.add_argument("--gene_prediction_timeout", type=int, default=3600,
+                        help="Guard of one Augustus or Prodigal run, in seconds (pipeline: "
+                             "gene_prediction_timeout): a run that does not finish stops the task")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    if args.gene_prediction_timeout < 1:
+        parser.error("--gene_prediction_timeout must be at least 1")
+    import gene_predictor
+    gene_predictor.GENE_PREDICTION_TIMEOUT = args.gene_prediction_timeout
     # An Augustus model that is not installed stops here (fix-phase item 16): Augustus exited 1
     # and the prediction fell back to Prodigal, which cannot predict genes with introns.
     if args.gene_predictor != "prodigal":

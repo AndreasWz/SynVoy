@@ -425,8 +425,17 @@ def main():
                         help="Genetic codes of target genomes, 'genome=table,...'")
     parser.add_argument("--default_target_genetic_code", type=int, default=1,
                         help="NCBI genetic code of a target genome not named there (default 1)")
+    parser.add_argument("--miniprot_timeout", type=int, default=3600,
+                        help="Guard of each miniprot run that transfers a target protein to the "
+                             "home window, in seconds (pipeline: flanking_miniprot_timeout): a run "
+                             "that does not finish stops the task (until 2026-10-28 a timeout of "
+                             "120 s left that protein out)")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    if args.miniprot_timeout < 1:
+        parser.error("--miniprot_timeout must be at least 1")
+    import annotate_goi_exons as ag
+    ag.FLANKING_MINIPROT_TIMEOUT = args.miniprot_timeout
 
     genome = load_genome(args.home_genome)
     predicted = predicted_models(args.predicted_gff)

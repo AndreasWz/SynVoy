@@ -594,10 +594,10 @@ Gene models kept per candidate locus. miniprot reports every place where the que
 
 A settings key. The `local_family` module (A1) sets max(10, home copies + 1), at most 60, so every copy of a home array larger than ten can get its own model (beyond the cap, copies become fragments). Whether the cap stopped the copy rounds of a locus is counted in the report's `limits` block (`goi_model_cap_stopped`).
 
-### `goi_miniprot_timeout`
-**Type:** Integer (s) | **Default:** `120`
+### `goi_miniprot_timeout`, `flanking_miniprot_timeout`
+**Type:** Integer (s) | **Defaults:** `3600`, `3600`
 
-Seconds per miniprot run that models the gene of interest in a window; one run per copy round of a locus. A run that times out gives no model, and the copy rounds of that locus end there: a timeout in the first round leaves the locus without a model. The report's `limits` block counts timeouts (`miniprot_timeout_goi`) apart from runs that found nothing, and rounds a timeout ended (`goi_model_rounds_ended_by_timeout`). The value was fixed at 120 s in the code until 2026-10-22. Flanking-gene models, the home gene model and the rescue passes keep their own limits (the strong-synteny rescue: `strong_synteny_rescue_miniprot_timeout`).
+Guards of a miniprot run (since 2026-10-29): a run that has not finished after this many seconds stops the task, with a message that names the run and the parameter (in the search, ANNOTATE_GOI and BORROW_ANNOTATIONS the kind of model, the protein's length, the DNA's length and sequence; in the hull rescue the genome, the hull's coordinates and length), and in the hull rescue it ends the run (exit 3). `goi_miniprot_timeout` covers every run that models the gene of interest: the search's windows (one run per copy round of a locus), the home gene model of ANNOTATE_GOI when no annotated gene matches, and the hull rescue. `flanking_miniprot_timeout` covers the other runs: the flanking genes of a window and, for a home genome without a GFF, the transfer of a target's genes to the home (BORROW_ANNOTATIONS). A run without miniprot stops the same way: the search refuses to start, and a step that needs miniprot stops at its first run (until then every gene became a hit-chain model, with a warning per call). Until 2026-10-28 a run beyond 120 s (600 s in the hull rescue) gave no model: a flanking gene got a hit-chain model, the copy rounds of a GOI locus ended there, the home model came from the next chromosome with hits, a target gene was not transferred; how many runs did so depended on the machine's speed. The report's `miniprot_timeout_goi`, `miniprot_timeout_flanking` and `goi_model_rounds_ended_by_timeout` counts are 0 since then. The strong-synteny rescue has its own guard, `strong_synteny_rescue_miniprot_timeout`.
 
 ### `window_tblastn_word_size`, `window_tblastn_comp_stats`
 **Type:** Integer | **Defaults:** `3`, `2` (tblastn's own)
@@ -647,6 +647,13 @@ Despite the name, this no longer filters exon hits (that filter was switched off
 **Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'augustus'`, `'prodigal'`
 
 Selects the ab initio gene prediction tool. It predicts the genes of a home genome without a GFF (PREPARE_HOME_PROTEOME, and the flank walk when no annotation could be borrowed) and, in the optional PLM, structural and discovery steps, the genes of target windows; the default search models target genes with miniprot. **`auto`** (recommended) takes Augustus when it is installed, else Prodigal with a warning. With any `--modules` other than `legacy` (since 2026-10-27), a home without a GFF whose species is a eukaryote in the NCBI taxonomy stops the run before the search when Augustus is missing, instead of falling back to Prodigal. **`augustus`** is a eukaryotic gene predictor that models intron-exon structure using species-specific hidden Markov models — it can predict multi-exon genes with realistic splice sites. **`prodigal`** is a prokaryotic gene finder optimized for compact genomes without introns — it is fast and accurate for bacteria and archaea but cannot predict spliced genes. Using Prodigal for eukaryotes will miss all multi-exon genes, which is most eukaryotic genes. Using Augustus for prokaryotes works but is unnecessarily slow. The `auto` setting handles this correctly in virtually all cases.
+
+Since 2026-10-29 an Augustus run that fails stops the gene prediction with the cause (Augustus's exit code and the end of its messages); it no longer falls back to Prodigal, which cannot predict genes with introns and which the run's record (`effective_params.json`) did not name. No archived run of the test sets shows that fallback. A missing Augustus: with `--gene_predictor augustus` the prediction stops ("Augustus is not installed here"); under `auto` the predictor is Prodigal from the start, with a warning, as before (and with any `--modules` other than `legacy` a eukaryotic home stops the run, see above). The structural discovery, which predicts with Augustus only, now stops the search at its start when Augustus is not installed (until 2026-10-28 it predicted with Prodigal there, with a debug line only).
+
+### `gene_prediction_timeout`
+**Type:** Integer (s) | **Default:** `3600`
+
+Guard of one Augustus or Prodigal run of the gene prediction (PREPARE_HOME_PROTEOME and the flank walk of a home genome without a GFF, and the structural discovery's Augustus runs on target windows): a run that has not finished after this many seconds stops the task (since 2026-10-29). Launch accepts a whole number of seconds only, as for every guard (`sw_timeout_seconds`, `goi_miniprot_timeout`, `flanking_miniprot_timeout`, `strong_synteny_rescue_miniprot_timeout`). Until then Augustus had 600 s and then fell back to Prodigal, and Prodigal had 300 s, after which PREPARE_HOME_PROTEOME failed and the flank walk skipped the region. The list of installed Augustus models (`augustus --species=help`) has no time limit since then, and an installed Augustus whose list fails stops the run (a list slower than 30 s gave the model `fly` with the reason "not installed here").
 
 ### `augustus_species`
 **Type:** String | **Default:** `'auto'`
@@ -1026,9 +1033,9 @@ Minimum miniprot query-coverage fraction for a rescue model to be emitted. Lower
 Bp padded each side of the syntenic block coordinates before extracting the window for the rescue miniprot run. Wider = catches GOI bodies that start just outside the strong-flanking span, at the cost of larger search windows.
 
 ### `strong_synteny_rescue_miniprot_timeout`
-**Type:** Integer (seconds) | **Default:** `120`
+**Type:** Integer (seconds) | **Default:** `3600`
 
-Per-block timeout for the rescue miniprot invocation. Bumps to `300` are reasonable on long blocks; keep it short to avoid stalling the report on pathological blocks.
+Guard of the rescue's miniprot run of one block window (since 2026-10-29): a run that has not finished after this many seconds ends the run (the script exits 3, which the module turns into the run's end; so does a missing miniprot). The module still ignores other failures of the rescue, except a third kill for memory or time (exit 137, 140, 143), which ends the run too. Until then the default was 120 s and such a block was skipped, with a GFF comment that read like a block without a model.
 
 ### `disable_paralog_check`
 **Type:** Boolean | **Default:** `false`

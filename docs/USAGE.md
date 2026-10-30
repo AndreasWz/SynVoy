@@ -305,7 +305,8 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--report_low_complexity` | `false` | `LowComplexity=` on GOI models (`low_complexity` module). |
 | `--core_completeness` | `false` | HIGH's completeness also on the protein without signal peptide and GPI tail (`CoreCoverage`; `signal_anchor` module). |
 | `--goi_max_models_per_locus` | `10` | Gene models kept per candidate locus: every miniprot model that does not lie on a better one (the copies of a tandem array). `1` = best model only, as before (`local_family`: home copies + 1, at most 60). |
-| `--goi_miniprot_timeout` | `120` | Seconds per miniprot run that models a GOI in a window; a timeout ends that locus's copy rounds (counted in the report's `limits`). |
+| `--goi_miniprot_timeout` | `3600` | Guard of a miniprot run that models the GOI (search windows, the home gene model, the hull rescue): a run that does not finish stops the task (until 2026-10-28: 120 s, in the hull rescue 600 s, then no model). |
+| `--flanking_miniprot_timeout` | `3600` | Guard of the other miniprot runs (flanking genes in a window, the transfer of target genes to a home without a GFF): a run that does not finish stops the task (until 2026-10-28: 120 s, then a hit-chain model, or the target gene was not transferred). |
 | `--goi_candidate_regions_per_query` | `2` | GOI loci kept per query in a window (the `local_family` module raises it to the home copies + 1, at most 40). |
 | `--report_copies_in_slot` | `false` | `CopiesInSlot` / `SlotRank` on GOI models and home : target copies per genome in the report (on with `local_family`). |
 | `--window_tblastn_word_size` / `--window_tblastn_comp_stats` | `3` / `2` | tblastn options of the window search (finding only; the `short_query` module sets 2 / 0). |
@@ -363,7 +364,8 @@ One search per window (the names date from a design with several relaxed rounds)
 | `--pred_flank_window` | `50000` | Prodigal prediction window around locus |
 | `--pred_keep_pct` | `0.10` | Fraction of Prodigal predictions to keep |
 | `--prodigal_full_genome_fallback` | `false` | Run Prodigal on entire genome if windowed prediction fails |
-| `--gene_predictor` | `auto` | Gene predictor for a home genome without a GFF (and the optional ML steps): `auto`, `augustus`, or `prodigal`. With any `--modules` other than `legacy`, `auto` stops the run when a eukaryotic home would fall back to Prodigal |
+| `--gene_predictor` | `auto` | Gene predictor for a home genome without a GFF (and the optional ML steps): `auto`, `augustus`, or `prodigal`. With any `--modules` other than `legacy`, `auto` stops the run when a eukaryotic home would fall back to Prodigal; a failed Augustus run stops the prediction (no fallback to Prodigal since 2026-10-29) |
+| `--gene_prediction_timeout` | `3600` | Guard of one Augustus or Prodigal run: a run that does not finish stops the task (until 2026-10-28: 600 s / 300 s) |
 | `--augustus_species` | `auto` | Augustus species model. `auto`: `fly` under `--modules legacy`; otherwise, for a home without a GFF, the installed model nearest the home species (e.g. `candida_albicans`, `honeybee1`, `human`), recorded in `effective_params.json`. A model name is used as given; one Augustus cannot load stops the gene prediction with the nearest installed models |
 
 ### Gene Model Classification
@@ -494,7 +496,7 @@ already recovered.
 | `--disable_strong_synteny_rescue` | `false` | Turn off the relaxed-miniprot pass inside those blocks. It emits a LOW-confidence model tagged `EvidenceType=relaxed_miniprot_rescue` — *some* model to inspect rather than a silent absence. |
 | `--strong_synteny_rescue_miniprot_outc` | `0.05` | Min query coverage (fraction) for the relaxed pass to emit a model. |
 | `--strong_synteny_rescue_window_pad` | `2000` | bp added each side of the block coordinates before the rescue search. |
-| `--strong_synteny_rescue_miniprot_timeout` | `120` | Seconds per block for the rescue miniprot call. |
+| `--strong_synteny_rescue_miniprot_timeout` | `3600` | Guard of the rescue's miniprot run of one block: a run that does not finish ends the run (until 2026-10-28: 120 s, then the block was skipped). |
 | `--disable_goi_hull_rescue` | `false` | Turn off the GOI **hull** rescue — miniprot of the GOI across the whole flanking neighbourhood of a target chromosome, which catches a gene sitting in a rearrangement gap *between* seeded blocks. Largely superseded by collinearity bridging (`--synteny_bridge_max_gap`), which covers the gap up front; kept as a backstop for when home gene order is unavailable. |
 | `--goi_hull_min_flanking` | `auto` | Min HIGH-confidence flanking genes in the hull before a rescue is attempted. `auto` = round(0.4 × `--n_flanking_genes`) (4 at the default). |
 | `--goi_hull_cluster_max_gap` | `auto` | bp gap that splits flanking genes into separate clusters when computing the hull. `auto` = the bridge limit of the search for that genome (3000000 before). |

@@ -503,21 +503,27 @@ Several fixed limits of the search can drop a hit, a candidate or a block withou
 the results. Each is counted per genome: in the `limit_<name>` columns of
 `hits/<genome>.target_policy.tsv`, in one INFO line at the end of each genome in the search log
 (`Limit counts (what each limit dropped; docs/OUTPUT.md): ...`, only the counts that are not 0,
-else `none`), and summed in the report's `limits` block. Since 2026-10-29 a Smith-Waterman
-search that does not finish within its guard (`sw_timeout_seconds`) stops the task instead of
-losing its hits (fix-phase item 18); the `sw_timeout` column stays in the table, at 0. Hits and candidates of decoy queries are
+else `none`), and summed in the report's `limits` block. Since 2026-10-29 a
+Smith-Waterman or miniprot run of the search that does not finish within its guard
+(`sw_timeout_seconds`, `goi_miniprot_timeout`, `flanking_miniprot_timeout`) stops the task
+instead of giving fewer hits or no model, and the four timeout counts below stay in the table at
+0. The other counts are decided by the inputs as long as no tool of the search runs out of
+memory: a miniprot run killed for memory counts in `miniprot_failed_*` and gives no model, and an
+MMseqs2 search that fails for memory is retried with one thread and a lower sensitivity (a
+window whose MMseqs2 search still fails keeps its tblastn and Smith-Waterman hits only), so its
+hits, and the counts that follow from them, can differ. Hits and candidates of decoy queries are
 left out, except in `regions_cap_decoy`. A limit that never shows a count on your data does
 not bind there.
 
 | Counter | Counts |
 |---|---|
-| `miniprot_timeout_goi`, `miniprot_timeout_flanking` | miniprot calls that ran into the 120-s timeout: the call for the gene of interest (sensitive) or for a flanking gene. A timeout gives no model, and in the masked rounds of a GOI locus it ends the search for further copies |
+| `miniprot_timeout_goi`, `miniprot_timeout_flanking` | 0 since 2026-10-29: a miniprot run that does not finish within `goi_miniprot_timeout` / `flanking_miniprot_timeout` stops the task. Until then: runs for the gene of interest (sensitive) or a flanking gene that ran into the 120-s timeout, which gave no model and, in the masked rounds of a GOI locus, ended the search for further copies |
 | `miniprot_failed_*`, `miniprot_no_alignment_*` | miniprot calls that failed, and those that found no alignment (the same kinds) |
 | `goi_model_loci`, `goi_models_found`, `goi_models_kept` | GOI loci modelled, the alignments miniprot returned there over all rounds, and the models kept (`goi_max_models_per_locus`, 10) |
 | `goi_model_cap_stopped` | GOI loci where the model cap stopped the rounds while an alignment that would have been kept, or a window hit no model explains, was left |
 | `goi_models_below_outs` | Alignments of a masked round below 0.3 × the best score (miniprot's own `--outs` bound, applied again) |
 | `goi_models_near_outs` | Kept models scoring below 0.4 × the best: models close to that bound, a hint at what `--outs` leaves out |
-| `goi_model_rounds_ended_by_timeout` | Masked rounds ended by a miniprot timeout |
+| `goi_model_rounds_ended_by_timeout` | 0 since 2026-10-29 (no round ends on time). Until then: masked rounds ended by a miniprot timeout |
 | `window_len_floor_mmseqs`, `_tblastn`, `_sw` | Window hits that pass the E-value and identity floors but are shorter than the length floor (15 aa for longer queries; Smith-Waterman 10 aa) |
 | `window_len_floor_lt15_long_query` | Of those, hits shorter than 15 aa on a query longer than 100 aa |
 | `mmseqs_maxseqs_window`, `mmseqs_maxseqs_genome` | Queries with 300 result rows in a window or in the genome-wide search: MMseqs2 reports at most 300 targets per query (its `--max-seqs` default), so such a query may have lost more |
@@ -532,9 +538,16 @@ not bind there.
 | `dispersed_identity`, `dispersed_evalue`, `dispersed_alnlen`, `dispersed_near_anchor` | Genome-wide GOI hits the dispersed-GOI rescue (§1o) does not take, by the first test they fail: identity < `dispersed_goi_min_identity`, E > `dispersed_goi_max_evalue`, aligned length < `dispersed_goi_min_alnlen` (50 aa), or lying within the GOI margin of an anchor (left to the blocks; the window margin until 2026-10-22) |
 | `dead_zone` | Of the near-anchor hits, those that no searched block's GOI core holds: strong GOI hits that neither the blocks nor the rescue use |
 
-Two limits outside the search are logged instead: `split_loci.py` warns whenever `--max_loci`
-drops a home locus (`WARNING: --max_loci N dropped K home locus/loci ...`), and the strong-synteny
-rescue logs `miniprot timed out in K of M window(s)` at its end (its GFF is unchanged).
+One limit outside the search is logged instead: `split_loci.py` warns whenever `--max_loci`
+drops a home locus (`WARNING: --max_loci N dropped K home locus/loci ...`). The rescue passes
+count nothing: a miniprot run there that does not finish within its guard
+(`strong_synteny_rescue_miniprot_timeout`, `goi_miniprot_timeout` for the hull rescue) ends the
+run (exit 3, which their modules turn into the run's end although they ignore other failures),
+and so does a rescue task the scheduler killed for memory or time (exit 137, 140, 143) a third
+time. Until 2026-10-28 such a window was skipped: the strong-synteny rescue wrote a GFF comment
+that read like a block without a model and logged `miniprot timed out in K of M window(s)`, the
+hull rescue left a line in its log only, and a third kill left the genome without its rescue
+models.
 
 ## Intermediate / debugging artifacts (most users skip)
 

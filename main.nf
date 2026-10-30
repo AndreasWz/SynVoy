@@ -489,9 +489,13 @@ def validateNumericParams(validationErrors, validationWarnings) {
     if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
         validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
     }
-    def swTimeout = num.call('sw_timeout_seconds', params.sw_timeout_seconds, 1)
-    if (swTimeout < 1) {
-        validationErrors << "Invalid --sw_timeout_seconds (${params.sw_timeout_seconds}). Must be >= 1."
+    // The guards of fix-phase item 18: seconds after which a tool run stops the task
+    // (whole numbers: the scripts read them as int; 3600.0 would stop a rescue with exit 2, which it ignores)
+    ['sw_timeout_seconds', 'goi_miniprot_timeout', 'flanking_miniprot_timeout',
+     'strong_synteny_rescue_miniprot_timeout', 'gene_prediction_timeout'].each { guardName ->
+        if (!(params[guardName].toString() ==~ /[1-9][0-9]*/)) {
+            validationErrors << "Invalid --${guardName} (${params[guardName]}). Must be a whole number of seconds >= 1."
+        }
     }
     if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
         validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."

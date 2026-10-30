@@ -25,7 +25,8 @@ import tempfile
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import (genetic_code_flag, genetic_code_for,  # noqa: E402
-                            parse_genetic_code_spec, set_genetic_code)
+                            parse_genetic_code_spec, set_genetic_code,
+                            exit_step_failed, guard_failed, StepFailed)
 from sequence_utils import parse_gff_attributes  # noqa: E402,F401  (kept for symmetry)
 
 
@@ -56,18 +57,18 @@ def _read_query(query_path: str) -> tuple[str, str]:
     return name, "".join(seq_parts)
 
 
-# Windows whose miniprot timed out in this run (profile handoff, stage 2): counted and logged
-# at the end, never written to the GFF (results stay byte-identical).
-TIMEOUTS = {"windows": 0, "runs": 0}
-
-
 def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
-                          timeout: int) -> str:
+                          timeout: int, param: str = "strong_synteny_rescue_miniprot_timeout",
+                          place: str = "") -> str:
     """Run miniprot --gff with very permissive thresholds against a single window.
 
     Mirrors the relaxed search profile used elsewhere in iterative_search_runner
     (-n 2 / -p 0.2 / -N 50 / --outs 0.2 / --outc <min_outc>). Returns the raw GFF3
-    text; the caller parses it.
+    text; the caller parses it. ``timeout`` is the run's guard (pipeline parameter ``param``):
+    a run that does not finish raises StepFailed naming ``place`` (genome, block or hull and its
+    coordinates), and the script exits STEP_FAILED_EXIT, which the module turns into the end of
+    the run (fix-phase item 18). Until 2026-10-28 such a
+    window was skipped and its GFF comment read like a real "no model".
     """
     cmd = [
         "miniprot",
@@ -82,17 +83,13 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
     ] + genetic_code_flag("miniprot") + [   # the target's genetic code ([] for table 1)
         window_fa, query_fa,
     ]
-    TIMEOUTS["runs"] += 1
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        # One slow window must not take the other windows of this genome with it: the task
-        # used to die here and errorStrategy 'ignore' hid it (bug hunt 2026-10-13, A9).
-        # A missing binary still raises: that is an installation fault, not a window.
-        print(f"[rescue] miniprot timed out after {timeout} s on {window_fa}; window skipped",
-              file=sys.stderr)
-        TIMEOUTS["windows"] += 1
-        return ""
+        raise guard_failed(f"[rescue] miniprot on {place or 'the window ' + window_fa}", timeout,
+                           param) from None
+    except FileNotFoundError as exc:   # an installation fault, not a window: the run stops too
+        raise StepFailed(f"[rescue] miniprot is not installed here ({exc})") from exc
     if proc.returncode != 0:
         print(f"[rescue] miniprot non-zero exit ({proc.returncode}) on "
               f"{window_fa}: {proc.stderr[:200]}", file=sys.stderr)
@@ -228,7 +225,10 @@ def main() -> None:
                     help="--outc passed to miniprot (default 0.05 = 5%% query coverage)")
     ap.add_argument("--window_pad", type=int, default=2000,
                     help="bp padding added each side of the block coords")
-    ap.add_argument("--miniprot_timeout", type=int, default=120)
+    ap.add_argument("--miniprot_timeout", type=int, default=3600,
+                    help="Guard of the miniprot run of one block window, in seconds (pipeline: "
+                         "strong_synteny_rescue_miniprot_timeout): a run that does not finish ends "
+                         "the run (exit STEP_FAILED_EXIT)")
     ap.add_argument("--target_genetic_codes", default="",
                     help="Genetic codes of target genomes, 'genome=table,...'; the table of "
                          "--target_genome is used (lib/GeneticCodes.groovy builds this)")
@@ -297,6 +297,8 @@ def main() -> None:
 
             gff_text = _run_miniprot_relaxed(
                 window_fa, query_fa, args.miniprot_outc, args.miniprot_timeout,
+                "strong_synteny_rescue_miniprot_timeout",
+                f"{args.genome_name} block {idx} ({chrom}:{ws}-{we}, {len(subseq):,} bp)",
             )
             if not gff_text.strip():
                 out_lines.append(
@@ -316,11 +318,9 @@ def main() -> None:
 
     with open(args.output, "w") as out:
         out.write("\n".join(out_lines) + "\n")
-    if TIMEOUTS["runs"]:
-        print(f"[rescue] {args.genome_name}: miniprot timed out in {TIMEOUTS['windows']} of "
-              f"{TIMEOUTS['runs']} window(s) (--miniprot_timeout {args.miniprot_timeout} s)",
-              file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    # A miniprot run beyond its guard exits STEP_FAILED_EXIT (3), which the module turns into
+    # the run's end; it ignores the other failures of the rescue (errorStrategy).
+    exit_step_failed(main)

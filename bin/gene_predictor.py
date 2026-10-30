@@ -33,13 +33,20 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from sequence_utils import get_genetic_code, offline_ncbi_taxa, strip_species_qualifier
+    from sequence_utils import (get_genetic_code, offline_ncbi_taxa, strip_species_qualifier,
+                                StepFailed, guard_failed)
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import get_genetic_code, offline_ncbi_taxa, strip_species_qualifier
+    from sequence_utils import (get_genetic_code, offline_ncbi_taxa, strip_species_qualifier,
+                                StepFailed, guard_failed)
 
 logger = logging.getLogger(__name__)
 _WARNED_PRODIGAL_CODE = set()
+# Guard of one Augustus or Prodigal run, in seconds (fix-phase item 18): a run that does not
+# finish stops the task (StepFailed). The prediction scripts set it from the pipeline parameter
+# gene_prediction_timeout (--gene_prediction_timeout). Until 2026-10-28 Augustus had 600 s and
+# then fell back to Prodigal, Prodigal 300 s; how long a run took could change the genes.
+GENE_PREDICTION_TIMEOUT = 3600
 
 # ---------------------------------------------------------------------------
 # Availability checks
@@ -121,8 +128,9 @@ def resolve_augustus_species(species_hint: str) -> str:
 
     Raises AugustusModelNotInstalled when Augustus is installed and cannot load the model
     (augustus_model_installed): the message names the hint, the model and the nearest
-    installed models. Without Augustus nothing is checked (the prediction then falls back to
-    Prodigal, as before).
+    installed models. Without Augustus nothing is checked: under gene_predictor 'auto' the
+    predictor is then Prodigal before Augustus is tried, and an Augustus run stops with
+    "Augustus is not installed here" (no fallback to Prodigal since fix-phase item 18).
     """
     if not species_hint:
         return "fly"  # safe default for eukaryotes
@@ -171,7 +179,10 @@ def nearest_installed_models(hint: str, name: str, models: Dict[str, str],
 def not_installed_message(hint: str, name: str, config_dir: str) -> str:
     """The message of a model that is not installed: the hint, the model it maps to, where
     Augustus looked, and the nearest installed models."""
-    models = installed_augustus_models(config_dir=config_dir)
+    try:
+        models, list_failed = installed_augustus_models(config_dir=config_dir), None
+    except StepFailed as exc:     # the list itself fails (fix-phase item 18): say so, keep the rest
+        models, list_failed = {}, str(exc)
     ncbi = offline_ncbi_taxa()
     near = nearest_installed_models(hint, name, models,
                                     TaxonomyLookup(ncbi) if ncbi is not None else None)
@@ -184,33 +195,13 @@ def not_installed_message(hint: str, name: str, config_dir: str) -> str:
     env_text = ("" if os.path.isdir(species_dir) else
                 f" Augustus reads its models only from $AUGUSTUS_CONFIG_PATH ({config_dir}) when it "
                 f"is set, and that folder holds no species folder.")
+    count_text = (f"The installed models could not be listed: {list_failed}; " if list_failed else
+                  f"{len(models)} models are installed: the identifiers `augustus --species=help` "
+                  f"lists (not its aliases in parentheses) and the Genus_species folders in "
+                  f"{species_dir} that the list leaves out; ")
     return (f"augustus_species '{hint}' {what} (there is no {cfg}).{env_text} {near_text} "
-            f"{len(models)} models are installed: the identifiers `augustus --species=help` lists "
-            f"(not its aliases in parentheses) and the Genus_species folders in {species_dir} that "
-            f"the list leaves out; set one with --augustus_species, or install the model in "
+            f"{count_text}set one with --augustus_species, or install the model in "
             f"{species_dir}.")
-
-
-def list_augustus_species() -> List[str]:
-    """List available Augustus species models on this system."""
-    try:
-        result = subprocess.run(
-            ["augustus", "--species=help"],
-            capture_output=True, text=True, timeout=10,
-        )
-        # Augustus prints species list to stderr
-        output = result.stderr + result.stdout
-        species = []
-        for line in output.splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("usage"):
-                # Augustus lists species one per line, sometimes with descriptions
-                name = line.split()[0] if line.split() else ""
-                if name and not name.startswith("-"):
-                    species.append(name)
-        return species
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +240,17 @@ def installed_augustus_models(help_text: Optional[str] = None,
     if help_text is None:
         if not check_augustus_available():
             return {}
+        # No time limit, and no empty answer on a failure (fix-phase item 18): until 2026-10-28
+        # a help call slower than 30 s gave {} and the model 'fly' with the reason "not
+        # installed here". An installed Augustus whose help call fails stops the run.
         try:
-            result = subprocess.run(["augustus", "--species=help"], capture_output=True,
-                                    text=True, timeout=30)
-        except (subprocess.TimeoutExpired, OSError):
-            return {}
+            result = subprocess.run(["augustus", "--species=help"], capture_output=True, text=True)
+        except OSError as exc:
+            raise StepFailed(f"`augustus --species=help` could not run: {exc}") from exc
         help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+        if not any(_HELP_ROW_RE.match(line) for line in help_text.splitlines()):
+            raise StepFailed(f"`augustus --species=help` listed no model (exit {result.returncode}): "
+                             + " | ".join(help_text.strip().splitlines()[-3:]))
         config_dir = config_dir or augustus_config_dir()
     species_dir = os.path.join(config_dir, "species") if config_dir else None
 
@@ -386,9 +382,13 @@ def run_prodigal(
         cmd.append("-q")
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=GENE_PREDICTION_TIMEOUT)
         return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+    except subprocess.TimeoutExpired:
+        raise guard_failed(f"Prodigal on {fasta_in}", GENE_PREDICTION_TIMEOUT,
+                           "gene_prediction_timeout") from None
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         logger.debug(f"Prodigal failed: {exc}")
         return False
 
@@ -408,7 +408,9 @@ def run_augustus(
     Run Augustus on a FASTA file.  Designed for eukaryotic genomes —
     handles introns, splice sites, and multi-exon gene structures.
 
-    Returns True on success.
+    Returns True. A run that fails, a missing Augustus and a run beyond GENE_PREDICTION_TIMEOUT
+    raise StepFailed with the cause (fix-phase item 18): the prediction no longer falls back to
+    Prodigal, which cannot model introns and which the run's record did not name.
     """
     species = resolve_augustus_species(species)
 
@@ -427,22 +429,26 @@ def run_augustus(
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600,
+            cmd, capture_output=True, text=True, timeout=GENE_PREDICTION_TIMEOUT,
         )
-        if result.returncode != 0:
-            logger.debug(f"Augustus exited {result.returncode}: {result.stderr[:300]}")
-            return False
+    except subprocess.TimeoutExpired:
+        raise guard_failed(f"Augustus ({species}) on {fasta_in}", GENE_PREDICTION_TIMEOUT,
+                           "gene_prediction_timeout") from None
+    except FileNotFoundError as exc:
+        raise StepFailed(f"Augustus is not installed here ({exc}); the prediction does not fall "
+                         f"back to Prodigal, which cannot model introns") from exc
+    if result.returncode != 0:
+        raise StepFailed(
+            f"Augustus ({species}) failed on {fasta_in} (exit {result.returncode}: "
+            + " | ".join((result.stderr or "").strip().splitlines()[-3:])
+            + "); the prediction does not fall back to Prodigal, which cannot model introns")
 
-        # Augustus writes GFF3 to stdout
-        gff_content = result.stdout
+    # Augustus writes GFF3 to stdout
+    gff_content = result.stdout
 
-        # Parse GFF and extract protein sequences
-        _parse_augustus_output(gff_content, faa_out, gff_out)
-        return True
-
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        logger.debug(f"Augustus failed: {exc}")
-        return False
+    # Parse GFF and extract protein sequences
+    _parse_augustus_output(gff_content, faa_out, gff_out)
+    return True
 
 
 def _parse_augustus_output(
@@ -576,11 +582,10 @@ def predict_genes(
     if predictor == "prodigal":
         return run_prodigal(fasta_in, faa_out, gff_out)
     elif predictor == "augustus":
-        success = run_augustus(fasta_in, faa_out, gff_out, species=augustus_species)
-        if not success and check_prodigal_available():
-            logger.warning("Augustus failed; falling back to Prodigal")
-            return run_prodigal(fasta_in, faa_out, gff_out)
-        return success
+        # No fallback to Prodigal (fix-phase item 18): Prodigal cannot model introns, and the
+        # run's record (effective_params.json) names Augustus; a failed Augustus run stops
+        # (run_augustus raises StepFailed with the cause).
+        return run_augustus(fasta_in, faa_out, gff_out, species=augustus_species)
     else:
         logger.error(f"Unknown predictor: {predictor}")
         return False
@@ -615,13 +620,11 @@ def predict_orfs(
     if predictor == "prodigal":
         success = run_prodigal(region_fasta, proteins_file, gff_file)
     elif predictor == "augustus":
+        # no fallback to Prodigal (fix-phase item 18): a failed run raises StepFailed
         success = run_augustus(
             region_fasta, proteins_file, gff_file,
             species=augustus_species,
         )
-        if not success and check_prodigal_available():
-            logger.debug("Augustus failed on region; falling back to Prodigal")
-            success = run_prodigal(region_fasta, proteins_file, gff_file)
     else:
         success = False
 

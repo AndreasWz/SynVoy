@@ -11,8 +11,12 @@
 process RESCUE_STRONG_SYNTENY {
     tag "${locus_id}/${genome_name}"
     // Never block the pipeline on a single failed rescue, but retry a task the scheduler
-    // killed for memory or time: 'ignore' alone overrode the config's retry for those.
-    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'ignore' }
+    // killed for memory or time: 'ignore' alone overrode the config's retry for those. Exit 3
+    // (sequence_utils.STEP_FAILED_EXIT: a miniprot run that did not finish within its guard)
+    // ends the run, and so does a kill after its retries (fix-phase item 18): until 2026-10-28
+    // a slow window was skipped and a third kill dropped the genome's rescue, so the machine's
+    // speed decided what the rescue contained.
+    errorStrategy { task.exitStatus == 3 ? 'terminate' : (task.exitStatus in [137, 140, 143] ? (task.attempt <= 2 ? 'retry' : 'terminate') : 'ignore') }
     maxRetries 2
     // Publish the rescued models. Until 2026-10-05 nothing did: a hull-rescued ortholog
     // appeared in synvoy_report.json as a span only, with its exon coordinates and

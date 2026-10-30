@@ -35,7 +35,7 @@ try:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query
+        continues_query, StepFailed, guard_failed
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,7 +43,7 @@ except ImportError:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query
+        continues_query, StepFailed, guard_failed
     )
 
 
@@ -1349,25 +1349,34 @@ def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
 # =============================================================================
 
 def _check_miniprot():
-    """Check if miniprot is available."""
+    """Check if miniprot is available. No time limit (fix-phase item 18): a slow start must
+    not read as a missing miniprot, which silently gave hit-chain models everywhere."""
     try:
-        result = subprocess.run(["miniprot", "--version"],
-                                capture_output=True, text=True, timeout=5)
+        result = subprocess.run(["miniprot", "--version"], capture_output=True, text=True)
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except OSError:
         return False
 
+# Probed once at import; the module stays importable without miniprot (CI has no bioconda
+# tools), and a call that needs it stops instead (_run_miniprot).
 MINIPROT_AVAILABLE = _check_miniprot()
 # Queries shorter than this are aligned with miniprot -L 10 (ORFs from 10 aa, default 30).
 # The search sets it per run (iterative_search_runner --miniprot_short_orf_max_len; the
 # short_query preset module raises it to 100); the home gene model always uses 60.
 MINIPROT_SHORT_ORF_MAX_LEN = 60
-# Seconds per miniprot run of the sensitive (GOI) kind; the search sets it per run
-# (iterative_search_runner --goi_miniprot_timeout). Every other run keeps 120 s.
-GOI_MINIPROT_TIMEOUT = 120
+# Guards of a miniprot run, in seconds (fix-phase item 18): a run that does not finish within
+# its guard stops the task (StepFailed) instead of giving no model, so the time a run takes
+# never changes a result. The sensitive (GOI) kind: pipeline parameter goi_miniprot_timeout
+# (iterative_search_runner --goi_miniprot_timeout, this script's --miniprot_timeout for the home
+# model); every other run: flanking_miniprot_timeout (iterative_search_runner
+# --flanking_miniprot_timeout, borrow_annotations.py --miniprot_timeout). Until 2026-10-28 a
+# timeout (120 s) gave no model, and in the masked rounds of a GOI locus ended them.
+GOI_MINIPROT_TIMEOUT = 3600
+FLANKING_MINIPROT_TIMEOUT = 3600
 # What a limit of the miniprot calls dropped (profile handoff, stage 2; they change no
 # result): per call kind ("goi" = the sensitive call for the gene of interest, "flanking"
-# otherwise) the calls that timed out, failed or found no alignment, and per GOI locus of
+# otherwise) the calls that failed or found no alignment (the timeout counts stay 0 since
+# fix-phase item 18: a guard stops the task), and per GOI locus of
 # miniprot_gene_models the alignments found, the models kept and whether the model cap
 # stopped the masked rounds. The search resets it at the start of each genome and reports
 # it at the end (iterative_search_runner: limit_* columns of hits/<genome>.target_policy.tsv).
@@ -1395,11 +1404,11 @@ def _miniprot_genetic_code_args():
         return []
     if _MINIPROT_T_OK is None:
         try:
-            out = subprocess.run(["miniprot", "--version"], capture_output=True, text=True,
-                                 timeout=5).stdout.strip()
+            out = subprocess.run(["miniprot", "--version"], capture_output=True,
+                                 text=True).stdout.strip()
             m = re.match(r"(\d+)\.(\d+)", out)
             _MINIPROT_T_OK = bool(m) and (int(m.group(1)), int(m.group(2))) >= (0, 13)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except OSError:
             _MINIPROT_T_OK = False
     if not _MINIPROT_T_OK:
         raise RuntimeError(f"genetic code {code} needs miniprot >= 0.13 (option -T)")
@@ -1671,13 +1680,16 @@ def refine_model_termini(cds_ordered, chrom_seq, strand,
 def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive=False):
     """Align a protein to a stretch of DNA with miniprot; the parsed models, best first.
 
-    An empty list when miniprot is missing, fails, times out or finds nothing.
+    An empty list when miniprot fails or finds nothing. A run that does not finish within its
+    guard (GOI_MINIPROT_TIMEOUT / FLANKING_MINIPROT_TIMEOUT), and a call without miniprot,
+    raise StepFailed (fix-phase item 18): until 2026-10-28 they gave an empty list, so the
+    gene fell back to a hit-chain model, and a missing miniprot did so for every gene.
     """
-    if not query_seq or not chrom_seq or not MINIPROT_AVAILABLE:
-        if query_seq and chrom_seq:
-            print("[annotate_goi_exons] WARNING: miniprot not available, returning raw query",
-                  file=sys.stderr)
+    if not query_seq or not chrom_seq:
         return []
+    if not MINIPROT_AVAILABLE:
+        raise StepFailed("miniprot is not installed here (or `miniprot --version` failed); the "
+                         "gene models need it. Install miniprot (bioconda) in the run's environment.")
 
     # mkstemp, not a pid-derived name: pids repeat across containers/PID namespaces
     # that share /tmp, and a collision would silently swap one task's model for another's.
@@ -1725,8 +1737,13 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
         cmd.extend(_miniprot_genetic_code_args())
         cmd.extend([target_file, query_file])
 
-        timeout = GOI_MINIPROT_TIMEOUT if sensitive else 120
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        timeout = GOI_MINIPROT_TIMEOUT if sensitive else FLANKING_MINIPROT_TIMEOUT
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise guard_failed(
+                f"miniprot ({kind} model: a {query_len}-aa protein against {len(chrom_seq):,} bp "
+                f"of {chrom_name})", timeout, f"{kind}_miniprot_timeout") from None
 
         if result.returncode != 0:
             print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
@@ -1744,10 +1761,6 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
             _count(f"miniprot_no_alignment_{kind}")
         return models
 
-    except subprocess.TimeoutExpired:
-        print(f"[miniprot] Timed out after {timeout}s", file=sys.stderr)
-        _count(f"miniprot_timeout_{kind}")
-        return []
     except Exception as e:
         print(f"[miniprot] Error: {e}", file=sys.stderr)
         _count(f"miniprot_failed_{kind}")
@@ -1955,8 +1968,9 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
     For the gene of interest (``sensitive``) LIMIT_COUNTS records per call: the locus, the
     alignments miniprot returned over all rounds, the models kept, alignments below the
     score bound of a masked round, kept models within 1.33x of that bound (a proxy for
-    alignments miniprot's own --outs left out), whether the cap stopped the rounds while an
-    alignment or a hit was still unexplained, and whether a timeout ended them.
+    alignments miniprot's own --outs left out), and whether the cap stopped the rounds while an
+    alignment or a hit was still unexplained. A miniprot run that does not finish within its
+    guard stops the task (StepFailed), so no round ends on time (fix-phase item 18).
     """
     if not query_seq or not chrom_seq:
         return []
@@ -1985,12 +1999,9 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
 
     for _round in range(limit):
         added = 0
-        timeouts_before = LIMIT_COUNTS.get("miniprot_timeout_goi", 0)
         found = _run_miniprot(query_seq, target, chrom_name, max_intron, sensitive)
         if sensitive:
             _count("goi_models_found", len(found))
-            if _round and LIMIT_COUNTS.get("miniprot_timeout_goi", 0) > timeouts_before:
-                _count("goi_model_rounds_ended_by_timeout")
         for i, model in enumerate(found):
             if len(kept) >= limit:
                 left_over = sensitive and any(would_be_kept(m) for m in found[i:])
@@ -2118,6 +2129,7 @@ def annotate_models_from_hit_list(hits, query_seq, chrom_seq, chrom_name,
 # =============================================================================
 
 def main():
+    global GOI_MINIPROT_TIMEOUT
     parser = argparse.ArgumentParser(
         description="Annotate GOI exons in home genome"
     )
@@ -2154,8 +2166,15 @@ def main():
 
     parser.add_argument("--genetic_code", type=int, default=1,
                         help="NCBI genetic code of the home genome (default 1, the standard code)")
+    parser.add_argument("--miniprot_timeout", type=int, default=GOI_MINIPROT_TIMEOUT,
+                        help="Guard of the miniprot run that builds the home gene model when no "
+                             "annotated gene matches, in seconds (pipeline: goi_miniprot_timeout): "
+                             "a run that does not finish stops the task")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    if args.miniprot_timeout < 1:
+        parser.error("--miniprot_timeout must be at least 1")
+    GOI_MINIPROT_TIMEOUT = args.miniprot_timeout
 
     # Load query sequence
     query_records = list(parse_fasta(args.query))

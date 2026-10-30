@@ -893,6 +893,12 @@ def augustus_steps_model_error(args) -> Optional[str]:
     if not (plm_or_structural and (getattr(args, "enable_structural_discovery", False) or GPU_IN_WORKER)):
         return None
     import gene_predictor
+    if not gene_predictor.check_augustus_available():
+        # The discovery predicts with Augustus only (no fallback to Prodigal since fix-phase
+        # item 18), so without it the run would fail only after every wave.
+        return ("the structural discovery predicts ORFs in target windows with Augustus, and "
+                "Augustus is not installed here (augustus not on PATH); install it or switch the "
+                "discovery off (--enable_structural_discovery false)")
     try:
         gene_predictor.resolve_augustus_species(getattr(args, "augustus_species", "fly"))
     except gene_predictor.AugustusModelNotInstalled as exc:
@@ -7500,7 +7506,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     # raises it); a module setting of annotate_goi_exons, set for this worker task.
     import annotate_goi_exons as _age
     _age.MINIPROT_SHORT_ORF_MAX_LEN = int(getattr(args, 'miniprot_short_orf_max_len', 60))
-    _age.GOI_MINIPROT_TIMEOUT = int(getattr(args, 'goi_miniprot_timeout', 120))
+    # The guards of its miniprot runs (fix-phase item 18): a run that does not finish stops the
+    # genome's search (StepFailed) instead of giving no model.
+    _age.GOI_MINIPROT_TIMEOUT = int(getattr(args, 'goi_miniprot_timeout', 3600))
+    _age.FLANKING_MINIPROT_TIMEOUT = int(getattr(args, 'flanking_miniprot_timeout', 3600))
     _age.LIMIT_COUNTS.clear()        # this genome's miniprot counts (log_genome_limits)
     global CORE_COMPLETENESS
     CORE_COMPLETENESS = bool(getattr(args, 'core_completeness', False))
@@ -8833,10 +8842,18 @@ def main():
                         help="Gene models kept per GOI locus of a window: every miniprot model "
                              "that does not lie on a better one, up to this number; 1 = the "
                              "best model only (default: 10)")
-    parser.add_argument("--goi_miniprot_timeout", type=int, default=120,
-                        help="Seconds per miniprot run that models a GOI in a window; a run "
-                             "that times out gives no model and ends that locus's copy rounds "
-                             "(default: 120)")
+    parser.add_argument("--goi_miniprot_timeout", type=int, default=3600,
+                        help="Guard of a miniprot run that models a GOI in a window, in seconds: "
+                             "a run that does not finish stops the genome's search and the task "
+                             "(default: 3600; until 2026-10-28 a timeout of 120 s gave no model)")
+    parser.add_argument("--flanking_miniprot_timeout", type=int, default=3600,
+                        help="Guard of a miniprot run that models a flanking gene in a window, in "
+                             "seconds: a run that does not finish stops the genome's search and the "
+                             "task (default: 3600; until 2026-10-28 a timeout of 120 s gave a "
+                             "hit-chain model instead)")
+    parser.add_argument("--gene_prediction_timeout", type=int, default=3600,
+                        help="Guard of one Augustus run of the structural discovery, in seconds: a "
+                             "run that does not finish stops the run (fix-phase item 18)")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
@@ -9405,6 +9422,20 @@ def main():
         sys.exit(1)
     if args.goi_miniprot_timeout < 1:
         logger.error(f"goi_miniprot_timeout must be >= 1 (got {args.goi_miniprot_timeout})")
+        sys.exit(1)
+    if args.flanking_miniprot_timeout < 1:
+        logger.error(f"flanking_miniprot_timeout must be >= 1 (got {args.flanking_miniprot_timeout})")
+        sys.exit(1)
+    if args.gene_prediction_timeout < 1:
+        logger.error(f"gene_prediction_timeout must be >= 1 (got {args.gene_prediction_timeout})")
+        sys.exit(1)
+    import gene_predictor as _gp       # the structural discovery's Augustus runs (main process)
+    _gp.GENE_PREDICTION_TIMEOUT = args.gene_prediction_timeout
+    # Every gene model of the search starts with a miniprot run; without miniprot each gene
+    # became a hit-chain model, with a warning per call only (fix-phase item 18).
+    if not MINIPROT_AVAILABLE:
+        logger.error("miniprot not found (or `miniprot --version` failed): the gene models of the "
+                     "search need it. Install miniprot (bioconda) in the run's environment.")
         sys.exit(1)
 
     # SW is the load-bearing tier for divergent GOI recovery (e.g. re-finding a 26-40 %

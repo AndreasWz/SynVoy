@@ -201,7 +201,7 @@ class _Proc:
     returncode, stdout, stderr = 0, "", ""
 
 
-@pytest.mark.parametrize("sensitive,want", [(True, 300), (False, 120)])
+@pytest.mark.parametrize("sensitive,want", [(True, 300), (False, 900)])
 def test_the_goi_miniprot_timeout_reaches_the_sensitive_runs_only(monkeypatch, sensitive, want):
     seen = {}
 
@@ -210,20 +210,23 @@ def test_the_goi_miniprot_timeout_reaches_the_sensitive_runs_only(monkeypatch, s
         return _Proc()
     monkeypatch.setattr(age, "MINIPROT_AVAILABLE", True)
     monkeypatch.setattr(age, "GOI_MINIPROT_TIMEOUT", 300)
+    monkeypatch.setattr(age, "FLANKING_MINIPROT_TIMEOUT", 900)
     monkeypatch.setattr(age.subprocess, "run", run)
     age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=sensitive)
     assert seen["timeout"] == want
 
 
-def test_a_goi_timeout_prints_its_own_limit(monkeypatch, capsys):
+def test_a_goi_run_beyond_its_guard_names_its_limit_and_stops(monkeypatch):
+    """Fix-phase item 18: the guard stops the task (StepFailed) and names its parameter; until
+    2026-10-28 a timeout gave no model and was counted as miniprot_timeout_goi."""
     def boom(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
     monkeypatch.setattr(age, "MINIPROT_AVAILABLE", True)
     monkeypatch.setattr(age, "GOI_MINIPROT_TIMEOUT", 45)
     monkeypatch.setattr(age.subprocess, "run", boom)
-    assert age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=True) == []
-    assert "[miniprot] Timed out after 45s" in capsys.readouterr().err
-    assert age.LIMIT_COUNTS.pop("miniprot_timeout_goi", 0) == 1
+    with pytest.raises(age.StepFailed, match=r"within 45 s \(--goi_miniprot_timeout\)"):
+        age._run_miniprot("MAAA", "ACGT" * 30, "c1", sensitive=True)
+    assert "miniprot_timeout_goi" not in age.LIMIT_COUNTS
 
 
 def test_the_search_takes_the_goi_timeout_and_sets_it_per_genome_task():
@@ -231,7 +234,7 @@ def test_the_search_takes_the_goi_timeout_and_sets_it_per_genome_task():
                                capture_output=True, text=True).stdout
     assert "--goi_miniprot_timeout" in help_text
     src = (ROOT / "bin" / "iterative_search_runner.py").read_text()
-    assert "_age.GOI_MINIPROT_TIMEOUT = int(getattr(args, 'goi_miniprot_timeout', 120))" in src
+    assert "_age.GOI_MINIPROT_TIMEOUT = int(getattr(args, 'goi_miniprot_timeout', 3600))" in src
     nf = (ROOT / "modules" / "iterative_search.nf").read_text()
     assert "--goi_miniprot_timeout ${params.goi_miniprot_timeout}" in nf
-    assert age.GOI_MINIPROT_TIMEOUT == 120
+    assert age.GOI_MINIPROT_TIMEOUT == 3600

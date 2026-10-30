@@ -37,6 +37,7 @@ process ANNOTATE_GOI {
         --max_evalue ${params.search_evalue} \\
         --gff_search_window ${params.gff_search_window} \\
         --gap_search_window ${params.gap_search_window} \\
+        --miniprot_timeout ${params.goi_miniprot_timeout} \\
         --output_exons goi_exons.faa \\
         --output_bed goi_annotation.bed \\
         --output_info goi_info.json

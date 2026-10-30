@@ -38,6 +38,7 @@ process EXTRACT_FLANKING {
         --pred_flank_window ${params.pred_flank_window} \\
         --pred_keep_pct ${params.pred_keep_pct} \\
         --gene_predictor ${params.gene_predictor} \\
+        --gene_prediction_timeout ${params.gene_prediction_timeout} \\
         --augustus_species ${HomeGenes.augustusSpecies(params, settings)} \\
         $goi_arg \\
         $dist_arg \\

@@ -52,19 +52,25 @@ def test_counted_compact_model_still_replaces_a_fused_one():
 
 # --------------------------------------------------------------------------- A9
 
-def test_miniprot_timeout_skips_the_window(monkeypatch, capsys):
+def test_miniprot_beyond_its_guard_stops_the_rescue(monkeypatch):
+    """A9 (2026-10-13) made a timeout skip the window instead of killing the task, which
+    errorStrategy 'ignore' hid; fix-phase item 18 (2026-10-29): the guard stops the rescue with
+    StepFailed, the script exits STEP_FAILED_EXIT and the module ends the run."""
     def slow(*_a, **kw):
         raise subprocess.TimeoutExpired(cmd="miniprot", timeout=kw.get("timeout"))
     monkeypatch.setattr(rss.subprocess, "run", slow)
-    assert rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 3) == ""
-    assert "timed out" in capsys.readouterr().err
+    with pytest.raises(isr.StepFailed, match="did not finish within 3 s"):
+        rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 3)
 
 
 def test_missing_miniprot_still_fails_loud(monkeypatch):
+    """Since fix-phase item 18 a missing miniprot stops the rescue with StepFailed (exit 3, which
+    the module turns into the run's end); the FileNotFoundError before exited 1, which the module
+    ignores."""
     def missing(*_a, **_kw):
         raise FileNotFoundError("miniprot")
     monkeypatch.setattr(rss.subprocess, "run", missing)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(isr.StepFailed, match="miniprot is not installed here"):
         rss._run_miniprot_relaxed("w.fa", "q.fa", 0.05, 3)
 
 

@@ -444,8 +444,15 @@ def main():
     
     parser.add_argument("--genetic_code", type=int, default=1,
                         help="NCBI genetic code of the home genome (default 1, the standard code)")
+    parser.add_argument("--gene_prediction_timeout", type=int, default=3600,
+                        help="Guard of one Augustus or Prodigal run, in seconds (pipeline: "
+                             "gene_prediction_timeout): a run that does not finish stops the task")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
+    if args.gene_prediction_timeout < 1:
+        parser.error("--gene_prediction_timeout must be at least 1")
+    import gene_predictor
+    gene_predictor.GENE_PREDICTION_TIMEOUT = args.gene_prediction_timeout
     exon_mode = args.exon_mode.lower() == 'true'
     expand_goi_similar = args.expand_goi_similar.lower() == 'true'
 

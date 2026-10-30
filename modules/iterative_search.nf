@@ -108,6 +108,8 @@ process ITERATIVE_SEARCH {
         --goi_genome_wide_without_blocks ${params.goi_genome_wide_without_blocks} \\
         --goi_max_models_per_locus ${settings.goi_max_models_per_locus} \\
         --goi_miniprot_timeout ${params.goi_miniprot_timeout} \\
+        --flanking_miniprot_timeout ${params.flanking_miniprot_timeout} \\
+        --gene_prediction_timeout ${params.gene_prediction_timeout} \\
         --goi_candidate_regions_per_query ${settings.goi_candidate_regions_per_query} \\
         --report_copies_in_slot ${settings.report_copies_in_slot} \\
         --window_tblastn_word_size ${settings.window_tblastn_word_size} \\
