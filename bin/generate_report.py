@@ -491,7 +491,9 @@ def _dir_diagnostics(dir_path, patterns, sample_size=5):
                 "sample_matches": [],
             }
         for pat in patterns:
-            matches.extend(glob.glob(os.path.join(dir_path, pat)))
+            # sorted: glob follows the file system's listing order, so two runs on LRZ
+            # scratch never gave byte-identical reports (fix-phase item 14)
+            matches.extend(sorted(glob.glob(os.path.join(dir_path, pat))))
     return {
         "path": dir_path,
         "exists": exists,
