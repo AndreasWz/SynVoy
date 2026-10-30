@@ -17,7 +17,12 @@ process RECIPROCAL_BEST_PARALOG {
     path home_query
 
     output:
-    tuple val(locus_id), path("${genome_name}.paralog_check.tsv"), emit: tsv
+    // Prefixed with the locus, as ASSIGN_LOCUS_OWNERSHIP's: a genome is checked once per home
+    // locus, and GENERATE_REPORT copies every check into one folder, so a bare
+    // ${genome_name}.paralog_check.tsv kept one locus's check, which one depending on the order
+    // the tasks finished in and the file system's listing order (fix-phase item 20).
+    // generate_report.py reads the locus and genome from the file's columns.
+    tuple val(locus_id), path("${locus_id}__${genome_name}.paralog_check.tsv"), emit: tsv
 
     when:
     !params.disable_paralog_check.toString().toBoolean()
@@ -30,6 +35,6 @@ process RECIPROCAL_BEST_PARALOG {
         --target_gff ${target_gff} \\
         --locus_id "${locus_id}" \\
         --genome_name "${genome_name}" \\
-        --output ${genome_name}.paralog_check.tsv
+        --output ${locus_id}__${genome_name}.paralog_check.tsv
     """
 }

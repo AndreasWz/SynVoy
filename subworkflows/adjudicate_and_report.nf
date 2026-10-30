@@ -154,6 +154,8 @@ workflow ADJUDICATE_AND_REPORT {
         BUILD_HOME_PARALOG_PANEL.out.faa.first()  // value channel: broadcast panel to every genome (see module)
     )
 
+    // Every list GENERATE_REPORT stages is sorted (collect(sort: true): by the files' paths, unique
+    // per task), so the report never depends on which task finished first (fix-phase item 20).
     STAGE_REGION_GFF(
         iter_gff.transpose()
             .mix(RESCUE_STRONG_SYNTENY.out.gff)
@@ -161,7 +163,7 @@ workflow ADJUDICATE_AND_REPORT {
     )
     STAGE_REGION_GFF.out
         .ifEmpty(no_gffs_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_region_gffs }
 
     STAGE_REGION_FAA(
@@ -169,7 +171,7 @@ workflow ADJUDICATE_AND_REPORT {
     )
     STAGE_REGION_FAA.out
         .ifEmpty(no_regions_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_regions }
 
     STAGE_REGION_HOMOLOGY(
@@ -177,13 +179,13 @@ workflow ADJUDICATE_AND_REPORT {
     )
     STAGE_REGION_HOMOLOGY.out
         .ifEmpty(no_homology_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_homology }
 
     iter_hits
         .map { rec -> rec[1] }
         .ifEmpty(no_hits_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_hits }
 
     // cluster_scores tuple is (locus_id, genome_name, score_file).
@@ -193,7 +195,7 @@ workflow ADJUDICATE_AND_REPORT {
     )
     STAGE_REGION_SCORES.out
         .ifEmpty(no_scores_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_scores }
 
     // §1j Phase B paralog-check TSVs (one per (locus, genome) when params.query
@@ -202,7 +204,7 @@ workflow ADJUDICATE_AND_REPORT {
     RECIPROCAL_BEST_PARALOG.out.tsv
         .map { rec -> rec[1] }
         .ifEmpty(no_paralog_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_paralog_check }
 
     // §1m locus-ownership TSVs (one per (locus, genome)) + the panel meta sidecar.
@@ -210,7 +212,7 @@ workflow ADJUDICATE_AND_REPORT {
     ASSIGN_LOCUS_OWNERSHIP.out.tsv
         .map { rec -> rec[1] }
         .ifEmpty(no_ownership_sentinel)
-        .collect()
+        .collect(sort: true)
         .set { collected_locus_ownership }
     collected_panel_meta = BUILD_HOME_PARALOG_PANEL.out.meta.ifEmpty(no_ownership_sentinel)
 
@@ -225,7 +227,7 @@ workflow ADJUDICATE_AND_REPORT {
     no_phylo_sentinel = file("${projectDir}/assets/sentinels/NO_PHYLO_PLACEMENT")
     collected_phylo = PHYLO_PLACEMENT_CHECK.out.tsv
         .map { _locus, tsv -> tsv }
-        .collect()
+        .collect(sort: true)
         .ifEmpty([no_phylo_sentinel])
 
     GENERATE_REPORT(
