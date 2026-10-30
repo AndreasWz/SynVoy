@@ -850,6 +850,52 @@ def run_command(
     )
 
 
+class StepFailed(BaseException):
+    """A tool call that did not finish within its guard, or failed where no fallback may
+    stand in for it (fix-phase item 18: the wall clock may decide whether a result exists,
+    never what it contains). A BaseException on purpose: the search's ``except Exception``
+    fallbacks (a window kept without its Smith-Waterman hits, a gene without its model) must
+    not swallow it. The script that owns the task reports it and exits non-zero."""
+
+
+def guard_failed(what: str, guard_seconds: float, param: Optional[str] = None) -> StepFailed:
+    """The StepFailed of a tool that did not finish within its guard: ``what`` names the tool
+    and the place, ``param`` the pipeline parameter that sets the guard."""
+    return StepFailed(f"{what} did not finish within {guard_seconds:g} s"
+                      + (f" (--{param})" if param else "")
+                      + ". The task stops instead of going on without this result; on a slow "
+                        "or busy machine raise the guard")
+
+
+def run_guarded(cmd: Sequence[str], guard_seconds: float, what: str, param: Optional[str] = None,
+                **popen_kwargs: Any) -> subprocess.CompletedProcess:
+    """subprocess.run(capture_output=True, text=True) in a process group of its own, with a
+    guard: when ``cmd`` has not finished after ``guard_seconds``, the whole group is killed
+    (the tool's own children too, e.g. ssearch36 under smith_waterman_search.py) and
+    StepFailed is raised, naming ``what`` (the tool and the place) and the pipeline parameter
+    ``param`` that sets the guard. The return code is not checked."""
+    import signal
+    proc = subprocess.Popen(list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, **popen_kwargs)
+    try:
+        out, err = proc.communicate(timeout=guard_seconds)
+    except BaseException as exc:
+        # The guard, and also an exception in the caller while it waits (Ctrl-C's
+        # KeyboardInterrupt): the child has a session of its own, so a signal to the caller's
+        # process group does not reach it. A SIGTERM or SIGKILL of the caller runs no Python
+        # code; Nextflow then kills the task's whole process tree, and Slurm or a container
+        # its cgroup, which hold the child too.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise guard_failed(what, guard_seconds, param) from None
+        raise
+    return subprocess.CompletedProcess(list(cmd), proc.returncode, out, err)
+
+
 def require_binary(name: str, install_hint: Optional[str] = None) -> str:
     """
     Resolve an external tool on PATH or exit with a clear, consistent error.

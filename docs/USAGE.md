@@ -322,7 +322,7 @@ Each distance still has a parameter in base pairs (`auto` by default); a number 
 | `--sw_method` | `auto` | Implementation: `auto`, `parasail`, or `ssearch36` |
 | `--sw_min_score` | `20` | Minimum SW alignment score to report a hit |
 | `--sw_min_identity` | `10.0` | Minimum identity (%) for SW hits |
-| `--sw_timeout_seconds` | `300` | Timeout per SW search invocation |
+| `--sw_timeout_seconds` | `3600` | Guard of the Smith-Waterman search of one window: a search that does not finish stops the task (until 2026-10-28: 300 s, then the window lost its Smith-Waterman hits) |
 | `--sw_max_alignments_per_piece` | `1` | SW alignments per piece of a frame; above 1, further exons or copies in the same frame while E ≤ 1 (`local_family` / `exon_structure`: 3) |
 
 ### Window search thresholds

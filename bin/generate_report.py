@@ -525,7 +525,8 @@ def collect_target_policy(paths):
                 for row in csv.DictReader(fh, delimiter="\t"):
                     genome = canonical_genome_id(
                         row.get("genome") or os.path.basename(path).split(TARGET_POLICY_SUFFIX)[0])
-                    row = {k: v for k, v in row.items() if k and not k.startswith(LIMIT_PREFIX)}
+                    row = {k: v for k, v in row.items()
+                           if k and not k.startswith(LIMIT_PREFIX) and k not in SW_BACKEND_COLUMNS}
                     row["genome"] = genome
                     key = (_CONTEXT_ORDER.get(row.get("best_block_context") or "NA", 2),
                            _safe_float(row.get("best_block_esyn")) if row.get("best_block_esyn") not in (None, "", "NA") else float("inf"))
@@ -535,6 +536,33 @@ def collect_target_policy(paths):
         except (OSError, csv.Error):
             continue
     return {g: row for g, (_key, row) in sorted(out.items())}
+
+
+SW_BACKEND_COLUMNS = ("sw_backend", "sw_parasail_version", "sw_simd")
+
+
+def collect_sw_backend(paths):
+    """What ran the Smith-Waterman search (fix-phase item 18): the sw_backend, sw_parasail_version
+    and sw_simd columns of the target-policy rows, as {backend, parasail_version, simd} when
+    every row agrees, else {'mixed': [...]} (one entry per combination, e.g. the tasks of a
+    cluster run on different nodes). None when no row carries them (a run before 2026-10-29)."""
+    seen = []
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if "sw_backend" not in row:
+                        continue
+                    entry = {"backend": row.get("sw_backend") or "",
+                             "parasail_version": row.get("sw_parasail_version") or "",
+                             "simd": row.get("sw_simd") or ""}
+                    if entry not in seen:
+                        seen.append(entry)
+        except (OSError, csv.Error):
+            continue
+    if not seen:
+        return None
+    return seen[0] if len(seen) == 1 else {"mixed": seen}
 
 
 DECOY_COUNT_COLUMNS = ("decoy_cases", "decoy_high", "decoy_medium_plus", "decoy_ambiguous_plus")
@@ -2113,6 +2141,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     limits = collect_limits(hits_scan["target_policy"])
     if limits is not None:
         report["limits"] = limits
+    # What ran the Smith-Waterman search (fix-phase item 18); main() moves it into run_settings.
+    sw_backend = collect_sw_backend(hits_scan["target_policy"])
+    if sw_backend is not None:
+        report["smith_waterman"] = sw_backend
     return report
 
 
@@ -2310,6 +2342,9 @@ def main():
         strong_flanking_min=args.strong_flanking_min,
     )
     report["run_settings"] = load_run_settings(args.effective_params)
+    sw_backend = report.pop("smith_waterman", None)
+    if isinstance(report["run_settings"], dict) and sw_backend is not None:
+        report["run_settings"]["smith_waterman"] = sw_backend
     home_annotation = load_home_annotation(args.home_db_dir)
     if home_annotation:
         report["home_annotation"] = home_annotation

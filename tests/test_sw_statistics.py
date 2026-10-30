@@ -84,8 +84,11 @@ def test_planted_homolog_significant_chance_hits_not(tmp_path):
     shuffled = list(QUERY)
     rng.shuffle(shuffled)
     null = _run(tmp_path, ''.join(shuffled), dna, "null")
-    assert null, "SW always returns a best hit per frame"
-    assert all(e > 1.0 for e, _b, _r in null)     # none survive the runner's E <= 1 filter
+    # SW finds a best alignment in every frame, homolog or not; none of them survives the
+    # runner's E <= 1 filter, and since 2026-10-29 (fix-phase item 18) the child no longer
+    # aligns them with a traceback or writes them (min_reportable_score).
+    assert all(e > 1.0 for e, _b, _r in null)
+    assert null == []
 
 
 # ----------------------------------------------------------- long frames in pieces (2026-10-09)
@@ -146,7 +149,9 @@ def test_pieces_find_the_same_gene_at_the_same_place(tmp_path, monkeypatch, posi
     assert best_pieces == best_whole
     lo, hi = sorted((int(best_whole[8]), int(best_whole[9])))
     assert (lo, hi) == (position + 1, position + len(gene))
-    assert len(pieces) > len(whole)                      # the best hit of every piece is written
+    # Only pieces that can give a kept hit are aligned with a traceback (fix-phase item 18), so
+    # the pieces add no line with E <= 1 and the gene is written once.
+    assert [r for r in pieces if float(r[10]) <= 1] == [r for r in whole if float(r[10]) <= 1]
     assert len({(r[8], r[9]) for r in pieces}) == len(pieces)   # nothing twice
 
 
@@ -189,13 +194,13 @@ def test_two_copies_in_one_frame_are_both_reported_with_three_alignments(tmp_pat
 
 
 def test_three_alignments_add_nothing_without_a_real_hit(tmp_path, monkeypatch):
-    """Without an alignment at E <= 1 a piece gives its best alignment only, as at 1."""
+    """Without an alignment at E <= 1 a piece gives nothing at 3, as at 1 (since 2026-10-29 its
+    best alignment, E > 1, is not aligned with a traceback or written at all)."""
     window = ''.join(random.Random(43).choice("ACGT") for _ in range(30_000))
     one = _run_main(tmp_path, monkeypatch, QUERY, window, "one")
     three = _run_main(tmp_path, monkeypatch, QUERY, window, "three",
                       extra=("--max_alignments_per_piece", "3"))
-    assert all(float(r[10]) > 1 for r in one)
-    assert three == one
+    assert one == [] and three == []
 
 
 # Pieces of 1,400 residues overlapping by 140: at these positions half of the copy lies in

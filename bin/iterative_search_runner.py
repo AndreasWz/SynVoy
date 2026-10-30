@@ -108,6 +108,7 @@ try:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
+        StepFailed, run_guarded,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -127,6 +128,7 @@ except ImportError:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
+        StepFailed, run_guarded,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -3798,7 +3800,8 @@ def run_tblastn_tabular_and_json(cmd: List[str], tabular_path: str) -> Optional[
 
 def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]], 
                         genome_name: str, args, unique_id: str, threads: int,
-                        tblastn_sink: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                        tblastn_sink: Optional[List[Dict[str, Any]]] = None,
+                        region_len: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Run augmented search (MMseqs2 + tblastn + Smith-Waterman) for GOI queries.
     
@@ -3814,9 +3817,15 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
         args: Command line arguments
         unique_id: Unique ID for temp files
         threads: Number of threads to use
-        
+        region_len: length of the window's DNA (read from region_fasta when not given); it
+            sets the Smith-Waterman cells logged per window
+
     Returns:
         List of hit dictionaries combining MMseqs2 and Smith-Waterman results
+
+    A Smith-Waterman search that does not finish within --sw_timeout_seconds, or fails,
+    raises StepFailed (fix-phase item 18): the catch-all below does not hold it, and the
+    genome's search stops instead of keeping the window without its Smith-Waterman hits.
     """
     all_hits = []
     
@@ -3967,65 +3976,82 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             )
         
         # ========== 3. Smith-Waterman Search ==========
-        # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2)
+        # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2).
+        # The work is fixed by the inputs (every query against the window's six frames;
+        # smith_waterman_search.smith_waterman_cells), and the time it takes decides nothing
+        # (fix-phase item 18): a search that does not finish within --sw_timeout_seconds, a
+        # child that fails or one that writes no hits file stops the genome's search. Until
+        # 2026-10-28 a timeout (300 s) kept the window with its MMseqs2 and tblastn hits only,
+        # so a slower or busier machine got other models, bits and labels.
         if args.enable_smith_waterman:
+            from smith_waterman_search import smith_waterman_cells
             sw_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_sw_hits.m8"
-            
+            if region_len is None:
+                region_len = sum(len(seq) for _h, _i, seq in parse_fasta(region_fasta))
+            sw_cells = smith_waterman_cells(region_len, goi_query_lengths.values())
+            sw_where = (f"[{genome_name}] Smith-Waterman search of the window ({region_len:,} bp, "
+                        f"{len(goi_query_lengths)} queries of {sum(goi_query_lengths.values()):,} aa: "
+                        f"{sw_cells:,} cells)")
+            sw_cmd = [
+                "python3", os.path.join(os.path.dirname(__file__), "smith_waterman_search.py"),
+                "--query", query_fasta,
+                "--target", region_fasta,
+                "--output", sw_hits_file,
+                "--min_score", str(int(round(args.sw_min_score))),
+                "--min_identity", str(args.sw_min_identity),
+                "--threads", str(threads),
+                "--method", str(args.sw_method)
+            ] + genetic_code_flag("synvoy")
+            if args.sw_max_alignments_per_piece > 1:
+                sw_cmd += ["--max_alignments_per_piece", str(args.sw_max_alignments_per_piece)]
+
+            sw_start = time.monotonic()
             try:
-                # Use smith_waterman_search.py script
-                sw_cmd = [
-                    "python3", os.path.join(os.path.dirname(__file__), "smith_waterman_search.py"),
-                    "--query", query_fasta,
-                    "--target", region_fasta,
-                    "--output", sw_hits_file,
-                    "--min_score", str(int(round(args.sw_min_score))),
-                    "--min_identity", str(args.sw_min_identity),
-                    "--threads", str(threads),
-                    "--method", str(args.sw_method)
-                ] + genetic_code_flag("synvoy")
-                if args.sw_max_alignments_per_piece > 1:
-                    sw_cmd += ["--max_alignments_per_piece", str(args.sw_max_alignments_per_piece)]
-                
-                result = subprocess.run(sw_cmd, capture_output=True, text=True, timeout=args.sw_timeout_seconds)
-                # Queries smith_waterman_search.py skips as too long (SW_MAX_QUERY_LEN); its
-                # message goes to stderr, which is read below only when SW fails.
-                count_limit(args, 'sw_long_query_skipped',
-                            (result.stderr or '').count('Smith-Waterman skipped for'))
-                
-                if result.returncode == 0 and os.path.exists(sw_hits_file):
-                    # Parse Smith-Waterman hits (BLAST m8 format)
-                    _drops = {}
-                    sw_hits = parse_hits(
-                        sw_hits_file,
-                        args.sw_min_identity,
-                        10,    # min 10 aa (was 2 – way too permissive)
-                        # E <= 1 over the window's six-frame search space. Only a real
-                        # filter since 2026-09-11: SW used to write E=0.001 for every hit.
-                        # On shuffled queries 2 % of per-frame best hits pass (~0.1 per
-                        # window); the weak melittin-family members SW exists for sit at
-                        # E 0.002-0.25 (smith_waterman_search.KARLIN_ALTSCHUL_BLOSUM62).
-                        1.0,
-                        query_lengths=goi_query_lengths,
-                        drops=_drops,
-                    )
-                    count_limit(args, 'window_len_floor_sw', _drops.get('len_floor', 0))
-                    count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
-                    if sw_hits:
-                        print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
-                        # Mark hits as from Smith-Waterman
-                        for hit in sw_hits:
-                            hit['method'] = 'smith_waterman'
-                        all_hits.extend(sw_hits)
-                elif result.stderr:
-                    print(f"[{genome_name}] Smith-Waterman warning: {result.stderr[:200]}", flush=True)
-                    
-            except subprocess.TimeoutExpired:
-                print(f"[{genome_name}] Smith-Waterman timed out after {args.sw_timeout_seconds} seconds, using MMseqs2 only.", flush=True)
-                count_limit(args, 'sw_timeout')
-            except FileNotFoundError:
-                print(f"[{genome_name}] Smith-Waterman script not found, using MMseqs2 only.", flush=True)
-            except Exception as sw_err:
-                print(f"[{genome_name}] Smith-Waterman failed: {sw_err}, using MMseqs2 only.", flush=True)
+                result = run_guarded(sw_cmd, args.sw_timeout_seconds, sw_where,
+                                     param='sw_timeout_seconds')
+            except OSError as sw_err:
+                raise StepFailed(f"{sw_where} could not start: {sw_err}") from sw_err
+            sw_seconds = time.monotonic() - sw_start
+            # Queries smith_waterman_search.py skips as too long (SW_MAX_QUERY_LEN), decided
+            # by the query lengths before the search.
+            count_limit(args, 'sw_long_query_skipped',
+                        (result.stderr or '').count('Smith-Waterman skipped for'))
+            if result.returncode != 0 or not os.path.exists(sw_hits_file):
+                tail = ' | '.join((result.stderr or '').strip().splitlines()[-3:])
+                if result.returncode == -9 or 'MemoryError' in (result.stderr or ''):
+                    # The wave exits 137 when every failure is this one, so Nextflow retries the
+                    # task with more memory (iterative_search_memory, attempt n x the base).
+                    raise StepFailed(f"{sw_where} ran out of memory ("
+                                     + ("killed by signal 9" if result.returncode == -9 else "MemoryError")
+                                     + ")")
+                raise StepFailed(
+                    f"{sw_where} failed (exit {result.returncode}"
+                    + ("" if os.path.exists(sw_hits_file) else ", no hits file") + f"): {tail}")
+            # Parse Smith-Waterman hits (BLAST m8 format)
+            _drops = {}
+            sw_hits = parse_hits(
+                sw_hits_file,
+                args.sw_min_identity,
+                10,    # min 10 aa (was 2 – way too permissive)
+                # E <= 1 over the window's six-frame search space. Only a real
+                # filter since 2026-09-11: SW used to write E=0.001 for every hit.
+                # On shuffled queries 2 % of per-frame best hits pass (~0.1 per
+                # window); the weak melittin-family members SW exists for sit at
+                # E 0.002-0.25 (smith_waterman_search.KARLIN_ALTSCHUL_BLOSUM62).
+                1.0,
+                query_lengths=goi_query_lengths,
+                drops=_drops,
+            )
+            count_limit(args, 'window_len_floor_sw', _drops.get('len_floor', 0))
+            count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
+            print(f"[{genome_name}] Smith-Waterman: {sw_cells:,} cells in {sw_seconds:.1f} s, "
+                  f"{len(sw_hits)} hits kept.", flush=True)
+            if sw_hits:
+                print(f"[{genome_name}] Smith-Waterman found {len(sw_hits)} additional hits.", flush=True)
+                # Mark hits as from Smith-Waterman
+                for hit in sw_hits:
+                    hit['method'] = 'smith_waterman'
+                all_hits.extend(sw_hits)
         
         # ========== 4. PLM Embedding Search ==========
         # Use ProtT5 protein language model to find ORFs that are functionally
@@ -4991,6 +5017,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             f"{unique_id}_b{block_idx}",
             threads_per_job,
             tblastn_sink=tblastn_raw,
+            region_len=len(subseq),
         )
 
         all_search_hits = list(augmented_hits_mmseqs) if augmented_hits_mmseqs else []
@@ -6512,7 +6539,8 @@ def _write_not_searched(args, prefix, genome_name, reason, details=''):
 
 TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 'blocks_searched',
                          'significant_blocks', 'best_block_esyn', 'best_block_context',
-                         'truncated_blocks', 'genetic_code']
+                         'truncated_blocks', 'genetic_code', 'sw_backend', 'sw_parasail_version',
+                         'sw_simd']
 
 # The genome axis (profile stage 5). The preset modules run once per query and see only the
 # home side, so a setting that should differ per target genome is set here, in the search,
@@ -6859,7 +6887,7 @@ def log_genome_limits(args, genome_name: str) -> None:
         if not overlaps_any(h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0)), cores)))
     limits = ctx.get('limits') or {}
     shown = [f"{k} {limits[k]}" for k in LIMIT_KEYS if limits.get(k)]
-    logger.info(f"[{genome_name}] Limit counts (stage 2; they change nothing): "
+    logger.info(f"[{genome_name}] Limit counts (what each limit dropped; docs/OUTPUT.md): "
                 + (", ".join(shown) if shown else "none"))
 
 
@@ -6889,6 +6917,11 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         'truncated_blocks': sum(1 for t in trunc.values() if t),
         'genetic_code': get_genetic_code(),
     }
+    # What ran the Smith-Waterman search here (fix-phase item 18; smith_waterman_search.
+    # backend_info): the report shows it under run_settings.smith_waterman.
+    sw = getattr(args, 'sw_record', None) or {}
+    row.update({'sw_backend': sw.get('backend', ''), 'sw_parasail_version': sw.get('parasail_version', ''),
+                'sw_simd': sw.get('simd', '')})
     columns = list(TARGET_POLICY_COLUMNS)
     if getattr(args, 'genome_axis', False):
         row.update(genome_axis_columns(genome_axis_values(args)))
@@ -8279,6 +8312,11 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 )
             )
 
+    except StepFailed as e:
+        # A tool that did not finish within its guard, or failed where no fallback may stand
+        # in (fix-phase item 18): the genome's search fails, the wave then ends the task.
+        error_message = str(e)
+        logger.error(f"[{genome_name}] Search stopped: {error_message}")
     except Exception as e:
         error_message = str(e)
         logger.error(f"[{genome_name}] Error processing: {error_message}")
@@ -8819,14 +8857,19 @@ def main():
     parser.add_argument("--padding_max", type=int, default=200000,
                         help="Largest margin, only with a fixed --region_padding")
     parser.add_argument("--enable_smith_waterman", type=str2bool, default=True, help="Enable Smith-Waterman search")
-    parser.add_argument("--sw_method", type=str, default="auto", help="Smith-Waterman backend (auto, parasail, ssearch36)")
+    parser.add_argument("--sw_method", type=str, default="auto", choices=["auto", "parasail", "ssearch36"],
+                        help="Smith-Waterman backend (auto, parasail, ssearch36)")
     parser.add_argument("--allow_missing_smith_waterman", type=str2bool, default=False,
                         help="Proceed (with only mmseqs/tblastn) when SW is requested but parasail is "
                              "unavailable, instead of failing loud. SW is load-bearing for divergent "
                              "GOI recovery, so this degrades results silently — opt in deliberately.")
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
-    parser.add_argument("--sw_timeout_seconds", type=int, default=300)
+    parser.add_argument("--sw_timeout_seconds", type=int, default=3600,
+                        help="Guard of the Smith-Waterman search of one window, in seconds: a search "
+                             "that does not finish stops the genome's search and the task (until "
+                             "2026-10-28 a timeout of 300 s kept the window without its "
+                             "Smith-Waterman hits)")
     parser.add_argument("--window_tblastn_word_size", type=int, default=3,
                         help="tblastn -word_size of the window search (3 = tblastn's default)")
     parser.add_argument("--window_tblastn_comp_stats", type=int, default=2, choices=[0, 1, 2, 3],
@@ -9382,6 +9425,25 @@ def main():
                 "(--allow_missing_smith_waterman set). Divergent GOI recovery is degraded to "
                 "mmseqs/tblastn only."
             )
+        # What runs the search on this machine (backend, parasail version, SIMD code), for the
+        # target-policy tables and the report (fix-phase item 18).
+        if args.enable_smith_waterman:
+            from smith_waterman_search import backend_info, HAS_PARASAIL
+            args.sw_record = backend_info(args.sw_method)
+            sw_missing = None
+            if args.sw_method == 'parasail' and not HAS_PARASAIL:
+                sw_missing = "--sw_method parasail, and parasail is not importable"
+            elif args.sw_record['backend'] == 'ssearch36' and not shutil.which('ssearch36'):
+                sw_missing = "neither parasail nor ssearch36 is installed"
+            if sw_missing:
+                # Until 2026-10-28 such a search degraded in silence; since then a window whose
+                # search fails stops the run, so this stops it before the first window.
+                logger.error(f"Smith-Waterman cannot run here: {sw_missing}. Install parasail "
+                             f"(conda install -c bioconda parasail-python) or ssearch36 (fasta3), "
+                             f"or set --enable_smith_waterman false.")
+                sys.exit(1)
+        else:
+            args.sw_record = {'backend': 'off', 'parasail_version': '', 'simd': ''}
     except SmithWatermanUnavailable:
         venv_hint = os.environ.get("VIRTUAL_ENV")
         env_note = (
@@ -9473,7 +9535,11 @@ def main():
     logger.info(f"  MMseqs sens:      {args.mmseqs_sens}")
     logger.info(f"  MMseqs mem limit: {args.mmseqs_split_memory_limit}")
     logger.info(f"  Gene predictor:   {args.gene_predictor}" + (f" (species={args.augustus_species})" if args.gene_predictor != "prodigal" else ""))
-    logger.info(f"  Smith-Waterman:   {'enabled (' + args.sw_method + ')' if args.enable_smith_waterman else 'disabled'}")
+    _sw = getattr(args, 'sw_record', None) or {}
+    logger.info(f"  Smith-Waterman:   " + (
+        f"enabled ({args.sw_method}: {_sw.get('backend')} {_sw.get('parasail_version')} "
+        f"{_sw.get('simd')}; guard {args.sw_timeout_seconds} s per window)"
+        if args.enable_smith_waterman else "disabled"))
     if args.enable_plm_search:
         logger.info(f"  PLM search:       enabled (ProtT5, device={args.plm_device})")
         logger.info(f"  PLM threshold:    {args.plm_similarity_threshold}")
@@ -9790,6 +9856,10 @@ def main():
                     "    increase the process memory in nextflow.config"
                 )
             logger.error("Aborting iterative search due to per-genome processing errors.")
+            # A Smith-Waterman search killed for memory (fix-phase item 18): exit 137, which
+            # Nextflow retries with more memory; every other failure stops the run.
+            if all('Smith-Waterman' in msg and 'ran out of memory' in msg for _, msg in wave_errors):
+                sys.exit(137)
             sys.exit(1)
 
         # Update DB after Wave

@@ -767,6 +767,17 @@ piece is returned; up to 1.1 Mb of window for a 550-aa query nothing changes. A 
 longer than 10,000 aa is not searched with Smith-Waterman (a warning says so): the
 memory of one piece grows with the square of the query length. A missing
 Smith-Waterman backend stops the run (`allow_missing_smith_waterman = false`).
+Each piece is scored without a traceback first (parasail's score-only kernel); the
+traceback runs only where the score can give a hit that is kept (E ≤ 1, read from the
+printed value: one raw score below the first score with E ≤ 1), so the kept hits are the
+same as with a traceback on every piece, and the work of a window, 2 × window bp × query
+aa cells, takes a fraction of the time. The time decides nothing (since 2026-10-29): a
+window whose search has not finished after `sw_timeout_seconds` (3,600 s), or whose search
+fails, stops the genome's search and the task (a child killed for memory, when that is the
+only kind of failure among the genomes searched at the same time: exit 137, which Nextflow
+retries with more memory). Until then a window that
+took more than 300 s kept its MMseqs2 and tblastn hits only, so a slower or busier machine
+got other results.
 With `sw_max_alignments_per_piece` above 1 (default 1), a piece is aligned again after
 each alignment, with the residues of that alignment masked in the frame (`*`), and
 further alignments are returned while their E-value is at most 1, up to that number per

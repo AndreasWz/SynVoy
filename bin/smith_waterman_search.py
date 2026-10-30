@@ -8,6 +8,13 @@ This provides more sensitive local alignment than MMseqs2 for divergent sequence
 Hits are written as BLAST m8 with real Karlin-Altschul bit scores and E-values for the
 window's six-frame search space (BLOSUM62, BLAST gap costs 11/1 by default).
 
+Every piece of a translated frame is scored first without a traceback (parasail's score-only
+kernel, several times faster); the traceback runs only where that score can give a hit the
+runner keeps (min_reportable_score). The hits with E <= 1 are the same as with a traceback
+on every piece; the time per window is what the inputs make it, so the runner's guard
+(--sw_timeout_seconds) can sit far above it. A failed alignment ends the program with an
+error (exit 1) instead of skipping the piece.
+
 Usage:
     python smith_waterman_search.py --query goi.faa --target region.fna \\
         --output hits.tsv --matrix BLOSUM62 --gap_open 11 --gap_extend 1
@@ -28,7 +35,36 @@ try:
     HAS_PARASAIL = True
 except ImportError:
     HAS_PARASAIL = False
-    print("WARNING: parasail not installed. Falling back to ssearch36.", file=sys.stderr)
+    print("WARNING: parasail is not installed: the Smith-Waterman search can use ssearch36 only.",
+          file=sys.stderr)
+
+
+# parasail picks its SIMD code at run time, the first of these the CPU supports.
+SIMD_ORDER = ('avx2', 'sse41', 'sse2', 'altivec', 'neon')
+
+
+def backend_info(method='auto'):
+    """What ``--method`` runs on this machine, for the run's record (fix-phase item 18):
+    {'backend', 'parasail_version', 'simd'}. 'parasail' is the main path (a score-only pass,
+    then a traceback where a kept hit can come out); 'ssearch36' with parasail installed runs
+    run_parasail_sw ('parasail_best_hit_rounds'); without parasail it is ssearch36 itself."""
+    if method == 'auto':
+        method = 'parasail' if HAS_PARASAIL else 'ssearch36'
+    if method == 'ssearch36':
+        backend = 'parasail_best_hit_rounds' if HAS_PARASAIL else 'ssearch36'
+    else:
+        backend = 'parasail'
+    version = simd = ''
+    if HAS_PARASAIL:
+        # the Python binding's version and the C library's, which holds the alignment code
+        version = str(getattr(parasail, '__version__', '') or '')
+        try:
+            version += f" (libparasail {'.'.join(str(v) for v in parasail.version())})"
+        except Exception:      # an older binding without version()
+            pass
+        simd = next((isa for isa in SIMD_ORDER
+                     if getattr(parasail, f'can_use_{isa}', lambda: False)()), 'none')
+    return {'backend': backend, 'parasail_version': version, 'simd': simd}
 
 
 # Gapped Karlin-Altschul parameters (lambda, K) for BLOSUM62, keyed by BLAST gap costs
@@ -72,6 +108,43 @@ def karlin_altschul(score, query_len, search_space_len, gap_open, gap_extend,
     bits = (lam * score - math.log(k)) / math.log(2)
     evalue = k * query_len * search_space_len * math.exp(-lam * score)
     return bits, evalue
+
+
+def min_reportable_score(query_len, search_space_len, gap_open, gap_extend,
+                         matrix_name='BLOSUM62'):
+    """The lowest raw score that can give a hit the runner keeps: one below the lowest score
+    with E <= 1. The runner reads the E-value back from the m8 line, printed with two
+    decimals ('%.2e'), and keeps E <= 1, so a hit with E up to 1.005 still counts; one raw
+    score lower multiplies E by exp(lambda) (1.31 at BLAST 11/1), so every score that can be
+    printed as 1.00e+00 or less is at or above this value."""
+    def evalue(score):
+        return karlin_altschul(score, query_len, search_space_len, gap_open, gap_extend,
+                               matrix_name)[1]
+    lam = KARLIN_ALTSCHUL_BLOSUM62[(gap_open, gap_extend)][0]
+    s = max(0, math.ceil(math.log(max(evalue(0), 1e-300)) / lam))
+    while s > 0 and evalue(s - 1) <= 1.0:
+        s -= 1
+    while evalue(s) > 1.0:
+        s += 1
+    return s - 1
+
+
+def best_local_score(query_seq, target_seq, matrix_name='BLOSUM62', gap_open=11, gap_extend=1):
+    """parasail's score-only Smith-Waterman (same scoring as smith_waterman_parasail): the
+    result's ``score`` and ``end_ref``. On equal scores both kernels report the alignment that
+    ends first in the target."""
+    matrix = parasail.blosum62 if matrix_name == 'BLOSUM62' else parasail.pam100
+    p_open, p_extend = to_parasail_gaps(gap_open, gap_extend)
+    return parasail.sw_striped_32(query_seq, target_seq, p_open, p_extend, matrix)
+
+
+def check_same_alignment(best, result, where):
+    """The traceback must find the alignment the score-only pass scored; a difference would
+    mean the score-only pass can skip a piece the traceback would report from."""
+    if (best.score, best.end_ref) != (result['score'], result['end_ref']):
+        raise RuntimeError(
+            f"parasail's score-only and traceback kernels disagree on {where}: score "
+            f"{best.score} / {result['score']}, end {best.end_ref} / {result['end_ref']}")
 
 
 def _traceback_counts(tb):
@@ -126,6 +199,22 @@ SW_MAX_CELLS = 200_000_000
 # 1.7 GB, a 34,000-aa titin 20 GB. Such a query is not searched with Smith-Waterman; the
 # other two search programs find a protein of that length without it.
 SW_MAX_QUERY_LEN = 10_000
+
+
+def six_frame_length(dna_len):
+    """Residues of the six translated frames of a DNA sequence of this length: translate()
+    reads (length - o) // 3 codons from offset o = 0, 1, 2, on each strand. This is the
+    search space of a window (search_space_len in main())."""
+    return 2 * sum(max(0, int(dna_len) - o) // 3 for o in range(3))
+
+
+def smith_waterman_cells(dna_len, query_lens):
+    """The cells the search of one window scores: each query of at most SW_MAX_QUERY_LEN
+    residues against the window's six frames. The score-only pass scores each of them once; a
+    traceback (only where a kept hit can come out) scores its piece once more. Fixed by the
+    inputs, so the iterative search logs it per window and names it when a window fails."""
+    frames = six_frame_length(dna_len)
+    return sum(int(q) * frames for q in query_lens if int(q) <= SW_MAX_QUERY_LEN)
 
 
 def protein_chunks(protein, query_len, max_cells=SW_MAX_CELLS):
@@ -194,7 +283,7 @@ MASK_RESIDUE = '*'
 
 
 def several_alignments(query_seq, frame_seq, max_alignments, evalue_of, matrix_name='BLOSUM62',
-                       gap_open=11, gap_extend=1, max_cells=None):
+                       gap_open=11, gap_extend=1, max_cells=None, skip_below=None):
     """Up to ``max_alignments`` local alignments of the query in each piece of one translated
     frame, as [(result, piece_start)] with ``result`` as smith_waterman_parasail returns it.
 
@@ -207,6 +296,13 @@ def several_alignments(query_seq, frame_seq, max_alignments, evalue_of, matrix_n
     later one can score higher), or when an alignment runs through a masked span (not
     reported; counted in the second return value). An alignment that ends on the last residue
     of a piece with a successor is masked in this piece only: the next piece holds it whole.
+
+    ``skip_below`` (min_reportable_score): a piece whose best score is lower is skipped
+    without a traceback when that best alignment reaches no later piece (it ends before the
+    next piece starts, or on the piece's last residue, where it is masked in this piece only).
+    Such a piece reports nothing the runner keeps (E > 1), and the loop above would stop after
+    that alignment, whose mask could reach no other piece; so the alignments with E <= 1 are
+    the same. Otherwise the piece is aligned as before.
     """
     if max_cells is None:
         max_cells = SW_MAX_CELLS
@@ -219,6 +315,13 @@ def several_alignments(query_seq, frame_seq, max_alignments, evalue_of, matrix_n
         has_next = idx < len(pieces) - 1
         local_mask = bytearray(masked[piece_start:piece_start + len(piece)])
         residues = [MASK_RESIDUE if m else aa for aa, m in zip(piece, local_mask)]
+        first = None
+        if skip_below is not None:
+            first = parasail.sw_striped_32(query_seq, ''.join(residues), p_open, p_extend, matrix)
+            if first.score < skip_below and (
+                    not has_next or first.end_ref < pieces[idx + 1][0] - piece_start
+                    or first.end_ref == len(piece) - 1):
+                continue
         kept, deferred = 0, False
         while kept < max_alignments:
             text = ''.join(residues)
@@ -227,6 +330,8 @@ def several_alignments(query_seq, frame_seq, max_alignments, evalue_of, matrix_n
                 if score <= 0 or evalue_of(score) > 1:
                     break
             result = smith_waterman_parasail(query_seq, text, matrix_name, gap_open, gap_extend)
+            if first is not None and not (kept or deferred):
+                check_same_alignment(first, result, f"a piece at {piece_start}")
             if result['score'] <= 0:
                 break
             end = result['end_ref']
@@ -350,8 +455,9 @@ def smith_waterman_ssearch(query_faa, target_fna, output_tsv, threads=1):
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             output = result.stdout
         except subprocess.CalledProcessError as e:
-            print(f"ssearch36 failed at iteration {i}: {e}", file=sys.stderr)
-            break
+            # Ends the program (exit 1): the runner stops the genome's search instead of
+            # keeping the hits of the iterations before (fix-phase item 18).
+            raise RuntimeError(f"ssearch36 failed at iteration {i}: {e}; {(e.stderr or '')[-300:]}") from e
             
         if not output.strip():
             break # No more hits
@@ -445,12 +551,9 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
 
     # 3. For each query
     for q_head, q_id, q_seq in queries:
-        try:
-            # Use 32-bit profile
-            profile = parasail.profile_create_32(q_seq, parasail.blosum62)
-        except Exception as e:
-            print(f"Parasail profile creation failed for {q_id}: {e}", file=sys.stderr)
-            continue
+        # Use 32-bit profile; a failure ends the program (fix-phase item 18: no query is
+        # left out in silence)
+        profile = parasail.profile_create_32(q_seq, parasail.blosum62)
             
         # Iteration Loop (Find multiple non-overlapping hits)
         for iteration in range(20): 
@@ -477,11 +580,8 @@ def run_parasail_sw(query_faa, target_fna, output_tsv):
             result = best_result
             frame = frames[best_frame_idx]
             
-            # CIGAR Parsing for coordinates
-            try: 
-                cigar_decoded = result.cigar.decode.decode()
-            except Exception:
-                break
+            # CIGAR Parsing for coordinates (a failure ends the program, fix-phase item 18)
+            cigar_decoded = result.cigar.decode.decode()
                 
             # Parse CIGAR to find start and alignment length
             # We must handle leading 'D's which shift the logical start
@@ -698,6 +798,7 @@ def main():
         
         hits = []
         refused_total = 0
+        cells = tracebacks = 0
         # Validate the statistics up front (fails loud on an unsupported matrix/gap pair).
         karlin_altschul(0, 1, 1, args.gap_open, args.gap_extend, args.matrix)
         target_frames = [(t_id, t_seq, translate_in_six_frames(t_seq))
@@ -713,21 +814,22 @@ def main():
                 continue
             print(f"Searching with query: {q_id}", file=sys.stderr)
             seen = set()        # an alignment in the overlap of two pieces is found twice
+            reportable = min_reportable_score(len(q_seq), search_space_len,
+                                              args.gap_open, args.gap_extend, args.matrix)
+            cells += len(q_seq) * search_space_len
 
             for t_id, t_seq, frames in target_frames:
                 for frame_id, prot_seq, offset in frames:
                     if args.max_alignments_per_piece > 1:
-                        try:
-                            found, refused = several_alignments(
-                                q_seq, prot_seq, args.max_alignments_per_piece,
-                                lambda score: karlin_altschul(
-                                    score, len(q_seq), search_space_len,
-                                    args.gap_open, args.gap_extend, args.matrix)[1],
-                                args.matrix, args.gap_open, args.gap_extend)
-                        except Exception as e:
-                            print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
-                                  file=sys.stderr)
-                            continue
+                        # A failed alignment ends the program (exit 1), so the runner stops the
+                        # genome's search instead of keeping the window without this frame.
+                        found, refused = several_alignments(
+                            q_seq, prot_seq, args.max_alignments_per_piece,
+                            lambda score: karlin_altschul(
+                                score, len(q_seq), search_space_len,
+                                args.gap_open, args.gap_extend, args.matrix)[1],
+                            args.matrix, args.gap_open, args.gap_extend,
+                            skip_below=reportable)
                         refused_total += refused
                         for result, piece_start in found:
                             if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
@@ -735,25 +837,27 @@ def main():
                                                    len(t_seq), len(q_seq), search_space_len, args))
                         continue
                     for piece_start, piece in protein_chunks(prot_seq, len(q_seq), SW_MAX_CELLS):
-                        # Run Smith-Waterman
-                        try:
-                            result = smith_waterman_parasail(
-                                q_seq, piece,
-                                args.matrix, args.gap_open, args.gap_extend
-                            )
-
-                            # Filter by thresholds
-                            if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
-                                hit = sw_hit(q_id, t_id, result, piece_start, frame_id, offset,
-                                             len(t_seq), len(q_seq), search_space_len, args)
-                                if (t_id, hit['tstart'], hit['tend']) in seen:
-                                    continue
-                                seen.add((t_id, hit['tstart'], hit['tend']))
-                                hits.append(hit)
-                        except Exception as e:
-                            print(f"Warning: SW alignment failed for {q_id} vs {t_id} frame {frame_id}: {e}",
-                                  file=sys.stderr)
+                        # Score-only first; the traceback only where a kept hit can come out
+                        # (score >= min_score and E low enough). A failed alignment ends the
+                        # program (exit 1) instead of skipping the piece.
+                        best = best_local_score(q_seq, piece, args.matrix, args.gap_open, args.gap_extend)
+                        if best.score < max(args.min_score, reportable):
                             continue
+                        tracebacks += 1
+                        result = smith_waterman_parasail(
+                            q_seq, piece,
+                            args.matrix, args.gap_open, args.gap_extend
+                        )
+                        check_same_alignment(best, result, f"{q_id} vs {t_id} frame {frame_id}, piece at {piece_start}")
+
+                        # Filter by thresholds
+                        if result['score'] >= args.min_score and result['identity'] >= args.min_identity:
+                            hit = sw_hit(q_id, t_id, result, piece_start, frame_id, offset,
+                                         len(t_seq), len(q_seq), search_space_len, args)
+                            if (t_id, hit['tstart'], hit['tend']) in seen:
+                                continue
+                            seen.add((t_id, hit['tstart'], hit['tend']))
+                            hits.append(hit)
         if refused_total:
             print(f"Smith-Waterman: {refused_total} further alignment(s) ran through an already "
                   f"reported one; those pieces were searched no further.", file=sys.stderr)
@@ -766,7 +870,10 @@ def main():
                        f"{hit['qstart']}\t{hit['qend']}\t{hit['tstart']}\t{hit['tend']}\t"
                        f"{hit['evalue']:.2e}\t{hit['bits']:.1f}\n")
         
-        print(f"Found {len(hits)} Smith-Waterman alignments above threshold", file=sys.stderr)
+        work = f"{cells} cells scored" + (f", {tracebacks} tracebacks"
+                                          if args.max_alignments_per_piece == 1 else "")
+        print(f"Found {len(hits)} Smith-Waterman alignments above threshold ({work})",
+              file=sys.stderr)
 
 
 if __name__ == "__main__":

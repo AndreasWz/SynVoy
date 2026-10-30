@@ -279,16 +279,19 @@ def _run_window(tmp_path, monkeypatch, args, sw="ok"):
         name = os.path.basename(str(cmd[0]))
         if name == "tblastn" and "-out" in cmd:
             _m8(cmd[cmd.index("-out") + 1], [_row("GOI_q", 30), _row("GOI_q", 11)])
-        if name == "python3":
-            if sw == "timeout":
-                raise subprocess.TimeoutExpired(cmd, args.sw_timeout_seconds)
-            _m8(cmd[cmd.index("--output") + 1], [_row("GOI_q", 9, evalue=0.01), _row("GOI_q", 30, evalue=0.01)])
-            return types.SimpleNamespace(
-                returncode=0, stdout="",
-                stderr="Warning: Smith-Waterman skipped for GOI_long: 12000 aa is longer than 10000 aa\n")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    def fake_guarded(cmd, guard, what, param=None, **k):      # the Smith-Waterman child
+        assert os.path.basename(str(cmd[0])) == "python3" and param == "sw_timeout_seconds"
+        if sw == "timeout":
+            raise isr.StepFailed(f"{what} did not finish within {guard} s (--{param})")
+        _m8(cmd[cmd.index("--output") + 1], [_row("GOI_q", 9, evalue=0.01), _row("GOI_q", 30, evalue=0.01)])
+        return types.SimpleNamespace(
+            returncode=0, stdout="",
+            stderr="Warning: Smith-Waterman skipped for GOI_long: 12000 aa is longer than 10000 aa\n")
+
     monkeypatch.setattr(isr.subprocess, "run", fake_run)
+    monkeypatch.setattr(isr, "run_guarded", fake_guarded)
     monkeypatch.setattr(isr.shutil, "which", lambda name: None)
     monkeypatch.setattr(isr, "run_augmented_mmseqs_with_retries", fake_mmseqs)
     return isr.run_augmented_search(str(region), query, "g1", args, "t1", 1)
@@ -307,11 +310,14 @@ def test_window_search_counts_each_engines_length_floor_and_sw(tmp_path, monkeyp
     assert "sw_timeout" not in lim
 
 
-def test_window_search_counts_a_sw_timeout(tmp_path, monkeypatch):
+def test_a_sw_guard_failure_stops_the_window_search(tmp_path, monkeypatch):
+    """Fix-phase item 18: a Smith-Waterman search that does not finish within the guard stops
+    the genome's search (StepFailed, through run_augmented_search's catch-all); until
+    2026-10-28 it was counted as sw_timeout and the window kept its other hits."""
     args = _aug_args(tmp_path)
-    _run_window(tmp_path, monkeypatch, args, sw="timeout")
-    assert _limits(args)["sw_timeout"] == 1
-    assert "window_len_floor_sw" not in _limits(args)
+    with pytest.raises(isr.StepFailed, match="Smith-Waterman"):
+        _run_window(tmp_path, monkeypatch, args, sw="timeout")
+    assert "sw_timeout" not in _limits(args)
 
 
 def test_window_search_counts_nothing_without_a_genome(tmp_path, monkeypatch):
@@ -459,7 +465,7 @@ def test_dead_zone_and_genome_line(caplog):
     assert _limits(args) == {"miniprot_timeout_goi": 2, "dead_zone": 2}
     assert age.LIMIT_COUNTS == {}
     msg = [r.getMessage() for r in caplog.records if "Limit counts" in r.getMessage()]
-    assert msg == ["[G.fna] Limit counts (stage 2; they change nothing): "
+    assert msg == ["[G.fna] Limit counts (what each limit dropped; docs/OUTPUT.md): "
                    "miniprot_timeout_goi 2, dead_zone 2"]
 
 
