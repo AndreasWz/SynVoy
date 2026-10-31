@@ -4413,9 +4413,10 @@ def _goi_display_label(all_tracks):
     """Label of the GOI column and figure title (e.g. 'Melt'), else 'GOI'.
 
     The annotated home GOI gene gives the label. Without one, target GOI genes
-    carry a SynVoy_Parent like 'GOI_DCN'; the synthetic home placeholder may
-    instead be 'GOI_<chrom>_<pos>', so accession/coordinate-style suffixes are
-    rejected.
+    carry a SynVoy_Parent like 'GOI_DCN' or 'GOI_5-HT2A'; the synthetic home
+    placeholder may instead be 'GOI_<chrom>_<pos>'. Only the part before the first
+    '|' is tested: it is refused when it holds '_' or '.' or is longer than 12
+    characters, which refuses a placeholder unless its chromosome's name holds '|'.
     """
     from collections import Counter
     cand = Counter()
@@ -4424,7 +4425,7 @@ def _goi_display_label(all_tracks):
             for s in (g.get("home_gene_id", "") or "", g.get("name", "") or ""):
                 if s.startswith("GOI_"):
                     suf = s[4:].split("|")[0]
-                    if re.match(r"^[A-Za-z][A-Za-z0-9-]{0,11}$", suf):
+                    if re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{0,11}$", suf):
                         cand[suf] += 1
     home_goi = [g for g in (all_tracks[0].get("genes", []) if all_tracks else [])
                 if is_goi(g.get("name", "") or "") and _named(g.get("name"))]

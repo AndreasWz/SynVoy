@@ -105,6 +105,11 @@ def count_sequences(filepath: str) -> int:
 
 # Known ID patterns (order matters - more specific first)
 ID_PATTERNS = [
+    # The pipeline's own GOI records: GOI_<name>, GOI_<name>|exon_1, GOI_copy_1|... The id is
+    # the whole first word, whatever <name> starts with: the locus_tag pattern below would cut
+    # GOI_14-3-3epsilon|exon_1 to GOI_14.
+    (r'^(GOI_\S+)', 'goi'),
+
     # NCBI RefSeq proteins: XP_123456.1, NP_123456.1, YP_123456.1, WP_123456.1
     (r'^([XNYWZ]P_\d+(?:\.\d+)?)(?=$|[\s|])', 'ncbi_refseq'),
     
