@@ -118,7 +118,9 @@ def main():
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
 
-    records = list(parse_fasta(args.input))
+    # The one place a user's protein header enters the pipeline: its id is written below and every
+    # later step reads that id as it stands.
+    records = list(parse_fasta(args.input, user_header=True))
     if not records:
         print(
             f"ERROR: No sequences found in query FASTA '{args.input}'. "

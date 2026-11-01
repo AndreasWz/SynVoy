@@ -476,7 +476,10 @@ Each flanking gene is written as its full protein and, with `exon_level_search` 
 as one sequence per exon. The FASTA header of a protein carries the gene's home
 coordinates and the length of the home genome (`home=start-end genome=bp`), the header
 of an exon its own coordinates (`coords=`). The search derives its distances from
-them ([§7, Distances](#distances-in-gene-units)).
+them ([§7, Distances](#distances-in-gene-units)). Every file SynVoy writes is read by the
+first word of each header, so `FBgn0000001|exon_2` stays that record and no other. The
+known forms of public databases (`sp|P12345|NAME` and `P12345|NAME` as `P12345`) are read
+once, when the user's query enters (`normalize_query.py`).
 
 The home BED also gets a marker row for the GOI (`GOI_<scaffold>_<start>`) when no
 annotated gene is left at the best interval, and one row named the same way for the

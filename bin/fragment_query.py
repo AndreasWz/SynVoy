@@ -286,7 +286,7 @@ def main():
     summary_data = []
     
     # Process each sequence in input
-    for _, rec_id, rec_seq in parse_fasta(args.query):
+    for _, rec_id, rec_seq in parse_fasta(args.query, user_header=True):   # run by hand, on a user's file
         print(f"Processing {rec_id} (length: {len(rec_seq)})")
         
         fragments = generate_fragments(rec_seq, rec_id, args.min_size)

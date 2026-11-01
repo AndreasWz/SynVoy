@@ -31,12 +31,20 @@ from urllib.parse import unquote
 # FASTA PARSING (No BioPython)
 # =============================================================================
 
-def parse_fasta(filepath: str) -> Iterator[Tuple[str, str, str]]:
+def parse_fasta(filepath: str, user_header: bool = False) -> Iterator[Tuple[str, str, str]]:
     """
-    Parse FASTA file yielding (raw_header, clean_id, sequence) tuples.
+    Parse FASTA file yielding (raw_header, id, sequence) tuples.
     
-    Works with any FASTA format. No assumptions about header structure.
+    Works with any FASTA format. No assumptions about header structure. The id is the header's
+    first word, verbatim (first_word): for a file SynVoy wrote that is the id it wrote and the id
+    the aligners report, so two records never read as one. Until 2026-10-31 every reader took
+    extract_id, which read FBgn0000001|exon_2 and FBgn0000001|exon_1 as FBgn0000001 (fix-phase
+    item 25).
+
+    user_header: the file comes from a user, so the id goes through extract_id, which knows the
+    forms of public databases (P12345|LY6E_HUMAN and sp|P12345|LY6E_HUMAN read P12345).
     """
+    read_id = extract_id if user_header else first_word
     current_header = None
     current_seq = []
     
@@ -48,7 +56,7 @@ def parse_fasta(filepath: str) -> Iterator[Tuple[str, str, str]]:
             if line.startswith('>'):
                 if current_header is not None:
                     seq = ''.join(current_seq)
-                    yield current_header, extract_id(current_header), seq
+                    yield current_header, read_id(current_header), seq
                 current_header = line[1:]  # Remove '>'
                 current_seq = []
             elif line and current_header is not None:
@@ -58,7 +66,7 @@ def parse_fasta(filepath: str) -> Iterator[Tuple[str, str, str]]:
         # Don't forget the last sequence
         if current_header is not None:
             seq = ''.join(current_seq)
-            yield current_header, extract_id(current_header), seq
+            yield current_header, read_id(current_header), seq
 
 
 def parse_fasta_to_dict(filepath: str) -> Dict[str, str]:
@@ -180,7 +188,9 @@ def first_word(header: str) -> str:
 
 def extract_id(header: str, fallback_counter: Optional[int] = None) -> str:
     """
-    Extract a clean, usable ID from any FASTA header.
+    Extract a clean, usable ID from any FASTA header a user wrote (parse_fasta's user_header).
+    A file SynVoy wrote is read by its first word (first_word); this function can read two of
+    its records as one.
     
     Philosophy:
     1. Try known patterns (NCBI, Ensembl, UniProt, etc.)
