@@ -108,7 +108,7 @@ try:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
-        StepFailed, run_guarded,
+        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -128,7 +128,7 @@ except ImportError:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
-        StepFailed, run_guarded,
+        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -4712,7 +4712,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     """
     chrom = block['chrom']
     if chrom not in genome_seqs:
-        return [], []
+        raise sequence_not_in_genome(chrom, genome_name, genome_seqs)
 
     slen = len(genome_seqs[chrom])
     if getattr(args, 'adaptive_padding', True):
@@ -7523,6 +7523,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
     error_message = None
 
     try:
+        # The genome's sequence names (fix-phase item 25): a name used twice stops the search here,
+        # before MMseqs2 runs, and a hit on any name but these below.
+        sequence_names = stream_fasta_lengths(genome_path)
+
         # Parse DB once so we can adapt hit-length filtering for short proteins.
         base_db_sequences = {}
         query_lengths = {}
@@ -7610,6 +7614,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             return genome_name, [], [], None
             
         logger.info(f"[{genome_name}] Parsed {len(hits)} hits.")
+        unknown_sequences = sorted({h['chrom'] for h in hits} - sequence_names.keys())
+        if unknown_sequences:
+            raise sequence_not_in_genome(unknown_sequences[0], genome_name, sequence_names)
         # Genome-wide places of every anchor, before one-anchor-per-place: how often each
         # home neighbour falls into a window by chance (synvoy_evalue.e_syn).
         _anchor_places = synvoy_evalue.places_per_gene(
@@ -7867,7 +7874,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
 
                     off_chrom = best_locus[0].get('chrom', '')
                     if off_chrom not in genome_seqs:
-                        continue
+                        raise sequence_not_in_genome(off_chrom, genome_name, genome_seqs)
 
                     # Build a local region around the off-chrom hits
                     off_start = min(h.get('start', 0) for h in best_locus)

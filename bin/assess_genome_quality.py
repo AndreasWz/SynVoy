@@ -6,10 +6,10 @@ import os
 
 # Use our own sequence utilities (no BioPython)
 try:
-    from sequence_utils import parse_fasta
+    from sequence_utils import StepFailed, iter_genome
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta
+    from sequence_utils import StepFailed, iter_genome
 
 def calculate_n50(lengths):
     sorted_lens = sorted(lengths, reverse=True)
@@ -43,9 +43,11 @@ def main():
     
     lengths = []
     try:
-        for _, _, rec_seq in parse_fasta(args.genome):
+        # The first task that reads a plain-file target (the module's find skips .gz; the search
+        # checks those at its start): a sequence name used twice stops the run here.
+        for _name, rec_seq in iter_genome(args.genome):
             lengths.append(len(rec_seq))
-    except Exception as e:
+    except (Exception, StepFailed) as e:
         print(f"Error reading genome: {e}")
         sys.exit(1)
         

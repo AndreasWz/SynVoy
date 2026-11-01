@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
-from sequence_utils import parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
+from sequence_utils import load_genome_subset, parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
 from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
 from sequence_utils import exit_step_failed  # noqa: E402
 import synvoy_evalue  # noqa: E402
@@ -176,10 +176,7 @@ def _extract_window(genome_path: str, chrom: str, start: int, end: int,
                              check=True, capture_output=True, text=True)
         return "".join(l for l in res.stdout.splitlines() if not l.startswith(">"))
     except (FileNotFoundError, subprocess.CalledProcessError):
-        for _h, cid, seq in parse_fasta(genome_path):
-            if cid == chrom:
-                return seq[max(0, start - 1):end]
-    return ""
+        return load_genome_subset(genome_path, [chrom]).get(chrom, "")[max(0, start - 1):end]
 
 
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,

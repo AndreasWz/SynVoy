@@ -30,14 +30,26 @@ DIGIT_FIRST = ["14", "14-3-3epsilon", "1700001C19Rik", "1_venom", "14.1", "5-HT2
 FULL = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRL"
 
 
-def old_extract_id(header):
-    """extract_id as it was before the fix: the same function without the new pattern."""
+def _with_ladder(patterns, header):
     keep = su.ID_PATTERNS
-    su.ID_PATTERNS = [p for p in keep if p[1] != "goi"]
+    su.ID_PATTERNS = patterns
     try:
         return su.extract_id(header)
     finally:
         su.ID_PATTERNS = keep
+
+
+def old_extract_id(header, with_goi_entry=False):
+    """extract_id as it was before item 19: the same function without the goi entry and with the
+    locus_tag pattern, which item 25 removed. with_goi_entry: with the goi entry in front of it."""
+    old = [p for p in su.ID_PATTERNS if p[1] != "goi"]
+    old.insert(len(old) - 1, (r"^([A-Z]{2,6}_\d+)", "locus_tag"))
+    return _with_ladder(([su.ID_PATTERNS[0]] + old) if with_goi_entry else old, header)
+
+
+def without_goi_entry(header):
+    """extract_id without the goi entry, the ladder as it stands otherwise."""
+    return _with_ladder([p for p in su.ID_PATTERNS if p[1] != "goi"], header)
 
 
 @pytest.mark.parametrize("header,expected", [
@@ -55,10 +67,18 @@ def test_a_goi_record_keeps_its_whole_first_word(header, expected):
 
 @pytest.mark.parametrize("name", DIGIT_FIRST)
 def test_the_old_patterns_cut_these_names(name):
-    """What the fix is for: the same headers without the new pattern lose their exon number."""
+    """What item 19 was for: under the old locus_tag pattern these headers lose their exon number,
+    and the goi entry keeps them whole. Item 25 removed that pattern, so the goi entry changes no id
+    today; it stays first in the ladder, in front of any generic pattern, as a guard."""
     cut = old_extract_id(f"GOI_{name}|exon_1")
     assert cut != f"GOI_{name}|exon_1" and re.fullmatch(r"GOI_\d+", cut)
+    assert old_extract_id(f"GOI_{name}|exon_1", with_goi_entry=True) == f"GOI_{name}|exon_1"
     assert su.extract_id(f"GOI_{name}|exon_1") == f"GOI_{name}|exon_1"
+    assert su.first_word(f"GOI_{name}|exon_1") == f"GOI_{name}|exon_1"
+
+
+def test_the_goi_entry_stays_first_in_the_ladder():
+    assert su.ID_PATTERNS[0] == (r"^(GOI_\S+)", "goi")
 
 
 @pytest.mark.parametrize("header", [
@@ -68,20 +88,20 @@ def test_the_old_patterns_cut_these_names(name):
     "GOI_lcl|NC_123.1_cds_XP_456.1_7", "GOI_12345", "GOI_12345 a description", "GOI_x~shuf1~rel",
 ])
 def test_every_other_goi_header_gives_what_it_gave(header):
-    assert su.extract_id(header) == old_extract_id(header)
+    assert su.extract_id(header) == su.first_word(header)
 
 
 def test_no_other_goi_name_changes():
-    """Any GOI_ header whose name does not start with a digit, or is only digits, as before."""
+    """Any GOI_ header reads as its first word (extract_id strips a trailing '|'), with the goi entry or without it."""
     rng = random.Random(19)
     letters = string.ascii_letters + "._-|~"
     rest = string.ascii_letters + string.digits + "._-|~"
     for _ in range(5000):
         name = rng.choice(letters) + "".join(rng.choice(rest) for _ in range(rng.randint(0, 20)))
         header = f"GOI_{name}" + rng.choice(["", " a description"])
-        assert su.extract_id(header) == old_extract_id(header), header
+        assert su.extract_id(header) == without_goi_entry(header) == su.first_word(header).strip("|"), header
     for n in (1, 14, 12345):
-        assert su.extract_id(f"GOI_{n}") == old_extract_id(f"GOI_{n}") == f"GOI_{n}"
+        assert su.extract_id(f"GOI_{n}") == without_goi_entry(f"GOI_{n}") == f"GOI_{n}"
 
 
 def _fixture_headers():
@@ -112,7 +132,8 @@ def _fixture_headers():
     ("14-3-3epsilon", "14-3-3epsilon"), ("1_venom", "1_venom"),
 ])
 def test_other_headers_keep_their_ids(header, expected):
-    """The ids as they stood before the fix, written out: the patterns behind the new one are the old ones."""
+    """The ids as they stood before item 19, written out. ABC_12345, gene_12345 and protein_12 come from first_word
+    since item 25."""
     assert su.extract_id(header) == expected
 
 
@@ -121,7 +142,7 @@ def test_the_new_pattern_fires_on_no_other_header():
     assert len(headers) > 100
     for h in headers:
         if not h.strip().startswith("GOI_") or not h.strip()[4:5].isdigit():
-            assert su.extract_id(h) == old_extract_id(h), h
+            assert su.extract_id(h) == without_goi_entry(h), h
     rng = random.Random(1919)
     alphabet = string.ascii_letters + string.digits + "._-|~ #"
     n = 0
@@ -130,7 +151,7 @@ def test_the_new_pattern_fires_on_no_other_header():
         if h.strip().startswith("GOI_"):
             continue
         n += 1
-        assert su.extract_id(h) == old_extract_id(h), h
+        assert su.extract_id(h) == without_goi_entry(h), h
 
 
 def _prepare_initial_db(tmp_path, goi_exons, flanking_faa):

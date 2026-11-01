@@ -106,8 +106,8 @@ def count_sequences(filepath: str) -> int:
 # Known ID patterns (order matters - more specific first)
 ID_PATTERNS = [
     # The pipeline's own GOI records: GOI_<name>, GOI_<name>|exon_1, GOI_copy_1|... The id is
-    # the whole first word, whatever <name> starts with: the locus_tag pattern below would cut
-    # GOI_14-3-3epsilon|exon_1 to GOI_14.
+    # the whole first word, whatever <name> starts with. Since item 25 no pattern below can cut
+    # one and first_word gives the same id: a guard, in front of any pattern that may come later.
     (r'^(GOI_\S+)', 'goi'),
 
     # NCBI RefSeq proteins: XP_123456.1, NP_123456.1, YP_123456.1, WP_123456.1
@@ -154,18 +154,28 @@ ID_PATTERNS = [
     # Prodigal format: >1_1 # start # end # strand # ID=1_1;...
     (r'^(\d+_\d+)\s*#', 'prodigal'),
     
-    # Generic locus_tag pattern: XXXX_12345
-    (r'^([A-Z]{2,6}_\d+)', 'locus_tag'),
-    
-    # Generic gene ID with underscore: gene_12345
-    (r'^(gene_\d+)', 'generic_gene'),
-    
-    # Generic protein ID: protein_12345, prot_12345
-    (r'^(prot(?:ein)?_\d+)', 'generic_protein'),
+    # No generic patterns here (fix-phase item 25). ^([A-Z]{2,6}_\d+), ^(gene_\d+) and
+    # ^(prot(?:ein)?_\d+) stood here without a boundary after the digits, so they cut the first
+    # word: NODE_1_length_5000_cov_1.0 read NODE_1, SUPER_10_unloc_1 read SUPER_10, and
+    # FUN_000001|exon_2 read FUN_000001. With a boundary of whitespace or the end they would
+    # return what first_word returns, so leaving them out is the same rule in less code.
     
     # Just take first word if nothing else matches
     (r'^(\S+)', 'first_word'),
 ]
+
+
+_FIRST_WORD = re.compile(r'\S+', re.ASCII)
+
+
+def first_word(header: str) -> str:
+    """A FASTA record's name: its header up to the first whitespace, verbatim. samtools, miniprot
+    and tblastn call a sequence by this word, MMseqs2 too unless the word starts with a database
+    tag or uc or consensus_ (sequence_not_in_genome). ASCII whitespace, the C library's: samtools,
+    miniprot and MMseqs2 keep a no-break space in the word. "unknown" for an empty header, as
+    extract_id."""
+    m = _FIRST_WORD.search(header or '')
+    return m.group(0) if m else "unknown"
 
 
 def extract_id(header: str, fallback_counter: Optional[int] = None) -> str:
@@ -617,29 +627,50 @@ class IdAssigner:
 # CONVENIENCE FUNCTIONS
 # =============================================================================
 
+def _genome_name(seen: Dict[str, str], header: str, filepath: str) -> str:
+    """The sequence name of a genome's header, its first word: the name the aligners, samtools and
+    the GFF use (fix-phase item 25; until 2026-10-31 extract_id's cut, so a block on
+    NODE_1_length_5000_cov_1.0 found no sequence and SUPER_10_unloc_1 overwrote SUPER_10). Two
+    records with one name stop the task: no tool can tell them apart, and samtools faidx keeps
+    only one of them."""
+    name = first_word(header)
+    if name in seen:
+        raise StepFailed(f"{filepath}: two records have the name {name}: >{seen[name]} and >{header}. "
+                         "A genome's sequence names must be unique up to the first whitespace: "
+                         "samtools faidx and a name lookup keep only one of them, so rename one.")
+    seen[name] = header
+    return name
+
+
+def iter_genome(filepath: str) -> Iterator[Tuple[str, str]]:
+    """(name, sequence) of each record of a genome FASTA, in file order; ``_genome_name``."""
+    seen: Dict[str, str] = {}
+    for header, _id, seq in parse_fasta(filepath):
+        yield _genome_name(seen, header, filepath), seq
+
+
 def load_genome(filepath: str) -> Dict[str, str]:
     """Load genome FASTA as dict {chrom: sequence}."""
-    return {clean_id: seq for _, clean_id, seq in parse_fasta(filepath)}
+    return dict(iter_genome(filepath))
 
 
 def load_genome_subset(filepath: str, names) -> Dict[str, str]:
-    """Like ``load_genome``, but keeps only the sequences named in ``names`` and stops
-    reading once all of them are found: one chromosome of a 3 Gb genome, not the genome."""
+    """Like ``load_genome``, but holds only the sequences named in ``names``: one chromosome of
+    a 3 Gb genome, not the genome. The whole file is read, one record at a time, so that a name
+    used twice further down still stops the task."""
     want = set(names)
     found: Dict[str, str] = {}
     if not want:
         return found
-    for _, clean_id, seq in parse_fasta(filepath):
-        if clean_id in want:
-            found[clean_id] = seq
-            if len(found) == len(want):
-                break
+    for name, seq in iter_genome(filepath):
+        if name in want:
+            found[name] = seq
     return found
 
 
 def get_sequence_lengths(filepath: str) -> Dict[str, int]:
     """Get lengths of all sequences in FASTA."""
-    return {clean_id: len(seq) for _, clean_id, seq in parse_fasta(filepath)}
+    return {name: len(seq) for name, seq in iter_genome(filepath)}
 
 
 def filter_fasta(input_path: str, output_path: str, keep_ids: set):
@@ -870,6 +901,21 @@ def guard_failed(what: str, guard_seconds: float, param: Optional[str] = None) -
                       + (f" (--{param})" if param else "")
                       + ". The task stops instead of going on without this result; on a slow "
                         "or busy machine raise the guard")
+
+
+def sequence_not_in_genome(chrom: str, genome: str, names) -> StepFailed:
+    """The StepFailed of a hit or search block on a sequence the loaded genome does not hold
+    (fix-phase item 25). The hits come from this genome's own FASTA, so it can only mean that an
+    aligner and the FASTA name the sequence differently. ``names``: the genome's sequence names."""
+    names = sorted(names)
+    shown = ", ".join(names[:3]) + (", ..." if len(names) > 3 else "")
+    return StepFailed(
+        f"[{genome}] a hit or search block lies on the sequence {chrom!r}, which this genome's FASTA "
+        f"does not hold (its {len(names)} sequence names: {shown}). An aligner and the FASTA name the "
+        "sequence differently. MMseqs2 reports a name that starts with a database tag by the "
+        "accession inside (lcl|X, ref|X|, sp|X|Y, gnl|db|X, gi|1|ref|X| as X) and drops a leading "
+        "uc or consensus_, while samtools, miniprot and tblastn keep the whole first word: rename "
+        "such sequences in the FASTA.")
 
 
 def run_guarded(cmd: Sequence[str], guard_seconds: float, what: str, param: Optional[str] = None,
@@ -1506,15 +1552,16 @@ def cds_model_protein(info: Dict[str, Any], chrom_seq: str) -> str:
 
 
 def stream_fasta_lengths(filepath: str) -> Dict[str, int]:
-    """{clean id: length} of every record of a FASTA (plain or .gz), without holding a
-    sequence in memory: a 3 Gb genome is read line by line."""
+    """{sequence name: length} of every record of a genome FASTA (plain or .gz), without holding
+    a sequence in memory: a 3 Gb genome is read line by line. Names as ``_genome_name``."""
     lengths: Dict[str, int] = {}
+    seen: Dict[str, str] = {}
     name = None
     _open = gzip.open if str(filepath).endswith('.gz') else open
     with _open(filepath, 'rt') as f:
         for line in f:
             if line.startswith('>'):
-                name = extract_id(line[1:].rstrip('\n\r'))
+                name = _genome_name(seen, line[1:].rstrip('\n\r'), filepath)
                 lengths[name] = 0
             elif name is not None:
                 lengths[name] += len(line.strip())
