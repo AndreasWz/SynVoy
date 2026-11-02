@@ -108,7 +108,7 @@ try:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
-        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths,
+        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -128,7 +128,7 @@ except ImportError:
         sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
-        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths,
+        StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -139,7 +139,7 @@ except ImportError:
 
 # Import fragment utilities if available
 try:
-    from fragment_query import generate_fragments, parse_fragment_id, merge_fragment_hits
+    from fragment_query import generate_fragments, merge_fragment_hits
     FRAGMENT_SUPPORT = True
 except ImportError:
     FRAGMENT_SUPPORT = False
@@ -1711,7 +1711,7 @@ def is_full_length_goi_query_id(query_id: str) -> bool:
         return False
     if '|exon_' in query_id:
         return False
-    if '|frag_' in query_id:
+    if fragment_of(query_id):
         return False
     return True
 
@@ -3855,7 +3855,7 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             all_variants = [(q['id'], q['seq']) for q in goi_queries]
         else:
             for query in goi_queries:
-                # Generate fragments (halves, thirds, quarters)
+                # Generate fragments (halves, thirds, quarters; above 100 aa also 50-aa windows)
                 fragments = generate_fragments(query['seq'], query['id'], min_size=15)
                 all_variants.extend([(f[0], f[1]) for f in fragments])
         
@@ -4809,7 +4809,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
     # Always include GOI-derived queries so blocks remain anchored to the target family.
     goi_ids = [k for k in db_sequences.keys() if is_goi_query_id(k)]
-    full_length_goi = {gid for gid in goi_ids if '|frag_' not in gid}
+    full_length_goi = {gid for gid in goi_ids if not fragment_of(gid)}
     if full_length_goi:
         unique_queries.update(full_length_goi)
     else:
@@ -5067,18 +5067,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 if not query_id:
                     continue
 
-                parent = query_id.split('|frag_')[0] if '|frag_' in query_id else query_id
-                parent = extract_base_gene_id(parent)
+                parent = extract_base_gene_id(query_id)
 
                 # Calculate offset for fragment or exon queries so qstart/qend
                 # are expressed in full-protein coordinates.
                 q_offset = 0
-                if '|frag_' in query_id and FRAGMENT_SUPPORT:
-                    try:
-                        frag_info = parse_fragment_id(query_id)
-                        q_offset = frag_info['start'] - 1
-                    except Exception:
-                        q_offset = 0
+                fragment = fragment_of(query_id)
+                if fragment:
+                    q_offset = (fragment[1] or 1) - 1
                 elif '|exon_' in query_id:
                     # Build exon offset map from DB sequences on first encounter.
                     if not hasattr(run_augmented_search, '_goi_exon_offsets'):
@@ -8674,7 +8670,7 @@ def run_gpu_augment_phase(args, genome_map=None):
             except Exception:
                 _all_goi = []
             goi_templates = [(cid, seq) for cid, seq in _all_goi
-                             if "exon" not in cid.lower()]
+                             if "exon" not in cid.lower() and not fragment_of(cid)]
             if not goi_templates:            # all were fragments → fall back
                 goi_templates = _all_goi
             # Optional home-paralog panel (guard 3). Absent by default → guard 3

@@ -55,6 +55,7 @@ from sequence_utils import (  # noqa: E402
     parse_fasta,
     sw_align,
     setup_logging,
+    fragment_of,
 )
 import synvoy_settings  # noqa: E402
 import synvoy_specificity  # noqa: E402
@@ -104,15 +105,15 @@ def panel_name(query_id: str) -> str:
 def home_goi_record(path: Optional[str]) -> Optional[Tuple[str, str]]:
     """The GOI's home protein in goi_exons.faa of ANNOTATE_GOI, picked as the search picks its
     home GOI query (iterative_search_runner.select_goi_queries): a full-length GOI record, a
-    GOI_ id that is no exon (|exon_), fragment (|frag_) or GOI_copy_ record (a query id can hold
-    '|': GOI_lcl|ORF1), an id without '|' first, then the longest. ANNOTATE_GOI writes one, the
+    GOI_ id that is no exon (|exon_), fragment (sequence_utils.fragment_of) or GOI_copy_ record (a
+    query id can hold '|': GOI_lcl|ORF1), an id without '|' first, then the longest. ANNOTATE_GOI writes one, the
     annotated gene's protein or the home model, before its exons. It is the q of the search's
     specificity check. None without a file or such a record."""
     if not path or not os.path.isfile(path):
         return None
     records = [(cid, seq) for _h, cid, seq in parse_fasta(path)
                if seq and cid.startswith("GOI_") and not cid.startswith("GOI_copy_")
-               and "|exon_" not in cid and "|frag_" not in cid]
+               and "|exon_" not in cid and not fragment_of(cid)]
     if not records:
         return None
     records.sort(key=lambda kv: ("|" in kv[0], -len(kv[1]), kv[0]))

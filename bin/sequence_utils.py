@@ -230,6 +230,26 @@ def extract_id(header: str, fallback_counter: Optional[int] = None) -> str:
     return f"seq_{hash_id}"
 
 
+# The ids fragment_query.generate_fragments writes: <query id>|frag_<start>_<end>_<total> and
+# <query id>|slide_<start>_<end>_<total>; <start> and <end> are 1-based in the whole protein. An id
+# that holds |frag_ or |slide_ in another form is a fragment too, without positions.
+_FRAGMENT_ID_RE = re.compile(r"\|(frag|slide)_(?:(\d+)_(\d+)_(\d+)$)?")
+
+
+def fragment_of(query_id: str):
+    """(kind, start, end, total) of a fragment's id, kind 'frag' or 'slide' (the numbers None when
+    the id holds none); None for any other id.
+
+    The one reader of these ids: a hit's query positions start at the fragment's own residue 1, so
+    a reader that knows only one kind reads the other as a full-length protein with positions
+    near its start (fix-phase item 12)."""
+    m = _FRAGMENT_ID_RE.search(query_id or "")
+    if not m:
+        return None
+    numbers = (int(m.group(2)), int(m.group(3)), int(m.group(4))) if m.group(2) else (None, None, None)
+    return (m.group(1), *numbers)
+
+
 def extract_base_id(id_string: str) -> str:
     """
     Extract the base gene/protein ID, stripping variants, fragments, versions.

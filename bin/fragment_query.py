@@ -10,8 +10,9 @@ Usage:
     python fragment_query.py --query input.faa --output fragments.faa [--min_size 20]
 
 Output format:
-    Each fragment has an ID like: {original_id}|frag_{start}_{end}_{total}
-    Description includes: fragment_type=half|third|quarter position=1|2|3|4
+    Each fragment has an ID like: {original_id}|frag_{start}_{end}_{total}, a sliding window
+    (above 100 aa) {original_id}|slide_{start}_{end}_{total}
+    Description includes: fragment_type=half|third|quarter|sliding position=1|2|3|4
 """
 
 import argparse
@@ -20,10 +21,10 @@ import sys
 
 # Use our own sequence utilities (no BioPython)
 try:
-    from sequence_utils import parse_fasta, write_fasta
+    from sequence_utils import fragment_of, parse_fasta, write_fasta
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, write_fasta
+    from sequence_utils import fragment_of, parse_fasta, write_fasta
 
 
 def generate_fragments(seq, seq_id, min_size=20):
@@ -137,7 +138,7 @@ def parse_fragment_id(frag_id):
     Parse a fragment ID to extract original gene ID and fragment info.
     
     Args:
-        frag_id: Fragment ID like "gene-LOC726866|frag_1_50_100"
+        frag_id: Fragment ID like "gene-LOC726866|frag_1_50_100" or "gene-LOC726866|slide_26_75_100"
     
     Returns:
         dict with keys: gene_id, start, end, total, fragment_type
@@ -153,43 +154,25 @@ def parse_fragment_id(frag_id):
         'fragment_type': 'full'
     }
     
-    if len(parts) > 1:
-        frag_part = parts[-1]  # Last part contains fragment info
-        
-        if frag_part.startswith('frag_'):
-            # Format: frag_START_END_TOTAL
-            try:
-                coords = frag_part.replace('frag_', '').split('_')
-                result['start'] = int(coords[0])
-                result['end'] = int(coords[1])
-                result['total'] = int(coords[2])
-                
-                # Determine type based on positions
-                if result['end'] == result['total'] and result['start'] == 1:
-                    result['fragment_type'] = 'full'
-                elif result['total'] and result['end'] - result['start'] + 1 > result['total'] // 2:
-                    result['fragment_type'] = 'half'
-                elif result['total'] and result['end'] - result['start'] + 1 > result['total'] // 4:
-                    result['fragment_type'] = 'third'
-                else:
-                    result['fragment_type'] = 'quarter'
-                    
-            except (ValueError, IndexError):
-                pass
-                
-        elif frag_part.startswith('slide_'):
+    frag = fragment_of(frag_id)
+    if frag:
+        kind, start, end, total = frag
+        if start is not None:
+            result['start'], result['end'], result['total'] = start, end, total
+        # Determine type based on positions
+        if kind == 'slide':
             result['fragment_type'] = 'sliding'
-            try:
-                coords = frag_part.replace('slide_', '').split('_')
-                result['start'] = int(coords[0])
-                result['end'] = int(coords[1])
-                result['total'] = int(coords[2])
-            except (ValueError, IndexError):
-                pass
-                
-        elif frag_part.startswith('exon_'):
-            result['fragment_type'] = 'exon'
-    
+        elif start is None or (end == total and start == 1):
+            result['fragment_type'] = 'full'
+        elif total and end - start + 1 > total // 2:
+            result['fragment_type'] = 'half'
+        elif total and end - start + 1 > total // 4:
+            result['fragment_type'] = 'third'
+        else:
+            result['fragment_type'] = 'quarter'
+    elif len(parts) > 1 and parts[-1].startswith('exon_'):
+        result['fragment_type'] = 'exon'
+
     return result
 
 
@@ -293,7 +276,7 @@ def main():
         
         # Optionally filter out sliding windows
         if args.no_sliding:
-            fragments = [f for f in fragments if 'slide_' not in f[0]]
+            fragments = [f for f in fragments if fragment_of(f[0])[0] != 'slide']
         
         all_fragments.extend(fragments)
         

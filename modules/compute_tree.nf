@@ -26,9 +26,12 @@ process COMPUTE_TREE {
     
     # Filter to GOI sequences: keep ALL GOI hits across all genomes (multiple
     # per genome are expected when expand_goi_similar finds paralogs).  Only
-    # exon fragments and exact-header duplicates are removed.
+    # exon records, the fragments and sliding windows of PREPARE_INITIAL_DB's
+    # fallback, and exact-header duplicates are removed.
     python3 -c "
 import sys
+sys.path.insert(0, '${projectDir}/bin')
+from sequence_utils import fragment_of
 
 # ---- Parse FASTA ----
 entries = []
@@ -47,7 +50,7 @@ if current_name and current_seq:
 
 # ---- Filter to GOI only, skip exon fragments ----
 goi_entries = [(n, s) for n, s in entries
-               if ('GOI_' in n or 'GOI|' in n) and '|exon_' not in n]
+               if ('GOI_' in n or 'GOI|' in n) and '|exon_' not in n and not fragment_of(n.split()[0])]
 
 # ---- Deduplicate by exact header (keep first occurrence) ----
 seen = set()

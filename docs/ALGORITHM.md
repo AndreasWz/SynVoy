@@ -491,7 +491,9 @@ hits of every interval of the locus (the hit span of a snapped row, columns 8-9)
 
 `PREPARE_INITIAL_DB` writes one FASTA per home locus: the flanking sequences in home
 order, then the GOI protein and its exons. If the GOI has no exon sequences, the
-protein is cut into halves, thirds and quarters (pieces of at least 20 aa) instead.
+protein is cut into halves, thirds and quarters (pieces of at least 20 aa) instead, and
+above 100 aa into overlapping 50-aa windows as well. These pieces are never a GOI query of a
+window, the GOI entry of the ownership panel or a leaf of the tree.
 
 The order of the flanking genes in this file defines the home rank
 (`iterative_search_runner.py` → `build_home_rank`).
@@ -759,7 +761,7 @@ the rest of the run, and identity and coverage of later calls referred to that m
 
 | Engine | Query | Kept when |
 |---|---|---|
-| MMseqs2, one thread | the protein and its halves, thirds and quarters (pieces ≥ 15 aa) | identity ≥ 15 %, length ≥ 15, E ≤ 0.1 |
+| MMseqs2, one thread | the protein, its halves, thirds and quarters (pieces ≥ 15 aa) and, above 100 aa, overlapping 50-aa windows in steps of 25; a hit's query positions are read back in the whole protein | identity ≥ 15 %, length ≥ 15, E ≤ 0.1 |
 | tblastn (`-seg no`) | the protein | identity ≥ 15 %, length ≥ 15, E ≤ 0.1 |
 | Smith-Waterman (parasail), six frames | the protein | score ≥ 20, identity ≥ 10 %, length ≥ 10, E ≤ 1 |
 
