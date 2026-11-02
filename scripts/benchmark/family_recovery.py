@@ -74,9 +74,10 @@ Layers -- every miss in the home_locus / home_address tiers gets exactly one
 ----------------------------------------------------------------------------
   A_neighbourhood   no search block from a responsible home locus covers the gene
                     (block hull of that home locus's models, +/- --block-pad)
-  B_modelling       a block covers it, but no GOI model overlaps it
-  C_classification  a GOI model overlaps it, but below --min-confidence
-  D_adjudication    a GOI model at/above the floor overlaps it, but the report demoted
+  B_modelling       a block covers it, but no GOI model overlaps it best: none, or only a
+                    neighbour's model that spans it (best_curated_gene: one call, one gene)
+  C_classification  a GOI model overlaps it best, but below --min-confidence
+  D_adjudication    a GOI model at/above the floor overlaps it best, but the report demoted
                     or dropped it (paralog_not_goi / identity_coverage_decoupled / absent)
 
 A-miss is a search bug; C is where a parameter argument is legitimate; D is the
@@ -86,8 +87,8 @@ What counts as a call
 ---------------------
 GOI models are read from the run's per-home-locus GFFs (`SynVoyRole=goi`, BOTH `mRNA`
 and `gene` features -- tandem copies are emitted as `gene` only). Rescue models
-(hull / strong-synteny) never reach the published GFFs, so the report's
-`goi_dedup.records` are merged in. A call is a FINAL confident call when the report
+(hull / strong-synteny) are published apart (`rescue/<locus>/`, read here too, for their CDS rows),
+and the report's `goi_dedup.records` are merged in. A call is a FINAL confident call when the report
 lists it HIGH/MEDIUM and did not relabel it `paralog_not_goi` or
 `identity_coverage_decoupled` -- the same rule generate_report.py uses for its headline.
 
@@ -206,7 +207,10 @@ def load_manifest(path, exclude_families=DEFAULT_EXCLUDE):
 
 
 def load_truth_cds(data_dir):
-    """{gm: [(start, end), ...]} of the curated CDS intervals, from the per-species GFF3s.
+    """{gm: [(start, end), ...]} of the curated CDS intervals, from the per-species GFF3s:
+    final_dataset/gff/, the current store, and browser_gff/ for a gene absent there (the dataset's
+    README lists browser_gff/ as not regenerated, and it lacks many genes: a gene without rows reads
+    as its span, introns included, which then decided best_curated_gene).
 
     A call is matched to a truth gene by overlap. Span overlap alone is too weak where a
     curated gene is intron-rich: in the 2026-09-15 boundary audit one VA call sat on the
@@ -215,20 +219,24 @@ def load_truth_cds(data_dir):
     `_ov` then falls back to span overlap.
     """
     out = {}
-    pattern = os.path.join(data_dir, "final_dataset", "browser_gff", "*.gff3")
-    for path in sorted(glob.glob(pattern)):
-        if os.path.basename(path).startswith("ALL_SPECIES"):
-            continue
-        with open(path) as fh:
-            for line in fh:
-                if line.startswith("#"):
-                    continue
-                f = line.rstrip("\n").split("\t")
-                if len(f) < 9 or f[2] != "CDS":
-                    continue
-                m = re.search(r"GM_\d+", f[8])
-                if m:
-                    out.setdefault(m.group(0), []).append((int(f[3]), int(f[4])))
+    for folder in ("gff", "browser_gff"):
+        found = {}
+        pattern = os.path.join(data_dir, "final_dataset", folder, "*.gff3")
+        for path in sorted(glob.glob(pattern)):
+            if os.path.basename(path).startswith("ALL_SPECIES"):
+                continue
+            with open(path) as fh:
+                for line in fh:
+                    if line.startswith("#"):
+                        continue
+                    f = line.rstrip("\n").split("\t")
+                    if len(f) < 9 or f[2] != "CDS":
+                        continue
+                    m = re.search(r"GM_\d+", f[8])
+                    if m:
+                        found.setdefault(m.group(0), []).append((int(f[3]), int(f[4])))
+        for gm, rows in found.items():
+            out.setdefault(gm, rows)
     return out
 
 
@@ -597,6 +605,8 @@ def load_run_models(paths, home_species=DEFAULT_HOME):
     Returns (goi_calls, block_spans). `block_spans` maps
     (home_locus, species, chrom, block_idx) -> [start, end] over EVERY model carrying
     that block's `_b<N>_` id -- the footprint of one search block, used for layer A.
+    A call carries its own CDS rows as `cds` (best_curated_gene reads them); a tandem copy
+    written as one `gene` row has none.
     """
     calls, seen, spans = [], set(), {}
     for p in paths:
@@ -610,6 +620,10 @@ def load_run_models(paths, home_species=DEFAULT_HOME):
         # Tandem copies are `gene`-only GOI models; a gene that parents an mRNA is not.
         parents = {_attrs(f[8]).get("Parent") for f in rows
                    if len(f) >= 9 and f[2] == "mRNA"}
+        cds_of = defaultdict(list)
+        for f in rows:
+            if len(f) >= 9 and f[2] == "CDS":
+                cds_of[_attrs(f[8]).get("Parent", "")].append((int(f[3]), int(f[4])))
         for f in rows:
             if len(f) < 9 or f[2] not in ("mRNA", "gene"):
                 continue
@@ -635,7 +649,7 @@ def load_run_models(paths, home_species=DEFAULT_HOME):
                 "goi_class": a.get("GOIClass", ""), "identity": a.get("Identity", f[5]),
                 "query_cov": a.get("QueryCoverage", ""), "id": mid,
                 "evidence": a.get("EvidenceType", f[1]), "home_loci": {hl} - {None},
-                "source": "gff",
+                "source": "gff", "cds": cds_of.get(mid, []),
             })
     return calls, spans
 
@@ -644,7 +658,7 @@ def load_report_records(run_dir):
     """goi_dedup.records from synvoy_report.json -- the ADJUDICATED calls.
 
     These carry the post-ownership / post-coverage-demotion labels and include rescue
-    models that never reach the published GFFs. Empty when the report is absent.
+    models, which older runs did not publish. Empty when the report is absent.
     """
     path = os.path.join(run_dir, "synvoy_report.json") if os.path.isdir(run_dir) else ""
     if not path or not os.path.isfile(path):
@@ -810,6 +824,58 @@ def _ov(a, b):
     return any(overlap_bp(cs, ce, b["start"], b["end"]) > 0 for cs, ce in cds)
 
 
+def _shared_bp(a, b):
+    """Base pairs two interval lists share; each list is merged first, so that overlapping
+    isoform CDS rows do not count twice."""
+    def merged(ivs):
+        out = []
+        for s, e in sorted(ivs):
+            if out and s <= out[-1][1] + 1:
+                out[-1] = (out[-1][0], max(out[-1][1], e))
+            else:
+                out.append((s, e))
+        return out
+    return sum(overlap_bp(s1, e1, s2, e2) for s1, e1 in merged(a) for s2, e2 in merged(b))
+
+
+def best_curated_gene(call, genes):
+    """The one curated gene a call recovers, or None.
+
+    The overlap rule: of the curated genes the call lands on (`_ov`), a gene on the call's own
+    strand first (a tandem row's strand is that of its best hit); for a call without CDS rows (a
+    tandem copy written as one row, whose protein reads from the row's strand start) then a gene
+    whose coding bases hold that base; then the most coding base pairs shared with the call's own
+    CDS rows, or with its span when it has none; then the most with the call's span; then the largest
+    share of the gene's coding length; then the lowest start, then the lowest id. A gene's coding
+    bases are its curated CDS; when one of the genes has none, all are compared on their spans, so
+    that no gene's introns count as coding against another's exons. The tie-breaks are fixed so
+    that the verdict does not depend on the order of the truth table.
+
+    One hit chain over a tandem array lands on every gene of the array, and each used to count as
+    recovered: 6 genes by one call in a family benchmark run. A call that lands on one gene recovers
+    it, as before.
+    """
+    on = [g for g in genes if _ov(g, call)]
+    if len(on) < 2:
+        return on[0] if on else None
+    span = [(call["start"], call["end"])]
+    known = all(g.get("cds") for g in on)
+    strand = call.get("strand")
+    first_base = None
+    if not call.get("cds") and strand in ("+", "-"):
+        first_base = call["start"] if strand == "+" else call["end"]
+
+    def key(g):
+        coding = g["cds"] if known else [(g["start"], g["end"])]
+        length = _shared_bp(coding, coding)
+        by_span = _shared_bp(coding, span)
+        opposite = strand in ("+", "-") and g.get("strand") in ("+", "-") and g["strand"] != strand
+        holds_start = first_base is not None and any(s <= first_base <= e for s, e in coding)
+        return (opposite, not holds_start, -_shared_bp(coding, call.get("cds") or span), -by_span,
+                -by_span / length, g["start"], g["gm"])
+    return min(on, key=key)
+
+
 def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
               block_spans, report_calls, searched_species=None, min_confidence="MEDIUM",
               block_pad=50000, seed_evalues=None, max_seed_evalue=MAX_SEED_EVALUE,
@@ -846,6 +912,22 @@ def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
         gff_calls, report_calls = (
             [dict(c, home_loci=c["home_loci"] or set(only)) for c in cs]
             for cs in (gff_calls, report_calls))
+    # The report's records name their model, whose strand and CDS rows are in the GFFs. A hull
+    # rescue's record names the gene row (X), its CDS rows hang on the mRNA row (X.mRNA).
+    def model_key(c):
+        return (c["species"], c["chrom"], c["start"], c["end"], c["id"].removesuffix(".mRNA"))
+    model_of = {model_key(c): c for c in gff_calls}
+    report_calls = [dict(c, cds=c.get("cds") or model_of.get(model_key(c), {}).get("cds"),
+                         strand=c.get("strand") or model_of.get(model_key(c), {}).get("strand"))
+                    for c in report_calls]
+
+    def recovers(gene, call):
+        """A call recovers only the curated gene it overlaps best (best_curated_gene)."""
+        if call["species"] != gene["species"] or not _ov(gene, call):
+            return False
+        best = best_curated_gene(call, fam_by_species[call["species"]])
+        return best is not None and best["gm"] == gene["gm"]
+
     final_calls = [c for c in report_calls if c["final"]]
     gene_rows = []
     for g in tiered:
@@ -861,7 +943,7 @@ def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
                                   nearest_block_bp=""))
             continue
         resp = responsible(g)
-        hits = [c for c in final_calls if c["species"] == g["species"] and _ov(g, c)]
+        hits = [c for c in final_calls if recovers(g, c)]
         locus_hit = any(lb == g["locus"] for c in hits for lid in c["home_loci"]
                         for lb in [home_labels.get(lid)])
         addr_hit = any(lid in resp for c in hits for lid in c["home_loci"])
@@ -885,7 +967,7 @@ def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
         layer, nearest = "", ""
         if verdict == "missed":
             layer, nearest = attribute_layer(g, gff_calls, report_calls, block_spans,
-                                             floor, block_pad)
+                                             floor, block_pad, recovers)
         best = max(hits, key=lambda c: CONF_RANK.get(c["confidence"], -1), default=None)
         gene_rows.append(dict(
             row, verdict=verdict, layer=layer, nearest_block_bp=nearest,
@@ -945,13 +1027,15 @@ def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
     return gene_rows, call_rows, summary
 
 
-def attribute_layer(gene, gff_calls, report_calls, block_spans, floor, block_pad):
+def attribute_layer(gene, gff_calls, report_calls, block_spans, floor, block_pad, recovers=None):
     """Which layer lost a reachable gene. Returns (layer, nearest_block_distance_bp).
 
     Layer A asks whether ANY search block reached the gene, whichever home locus seeded
     it: a neighbourhood searched from a paralogous home locus that still produced no
     model is a modelling failure, not a search one. A block only leaves a trace when it
     produced at least one model, so A strictly means "no model-bearing block".
+    A gene whose only call overlaps a neighbour better (`recovers`) has no model of its own:
+    layer B, whatever that call's label.
     """
     spans = [(v[0], v[1]) for k, v in block_spans.items()
              if k[1] == gene["species"] and k[2] == gene["chrom"]]
@@ -959,8 +1043,8 @@ def attribute_layer(gene, gff_calls, report_calls, block_spans, floor, block_pad
                   default="")
     if nearest == "" or nearest > block_pad:
         return "A_neighbourhood", nearest
-    models = [c for c in gff_calls + report_calls
-              if c["species"] == gene["species"] and _ov(gene, c)]
+    recovers = recovers or (lambda g, c: c["species"] == g["species"] and _ov(g, c))
+    models = [c for c in gff_calls + report_calls if recovers(gene, c)]
     if not models:
         return "B_modelling", nearest
     if max(CONF_RANK.get(c["confidence"], -1) for c in models) < floor:
@@ -1332,8 +1416,8 @@ def cmd_score(args):
         for g in genes:
             g["cds"] = truth_cds.get(g["gm"], [])
     else:
-        print("  ** no final_dataset/browser_gff/*.gff3: calls are matched to truth genes "
-              "by span overlap, not coding overlap")
+        print("  ** no final_dataset/gff/*.gff3 or browser_gff/*.gff3: calls are matched to truth "
+              "genes by span overlap, not coding overlap")
     home_labels = label_home_loci(home_loci, genes, args.family, args.home_species,
                                   slack=args.home_slack)
     gff_calls, spans = load_run_models(gather_run_gffs(args.run), args.home_species)

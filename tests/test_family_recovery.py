@@ -771,3 +771,143 @@ class TestRealDataset(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ------------------------------------------------- fix-phase item 13: one call, one gene ---
+def _gene(gm, start, end, cds=None, species="Sp", locus="L1", family="FAM"):
+    return {"gm": gm, "species": species, "family": family, "locus": locus, "chrom": "c1",
+            "start": start, "end": end, "strand": "+", "status": "", "prot_len": 100,
+            "cds": cds if cds is not None else [(start, end)]}
+
+
+def _call(start, end, cds=None, conf="MEDIUM", species="Sp", chrom="c1", cid="GOI_x|m"):
+    c = {"species": species, "chrom": chrom, "start": start, "end": end, "confidence": conf,
+         "goi_class": "probable_goi", "identity": "60", "query_cov": "0.7", "id": cid,
+         "home_loci": {"locus_1"}, "final": conf in ("HIGH", "MEDIUM"), "phylo_verdict": "",
+         "source": "report"}
+    if cds is not None:
+        c["cds"] = cds
+    return c
+
+
+class TestOneCallOneGene:
+    """A chain over a tandem array used to recover all its genes (6 by one call in a benchmark run)."""
+
+    ARRAY = [_gene("GM_1", 1000, 1500), _gene("GM_2", 2000, 2500), _gene("GM_3", 3000, 3400)]
+
+    def test_a_call_on_one_gene_recovers_it(self):
+        assert fr.best_curated_gene(_call(1100, 1200), self.ARRAY)["gm"] == "GM_1"
+
+    def test_a_call_off_every_gene_recovers_none(self):
+        assert fr.best_curated_gene(_call(1600, 1900), self.ARRAY) is None
+
+    def test_the_span_decides_a_call_without_cds_rows(self):
+        # 300 bp of GM_1 against 501 of GM_2 and 101 of GM_3.
+        assert fr.best_curated_gene(_call(1201, 3100), self.ARRAY)["gm"] == "GM_2"
+
+    def test_the_calls_own_exons_decide_before_its_span(self):
+        # The span holds all of GM_1 and GM_2; the coding rows lie on GM_3 and a little of GM_2.
+        c = _call(900, 3400, cds=[(3000, 3300), (2000, 2100)])
+        assert fr.best_curated_gene(c, self.ARRAY)["gm"] == "GM_3"
+
+    def test_the_genes_exons_count_not_its_introns(self):
+        genes = [_gene("GM_A", 1000, 5000, cds=[(1000, 1100), (4900, 5000)]), _gene("GM_B", 2000, 2300)]
+        assert fr.best_curated_gene(_call(1000, 3000), genes)["gm"] == "GM_B"
+
+    def test_isoform_rows_do_not_count_twice(self):
+        genes = [_gene("GM_A", 1000, 1200, cds=[(1000, 1200), (1000, 1200), (1000, 1200)]),
+                 _gene("GM_B", 1300, 1600)]
+        assert fr.best_curated_gene(_call(1000, 1600), genes)["gm"] == "GM_B"
+
+    def test_a_tie_does_not_depend_on_the_order_of_the_table(self):
+        genes = [_gene("GM_2", 2000, 2500), _gene("GM_1", 1000, 1500)]
+        c = _call(900, 2600)
+        assert fr.best_curated_gene(c, genes)["gm"] == "GM_1"
+        assert fr.best_curated_gene(c, list(reversed(genes)))["gm"] == "GM_1"
+
+    def _score(self, calls, gff=()):
+        return fr.score_run(self.ARRAY, "FAM", "Home", {"locus_1": "L1"}, {"L1": "A1"},
+                            list(gff), {("locus_1", "Sp", "c1", 0): [900, 3500]}, calls)
+
+    def test_one_chain_over_an_array_recovers_one_gene(self):
+        rows, _, summary = self._score([_call(900, 3500)])
+        assert sorted(r["verdict"] for r in rows) == ["missed", "missed", "recovered"]
+        assert summary["locus_recall"] == round(1 / 3, 4)
+        assert [r["gm"] for r in rows if r["verdict"] == "recovered"] == ["GM_1"]
+
+    def test_three_calls_recover_three_genes(self):
+        rows, _, summary = self._score([_call(1000, 1500), _call(2000, 2500), _call(3000, 3400)])
+        assert summary["locus_recall"] == 1.0 and len(rows) == 3
+
+    def test_the_calls_strand_decides_first(self):
+        """A tandem row's strand is that of its best hit: the gene on that strand, also with fewer bases."""
+        genes = [dict(_gene("GM_A", 1000, 1500), strand="+"), dict(_gene("GM_B", 1400, 2000), strand="-")]
+        call = dict(_call(1100, 1500), strand="-")
+        assert fr.best_curated_gene(call, genes)["gm"] == "GM_B"
+        assert fr.best_curated_gene(dict(_call(1100, 1500), strand="+"), genes)["gm"] == "GM_A"
+        assert fr.best_curated_gene(_call(1100, 1500), genes)["gm"] == "GM_A"     # unknown strand: bases
+
+    def test_a_gene_without_cds_rows_does_not_count_its_introns(self):
+        """GM_A's span holds 590 bases of the call but no CDS row is known; GM_B's real CDS shares 165. On
+        their spans the two compare fairly: GM_B's span holds more of the call."""
+        genes = [_gene("GM_A", 1000, 1589, cds=[]), _gene("GM_B", 1500, 2400, cds=[(1500, 1664)])]
+        assert fr.best_curated_gene(_call(1000, 2400), genes)["gm"] == "GM_B"
+
+    def test_a_hull_rescues_record_reads_its_mrna_rows(self):
+        """The record names the gene row X, the GFF model is X.mRNA with the CDS rows."""
+        gff = _call(900, 3400, cds=[(3000, 3300)], conf="LOW", cid="GOI_x|h_hull_rescue.mRNA")
+        gff["source"] = "gff"
+        rows, _, _ = self._score([_call(900, 3400, cid="GOI_x|h_hull_rescue")], gff=[gff])
+        assert [r["gm"] for r in rows if r["verdict"] == "recovered"] == ["GM_3"]
+
+    def test_the_report_record_reads_its_models_cds_rows(self):
+        """A report record holds its span only: the rows come from the GFF model of the same id."""
+        gff = _call(900, 3400, cds=[(3000, 3300)], conf="LOW", cid="GOI_x|chain")
+        gff["source"] = "gff"
+        rows, _, _ = self._score([_call(900, 3400, cid="GOI_x|chain")], gff=[gff])
+        assert [r["gm"] for r in rows if r["verdict"] == "recovered"] == ["GM_3"]
+
+    def test_a_gene_spanned_by_a_neighbours_call_is_layer_b(self):
+        """Its only model is the neighbour's, whatever that call's label: no model of its own."""
+        rows, _, _ = self._score([_call(900, 3500)])
+        assert {r["gm"]: r["layer"] for r in rows if r["verdict"] == "missed"} == {
+            "GM_2": "B_modelling", "GM_3": "B_modelling"}
+
+    def test_a_gene_with_a_low_call_of_its_own_stays_layer_c(self):
+        rows, _, _ = self._score([_call(900, 2500), _call(3000, 3400, conf="LOW")])
+        assert {r["gm"]: r["layer"] for r in rows if r["gm"] == "GM_3"} == {"GM_3": "C_classification"}
+
+    def test_a_row_without_cds_goes_to_the_gene_of_its_first_base(self):
+        """A tandem row's protein reads from its strand start. The real shape: a row over five same-strand copies whose
+        protein is the first copy's, while a middle copy shares more bases."""
+        genes = [_gene("GM_1", 1000, 1120), _gene("GM_2", 1500, 1800), _gene("GM_3", 2000, 2100)]
+        assert fr.best_curated_gene(dict(_call(1010, 2050), strand="+"), genes)["gm"] == "GM_1"
+        minus = [dict(g, strand="-") for g in genes]
+        assert fr.best_curated_gene(dict(_call(1010, 2050), strand="-"), minus)["gm"] == "GM_3"
+        # The start in no gene's coding bases: the bases decide, as before.
+        assert fr.best_curated_gene(dict(_call(1200, 2050), strand="+"), genes)["gm"] == "GM_2"
+        # With CDS rows the rows decide, not the first base.
+        assert fr.best_curated_gene(dict(_call(1010, 2050, cds=[(1500, 1800)]), strand="+"), genes)["gm"] == "GM_2"
+
+    def test_the_report_record_reads_its_models_strand(self):
+        """The record holds no strand: it comes through the join, and it decides between two genes."""
+        genes = [dict(_gene("GM_A", 1000, 1500), strand="+"), dict(_gene("GM_B", 1400, 2000), strand="-")]
+        gff = dict(_call(1100, 1500, conf="LOW", cid="GOI_x|t"), strand="-", source="gff")
+        rows, _, _ = fr.score_run(genes, "FAM", "Home", {"locus_1": "L1"}, {"L1": "A1"}, [gff],
+                                  {("locus_1", "Sp", "c1", 0): [900, 3500]}, [_call(1100, 1500, cid="GOI_x|t")])
+        assert [r["gm"] for r in rows if r["verdict"] == "recovered"] == ["GM_B"]
+
+    def test_the_current_store_goes_before_the_browser_files(self):
+        with tempfile.TemporaryDirectory() as data:
+            for folder, rows in (("gff", [("GM_1", 100, 200)]),
+                                 ("browser_gff", [("GM_1", 100, 900), ("GM_2", 300, 400)])):
+                os.makedirs(os.path.join(data, "final_dataset", folder))
+                with open(os.path.join(data, "final_dataset", folder, "Sp.gff3"), "w") as fh:
+                    for gm, a, b in rows:
+                        fh.write(f"c1\tx\tCDS\t{a}\t{b}\t.\t+\t0\tID={gm}.cds;Parent={gm}.mRNA\n")
+            assert fr.load_truth_cds(data) == {"GM_1": [(100, 200)], "GM_2": [(300, 400)]}
+
+    def test_the_precision_classes_do_not_change(self):
+        """A chain over an array is still a call on that locus: the rule is about recall."""
+        _, calls, summary = self._score([_call(900, 3500)])
+        assert calls[0]["call_class"] == "on_locus" and summary["locus_precision"] == 1.0

@@ -172,11 +172,12 @@ scripts/benchmark/score_runs.sh local_runs/family_bench/FAM_*__*
 
 What the harness reports per family: recall at locus, address and family level over
 the genes the seed can reach; per-call precision; and for every miss the pipeline
-layer that lost it (A: no search block on the locus, B: block but no model, C:
-model but confidence too low, D: right gene, wrong label). Genes at loci the home
+layer that lost it (A: no search block on the locus, B: block but no model of its own,
+C: model but confidence too low, D: right gene, wrong label). Genes at loci the home
 genome does not have are `no_home_anchor` and are never counted — a hit there is
 reported as `found_without_anchor`, not as a win. Calls are matched to truth genes
-by coding-sequence overlap.
+by coding-sequence overlap, and a call recovers only the gene it overlaps best
+(`best_curated_gene`): one hit chain over a tandem array recovers one gene.
 
 `run_family.sh` records anything passed after the output folder in
 `<run>/run_args.txt`, so a tuned run cannot be mistaken for a default one. The
