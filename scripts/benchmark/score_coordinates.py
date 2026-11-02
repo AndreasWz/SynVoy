@@ -41,7 +41,9 @@ Usage
                          [--min-confidence MEDIUM] [--out report.tsv]
 
 `--run` may be a SynVoy output directory (every `*.gff` under it is scanned for
-`SynVoyRole=goi` mRNA features) or a single GFF file.
+`SynVoyRole=goi` mRNA features) or a single GFF file. Decoy models (`--decoy_mode`) are the
+search's own null test, not calls: `decoys/` and every model of a `~rev` or `~shuf` parent are
+left out of the calls.
 """
 import argparse
 import csv
@@ -53,6 +55,10 @@ import sys
 # AMBIGUOUS sits between LOW and MEDIUM, as in the pipeline; it was missing, so an
 # AMBIGUOUS call was dropped even with --min_confidence LOW (bug hunt 2026-10-13, A14).
 CONF_RANK = {"LOW": 0, "AMBIGUOUS": 1, "MEDIUM": 2, "HIGH": 3}
+
+# A decoy query's id is <parent>~rev, ~shuf1 or ~shuf2, with ~rel behind it for a decoy of the
+# relative's query (iterative_search_runner.DECOY_TAGS, is_decoy_parent). ~rel alone is a real model.
+DECOY_TAG_RE = re.compile(r"~(?:rev|shuf)")
 
 
 # ---------------------------------------------------------------- loading ---
@@ -152,6 +158,11 @@ def classify_scoreability(model, searched_species, truth_by_species, searched_ch
     return "scoreable"
 
 
+def is_decoy_model(attrs):
+    """A model of a decoy query, by its ID or its SynVoy_Parent."""
+    return any(DECOY_TAG_RE.search(attrs.get(k, "")) for k in ("ID", "SynVoy_Parent"))
+
+
 def load_calls_from_gff(paths):
     """Extract GOI model features from SynVoy GFFs.
 
@@ -161,7 +172,7 @@ def load_calls_from_gff(paths):
     (iterative_search_runner.py, `tandem_copy`), and reading mRNA alone scored LRZ
     det_rep R2 as having LOST the T. bicarinatum melittin when it had modelled the
     same locus as a tandem copy. A `gene` that is the Parent of an mRNA is skipped so a
-    gene+mRNA pair is never counted twice.
+    gene+mRNA pair is never counted twice. A decoy's model is not a call, wherever it stands.
     """
     calls, seen = [], set()
     for p in paths:
@@ -178,7 +189,7 @@ def load_calls_from_gff(paths):
             if len(f) < 9 or f[2] not in ("mRNA", "gene"):
                 continue
             a = _attrs(f[8])
-            if a.get("SynVoyRole") != "goi":
+            if a.get("SynVoyRole") != "goi" or is_decoy_model(a):
                 continue
             if f[2] == "gene" and a.get("ID") in parents:
                 continue
@@ -204,12 +215,17 @@ def load_calls_from_gff(paths):
     return calls
 
 
-def gather_gffs(target):
+def gather_gffs(target, decoys=False):
+    """The GFFs of a run. `decoys/` only on request: the decoy models' scaffolds still prove which
+    assembly the run used (load_searched_chroms), but they are not calls."""
     if os.path.isfile(target):
         return [target]
     if not os.path.isdir(target):
         sys.exit(f"--run not found: {target}")
-    return sorted(glob.glob(os.path.join(target, "**", "*.gff*"), recursive=True))
+    paths = sorted(glob.glob(os.path.join(target, "**", "*.gff*"), recursive=True))
+    if decoys:
+        return paths
+    return [p for p in paths if "decoys" not in os.path.relpath(p, target).split(os.sep)[:-1]]
 
 
 # ---------------------------------------------------------------- scoring ---
@@ -359,9 +375,8 @@ def main():
     args = ap.parse_args()
 
     truth = load_truth(args.truth)
-    gffs = gather_gffs(args.run)
-    calls = load_calls_from_gff(gffs)
-    searched = load_searched_chroms(gffs)
+    calls = load_calls_from_gff(gather_gffs(args.run))
+    searched = load_searched_chroms(gather_gffs(args.run, decoys=True))
     sp = load_searched_species(args.run)
     model_rows, call_rows, summary = score(truth, calls, args.min_confidence,
                                            searched_chroms=searched,
