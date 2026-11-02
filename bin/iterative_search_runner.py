@@ -112,6 +112,7 @@ try:
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
+    from query_features import completeness_coverage, core_coverage, query_core
     import synvoy_scale
     import synvoy_specificity
     import synvoy_evalue
@@ -132,6 +133,7 @@ except ImportError:
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
+    from query_features import completeness_coverage, core_coverage, query_core
     import synvoy_scale
     import synvoy_specificity
     import synvoy_evalue
@@ -1425,37 +1427,6 @@ def _place_evalue(cand) -> float:
 # signal peptide and GPI tail, which are often the least conserved or not modelled. Set per
 # genome task from the option (process_single_genome).
 CORE_COMPLETENESS = False
-_QUERY_CORE: Dict[str, Tuple[int, int]] = {}
-
-
-def query_core(seq: str) -> Tuple[int, int]:
-    """(first, last), 1-based inclusive: the residues of ``seq`` without its signal peptide
-    and GPI tail (query_features.signal_peptide, gpi_signal); the whole sequence when
-    neither is found or nothing would be left."""
-    if seq not in _QUERY_CORE:
-        from query_features import gpi_signal, signal_peptide
-        has_sp, sp_len = signal_peptide(seq)
-        has_gpi, gpi_len = gpi_signal(seq)
-        first = (int(sp_len) if has_sp else 0) + 1
-        last = len(seq) - (int(gpi_len) if has_gpi else 0)
-        _QUERY_CORE[seq] = (first, last) if last >= first else (1, len(seq))
-    return _QUERY_CORE[seq]
-
-
-def core_coverage(intervals, seq: str) -> Optional[float]:
-    """Share of the core of ``seq`` (query_core) covered by the union of ``intervals``
-    (1-based inclusive query positions), each clipped to the core. None without a sequence."""
-    if not seq:
-        return None
-    first, last = query_core(seq)
-    clipped = sorted((max(int(a), first), min(int(b), last)) for a, b in intervals
-                     if min(int(b), last) >= max(int(a), first))
-    covered, end = 0, first - 1
-    for a, b in clipped:
-        if b > end:
-            covered += b - max(a, end + 1) + 1
-            end = b
-    return covered / (last - first + 1)
 
 
 def _judge_attrs(a: Dict[str, str], e_key: str, numbers: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
@@ -1483,10 +1454,7 @@ def _judge_attrs(a: Dict[str, str], e_key: str, numbers: Optional[Dict[str, Any]
     if isinstance(near, bool):
         near = '1' if near else '0'
     esyn = num('BlockEsyn')
-    cov = num('QueryCoverage')
-    core = num('CoreCoverage') if CORE_COMPLETENESS else None
-    if core is not None:
-        cov = core if cov is None else max(cov, core)
+    cov = completeness_coverage(num('QueryCoverage'), num('CoreCoverage'), CORE_COMPLETENESS)
     return synvoy_label.judge(
         num(e_key), a.get('Place', 'genome'),
         esyn is not None and esyn <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN,
@@ -2177,7 +2145,8 @@ def _goi_feature_attrs(
     attrs["EvidenceType"] = evidence_type
     attrs["Confidence"] = confidence
     attrs["GOIClass"] = goi_class
-    attrs["ModelStatus"] = _model_status(query_cov, exon_count, evidence_type)
+    attrs["ModelStatus"] = _model_status(completeness_coverage(query_cov, core_cov, CORE_COMPLETENESS),
+                                         exon_count, evidence_type)
     # Whether the model carries the gene's own termini. The per-exon flags existed but only
     # ever reached CDS lines, so a model starting three codons inside the gene, with no
     # initiator Met, was indistinguishable from a complete one (family benchmark 2026-09-15:

@@ -31,6 +31,7 @@ sys.path.insert(0, THIS_DIR)
 from sequence_utils import load_genome_subset, parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
 from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
 from sequence_utils import exit_step_failed  # noqa: E402
+from query_features import completeness_coverage, core_coverage  # noqa: E402
 import synvoy_evalue  # noqa: E402
 import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
@@ -180,7 +181,7 @@ def _extract_window(genome_path: str, chrom: str, start: int, end: int,
 
 
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,
-                         confidence, query_coverage=None, bits=None, judged="") -> List[str]:
+                         confidence, query_coverage=None, bits=None, judged="", core_cov=None) -> List[str]:
     """Map miniprot window-relative coords to genome coords; SynVoy GFF block tagged
     EvidenceType=synteny_hull_rescue, confidence by identity. ``bits``: the model
     protein's bit score against the query (sequence_utils.sw_bits), written as Bits= like
@@ -194,6 +195,8 @@ def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_i
     # latter, and a coverage-based demotion could not fire without also demoting
     # good full-length rescues.
     cov_attr = "" if query_coverage is None else f";QueryCoverage={query_coverage:.3f}"
+    if core_cov is not None:
+        cov_attr += f";CoreCoverage={core_cov:.3f}"
     bits_attr = "" if bits is None else f";Bits={bits:.1f}"
     common = (f"Name={query_id};SynVoyRole=goi;Confidence={confidence};"
               f"EvidenceType=synteny_hull_rescue;GOIClass=synteny_hull_rescue;"
@@ -295,20 +298,35 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     return conf, key, attrs, bits
 
 
-def _query_span_coverage(mrna, cds_rows, query_len: int) -> float:
-    """Share of the query between the first and the last residue miniprot aligned
-    (``Target=<query> <start> <end>`` of the mRNA row): the completeness the judge reads,
-    as the runner's QueryCoverage (review fix RF-1d). CDS aa / query length, the old
-    measure, reaches 1.0 for any long model; it stays the fallback without a Target."""
+def _target_interval(mrna) -> Optional[Tuple[int, int]]:
+    """The query residues miniprot aligned (``Target=<query> <start> <end>`` of the mRNA row)."""
     target = dict(kv.split("=", 1) for kv in (mrna[8] if len(mrna) > 8 else "").split(";")
                   if "=" in kv).get("Target", "").split()
-    if query_len > 0 and len(target) >= 3:
+    if len(target) >= 3:
         try:
             qs, qe = int(target[1]), int(target[2])
-            return max(0.0, min(1.0, (abs(qe - qs) + 1) / query_len))
+            return min(qs, qe), max(qs, qe)
         except ValueError:
             pass
+    return None
+
+
+def _query_span_coverage(mrna, cds_rows, query_len: int) -> float:
+    """Share of the query between the first and the last residue miniprot aligned: the
+    completeness the judge reads, as the runner's QueryCoverage (review fix RF-1d). CDS aa /
+    query length, the old measure, reaches 1.0 for any long model; it stays the fallback
+    without a Target."""
+    aligned = _target_interval(mrna)
+    if query_len > 0 and aligned:
+        return max(0.0, min(1.0, (aligned[1] - aligned[0] + 1) / query_len))
     return _cds_coverage(cds_rows, query_len)
+
+
+def _core_coverage(mrna, query_seq: str) -> Optional[float]:
+    """CoreCoverage of a model under core_completeness (the runner's, on its aligned residues);
+    None without a Target."""
+    aligned = _target_interval(mrna)
+    return core_coverage([aligned], query_seq) if aligned else None
 
 
 def hull_label_protein(window_seq: str, cds_rows) -> Tuple[str, str]:
@@ -418,8 +436,11 @@ def main() -> int:
     min_coverage, coverage_from = synvoy_settings.pick(
         args.min_coverage, synvoy_settings.load_settings(args.effective_params),
         "goi_hull_min_coverage", 0.5, float)
+    core_on, _core_from = synvoy_settings.pick(
+        None, synvoy_settings.load_settings(args.effective_params), "core_completeness", False,
+        synvoy_settings.flag)
     print(f"[hull] cost filters: identity >= {args.min_identity:g} %, CDS >= {min_coverage:g} "
-          f"of the query ({coverage_from})", file=sys.stderr)
+          f"of the query ({coverage_from})" + (", or the aligned span of its core" if core_on else ""), file=sys.stderr)
     flanking, high_goi = collect_features(args.region_gff)
     query_id, query_seq = _read_query(args.query)
     # Sanitise for GFF IDs (UniProt headers carry pipes, e.g. sp|P07585|PGS2_HUMAN).
@@ -492,7 +513,8 @@ def main() -> int:
             best = None
             for mrna, cds_rows in _parse_miniprot_gff(gff_text):
                 ident = _identity_pct(mrna[8])
-                cov = _cds_coverage(cds_rows, qlen)
+                core_cov = _core_coverage(mrna, query_seq) if core_on else None
+                cov = completeness_coverage(_cds_coverage(cds_rows, qlen), core_cov, core_on)
                 if ident < args.min_identity or cov < min_coverage:
                     continue
                 # Same terminal refinement as the main path: a rescue model otherwise stops
@@ -507,22 +529,23 @@ def main() -> int:
                 try:
                     conf, key, judged, bits = judge_hull_model(
                         query_id, query_seq, prot, cds_rows, genome_len, proteome,
-                        label_protein=label_prot, coverage=span_cov, neighbourhood=neighbourhood,
+                        label_protein=label_prot,
+                        coverage=completeness_coverage(span_cov, core_cov, core_on), neighbourhood=neighbourhood,
                         n_flanking=args.n_flanking_genes, own_gene_id=own_gene_id)
                 except RuntimeError:
                     continue
                 if frame_flag:
                     judged = f"{judged};{frame_flag}"
                 if best is None or key < best[0]:
-                    best = (key, conf, judged, bits, ident, mrna, cds_rows, prot, span_cov)
+                    best = (key, conf, judged, bits, ident, mrna, cds_rows, prot, span_cov, core_cov)
             if best is None:
                 continue
-            _key, conf, judged, bits, ident, mrna, cds_rows, prot, best_cov = best
+            _key, conf, judged, bits, ident, mrna, cds_rows, prot, best_cov, best_core = best
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
                                                   query_id, parent_id, conf,
                                                   query_coverage=best_cov, bits=bits,
-                                                  judged=judged))
+                                                  judged=judged, core_cov=best_core))
             if prot:
                 faa_records.append((f"{parent_id}.mRNA", prot))
             n_emitted += 1

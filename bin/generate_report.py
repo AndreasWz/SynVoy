@@ -11,7 +11,9 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E402,F401
 from sequence_utils import clopper_pearson  # noqa: E402
+from query_features import completeness_coverage  # noqa: E402
 import synvoy_label  # noqa: E402
+import synvoy_settings  # noqa: E402
 
 
 KNOWN_SUFFIXES = [
@@ -290,6 +292,7 @@ def _process_gffs_unified(gff_files):
                             "goi_class": goi_class,
                             "identity": (attrs.get("Identity", "") or "").strip(),
                             "query_cov": (attrs.get("QueryCoverage", "") or "").strip(),
+                            "core_cov": (attrs.get("CoreCoverage", "") or "").strip(),
                             "bits": (attrs.get("Bits", "") or "").strip(),
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
@@ -1087,6 +1090,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Carried so the coverage demotion can distinguish "coverage is low"
                 # from "coverage was never recorded" (see apply_coverage_demotion).
                 "query_cov": rep.get("query_cov", ""),
+                # A model's core coverage (core_completeness), for the same demotion.
+                **({"core_cov": rep["core_cov"]} if rep.get("core_cov") else {}),
                 # Set when this compact model replaced a wider model of the same gene that
                 # aligned barely more of the query (see _prefers_contained_model).
                 "superseded_wide_model": bool(rep.get("superseded_wide_model")),
@@ -1596,7 +1601,8 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                            ownership_flags=None, ownership_summary=None,
                            phylo_flags=None, phylo_summary=None,
                            identity_decoupled_min_identity=50.0,
-                           identity_decoupled_max_qcov=0.35):
+                           identity_decoupled_max_qcov=0.35,
+                           core_completeness=False):
     """End-of-run sanity checks (docs/TODO.md §1j).
 
     Currently emits two flag types:
@@ -1672,8 +1678,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
         ident = _safe_float(a.get("identity"), 0.0)
         if ident < identity_decoupled_min_identity:
             continue
-        qc_raw = (a.get("query_cov") or "").strip()
-        qc = _safe_float(qc_raw, None) if qc_raw else None
+        qc = _judged_coverage(a, core_completeness)
         if qc is None or qc < identity_decoupled_max_qcov:
             flags.append({
                 "type": "identity_coverage_decoupled",
@@ -1761,7 +1766,17 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     }
 
 
-def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35):
+def _judged_coverage(rec, core_completeness=False):
+    """The coverage a record is tested on (constraint C6, as the judge does): its QueryCoverage,
+    under core_completeness the larger of that and its CoreCoverage. None when neither is
+    recorded."""
+    query_raw = str(rec.get("query_cov") or "").strip()
+    core_raw = str(rec.get("core_cov") or "").strip()
+    return completeness_coverage(_safe_float(query_raw, None) if query_raw else None,
+                                 _safe_float(core_raw, None) if core_raw else None, core_completeness)
+
+
+def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35, core_completeness=False):
     """Demote a high-identity / low-coverage GOI call out of the headline counts.
 
     A short high-identity local window is not an ortholog call: 100 % over 10 aa of a
@@ -1784,8 +1799,7 @@ def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35):
             continue
         if _safe_float(rec.get("identity"), 0.0) < min_identity:
             continue
-        raw = str(rec.get("query_cov") or "").strip()
-        qc = _safe_float(raw, None) if raw else None
+        qc = _judged_coverage(rec, core_completeness)
         if qc is None:
             unknown += 1
             continue
@@ -1808,7 +1822,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                  locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
                  identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
                  phylo_placement_dir=None, phylo_placement_promote=False,
-                 strong_flanking_min=20):
+                 strong_flanking_min=20, core_completeness=False):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -1954,7 +1968,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     coverage_demotion_summary = (
         apply_coverage_demotion(goi_dedup,
                                 min_identity=identity_decoupled_min_identity,
-                                max_qcov=identity_decoupled_max_qcov)
+                                max_qcov=identity_decoupled_max_qcov,
+                                core_completeness=core_completeness)
         if coverage_demotion else
         {"demoted": 0, "coverage_not_recorded": 0, "disabled": True}
     )
@@ -1991,6 +2006,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         ownership_summary=ownership_summary,
         identity_decoupled_min_identity=identity_decoupled_min_identity,
         identity_decoupled_max_qcov=identity_decoupled_max_qcov,
+        core_completeness=core_completeness,
     )
 
     # §1.1 honesty: detect a gene-family / multi-paralog query and advise treating GOI
@@ -2342,6 +2358,9 @@ def main():
         identity_decoupled_min_identity=args.identity_decoupled_min_identity,
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
         strong_flanking_min=args.strong_flanking_min,
+        core_completeness=synvoy_settings.pick(
+            None, synvoy_settings.load_settings(args.effective_params), "core_completeness", False,
+            synvoy_settings.flag)[0],
     )
     report["run_settings"] = load_run_settings(args.effective_params)
     sw_backend = report.pop("smith_waterman", None)

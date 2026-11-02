@@ -151,7 +151,9 @@ def test_every_rule_has_owners_a_default_a_settings_reader_and_no_params_reader(
         for script in scripts:
             source = (ROOT / "bin" / script).read_text()
             assert re.search(rf"synvoy_settings\.pick\(.{{0,200}}?[\"']{r.key}[\"']", source, re.S), (r.key, script)
-            modules = [t for t in nf.values() if re.search(rf"(?<![\w.]){re.escape(script)}\b", t)]
+            # A module that runs the script, not one that names it in a comment.
+            modules = [t for t in nf.values()
+                       if re.search(rf"(?<![\w.]){re.escape(script)}\b", re.sub(r"(?m)(^|\s)(//|#).*$", "", t))]
             assert modules, (r.key, script)
             for text in modules:            # the module gets the file and passes it on
                 assert re.search(r"path\(?\s*effective_params\b", text), (r.key, script)

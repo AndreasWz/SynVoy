@@ -139,6 +139,48 @@ def gpi_signal(seq: str) -> Tuple[bool, int]:
     return False, 0
 
 
+_QUERY_CORE: Dict[str, Tuple[int, int]] = {}
+
+
+def query_core(seq: str) -> Tuple[int, int]:
+    """(first, last), 1-based inclusive: the residues of ``seq`` without its signal peptide
+    and GPI tail (signal_peptide, gpi_signal); the whole sequence when neither is found or
+    nothing would be left."""
+    if seq not in _QUERY_CORE:
+        has_sp, sp_len = signal_peptide(seq)
+        has_gpi, gpi_len = gpi_signal(seq)
+        first = (int(sp_len) if has_sp else 0) + 1
+        last = len(seq) - (int(gpi_len) if has_gpi else 0)
+        _QUERY_CORE[seq] = (first, last) if last >= first else (1, len(seq))
+    return _QUERY_CORE[seq]
+
+
+def core_coverage(intervals, seq: str) -> Optional[float]:
+    """Share of the core of ``seq`` (query_core) covered by the union of ``intervals``
+    (1-based inclusive query positions), each clipped to the core. None without a sequence."""
+    if not seq:
+        return None
+    first, last = query_core(seq)
+    clipped = sorted((max(int(a), first), min(int(b), last)) for a, b in intervals
+                     if min(int(b), last) >= max(int(a), first))
+    covered, end = 0, first - 1
+    for a, b in clipped:
+        if b > end:
+            covered += b - max(a, end + 1) + 1
+            end = b
+    return covered / (last - first + 1)
+
+
+def completeness_coverage(query_cov: Optional[float], core_cov: Optional[float],
+                          core_completeness: bool) -> Optional[float]:
+    """The coverage every completeness test reads (constraint C6, one coverage basis): with
+    core_completeness on, the larger of QueryCoverage and CoreCoverage, so that a signal peptide
+    never counts against a call in one place and not in another; else QueryCoverage."""
+    if core_completeness and core_cov is not None:
+        return core_cov if query_cov is None else max(query_cov, core_cov)
+    return query_cov
+
+
 def query_features(seq: str) -> Dict[str, object]:
     """The feature dict of one query protein (module docstring). Deterministic: fixed
     rounding, so the dict can sit in a cached Nextflow task's output."""

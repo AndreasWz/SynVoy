@@ -232,7 +232,7 @@ distance to the scaffold end).
 | A3 | `shared_domain` | `shared_domain_only` | nothing yet (a flag; A2 does not fire) |
 | B1 | `short_query` | query < 100 aa (the headroom, self bits over the bits an alignment needs for E ≤ 1e-3 in a 100-kb window, is logged) | model status 0.5 / 0.3 (= `preset_short_peptide`); finding in the windows: tblastn word size 2 and no composition statistics (the run with tblastn's defaults still gives `EeffTblastn`), MMseqs2 ORFs from 10 codons (30), miniprot `-L 10` below 100 aa (60); the length floors of window hits and of the short-query fallback 15 → 10 aa, the dispersed rescue's 50 → 0.6 × `Lpiece` (10-50); LOCATE_GENE: tblastn once more with `-seg no` when a query < 100 aa has no home hit (recorded as `locate_retry`); the hull rescue's coverage filter (`goi_hull_min_coverage`) 0.5 → 0.3, B1's fragment bound (§9) |
 | B2 | `low_complexity` | low-complexity share ≥ 0.10 or repeated 4-mers ≥ 0.25 | stricter only: the relative test of the flank walk with blastp and composition-based statistics (`goi_relative_statistic blastp_cbs`); `LowComplexity=` on GOI models |
-| B3 | `signal_anchor` | a signal peptide or a GPI tail | completeness for HIGH also on the core of the home protein (`core_completeness`: `CoreCoverage=` on gene models, the judge reads the larger of the two coverages; §7.8) |
+| B3 | `signal_anchor` | a signal peptide or a GPI tail | completeness for HIGH also on the core of the home protein (`core_completeness`: `CoreCoverage=` on gene models, every completeness test of a gene model reads the larger of the two coverages; §7.8) |
 | B4 | `cys_framework` | ≥ 6 Cys in a 90-residue window | nothing (advisory) |
 | C1 | `exon_structure` | a home gene of ≥ 2 exons (tandem copies of the home model not counted) | Smith-Waterman alignments per piece 1 → 3 (a second exon in the same frame); the dispersed rescue's length floor 50 → 0.6 × `Lpiece` (10-50) |
 | C2 | `home_context` | the home gene < 40 kb from the end of a scaffold of ≥ 1 Mb | nothing (advisory) |
@@ -271,8 +271,9 @@ hold for every module:
   cap that binds is named; C3), as do the ownership panel's genes per home locus (C4) and
   the GOI models that steer a figure (C5); a per-hit length floor a rule sets lies between
   10 and max(10, 0.6 × `Lpiece`) (C7); a value a rule set stays within its cap (C11); the
-  ModelStatus fragment bound lies below the complete bound (C12). C6, one coverage basis
-  under `core_completeness`, is not met yet: only the label reads the core (§14). A
+  ModelStatus fragment bound lies below the complete bound (C12); under `core_completeness`
+  every completeness test of a gene model reads the larger of `QueryCoverage` and
+  `CoreCoverage` (C6; §7.8). A
   violation that the rules alone made is a bug and stops the run before the search; one
   that involves a value the user set is a warning, and the user's value is kept.
 - **Precedence**, lowest to highest: shipped default < modules < preset (the chooser's
@@ -927,8 +928,13 @@ coverage:
   `core_completeness` (the `signal_anchor` module) a gene model also carries
   `CoreCoverage`, the share of the protein's core (without the signal peptide and the GPI
   tail found by `query_features.py`) covered by its exons' query intervals, and the judge
-  reads the larger of the two; 0.7 stays the bar. The hull rescue reads the query span of
-  its alignment, without the core.
+  reads the larger of the two; 0.7 stays the bar. So do the other completeness tests of a
+  model (C6): the model status, the hull rescue's cost filter and the coverage its judge reads
+  (the query span of its alignment; it writes `CoreCoverage` too), and the report's coverage
+  demotion and `identity_coverage_decoupled` flag. A hit chain, a tandem copy or a rescued exon
+  has no `CoreCoverage` and reads the whole protein, and so do the search's bars on single hits
+  (`fallback_refusal`, the tandem detector) and the fused-model rule of the report's dedup,
+  where a real signal-peptide exon behind a long intron has to count.
 - **Specific**: no real competitor, or a margin of at least 3.3 bits over the best other
   home protein. Within ±3.3 bits a model in the slot or core of a significant block is
   decided for the gene (positional tie-break), unless that protein lies in the gene's own
@@ -1236,7 +1242,7 @@ flanking genes alone. Both apply the start/stop refinement of §7.7.
 | Script | `rescue_strong_synteny.py` | `rescue_goi_hull.py` |
 | Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ `goi_hull_min_flanking` (round(0.4 × `n_flanking_genes`) = 4) HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
-| Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ `goi_hull_min_coverage` (0.5; the `short_query` module 0.3) of the query length (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
+| Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ `goi_hull_min_coverage` (0.5; the `short_query` module 0.3) of the query length, or, with `core_completeness`, an alignment over that share of the query's core (cost filters in front of the judge, kept by decision of 2026-10-15); the one the judge ranks first |
 | Confidence | always LOW | the judge of the main search (§7.8): E-value in the genome-wide place, specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
 | Evidence type | `relaxed_miniprot_rescue` | `synteny_hull_rescue` |
 
@@ -1360,13 +1366,9 @@ Consequences of the rules above that a reader of the results should know.
 - HIGH needs a query coverage of at least 0.7, whatever the number of exons (until
   2026-10-14 a one-exon model could be HIGH only when the home gene had one exon).
 - The hull rescue's models are judged like the main search's (§7.8). Its 40 % identity
-  and 0.5 CDS-coverage gates (0.3 with the `short_query` module) only decide which models
+  and 0.5 CDS-coverage gates (0.3 with the `short_query` module; with `core_completeness` the
+  aligned share of the query's core counts as well) only decide which models
   are judged.
-- With `core_completeness` (the `signal_anchor` module) only the label reads the core of
-  the home protein. The model status, the hull rescue's coverage gate and the coverage its
-  label reads, and the report's coverage demotion and `identity_coverage_decoupled` flag
-  still read the whole protein (constraint C6, one coverage basis; not fixed yet), so a
-  signal peptide can count against a call there and not in the label.
 - Flanking support is a property of the window (every candidate in a window has the
   same value, also a copy at the edge of the window), and the label does not read it.
 - Two GOI row types are not judged: `relaxed_miniprot_rescue` rows of the strong-synteny

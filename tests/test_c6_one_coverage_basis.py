@@ -4,16 +4,15 @@ protein without its signal peptide and GPI tail, as the judge does (the larger o
 QueryCoverage and CoreCoverage). A signal peptide must never count against a call in one
 place and not in another.
 
-Only the judge reads the core today. The fix is fix-phase item 11 of the profile work, not
-stage 4: each test below is a strict xfail and flips when its place is fixed (then remove its
-marker). Each comes with a control that passes today, showing that the setup reaches the
-coverage test at all, so the xfail fails for the reason it names. Places:
+Each place has a control: with core_completeness off it reads QueryCoverage, also when a
+CoreCoverage is recorded. All of them read through query_features.completeness_coverage (fix-phase
+item 11). Places:
 
-* ModelStatus (iterative_search_runner._goi_feature_attrs) reads QueryCoverage only;
+* ModelStatus (iterative_search_runner._goi_feature_attrs);
 * the hull rescue's cost filter (CDS aa / query length) and the coverage its judge reads
   (the query span of the alignment), rescue_goi_hull.py;
 * the report's coverage demotion (apply_coverage_demotion) and its identity_coverage_decoupled
-  flag (build_self_consistency): generate_report.py never reads CoreCoverage.
+  flag (build_self_consistency).
 """
 from __future__ import annotations
 
@@ -29,9 +28,6 @@ sys.path.insert(0, str(ROOT / "bin"))
 
 import iterative_search_runner as isr  # noqa: E402
 import rescue_goi_hull as hull  # noqa: E402
-
-C6 = pytest.mark.xfail(strict=True, reason="fix-phase item 11 (C6, one coverage basis): this place "
-                                           "does not read the core under core_completeness yet")
 
 # UniProt Q16553 (LY6E): signal peptide 1-20 and a GPI tail of 32 aa (query_features), so its
 # core is residues 21-99 (79 aa) of 131.
@@ -56,7 +52,6 @@ def test_model_status_control(monkeypatch):
     assert _status(monkeypatch, False) == ("fragment", "0.950")
 
 
-@C6
 def test_model_status_reads_the_core(monkeypatch):
     assert _status(monkeypatch, True)[0] == "complete"
 
@@ -94,22 +89,31 @@ def _hull(tmp_path, monkeypatch, settings):
 
 
 def test_hull_control(tmp_path, monkeypatch):
-    """The cost filter at 0.5 drops the model; at 0.3 it is judged, on its span of the whole
-    precursor."""
-    assert _hull(tmp_path, monkeypatch, {"core_completeness": True, "goi_hull_min_coverage": 0.5}) == []
-    judged = _hull(tmp_path, monkeypatch, {"core_completeness": True, "goi_hull_min_coverage": 0.3})
-    assert judged == [pytest.approx(60 / 131)]
+    """With core_completeness off the cost filter at 0.5 drops the model; at 0.3 it is judged, on
+    its span of the whole precursor. The same with the switch as Nextflow's text."""
+    for off in (False, "false"):
+        assert _hull(tmp_path, monkeypatch, {"core_completeness": off, "goi_hull_min_coverage": 0.5}) == []
+        judged = _hull(tmp_path, monkeypatch, {"core_completeness": off, "goi_hull_min_coverage": 0.3})
+        assert judged == [pytest.approx(60 / 131)]
+    assert _hull(tmp_path, monkeypatch, {"goi_hull_min_coverage": 0.5}) == []
 
 
-@C6
 def test_hull_cost_filter_reads_the_core(tmp_path, monkeypatch):
     assert _hull(tmp_path, monkeypatch, {"core_completeness": True, "goi_hull_min_coverage": 0.5})
 
 
-@C6
 def test_hull_judge_reads_the_core(tmp_path, monkeypatch):
     judged = _hull(tmp_path, monkeypatch, {"core_completeness": True, "goi_hull_min_coverage": 0.3})
     assert judged and judged[0] >= 60 / 79 - 0.01
+
+
+def test_hull_writes_the_core_for_the_report(tmp_path, monkeypatch):
+    _hull(tmp_path, monkeypatch, {"core_completeness": True, "goi_hull_min_coverage": 0.3})
+    mrna = [ln for ln in (tmp_path / "out.gff").read_text().splitlines() if "\tmRNA\t" in ln][0]
+    assert "QueryCoverage=0.458" in mrna and "CoreCoverage=0.759" in mrna
+    _hull(tmp_path, monkeypatch, {"core_completeness": False, "goi_hull_min_coverage": 0.3})
+    mrna = [ln for ln in (tmp_path / "out.gff").read_text().splitlines() if "\tmRNA\t" in ln][0]
+    assert "QueryCoverage=0.458" in mrna and "CoreCoverage" not in mrna
 
 
 # ----------------------------------------------------------------------------- the report
@@ -142,11 +146,32 @@ def test_report_control(tmp_path):
     assert goi_class == "identity_coverage_decoupled" and len(flagged) == 1
 
 
-@C6
 def test_report_demotion_reads_the_core(tmp_path):
     assert _report(tmp_path, True)[0] != "identity_coverage_decoupled"
 
 
-@C6
 def test_report_flag_reads_the_core(tmp_path):
     assert _report(tmp_path, True)[1] == []
+
+
+@pytest.mark.parametrize("query,core,on,want", [
+    (0.3, 0.9, True, 0.9), (0.9, 0.3, True, 0.9), (0.3, 0.9, False, 0.3), (None, 0.9, True, 0.9),
+    (None, 0.9, False, None), (0.3, None, True, 0.3), (None, None, True, None),
+])
+def test_completeness_coverage(query, core, on, want):
+    from query_features import completeness_coverage
+    assert completeness_coverage(query, core, on) == want
+
+
+@pytest.mark.parametrize("value,want", [(True, True), (False, False), ("true", True), ("false", False),
+                                        (" True ", True), ("FALSE", False), ("yes", True), ("no", False),
+                                        ("1", True), ("0", False), (1, True), (0, False), ("t", True), ("n", False)])
+def test_the_switch_is_read_as_a_switch(value, want):
+    import synvoy_settings
+    assert synvoy_settings.flag(value) is want
+
+
+def test_a_word_is_no_switch():
+    import synvoy_settings
+    with pytest.raises(ValueError):
+        synvoy_settings.flag("maybe")

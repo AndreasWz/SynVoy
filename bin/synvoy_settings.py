@@ -20,10 +20,13 @@ one the run decided, or the one its caller gave.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Tuple
+
+from sequence_utils import str2bool
 
 # key -> the scripts that read it through load_settings. tests/test_modules.py checks that
 # each rule key has a reader (this map, or ${settings.x} in a module) and that every script
@@ -32,6 +35,7 @@ READERS: Mapping[str, Tuple[str, ...]] = MappingProxyType({
     "locus_ownership_max_genes_per_locus": ("build_home_paralog_panel.py",),
     "paralog_panel_max_family": ("build_home_paralog_panel.py",),
     "goi_hull_min_coverage": ("rescue_goi_hull.py",),
+    "core_completeness": ("rescue_goi_hull.py", "generate_report.py"),
     "max_goi_per_genome": ("plot_synteny.py",),
 })
 
@@ -68,6 +72,16 @@ def whole(value: Any) -> int:
     if not number.is_integer():
         raise ValueError(f"not a whole number: {value!r}")
     return int(number)
+
+
+def flag(value: Any) -> bool:
+    """A switch, in the vocabulary of sequence_utils.str2bool, which the search reads the same key
+    with: a value that passes the search must pass the steps after it (Nextflow hands a value from
+    the command line over as text, and "false" is a true string). ValueError for anything else."""
+    try:
+        return str2bool(value)
+    except argparse.ArgumentTypeError:
+        raise ValueError(f"not a switch: {value!r}") from None
 
 
 def pick(given: Any, settings: Mapping[str, Any], key: str, default: Any,

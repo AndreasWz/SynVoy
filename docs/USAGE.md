@@ -503,7 +503,7 @@ already recovered.
 | `--goi_hull_window_pad` | `auto` | bp padding around the hull window. `auto` = the GOI margin of the search (100000 before). |
 | `--goi_hull_max_window` | `auto` | Skip hulls longer than this (bp). `auto` = twice the home neighbourhood × expansion (20000000 before). |
 | `--goi_hull_min_identity` | `40.0` | Min miniprot % identity for a rescue model to be judged (a cost filter). |
-| `--goi_hull_min_coverage` | `0.5` | Min CDS aa / query length for a rescue model to be judged (a cost filter; the label reads the query span of the alignment). Settings key: the `short_query` module (B1) sets 0.3, its fragment bound. |
+| `--goi_hull_min_coverage` | `0.5` | Min CDS aa / query length for a rescue model to be judged (a cost filter; the label reads the query span of the alignment; with `core_completeness` the aligned share of the query's core counts as well). Settings key: the `short_query` module (B1) sets 0.3, its fragment bound. |
 | `--enable_dispersed_goi_rescue` | `true` | Seed a block from a strong GOI hit that landed *outside* every flanking-seeded block, provided the chromosome carries enough flanking anchors to define an envelope around it. |
 | `--dispersed_goi_min_identity` | `40.0` | Min % identity for a dispersed GOI hit to qualify. |
 | `--dispersed_goi_max_evalue` | `1e-10` | Max e-value for a dispersed GOI hit. |

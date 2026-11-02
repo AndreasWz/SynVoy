@@ -575,7 +575,7 @@ def merge(chosen: Sequence[Module], f: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 # ----------------------------------------------------------------------------- constraints
 # How the settings must relate to each other, checked after the rules and the values the
 # user set (profile handoff, section 4). C2 is a code fix of the dispersed rescue (stage 3b);
-# C6, one coverage basis, is a fix-phase item; C9, the counts tied to n, are resolved in
+# C6, one coverage basis, is query_features.completeness_coverage; C9, the counts tied to n, are resolved in
 # lib/FlankingCounts.groovy (stage 6). C8 (composition statistics kept for a low-complexity
 # short query) was tried in stage 3 and taken out again; see window_tblastn_comp_stats. C10,
 # no rule writes a forbidden key, is enforced when this module loads (validate_registry).
