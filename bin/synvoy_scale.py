@@ -349,7 +349,13 @@ def gene_gap_limit(geometry: Optional[Dict[str, Any]], gene: str, expansion: flo
     """
     if not geometry or gene not in geometry['genes']:
         return int(floor_bp)
-    return int(max(floor_bp, margin * geometry['genes'][gene]['span'] * expansion))
+    return gene_span_limit(geometry['genes'][gene]['span'], expansion, floor_bp, margin)
+
+
+def gene_span_limit(span: float, expansion: float, floor_bp: int, margin: float = 1.5) -> int:
+    """A gene's own span at home in this target (times a margin for longer introns), never below
+    ``floor_bp``: gene_gap_limit for an anchor, fallback_span_too_wide for the GOI's hit chain."""
+    return int(max(floor_bp, margin * span * expansion))
 
 
 def format_gff_header(distances: Dict[str, Any]) -> str:

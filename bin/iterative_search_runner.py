@@ -4680,16 +4680,26 @@ def count_fallback_refusal(args, parent_id: str, refused) -> None:
             count_limit(args, f'fallback_{test}')
 
 
+# The hit-chain span cap's length arm: at least 100 kb (introns dominate a short peptide's span:
+# melittin at 70 aa can span tens of kb in bee genomes), 150 bp per residue beyond it (TP53 runs
+# showed real TP63/TP73 loci spanning > 100 kb).
+FALLBACK_SPAN_MIN_BP = 100_000
+FALLBACK_SPAN_BP_PER_AA = 150
+
+
+def fallback_span_limit(query_len: int, home_span: float = 0, expansion: float = 1.0) -> int:
+    """Longest span of a GOI hit chain: continuous in the query's length, and never below the GOI's
+    own span at home in this target, the rule of an anchor's gene_gap_limit. The old cap fell from
+    100 kb to 22.5 kb at 150 aa and ignored the home span."""
+    length_arm = max(FALLBACK_SPAN_MIN_BP, int(query_len) * FALLBACK_SPAN_BP_PER_AA)
+    return synvoy_scale.gene_span_limit(home_span or 0, float(expansion or 1.0), length_arm)
+
+
 def fallback_span_too_wide(args, parent_id: str, ordered_hits, query_len: int) -> bool:
-    """Span sanity check of a GOI fallback model: its hits may span at most 600x the CDS
-    length below 150 aa (introns dominate a short peptide's span: melittin at 70 aa can span
-    tens of kb in bee genomes), at least 100 kb, and 50x from 150 aa on (raised from 30x
-    after TP53 runs showed real TP63/TP73 loci spanning > 100 kb), at least 5 kb. A refusal
-    is counted as fallback_span_cap (decoy queries left out)."""
-    if query_len < 150:
-        max_span_nt = max(100_000, query_len * 3 * 200)
-    else:
-        max_span_nt = max(5000, query_len * 3 * 50)
+    """Span sanity check of a GOI fallback model (fallback_span_limit). A refusal is counted as
+    fallback_span_cap (decoy queries left out)."""
+    max_span_nt = fallback_span_limit(query_len, getattr(args, 'goi_home_span', 0),
+                                      getattr(args, 'expansion', 1.0))
     gspan_min = min(h.get('gstart', 0) for h in ordered_hits)
     gspan_max = max(h.get('gend', 0) for h in ordered_hits)
     actual_span = gspan_max - gspan_min
@@ -5267,11 +5277,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                                     # Span sanity check: reject fallback hits whose
                                     # genomic span is wildly disproportionate to the
-                                    # query protein length. For short peptides
-                                    # (<150 aa) the intron:exon ratio is dominated
-                                    # by introns, so a flat 30x multiplier rejects
-                                    # valid multi-exon loci (e.g. melittin at 70 aa
-                                    # can span tens of kb in bee genomes).
+                                    # query protein and to the GOI's own span at home.
                                     if valid_fallback and fallback_span_too_wide(
                                             args, parent_id, ordered_hits, query_len):
                                         valid_fallback = False

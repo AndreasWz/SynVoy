@@ -856,8 +856,9 @@ For each GOI query:
    - longer query, one hit: coverage ≥ 0.25 and length ≥ 25 aa;
    - longer query, several hits: coverage ≥ 0.25, or total length ≥ 35 aa, or bit
      score ≥ 60;
-   - and its genomic span is at most 600 × the query length in bp (at least 100 kb)
-     for queries below 150 aa, or 150 × (at least 5 kb) for longer ones.
+   - and its genomic span is at most 150 bp per query residue, at least 100 kb and at
+     least 1.5 × the GOI's own span at home × the target's expansion (the rule of an
+     anchor's gap limit).
 
    The identity of a chain is the mean over its hits, weighted by alignment length.
    The mRNA row lists the query interval of each hit (`ChainQuery=1-40,41-88,...`).
