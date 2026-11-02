@@ -82,7 +82,8 @@ def test_off_by_default_today_s_chain():
 
 
 def test_the_judge_reads_the_hits_also_when_cds_rows_were_merged():
-    subseq = "ATG" + "GCT" * 100 + "TAA" + "GCT" * 20
+    # A stop between the hits: two hits in one stop-free frame are one piece (fix-phase item 1).
+    subseq = "ATG" + "GCT" * 49 + "TAA" + "GCT" * 70
     gff = ["c\tfallback_hits\tmRNA\t1\t300\t90\t+\t.\tID=x;EvidenceType=fallback_hit_span",
            "c\tfallback_hits\tCDS\t1\t300\t.\t+\t0\tID=x_CDS1;Parent=x"]
     label_rows = ["c\tfallback_hits\tCDS\t1\t150\t.\t+\t0\tParent=x",
@@ -91,5 +92,5 @@ def test_the_judge_reads_the_hits_also_when_cds_rows_were_merged():
     isr.prepare_label_proteins([cand], subseq, 0)
     assert cand["label_protein"].count("*") == 1                     # two pieces, joined by '*'
     plain = {"gff": gff, "record": {"seq": "M"}, "label_rows": None}
-    isr.prepare_label_proteins([plain], subseq, 0)
+    isr.prepare_label_proteins([plain], "ATG" + "GCT" * 120, 0)
     assert "*" not in plain["label_protein"]                          # one row: one piece

@@ -891,7 +891,9 @@ Every candidate gets a bit score: the Smith-Waterman score against the home prot
 BLOSUM62 with gap costs 11/1, in bits (λ 0.267, K 0.041), written as `Bits=`, of the best
 of the proteins the candidate is judged on (§7.13): its label protein in pieces between
 stops (the model's translation through the frame guard, or a chain's, copy's or single
-hit's hits translated again with their stops) and its hit regions. The specificity uses
+hit's hits translated again with their stops; two consecutive hits in one frame with no
+stop between them lie in one open reading frame and are one piece, translated through the
+gap) and its hit regions. The specificity uses
 that same protein (review fix RF-1e, 2026-10-15; before, both used the record protein,
 for a chain the join of its hits with the stops deleted).
 The candidates of a window are judged first and then ranked in the judge's order

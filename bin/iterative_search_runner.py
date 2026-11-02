@@ -1320,23 +1320,47 @@ HIT_EVIDENCE_TYPES = ('fallback_hit_span', 'rescued_exon', 'raw_hit')
 def hit_label_protein(gff_rows, subseq, w_start) -> str:
     """The label protein of a candidate built from search hits (review fix RF-1a): each CDS
     row (one hit) translated with its stops kept, in transcript order, the rows joined with
-    '*'. split_at_stops then judges the pieces between stops and never joins two hits; with
-    the stops deleted, one 3-stop on-truth model read E 9.1e-13 instead of 6.3e-6."""
-    pieces, minus = [], False
+    '*'. split_at_stops then judges the pieces between stops; with the stops deleted, one
+    3-stop on-truth model read E 9.1e-13 instead of 6.3e-6.
+
+    Two consecutive hits on one strand, in one frame, with no stop codon in that frame from the
+    first hit's start to the second hit's end lie in one open reading frame: they are one piece,
+    translated through the gap (overlapping hits too). Fix-phase item 1: orf19.6528 / C.
+    parapsilosis, two hits 24 bp apart and 879 bp end to end in one ORF, the truth gene (897 bp with
+    its stop): the main hit alone gave E 3.35e-4, the piece 9.34e-5. No alignment crosses that gap, so
+    the gain there is composition statistics on the longer subject, not the two hits adding up. A join
+    never crosses a stop or an unknown codon (X, a gap of Ns in the assembly: whether the frame is
+    open there is not known)."""
+    minus = False
     rows = []
     for line in gff_rows:
         c = line.split('\t')
         if len(c) >= 9 and c[2] == 'CDS':
             rows.append((int(c[3]), int(c[4])))
             minus = c[6] == '-'
-    for start, end in sorted(rows, reverse=minus):
+
+    def piece_protein(start, end):
         dna = subseq[start - w_start - 1:end - w_start]
         if minus:
             dna = reverse_complement(dna)
         dna = dna[:len(dna) - len(dna) % 3]
-        if dna:
-            pieces.append(translate(dna))
-    return '*'.join(pieces)
+        return translate(dna) if dna else ''
+
+    def open_frame(protein):
+        return '*' not in protein and 'X' not in protein
+
+    # In transcript order; the minus strand's is the exact mirror of the plus strand's.
+    pieces = []
+    for start, end in sorted(rows, key=(lambda r: (-r[1], -r[0])) if minus else None):
+        if pieces:
+            cur_start, cur_end = pieces[-1]
+            same_frame = (cur_end - end if minus else start - cur_start) % 3 == 0
+            joined = (min(cur_start, start), max(cur_end, end))
+            if same_frame and open_frame(piece_protein(*joined)):
+                pieces[-1] = joined
+                continue
+        pieces.append((start, end))
+    return '*'.join(p for p in (piece_protein(*piece) for piece in pieces) if p)
 
 
 def prepare_label_proteins(candidates, subseq, w_start) -> None:

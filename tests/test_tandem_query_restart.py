@@ -71,7 +71,8 @@ def test_a_short_query_copy_needs_both_length_and_bits():
 
 
 def test_the_judge_reads_a_copy_s_hits():
-    subseq = "ATG" + "GCT" * 100 + "TAA" + "GCT" * 20
+    # A stop between the hits: two hits in one stop-free frame are one piece (fix-phase item 1).
+    subseq = "ATG" + "GCT" * 49 + "TAA" + "GCT" * 70
     gff = ["c\ttandem_copy\tmRNA\t1\t300\t90\t+\t.\tID=x;EvidenceType=tandem_copy",
            "c\ttandem_copy\tCDS\t1\t150\t.\t+\t0\tID=x_CDS1;Parent=x",
            "c\ttandem_copy\tCDS\t154\t300\t.\t+\t0\tID=x_CDS2;Parent=x"]
