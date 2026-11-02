@@ -308,7 +308,8 @@ The fields of `summary` worth reading:
 |---|---|
 | `headline` | One sentence, e.g. `12 ortholog(s) (9 high, 3 medium confidence); 4 need curation (3 gene order only, 1 another home gene fits as well); 40 no significant match; across 33 genome(s).` |
 | `high_confidence_goi`, `medium_confidence_goi` | Counts after dedup and the paralog check — the numbers to quote |
-| `needs_curation_goi`, `needs_curation_by_basis` | The AMBIGUOUS calls ("needs curation"), never part of the ortholog count, and how many rest on `gene_order_only` and how many are `not_specific`. `ambiguous_goi` is the old name of `needs_curation_goi` (kept for one release) |
+| `needs_curation_goi`, `needs_curation_by_basis` | The AMBIGUOUS calls ("needs curation"), never part of the ortholog count, and how many rest on `gene_order_only` and how many are `not_specific`. Calls that ownership gave to another home gene (`goi_class` = `paralog_not_goi`) are not among them. `ambiguous_goi` is the old name of `needs_curation_goi` (kept for one release) |
+| `ambiguous_other_home_gene_goi` | AMBIGUOUS calls that ownership gave to another home gene: named in the headline ("of another home gene"), neither counted nor in need of curation for this GOI |
 | `gene_order_only_dropped` | Gene-order-only calls not offered because their genome has a counted call of the gene; `goi_dedup.gene_order_only_dropped_records` lists them (genome, position, model id). The per-genome GFFs in `plot_inputs_*` and the figures leave them out too |
 | `low_confidence_goi` | LOW calls, named separately, never part of the ortholog count |
 | `goi_absent_genomes` | Genomes in which no GOI call was **placed**. Not proof of absence. |

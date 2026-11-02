@@ -870,17 +870,20 @@ def low_quality_warnings(failed_genomes, searched):
     return ids, sentences
 
 
-def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_basis=None):
+def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_basis=None,
+                         other_home_gene=0):
     """One-line summary of the GOI yield, for the summary block (docs/TODO.md §1k; names of
     the label rework, 2026-10-14):
 
         12 orthologs (9 high, 3 medium confidence); 4 need curation (3 gene order only,
-        1 another home gene fits as well); 40 no significant match; across 33 genome(s).
+        1 another home gene fits as well); 2 of another home gene; 40 no significant match;
+        across 33 genome(s).
 
     Only HIGH and MEDIUM are orthologs. AMBIGUOUS calls are named apart and never counted:
     ``gene_order_only`` is a weak match in the slot where the gene was expected,
-    ``not_specific`` a significant match that another home gene explains as well."""
-    if not (high or medium or low or ambiguous):
+    ``not_specific`` a significant match that another home gene explains as well.
+    ``other_home_gene``: AMBIGUOUS calls that ownership gave to another home gene."""
+    if not (high or medium or low or ambiguous or other_home_gene):
         return "No GOI ortholog annotations were produced."
     parts = []
     if high or medium:
@@ -903,6 +906,8 @@ def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_
         if rest > 0 and detail:
             detail.append(f"{rest} by sequence and synteny alone")
         parts.append(f"{ambiguous} need curation" + (f" ({', '.join(detail)})" if detail else ""))
+    if other_home_gene:
+        parts.append(f"{other_home_gene} of another home gene")
     if low:
         parts.append(f"{low} no significant match")
     return "; ".join(parts) + f"; across {n_genomes} genome(s)."
@@ -1999,7 +2004,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
 
     dedup_high = goi_dedup["high_confidence_goi_deduped"]
     dedup_medium = goi_dedup["medium_confidence_goi_deduped"]
-    dedup_ambiguous = goi_dedup.get("ambiguous_goi_deduped", 0)
 
     # §1j Phase B: per-call reciprocal-best paralog check (run by RECIPROCAL_BEST_PARALOG
     # per (locus, genome) and staged under paralog_check/). Aggregated here so the
@@ -2048,7 +2052,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
 
     _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
     drop_gene_order_only(goi_dedup, _DEMOTED_CLASSES)
-    dedup_ambiguous = goi_dedup["ambiguous_goi_deduped"]
     absence = genome_absence_categories(goi_dedup.get("records", []), target_policy,
                                         _DEMOTED_CLASSES)
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
@@ -2057,9 +2060,14 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                      if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
     dedup_medium = sum(1 for r in _own_recs
                        if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
-    # AMBIGUOUS calls: shown as "needs curation", never counted, split by why (Basis).
-    needs_curation_by_basis = dict(Counter(
-        r.get("basis") or "unlabelled" for r in _own_recs if r.get("confidence") == "AMBIGUOUS"))
+    # AMBIGUOUS calls: shown as "needs curation", never counted, split by why (Basis). One that
+    # ownership gave to another home gene (paralog_not_goi) is that gene's call, named apart.
+    _curation = [r for r in _own_recs if r.get("confidence") == "AMBIGUOUS"
+                 and r.get("goi_class") != "paralog_not_goi"]
+    dedup_ambiguous = len(_curation)
+    ambiguous_other_home_gene = sum(1 for r in _own_recs if r.get("confidence") == "AMBIGUOUS"
+                                    and r.get("goi_class") == "paralog_not_goi")
+    needs_curation_by_basis = dict(Counter(r.get("basis") or "unlabelled" for r in _curation))
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
     # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
@@ -2142,7 +2150,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # per-home-locus seed count, so the same gene found from N loci reads as one.
             "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low,
                                              genomes_with_goi, ambiguous=dedup_ambiguous,
-                                             curation_by_basis=needs_curation_by_basis),
+                                             curation_by_basis=needs_curation_by_basis,
+                                             other_home_gene=ambiguous_other_home_gene),
             # How many calls the coverage rule removed from the headline above.
             "coverage_demoted_calls": coverage_demotion_summary.get("demoted", 0),
             "coverage_not_recorded_calls": coverage_demotion_summary.get("coverage_not_recorded", 0),
@@ -2153,9 +2162,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # counts (see _format_goi_headline), and why: gene_order_only = a weak match in
             # the slot where the gene was expected; not_specific = another home gene explains
             # the match as well. ambiguous_goi is the old name of the same number (kept for
-            # one release).
+            # one release). ambiguous_other_home_gene_goi: AMBIGUOUS calls that ownership
+            # gave to another home gene (paralog_not_goi); they need no curation for this GOI.
             "needs_curation_goi": dedup_ambiguous,
             "needs_curation_by_basis": needs_curation_by_basis,
+            "ambiguous_other_home_gene_goi": ambiguous_other_home_gene,
             "ambiguous_goi": dedup_ambiguous,
             "gene_order_only_dropped": goi_dedup.get("gene_order_only_dropped", 0),
             "phylo_discordant_calls": phylo_summary["discordant"],
