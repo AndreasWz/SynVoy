@@ -1068,6 +1068,14 @@ the GOI's home protein, the GOI record of the query set (§5.8; ≥ 95 % identit
 of it; the hull rescue compares the query). Until 2026-10-16 (review fix RF-2b) only that
 identity rule existed, so where the home annotation differs from the query (an extra exon,
 a partial model) the GOI's own gene was p*.
+A home protein in the GOI's own home locus (the own gene and its `n_flanking_genes` neighbours
+on each side, and this locus's hull when it holds the own gene: the flank walk skips relatives, so
+a hull spans an array that n genes do not) that passes the same identity rule against the GOI or its
+own gene is no p* for a model either, unless the model favours it over the GOI and its own gene by 10
+bits (the seed's bar). A tandem copy identical to the GOI ties with it at a margin of 0 bits, so every copy
+in a target was `not_specific`, and with a copy at 98.8 % one target model was specific or not by which of the two
+was the query. A target's copy of a 96 % neighbour of a long protein is tens of bits
+closer to that neighbour, and it stays not specific. A paralog below that identity stays a competitor.
 p* is a real competitor (`RealCompetitor=1`) when it aligns to x at E ≤ 0.01 over the
 whole proteome, or when it is a home family member of the GOI (the two align at E ≤ 1e-3,
 blastp with composition-based statistics and SEG, the GOI as the query: in a pairwise run
@@ -1299,9 +1307,13 @@ this order:
    (`home_<gene>`), from which no search started, so a call it owns is marked as found from
    another home locus (`locus_reattributed`, and `goi_owner_search_fumble`). Each recovered
    protein is aligned to the
-   panel. If its best match is a paralog and not the GOI, the call is relabelled
-   `paralog_not_goi`. If the two best scores differ by less than 10, the locus with more
-   HIGH flanking models decides. Until 2026-10-28 the GOI entry was the panel protein the
+   panel. A panel gene that passes the own-gene rule against the GOI's home protein or its own gene
+   (≥ 95 % identity over ≥ 90 % of it) counts as the GOI for a call that does not favour it over
+   the GOI's own entry by 10 bits, as in the specificity (§7.12); the call then stays at a searched
+   locus. A call is relabelled `paralog_not_goi` only when a paralog beats the GOI's best panel
+   entry by at least 10 (`locus_ownership_tiebreak_gap`, SW score); below that the call stays the
+   GOI's (`ownership_near_tie`). If the two best scores differ by less than 10 and both or neither
+   of them are the GOI, the locus with more HIGH flanking models decides. Until 2026-10-28 the GOI entry was the panel protein the
    query aligned to best, with no minimum: without a home GFF that was a neighbour, and the
    true orthologs that aligned best to another neighbour were relabelled `paralog_not_goi`.
 4. **Coverage demotion** (`apply_coverage_demotion`). A HIGH or MEDIUM call with

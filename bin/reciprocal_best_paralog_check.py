@@ -38,7 +38,7 @@ HEADER = [
     "mrna_id", "target_len_aa",
     "best_paralog", "best_bit", "best_identity",
     "second_paralog", "second_bit", "bitscore_gap",
-    "n_paralogs_compared",
+    "n_paralogs_compared", "panel_scores",
 ]
 
 
@@ -143,9 +143,12 @@ def _align(query_seq: str, paralog_seq: str) -> tuple[float, float]:
     return score, ident
 
 
-def _best_two_paralogs(query_seq: str, paralogs: dict[str, str]) -> tuple[str, float, float, str, float]:
-    """Return (best_name, best_bit, best_identity, second_name, second_bit).
-    ``second_name``/``second_bit`` are '' / 0.0 when only one paralog is available."""
+def _best_two_paralogs(query_seq: str, paralogs: dict[str, str]) -> tuple[str, float, float, str, float, str]:
+    """Return (best_name, best_bit, best_identity, second_name, second_bit, panel_scores).
+    ``second_name``/``second_bit`` are '' / 0.0 when only one paralog is available.
+    ``panel_scores``: every entry's score, ``name=score`` joined with ';', so the report can read
+    the score of the GOI's own entries: which of them is the GOI is in the panel's meta file, which
+    only the report reads."""
     scored = []
     for name, seq in paralogs.items():
         if not seq:
@@ -154,12 +157,13 @@ def _best_two_paralogs(query_seq: str, paralogs: dict[str, str]) -> tuple[str, f
         scored.append((bit, ident, name))
     scored.sort(reverse=True)
     if not scored:
-        return "", 0.0, 0.0, "", 0.0
+        return "", 0.0, 0.0, "", 0.0, ""
+    panel_scores = ";".join(f"{name}={bit:.1f}" for bit, _ident, name in scored)
     best_bit, best_ident, best_name = scored[0]
     if len(scored) == 1:
-        return best_name, best_bit, best_ident, "", 0.0
+        return best_name, best_bit, best_ident, "", 0.0, panel_scores
     second_bit, _, second_name = scored[1]
-    return best_name, best_bit, best_ident, second_name, second_bit
+    return best_name, best_bit, best_ident, second_name, second_bit, panel_scores
 
 
 def main() -> None:
@@ -197,7 +201,7 @@ def main() -> None:
             model = models_by_id.get(name)
             if model is None or not seq:
                 continue
-            best, best_bit, best_ident, second, second_bit = \
+            best, best_bit, best_ident, second, second_bit, panel_scores = \
                 _best_two_paralogs(seq, paralogs)
             if not best:
                 continue
@@ -208,7 +212,7 @@ def main() -> None:
                 name, str(len(seq)),
                 best, f"{best_bit:.1f}", f"{best_ident:.1f}",
                 second, f"{second_bit:.1f}", f"{gap:.1f}",
-                str(len(paralogs)),
+                str(len(paralogs)), panel_scores,
             ]
             out.write("\t".join(row) + "\n")
 

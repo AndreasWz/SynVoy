@@ -99,7 +99,7 @@ def panel_name(query_id: str) -> str:
     """q's id as the gene part of a panel id: no '|' (the report splits a panel id at its
     first '|', and a UniProt-style id holds two) and no whitespace (a FASTA header ends at
     the first blank)."""
-    return re.sub(r"[|\s]+", "_", query_id.strip()) or "query"
+    return re.sub(r"[|\s;=]+", "_", query_id.strip()) or "query"
 
 
 def home_goi_record(path: Optional[str]) -> Optional[Tuple[str, str]]:
@@ -473,6 +473,19 @@ def main() -> None:
             goi_genes.add(name)
             added = " + q"
             logger.info(f"GOI entry: q itself ({q_id}), as {p_lid}|{name}; {how}.")
+        # A panel gene that passes the own-gene rule against q or q's own gene is an own copy (fix-phase
+        # item 10): the report counts it as the GOI for a call that does not favour it over the GOI's
+        # own entry (generate_report.build_locus_ownership), as the search's p* does.
+        own_seq = proteome.get(own, "").upper().rstrip("*") if own else ""
+        own_copies = sorted({gid for gid, seq, *_rest in panel.values() if gid not in goi_genes
+                             and (synvoy_specificity.passes_own_gene_rule(q_seq, seq.upper().rstrip("*"))
+                                  or (own_seq and synvoy_specificity.passes_own_gene_rule(own_seq, seq.upper().rstrip("*"))))})
+        if own_copies:
+            logger.info(f"Own copies of the GOI, >= {synvoy_specificity.OWN_GENE_MIN_IDENTITY:.0f} % "
+                        f"identity over >= {synvoy_specificity.OWN_GENE_MIN_COVERAGE * 100:.0f} % of q: "
+                        f"{', '.join(own_copies)}.")
+    else:
+        own_copies = []
     logger.info(f"Panel: {n_locus_entries} locus + {n_family_entries} family{added} = "
                 f"{len(panel)} entries.")
     if len(panel) < 2:
@@ -492,8 +505,8 @@ def main() -> None:
     with open(meta_path, "w") as fh:
         fh.write("panel_id\tlocus_id\tgene\tchrom\tstart\tend\tis_goi_gene\tgoi_found_by\n")
         for panel_id, (gid, _seq, lid, gchrom, gstart, gend) in sorted(panel.items()):
-            is_goi = gid in goi_genes
-            found_by = goi_found_by if is_goi else ""
+            is_goi = gid in goi_genes or gid in own_copies
+            found_by = "own_copy" if gid in own_copies else (goi_found_by if is_goi else "")
             fh.write(f"{panel_id}\t{lid}\t{gid}\t{gchrom}\t{gstart}\t{gend}\t"
                      f"{'1' if is_goi else '0'}\t{found_by}\n")
 

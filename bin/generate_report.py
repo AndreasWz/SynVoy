@@ -14,6 +14,7 @@ from sequence_utils import clopper_pearson  # noqa: E402
 from query_features import completeness_coverage  # noqa: E402
 import synvoy_label  # noqa: E402
 import synvoy_settings  # noqa: E402
+import synvoy_specificity  # noqa: E402
 
 
 KNOWN_SUFFIXES = [
@@ -1220,6 +1221,39 @@ def drop_gene_order_only(goi_dedup, demoted_classes):
     return dropped
 
 
+def _panel_scores(field):
+    """``name=score;name=score`` of reciprocal_best_paralog_check.py as {name: score}. A name may
+    hold ';' or '=' (a GFF id with %3B): the number ends each item."""
+    return {name: float(score) for name, score in
+            re.findall(r"(.+?)=(-?\d+(?:\.\d+)?)(?:;|$)", field or "")}
+
+
+def _is_goi_for_call(label, scores, panel_meta):
+    """A panel entry counts as the GOI for one call: the GOI's own entry, or an own copy (found_by
+    own_copy: near-identical to the GOI, build_home_paralog_panel) that the call does not favour
+    over the GOI's own entry by the bar at which the search's p* tells them apart
+    (synvoy_specificity.SEED_MIN_MARGIN_BITS). Scores are raw Smith-Waterman scores."""
+    meta = panel_meta.get(label, {})
+    if not meta.get("is_goi"):
+        return False
+    if meta.get("goi_found_by") != "own_copy":
+        return True
+    own = [bit for name, bit in scores.items() if panel_meta.get(name, {}).get("is_goi")
+           and panel_meta.get(name, {}).get("goi_found_by") != "own_copy"]
+    if not own or label not in scores:
+        return True
+    return (synvoy_specificity.raw_to_bits(scores[label]) - synvoy_specificity.raw_to_bits(max(own))
+            < synvoy_specificity.SEED_MIN_MARGIN_BITS)
+
+
+def _ownership_scores(row):
+    """Every panel entry's score in an ownership row. A table written before panel_scores names only
+    the two best entries."""
+    return row.get("panel_scores_d") or {
+        label: bit for label, bit in ((row.get("best_paralog"), row.get("best_bit_f")),
+                                      (row.get("second_paralog"), row.get("second_bit_f"))) if label}
+
+
 def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
     """Read every ``<genome><suffix>`` TSV produced by RECIPROCAL_BEST_PARALOG
     (docs/TODO.md §1j Phase B) — also reused for the §1m locus-ownership TSVs,
@@ -1247,6 +1281,7 @@ def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
                             row["gap_f"] = float(row.get("bitscore_gap") or 0)
                             row["start_i"] = int(row.get("start") or 0)
                             row["end_i"] = int(row.get("end") or 0)
+                            row["panel_scores_d"] = _panel_scores(row.get("panel_scores"))
                         except ValueError:
                             continue
                         rows.append(row)
@@ -1395,7 +1430,9 @@ def goi_panel_entry(panel_meta):
     goi = sorted(pid for pid, m in (panel_meta or {}).items() if m.get("is_goi"))
     if not goi:
         return None
-    first = panel_meta[goi[0]]
+    # Own copies (found_by own_copy: home copies near-identical to the query) are listed in
+    # panel_ids; the entry itself is the gene the rule above names.
+    first = panel_meta[next((pid for pid in goi if panel_meta[pid].get("goi_found_by") != "own_copy"), goi[0])]
     return {"gene": first.get("gene", ""), "panel_ids": goi,
             "found_by": first.get("goi_found_by") or "unrecorded"}
 
@@ -1496,7 +1533,7 @@ def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
 
 
 def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_locus,
-                          *, tiebreak_gap=15.0):
+                          *, tiebreak_gap=10.0):
     """Re-attribute each deduped GOI ortholog to the home locus it *truly* belongs
     to (docs/TODO.md §1m), using reciprocal-best alignment against the home-paralog
     panel (the RBH leg) with a flanking-synteny tiebreak when the panel scores are
@@ -1517,12 +1554,20 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         to a non-GOI home paralog (asporin, not decorin); relabel before it's read
         as an ortholog of the GOI.
 
+    A non-GOI gene owns a call only when it beats the GOI's best panel entry by at least
+    ``tiebreak_gap``: below that the two cannot be told apart, and the call stays the GOI's
+    (``ownership_near_tie``). An own copy counts as the GOI unless the call favours it over the
+    GOI's own entry (_is_goi_for_call). A demo had 30 of 30 true orthologs relabelled when another
+    home copy was identical to the GOI, a margin of 0 (fix-phase item 10). Neither case says the
+    GOI's locus failed to recover the call, so neither raises locus_reattributed or
+    goi_owner_search_fumble.
+
     Mutates the records in ``goi_dedup['records']`` in place (adds owning_* keys) and
     returns (flags, summary)."""
     records = goi_dedup.get("records", [])
     if not records or not ownership_rows:
         return [], {"n_reattributed": 0, "n_paralog_misassignment": 0,
-                    "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "evaluated": 0,
+                    "n_owner_search_fumble": 0, "n_tiebreak_applied": 0, "n_near_tie": 0, "evaluated": 0,
                     "goi_entry": goi_panel_entry(panel_meta)}
 
     # Index ownership rows by genome+chrom for coordinate matching.
@@ -1538,7 +1583,7 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         rows_by_gc[(canonical_genome_id(r["genome"]), r["chrom"])].append(r)
 
     flags = []
-    n_reattributed = n_paralog = n_fumble = n_tiebreak = n_eval = 0
+    n_reattributed = n_paralog = n_fumble = n_tiebreak = n_eval = n_near_tie = 0
 
     for rec in records:
         cands = rows_by_gc.get((rec["genome"], rec["chrom"]), [])
@@ -1562,33 +1607,58 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         gap = row["gap_f"]
         owning_locus = _panel_locus(best_label)
         owning_gene = best_label.split("|", 1)[1] if "|" in best_label else best_label
-        owning_is_goi = panel_meta.get(best_label, {}).get("is_goi", False)
+        scores = _ownership_scores(row)
+        owning_is_goi = _is_goi_for_call(best_label, scores, panel_meta)
+        second_is_goi = bool(second_label) and _is_goi_for_call(second_label, scores, panel_meta)
+        goi_entries = [(bit, label) for label, bit in scores.items()
+                       if _is_goi_for_call(label, scores, panel_meta)]
+        owner_label = best_label
 
-        # --- Synteny tiebreak: when the top-2 panel genes are near-tied, defer to
-        # which candidate locus's HIGH flanking neighbourhood is present on this
-        # target chromosome (true local synteny beats a coin-flip alignment gap).
+        # A non-GOI gene on top, closer to the GOI's best entry than the gap: the GOI keeps the call.
+        near_tie = False
+        if not owning_is_goi and goi_entries and row["best_bit_f"] - max(goi_entries)[0] < tiebreak_gap:
+            owner_label = max(goi_entries)[1]
+            owning_locus = _panel_locus(owner_label)
+            owning_gene = owner_label.split("|", 1)[1] if "|" in owner_label else owner_label
+            owning_is_goi = near_tie = True
+            n_near_tie += 1
+
+        # --- Synteny tiebreak: when the top-2 panel genes are near-tied and neither or both are the
+        # GOI, defer to which candidate locus's HIGH flanking neighbourhood is present on this target
+        # chromosome (true local synteny beats a coin-flip alignment gap).
         tiebroken = False
-        if second_label and gap < tiebreak_gap:
+        if not near_tie and second_label and gap < tiebreak_gap and owning_is_goi == second_is_goi:
             second_locus = _panel_locus(second_label)
             if second_locus != owning_locus:
                 f_best = flanking_per_locus.get((rec["genome"], owning_locus, rec["chrom"]), 0)
                 f_second = flanking_per_locus.get((rec["genome"], second_locus, rec["chrom"]), 0)
                 if f_second > f_best:
+                    owner_label = second_label
                     owning_locus = second_locus
                     owning_gene = second_label.split("|", 1)[1] if "|" in second_label else second_label
-                    owning_is_goi = panel_meta.get(second_label, {}).get("is_goi", False)
                     tiebroken = True
                     n_tiebreak += 1
+
+        # An own copy owns the call, by a near tie or not: the call stays at a searched locus, not at
+        # the copy's pseudo-locus home_<gene>, from which no search started.
+        own_copy_owner = owning_is_goi and panel_meta.get(owner_label, {}).get("goi_found_by") == "own_copy"
+        if own_copy_owner and owning_locus.startswith("home_"):
+            own_entries = [(bit, label) for label, bit in scores.items() if panel_meta.get(label, {}).get("is_goi")
+                           and panel_meta.get(label, {}).get("goi_found_by") != "own_copy"]
+            if own_entries:
+                owning_locus = _panel_locus(max(own_entries)[1])
 
         provenance = rec.get("provenance", [])
         # Re-attribution only makes sense when the owning gene IS the GOI (moving a true
         # GOI ortholog to its correct home locus). When the best match is a home PARALOG
         # (owning_is_goi=False — e.g. a homology-family entry like home_gene-BGN), that's a
-        # paralog_misassignment, not a reattribution to a searched locus.
-        reattributed = owning_is_goi and (owning_locus not in provenance or (
+        # paralog_misassignment, not a reattribution to a searched locus. A near tie or an own copy
+        # says nothing about which home locus the call belongs to.
+        cannot_tell = near_tie or own_copy_owner
+        reattributed = owning_is_goi and not cannot_tell and (owning_locus not in provenance or (
             len(provenance) > 1 and provenance[0] != owning_locus
         ))
-        owner_absent = owning_locus not in provenance
+        owner_absent = owning_locus not in provenance and not cannot_tell
 
         rec["owning_locus"] = owning_locus
         rec["owning_gene"] = owning_gene
@@ -1596,6 +1666,8 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         rec["ownership_bit"] = round(row["best_bit_f"], 1)
         rec["ownership_gap"] = round(gap, 1)
         rec["ownership_tiebroken"] = tiebroken
+        if near_tie:
+            rec["ownership_near_tie"] = True
         rec["locus_reattributed"] = reattributed
         if not owning_is_goi:
             rec["inferred_paralog"] = owning_gene
@@ -1665,6 +1737,7 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         "n_paralog_misassignment": n_paralog,
         "n_owner_search_fumble": n_fumble,
         "n_tiebreak_applied": n_tiebreak,
+        "n_near_tie": n_near_tie,
         "goi_entry": goi_panel_entry(panel_meta),
     }
     return flags, summary
@@ -2376,9 +2449,10 @@ def main():
         help="Bitscore gap required to flag a paralog_confusion (docs/TODO.md §1j Phase B)",
     )
     parser.add_argument(
-        "--locus_ownership_tiebreak_gap", type=float, default=15.0,
-        help="Panel bitscore gap below which locus ownership defers to the "
-             "flanking-synteny tiebreak (docs/TODO.md §1m)",
+        "--locus_ownership_tiebreak_gap", type=float, default=10.0,
+        help="Panel score margin a paralog needs over the GOI's best entry to take a call; below "
+             "it the call stays the GOI's, and between two entries that are both the GOI or both "
+             "not, the flanking-synteny tiebreak decides",
     )
     parser.add_argument(
         "--phylo_placement_dir", default=None,

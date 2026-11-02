@@ -280,20 +280,134 @@ class TestBuildLocusOwnership(unittest.TestCase):
         self.assertEqual(summary["n_reattributed"], 0)
 
     def test_synteny_tiebreak_flips_near_tie(self):
-        # Near-tied panel scores between two loci; flanking neighbourhood on the
-        # target chrom favours locus_4 -> ownership flips to locus_4.
+        # Near-tied panel scores between two loci, neither the GOI; the flanking neighbourhood on
+        # the target chrom favours locus_4 -> ownership flips to locus_4.
         rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
         goi_dedup = {"records": [rec]}
         rows = [_ownership_row("frog", "NC_q1", 200, 600,
-                               best_label="locus_1|gene-DCN", best_bit=200.0,
+                               best_label="locus_2|gene-TWO", best_bit=200.0,
                                second_label="locus_4|gene-OMD", second_bit=195.0,  # gap 5 < 10
                                locus="locus_1")]
-        flanking = {("frog", "locus_1", "NC_q1"): 1, ("frog", "locus_4", "NC_q1"): 6}
-        flags, summary = build_locus_ownership(goi_dedup, rows, self._panel_meta(), flanking,
-                                               tiebreak_gap=10.0)
+        flanking = {("frog", "locus_2", "NC_q1"): 1, ("frog", "locus_4", "NC_q1"): 6}
+        meta = dict(self._panel_meta(), **{"locus_2|gene-TWO": {"locus": "locus_2", "gene": "gene-TWO", "is_goi": False}})
+        flags, summary = build_locus_ownership(goi_dedup, rows, meta, flanking, tiebreak_gap=10.0)
         self.assertEqual(rec["owning_locus"], "locus_4")
         self.assertTrue(rec["ownership_tiebroken"])
         self.assertEqual(summary["n_tiebreak_applied"], 1)
+
+    def test_synteny_does_not_take_a_near_tie_from_the_goi(self):
+        # The same near tie with the GOI on top: only a non-GOI gene that beats the GOI by the
+        # gap owns a call, so the flanking of locus_4 changes nothing (fix-phase item 10).
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+        rows = [_ownership_row("frog", "NC_q1", 200, 600,
+                               best_label="locus_1|gene-DCN", best_bit=200.0,
+                               second_label="locus_4|gene-OMD", second_bit=195.0,
+                               locus="locus_1")]
+        flanking = {("frog", "locus_1", "NC_q1"): 1, ("frog", "locus_4", "NC_q1"): 6}
+        flags, summary = build_locus_ownership({"records": [rec]}, rows, self._panel_meta(), flanking, tiebreak_gap=10.0)
+        self.assertEqual((rec["owning_locus"], rec["owning_gene"], rec["goi_class"]), ("locus_1", "gene-DCN", "confident_goi"))
+        self.assertNotIn("ownership_near_tie", rec)       # the GOI is on top: nothing to tie with
+        self.assertFalse(rec["ownership_tiebroken"])
+        self.assertEqual((summary["n_near_tie"], summary["n_tiebreak_applied"]), (0, 0))
+        self.assertEqual(flags, [])
+
+    def test_a_paralog_must_beat_the_goi_by_the_gap(self):
+        def run(paralog_bit):
+            rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+            rows = [_ownership_row("frog", "NC_q1", 200, 600,
+                                   best_label="locus_4|gene-OMD", best_bit=paralog_bit,
+                                   second_label="locus_1|gene-DCN", second_bit=200.0,
+                                   locus="locus_1")]
+            flags, _s = build_locus_ownership({"records": [rec]}, rows, self._panel_meta(), {}, tiebreak_gap=10.0)
+            return rec, flags
+        rec, flags = run(209.9)
+        self.assertEqual((rec["goi_class"], rec["owning_is_goi_gene"], rec["owning_gene"]), ("confident_goi", True, "gene-DCN"))
+        self.assertTrue(rec["ownership_near_tie"])
+        self.assertEqual(flags, [])
+        rec, flags = run(210.0)
+        self.assertEqual((rec["goi_class"], rec["owning_is_goi_gene"], rec["inferred_paralog"]), ("paralog_not_goi", False, "gene-OMD"))
+        self.assertEqual([f["type"] for f in flags], ["paralog_misassignment"])
+
+    def test_the_goi_entry_is_read_from_all_panel_scores(self):
+        # Two paralogs on top and the GOI third: the table's two best do not name it.
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+        row = _ownership_row("frog", "NC_q1", 200, 600, best_label="locus_4|gene-OMD", best_bit=205.0,
+                             second_label="locus_4|gene-ASPN", second_bit=203.0, locus="locus_1")
+        row["panel_scores_d"] = {"locus_4|gene-OMD": 205.0, "locus_4|gene-ASPN": 203.0, "locus_1|gene-DCN": 200.0}
+        build_locus_ownership({"records": [rec]}, [row], self._panel_meta(), {}, tiebreak_gap=10.0)
+        self.assertEqual((rec["goi_class"], rec["owning_gene"]), ("confident_goi", "gene-DCN"))
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+        row["panel_scores_d"]["locus_1|gene-DCN"] = 190.0
+        build_locus_ownership({"records": [rec]}, [row], self._panel_meta(), {}, tiebreak_gap=10.0)
+        self.assertEqual((rec["goi_class"], rec["inferred_paralog"]), ("paralog_not_goi", "gene-OMD"))
+
+    def test_a_table_that_names_no_goi_entry_relabels_as_before(self):
+        # An older table with the GOI third: its score is not known, so the relabel stands.
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+        rows = [_ownership_row("frog", "NC_q1", 200, 600, best_label="locus_4|gene-OMD", best_bit=205.0,
+                               second_label="locus_4|gene-ASPN", second_bit=203.0, locus="locus_1")]
+        build_locus_ownership({"records": [rec]}, rows, self._panel_meta(), {}, tiebreak_gap=10.0)
+        self.assertEqual((rec["goi_class"], rec["inferred_paralog"]), ("paralog_not_goi", "gene-OMD"))
+
+    def _copy_meta(self):
+        return dict(self._panel_meta(), **{"home_gene-C|gene-C": {"locus": "home_gene-C", "gene": "gene-C", "is_goi": True,
+                                                                  "goi_found_by": "own_copy"},
+                                           "locus_1|gene-DCN": {"locus": "locus_1", "gene": "gene-DCN", "is_goi": True,
+                                                                "goi_found_by": "goi_info"}})
+
+    def _copy_case(self, copy_bit, provenance=("locus_1",)):
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=list(provenance))
+        row = _ownership_row("frog", "NC_q1", 200, 600, best_label="home_gene-C|gene-C", best_bit=copy_bit,
+                             second_label="locus_1|gene-DCN", second_bit=300.0, locus="locus_1")
+        row["panel_scores_d"] = {"home_gene-C|gene-C": copy_bit, "locus_1|gene-DCN": 300.0, "locus_4|gene-OMD": 100.0}
+        flags, summary = build_locus_ownership({"records": [rec]}, [row], self._copy_meta(), {}, tiebreak_gap=10.0)
+        return rec, flags, summary
+
+    def test_a_home_copy_the_call_does_not_favour_is_the_goi(self):
+        # A copy on top, by less than the bar of the search's p*: the call stays the GOI's, at a
+        # searched locus, with no flag: no search started from the pseudo-locus home_gene-C.
+        for bit in (300.0, 313.0, 325.0):
+            rec, flags, _s = self._copy_case(bit)
+            self.assertEqual((rec["goi_class"], rec["owning_is_goi_gene"], rec["owning_gene"], rec["owning_locus"]),
+                             ("confident_goi", True, "gene-C", "locus_1"))
+            self.assertFalse(rec["locus_reattributed"])
+            self.assertEqual(flags, [])
+
+    def test_a_home_copy_the_call_favours_is_a_paralog(self):
+        # 26 raw = 10 bits: the call is that copy's, as in the search's specificity.
+        rec, flags, _s = self._copy_case(326.0)
+        self.assertEqual((rec["goi_class"], rec["owning_is_goi_gene"], rec["inferred_paralog"]),
+                         ("paralog_not_goi", False, "gene-C"))
+        self.assertEqual([f["type"] for f in flags], ["paralog_misassignment"])
+
+    def test_a_near_tie_held_by_an_own_copy_stays_at_a_searched_locus(self):
+        # A paralog on top, within the gap of an own copy that is itself above the GOI's own entry: the
+        # call stays the GOI's, and not at the copy's pseudo-locus home_gene-C.
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_1"])
+        row = _ownership_row("frog", "NC_q1", 200, 600, best_label="locus_4|gene-OMD", best_bit=1565.0,
+                             second_label="home_gene-C|gene-C", second_bit=1559.0, locus="locus_1")
+        row["panel_scores_d"] = {"locus_4|gene-OMD": 1565.0, "home_gene-C|gene-C": 1559.0, "locus_1|gene-DCN": 1548.0}
+        flags, summary = build_locus_ownership({"records": [rec]}, [row], self._copy_meta(), {}, tiebreak_gap=10.0)
+        self.assertEqual((rec["goi_class"], rec["owning_is_goi_gene"], rec["owning_gene"], rec["owning_locus"]),
+                         ("confident_goi", True, "gene-C", "locus_1"))
+        self.assertTrue(rec["ownership_near_tie"])
+        self.assertEqual((flags, summary["n_near_tie"]), ([], 1))
+
+    def test_no_rows_gives_the_same_summary_keys(self):
+        _f, summary = build_locus_ownership({"records": []}, [], {}, {})
+        self.assertEqual(summary["n_near_tie"], 0)
+
+    def test_a_near_tie_raises_no_locus_flag(self):
+        # Found only from a paralog's locus, the paralog 5 above the GOI: the call stays the GOI's,
+        # and that says nothing about the GOI's locus having failed.
+        rec = _dedup_record("frog", "NC_q1", 200, 600, provenance=["locus_4"])
+        rows = [_ownership_row("frog", "NC_q1", 200, 600, best_label="locus_4|gene-OMD", best_bit=200.0,
+                               second_label="locus_1|gene-DCN", second_bit=195.0, locus="locus_4")]
+        flanking = {("frog", "locus_1", "NC_q1"): 1, ("frog", "locus_4", "NC_q1"): 6}
+        flags, summary = build_locus_ownership({"records": [rec]}, rows, self._panel_meta(), flanking, tiebreak_gap=10.0)
+        self.assertEqual((rec["goi_class"], rec["owning_locus"], rec["locus_reattributed"]), ("confident_goi", "locus_1", False))
+        self.assertTrue(rec["ownership_near_tie"])
+        self.assertEqual((flags, summary["n_near_tie"], summary["n_tiebreak_applied"], summary["n_reattributed"]), ([], 1, 0, 0))
 
     def test_decisive_gap_ignores_tiebreak(self):
         # Large gap -> RBH wins outright even if flanking points elsewhere.

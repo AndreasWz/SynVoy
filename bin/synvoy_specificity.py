@@ -18,6 +18,17 @@ other protein of the home genome explains it as well. Used by iterative_search_r
                  (>= 95 % identity over >= 90 % of q). That identity rule alone failed where
                  the home annotation of q differs from q (an extra exon, a partial model: the
                  own gene became p*) and took a >= 95 % paralog for q when q is unannotated.
+  q's own copies the home proteins in q's own home locus (below; also this home locus's hull when it
+                 holds q's own gene: the flanking walk skips relatives, so a hull spans a tandem
+                 array that n genes on each side do not) that pass the identity rule against q or
+                 q's own gene. In a tandem array the best other home protein can be such a copy: with
+                 a copy identical to q every significant target copy read a margin of at most 0 bits,
+                 not_specific, and with a copy at 98.8 % one target model read -5 or +5 bits, by which
+                 of the two was q. A copy is left out of p* for a model x unless x favours it over q and q's own gene by
+                 SEED_MIN_MARGIN_BITS: such an x is told apart from q (a 96 % tandem neighbour of a
+                 450-aa protein reads tens of bits),
+                 and the copy stays its competitor. Real paralogs in the neighbourhood, below that
+                 identity, stay competitors (fix-phase item 10).
   margin         bits(q, x) - bits(p*, x).
   real           p* is a real competitor when it aligns to x at E <= 0.01 over the whole
   competitor     proteome, or when it is a home family member of q (q and p* align at
@@ -73,6 +84,12 @@ OWN_GENE_MIN_COVERAGE = 0.9     # ... over this share of q
 _LN2 = math.log(2.0)
 
 
+def passes_own_gene_rule(q_seq: str, p_seq: str) -> bool:
+    """A home protein is q itself: >= 95 % identity over >= 90 % of q."""
+    aln = sw_align_span(q_seq, p_seq)
+    return aln["identity"] >= OWN_GENE_MIN_IDENTITY and aln["query_cov"] >= OWN_GENE_MIN_COVERAGE
+
+
 def raw_to_bits(score: float) -> float:
     """Bit score of a raw BLOSUM62 score at BLAST gaps 11/1."""
     return (SW_LAMBDA_11_1 * score - math.log(SW_K_11_1)) / _LN2
@@ -89,6 +106,7 @@ class HomeProteome:
         self.total_length = sum(len(s) for _r, s in self.records)
         self._own: Dict[Tuple[str, str], Optional[str]] = {}
         self._own_hood: Dict[Tuple[str, int, str], Optional[Set[str]]] = {}
+        self._own_copy: Dict[Tuple[str, str, str], bool] = {}
         self._family: Dict[Tuple[str, str], float] = {}
 
     @classmethod
@@ -141,8 +159,7 @@ class HomeProteome:
                                f"q's home gene {gene_id} is not in the home proteome: q's own "
                                f"gene is the home protein near-identical to q, if any.")
                 for _score, rid in self.scores(q_seq)[:3]:
-                    aln = sw_align_span(q_seq, self._seq(rid))
-                    if aln["identity"] >= OWN_GENE_MIN_IDENTITY and aln["query_cov"] >= OWN_GENE_MIN_COVERAGE:
+                    if passes_own_gene_rule(q_seq, self._seq(rid)):
                         own = rid
                         break
             self._own[key] = own
@@ -151,10 +168,12 @@ class HomeProteome:
     def _seq(self, rid: str) -> str:
         return self._by_id.get(rid, "")
 
-    def best_other(self, x_seq: str, exclude: Iterable[str]) -> Tuple[str, float]:
-        """(p*, raw score of p* against x), or ("", 0.0) when nothing aligns."""
+    def best_other(self, x_seq: str, exclude: Iterable[str],
+                   scored: Optional[List[Tuple[float, str]]] = None) -> Tuple[str, float]:
+        """(p*, raw score of p* against x), or ("", 0.0) when nothing aligns. ``scored``: self.scores(x_seq)
+        when the caller has it."""
         skip = set(exclude)
-        for score, rid in self.scores(x_seq):
+        for score, rid in (self.scores(x_seq) if scored is None else scored):
             if rid not in skip:
                 return (rid, score) if score > 0 else ("", 0.0)
         return "", 0.0
@@ -210,6 +229,29 @@ class HomeProteome:
                 hood = {g for _s, _e, g in order[max(0, i - n): i + n + 1]}
             self._own_hood[key] = hood
         return self._own_hood[key]
+
+    def own_copies(self, q_id: str, q_seq: str, n: int, gene_id: Optional[str] = None,
+                   hull: Optional[Set[str]] = None) -> Set[str]:
+        """q's own gene and the home proteins in q's own home locus that pass the own-gene rule
+        against q or against q's own gene (a query of another species is under 95 % of an array
+        its own gene is a copy of): own_neighbourhood, and ``hull`` (HomeProteome.neighbourhood of
+        this home locus) when it holds q's own gene. Empty when q has no own gene."""
+        own = self.own_gene(q_id, q_seq, gene_id)
+        if not own:
+            return set()
+        hood = set(self.own_neighbourhood(q_id, q_seq, n, gene_id) or ()) if n else set()
+        if hull and own in hull:
+            hood |= set(hull)
+        out = {own}
+        for rid in sorted(hood - out):
+            key = (q_id, gene_id or "", rid)
+            if key not in self._own_copy:
+                seq = self._seq(rid)
+                self._own_copy[key] = bool(seq) and (passes_own_gene_rule(q_seq, seq)
+                                                     or passes_own_gene_rule(self._seq(own), seq))
+            if self._own_copy[key]:
+                out.add(rid)
+        return out
 
 
 _WARNED: Set[str] = set()
@@ -339,12 +381,20 @@ def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_
     ``margin``, ``real_competitor`` (bool), ``in_neighbourhood`` (bool, None without
     coordinates) and ``seed_specific`` (margin >= SEED_MIN_MARGIN_BITS or no real competitor).
     """
+    hull = neighbourhood
     if n_flanking:
         own_hood = proteome.own_neighbourhood(q_id, q_seq, n_flanking, own_gene_id)
         if own_hood is not None:
             neighbourhood = (neighbourhood or set()) | own_hood
     own = proteome.own_gene(q_id, q_seq, own_gene_id)
-    p_id, p_raw = proteome.best_other(x_seq, [own] if own else [])
+    copies = proteome.own_copies(q_id, q_seq, n_flanking, own_gene_id, hull)
+    scored = proteome.scores(x_seq)
+    # Told apart: favoured over q and over q's own gene (q can be another species' protein, or
+    # another isoform: x is then closer to the home gene than to q, whatever the copy).
+    goi_bits = max([bits_qx] + [raw_to_bits(score) for score, rid in scored if rid == own])
+    told_apart = {rid for score, rid in scored if rid in copies and rid != own
+                  and raw_to_bits(score) - goi_bits >= SEED_MIN_MARGIN_BITS}
+    p_id, p_raw = proteome.best_other(x_seq, copies - told_apart, scored)
     p_bits = raw_to_bits(p_raw) if p_id else 0.0
     margin = bits_qx - p_bits
     real = False

@@ -249,7 +249,7 @@ The pipeline proceeds through five phases:
 ### Phase 5 — Adjudication & Reporting
 
 13. **Rescue passes:** where a neighbourhood is clearly the right one but holds no GOI model, a relaxed miniprot pass searches the block (strong-synteny rescue) or the whole flanking neighbourhood including the gaps between blocks (hull rescue).
-14. **Adjudication:** calls are de-duplicated across home loci, checked against the home genome's paralogs (a call that matches a paralog better than the GOI becomes `paralog_not_goi`), demoted when a high identity rests on a short slice of the query, and tested for phylogenetic placement (advisory).
+14. **Adjudication:** calls are de-duplicated across home loci, checked against the home genome's paralogs (a call that matches a paralog better than the GOI, by at least `locus_ownership_tiebreak_gap`, becomes `paralog_not_goi`), demoted when a high identity rests on a short slice of the query, and tested for phylogenetic placement (advisory).
 15. **Generate Report:** `synvoy_report.json` carries the adjudicated calls (`goi_dedup.records`), the headline counts, the self-consistency flags and the candidates that were rejected by a synteny gate.
 
 ---
@@ -518,13 +518,13 @@ paralog — the decorin-vs-biglycan class of error.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--disable_locus_ownership` | `false` | Turn off reciprocal-best-hit assignment of each recovered gene to a home locus. With it on, a call whose best home match is a *family paralog* rather than the GOI is relabelled `paralog_not_goi` and excluded from the headline HIGH/MEDIUM counts. |
+| `--disable_locus_ownership` | `false` | Turn off reciprocal-best-hit assignment of each recovered gene to a home locus. With it on, a call whose best home match is a *family paralog* rather than the GOI, by at least `--locus_ownership_tiebreak_gap`, is relabelled `paralog_not_goi` and excluded from the headline HIGH/MEDIUM counts. A home copy near-identical to the GOI (≥ 95 % identity over ≥ 90 % of it) counts as the GOI unless the call favours it by 10 bits. |
 | `--require_paralog_panel` | `true` | Fail loud if the home-paralog panel cannot be built (e.g. parasail missing) instead of silently skipping ownership. Set `false` to tolerate a missing panel. |
 | `--paralog_panel_min_identity` | `28.0` | Min % identity (query vs a home protein, with a coverage guard) for that protein to enter the paralog panel. The panel is built from the whole home proteome, not just the split-loci spans — otherwise the real paralogs are missing and only spurious domain cross-hits are present. |
 | `--paralog_panel_max_family` | `15` | Cap on homology-derived family entries (closest paralogs by identity). Settings key: the `dispersed_family` module (A2) sets max(15, home loci of the family + 1), at most 50. |
 | `--locus_ownership_pad` | `2000` | bp padding when intersecting genes with a locus span. |
 | `--locus_ownership_max_genes_per_locus` | `5` | Cap panel entries per locus (the annotated genes overlapping the locus most). Settings key: the `local_family` module (A1) sets max(5, home copies + 1), at most 60, so every copy of a home array is in the panel. |
-| `--locus_ownership_tiebreak_gap` | `10.0` | SW-score margin below which the RBH result counts as ambiguous and the synteny tiebreak decides. |
+| `--locus_ownership_tiebreak_gap` | `10.0` | SW-score margin. A paralog must beat the GOI's best panel entry by at least this to take a call (`paralog_not_goi`); between two entries closer than this, neither or both of them the GOI, the synteny tiebreak decides. |
 | `--disable_paralog_check` | `false` | Turn off the reciprocal-best paralog check. Automatically a no-op for single-sequence queries. |
 | `--paralog_confusion_min_gap` | `5` | Min bitscore gap before a call whose best-matching paralog differs from the per-cell modal paralog is flagged `paralog_confusion` in `self_consistency`. |
 

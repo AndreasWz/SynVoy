@@ -106,7 +106,8 @@ def _goi(meta):
 
 def test_the_home_steps_gene_is_the_goi_entry(tmp_path):
     """goi_info.json names q's own gene (found by name); it is the GOI entry although a copy
-    elsewhere is identical to q and the named gene's protein is a partial model."""
+    elsewhere is identical to q and the named gene's protein is a partial model. The copy passes the
+    own-gene rule, so it is an own copy (fix-phase item 10), but it is not the entry."""
     partial = Q[:80]
     meta, labels, err = _run_panel(
         tmp_path,
@@ -114,9 +115,9 @@ def test_the_home_steps_gene_is_the_goi_entry(tmp_path):
         proteins=[("gene-Q", partial), ("gene-N", NEIGHBOUR_OTHER), ("gene-C", OTHER_COPY)],
         beds=[("locus_1.bed", [("c1", 1100, 1900)])],
         goi_info=_goi_info(tmp_path / "goi_info.json", gene_id="gene-Q", found_by="name"))
-    assert _goi(meta) == {"locus_1|gene-Q": "goi_info"}
-    assert meta["home_gene-C|gene-C"]["is_goi_gene"] == "0"
+    assert _goi(meta) == {"locus_1|gene-Q": "goi_info", "home_gene-C|gene-C": "own_copy"}
     assert "GOI entry: gene-Q, q's own home gene, the one the home step took" in err
+    assert "Own copies of the GOI" in err and "gene-C" in err
 
 
 def test_the_identity_rule_without_a_gene_from_the_home_step(tmp_path):
