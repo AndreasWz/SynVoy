@@ -1268,7 +1268,14 @@ this order:
    or identity for a record without `Eeff`, from a run before 2026-10-14 or a rescue
    pass), with the list of home loci that found it. The figures choose their
    representative GOI model by label, then the same strength. A model contained in a wider one replaces it when the
-   wider model is at least twice as long and adds less than 0.15 query coverage.
+   wider model is at least twice as long and adds less than 0.15 query coverage. Otherwise,
+   when the wider model is a gene model or a rescued hit, AMBIGUOUS with `Basis=not_specific`,
+   its verdict stands against a HIGH or MEDIUM fragment (`ModelStatus=fragment`) inside it, on its
+   strand and coding bases and covering no more of the query: a piece of a gene that another home
+   protein explains as well is no ortholog call (`overruled_counted_piece`). A hit chain or a tandem
+   row can lie over several genes, and a hull rescue's verdict can come from its place alone, so
+   neither overrules. When the record later goes to another model, such a piece is clustered on its
+   own again.
 2. **Phylogenetic placement** (`phylo_placement_check.py`). Across all calls, sequence
    divergence (1 − identity to the query) is fitted against the taxonomic distance of
    the species with a Theil-Sen line. A call whose residual, scaled by the median

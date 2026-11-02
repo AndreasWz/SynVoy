@@ -224,6 +224,7 @@ def _process_gffs_unified(gff_files):
 
         try:
             with open(gff_path) as fh:
+                cds_of_model = defaultdict(list)
                 for line in fh:
                     # NB: rstrip("\n") matches the collect_goi_annotations behaviour
                     # which trimmed only the newline (not surrounding whitespace).
@@ -235,6 +236,14 @@ def _process_gffs_unified(gff_files):
                     if not line or line.startswith("#"):
                         continue
                     parts = line.split("\t")
+                    if len(parts) >= 9 and parts[2] == "CDS":
+                        # A model's coding rows, for the dedup's test of a piece (_is_piece_of).
+                        parent = _parse_gff_attrs(parts[8]).get("Parent", "")
+                        try:
+                            cds_of_model[parent].append((int(parts[3]), int(parts[4])))
+                        except ValueError:
+                            pass
+                        continue
                     if len(parts) < 9 or parts[2] not in {"mRNA", "gene"}:
                         continue
                     attrs = _parse_gff_attrs(parts[8])
@@ -288,6 +297,9 @@ def _process_gffs_unified(gff_files):
                             "chrom": parts[0],
                             "start": start,
                             "end": end,
+                            "strand": parts[6],
+                            "evidence": evidence_type,
+                            "cds": cds_of_model[model_id],
                             "confidence": confidence,
                             "goi_class": goi_class,
                             "identity": (attrs.get("Identity", "") or "").strip(),
@@ -1001,6 +1013,38 @@ def _prefers_contained_model(wide, compact, span_ratio, qcov_margin):
     return (wide_cov - compact_cov) < qcov_margin
 
 
+def _not_specific_whole_model(rec):
+    """AMBIGUOUS because another home protein explains the model as well (synvoy_label: Basis)."""
+    return rec.get("confidence") == "AMBIGUOUS" and rec.get("basis") == "not_specific"
+
+
+# What can overrule a piece as the whole gene: a gene model, or a hit the search itself left as one
+# (the luciferase runs hold both). A hit chain or a tandem row can lie over several genes, and a hull
+# rescue's not_specific can come from its place alone (it is judged in the genome place, with no block).
+WHOLE_MODEL_EVIDENCE = {"exon_annotation", "rescued_exon"}
+
+
+def _is_piece_of(piece, wide, min_overlap=0.8):
+    """A real piece of ``wide``: the pipeline itself calls it a fragment (ModelStatus), it lies on the
+    wide model's strand and shares coding bases with it, it is no near-identical twin (the dedup's
+    reciprocal overlap), and the wide model covers at least as much of the query and is a gene model
+    or a rescued hit. A complete gene inside another gene's intron, a hit chain over
+    several copies, or a model and its rescue twin at the same coordinates is no case of this."""
+    if piece.get("model_status") != "fragment":
+        return False
+    if wide.get("evidence") and wide["evidence"] not in WHOLE_MODEL_EVIDENCE:
+        return False
+    if _reciprocal_overlap(piece, wide) > min_overlap:
+        return False
+    strands = {piece.get("strand"), wide.get("strand")}
+    if strands <= {"+", "-"} and len(strands) == 2:
+        return False
+    if piece.get("cds") and wide.get("cds") and not any(
+            min(e1, e2) >= max(s1, s2) for s1, e1 in piece["cds"] for s2, e2 in wide["cds"]):
+        return False
+    return _safe_float(wide.get("query_cov"), 1.0) >= _safe_float(piece.get("query_cov"), 0.0)
+
+
 def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                            fused_span_ratio=2.0, fused_qcov_margin=0.15):
     """Collapse HIGH/MEDIUM/AMBIGUOUS GOI hits that are the same target gene found from
@@ -1042,15 +1086,41 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                     # The compact model must itself be a counted call (MEDIUM or better):
                     # an AMBIGUOUS hit chain inside a HIGH model of the same gene took the
                     # gene out of the headline (bug hunt 2026-10-13, A2; never seen in runs).
-                    if contained and wide is not compact and _prefers_contained_model(
-                            wide, compact, fused_span_ratio, fused_qcov_margin) \
-                            and _confidence_rank(compact["confidence"]) >= _confidence_rank("MEDIUM"):
+                    counted_piece = (contained and wide is not compact
+                                     and _confidence_rank(compact["confidence"]) >= _confidence_rank("MEDIUM"))
+                    if counted_piece and _prefers_contained_model(
+                            wide, compact, fused_span_ratio, fused_qcov_margin):
                         if cl["rep"] is not compact:
                             compact["superseded_wide_model"] = True
                             cl["rep"] = compact
+                    elif counted_piece and _not_specific_whole_model(wide) and _is_piece_of(compact, wide, min_overlap):
+                        # A piece of a gene another home protein explains as well is no ortholog
+                        # call: the whole gene's verdict stands. Without this rule a paralog's
+                        # exon, HIGH or MEDIUM on its own, won on confidence (the luciferase runs).
+                        # Counted models merged under the piece earlier are judged against the
+                        # gene themselves.
+                        if cl["rep"] is compact:
+                            for m in cl["members"]:
+                                if m is not compact and m is not wide and _confidence_rank(m["confidence"]) >= _confidence_rank("MEDIUM"):
+                                    items.append(m)
+                            cl["members"] = [m for m in cl["members"] if m is compact or m is wide
+                                             or _confidence_rank(m["confidence"]) < _confidence_rank("MEDIUM")]
+                        cl.setdefault("overruled", []).append(compact)
+                        cl["rep"] = wide
                     else:
                         if _record_rank(a) < _record_rank(cl["rep"]):
                             cl["rep"] = a
+                    # A piece was overruled by the record's whole gene. When that gene stops being
+                    # the record (the fused-model rule, or the judge's order chose another model),
+                    # the piece goes back into the pool: it must not vanish into a record that says
+                    # nothing about it.
+                    for piece in list(cl.get("overruled", ())):
+                        rep = cl["rep"]
+                        if not (_not_specific_whole_model(rep) and _is_piece_of(piece, rep, min_overlap)
+                                and _containment(piece, rep) >= contain_min):
+                            cl["overruled"] = [p for p in cl["overruled"] if p is not piece]
+                            cl["members"] = [m for m in cl["members"] if m is not piece]
+                            items.append(piece)
                     placed = True
                     break
             if not placed:
@@ -1095,6 +1165,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Set when this compact model replaced a wider model of the same gene that
                 # aligned barely more of the query (see _prefers_contained_model).
                 "superseded_wide_model": bool(rep.get("superseded_wide_model")),
+                # Set when this not-specific whole gene overruled a counted piece of itself.
+                **({"overruled_counted_piece": True} if cl.get("overruled") else {}),
                 # Join key for the F9 phylo-placement verdicts, which are computed from
                 # goi_for_tree.faa and so are keyed by model id, not coordinates.
                 "mrna_id": rep.get("mrna_id", ""),
