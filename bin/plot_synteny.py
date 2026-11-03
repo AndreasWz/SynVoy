@@ -5818,18 +5818,27 @@ def _run_figures(args, show_fragments=False, suffix=""):
     # -- 1. Parse inputs -------------------------------------------------
 
     home_genes = parse_bed(args.home_bed)
+    if not os.path.isfile(args.home_bed):           # a wrong path is an error, not an empty locus
+        print(f"ERROR: home BED not found: {args.home_bed}", file=sys.stderr)
+        sys.exit(2)
     if not home_genes:
-        msg = f"ERROR: empty home BED: {args.home_bed}"
+        # A home locus without flanking genes (on a short contig, say) has nothing to draw. Until
+        # 2026-11-03 this was exit 2, and PLOT_SYNTENY's failure ended the whole run after its
+        # report was written (three cluster runs that started from short contigs). Now the page
+        # says why and the run goes on; the module needs only this page, its other outputs are
+        # optional.
+        msg = (f"WARNING: no flanking genes in the home BED {args.home_bed}: this home locus "
+               "has nothing to draw, so its figures are skipped")
         print(msg, file=sys.stderr)
-        error_html = f"""<!DOCTYPE html>
-<html><head><title>SynVoy Error</title></head>
+        page = f"""<!DOCTYPE html>
+<html><head><title>SynVoy synteny plot skipped</title></head>
 <body style="font-family:sans-serif;padding:40px;background:#f8f9fb;">
-<h1 style="color:#dc2626;">SynVoy Synteny Plot Failed</h1>
+<h1 style="color:#b45309;">No synteny plot for this locus</h1>
 <p style="color:#555;">{_html_escape(msg)}</p>
 </body></html>"""
         with open(args.output, "w") as f:
-            f.write(error_html)
-        sys.exit(2)
+            f.write(page)
+        return
     home_genes.sort(key=lambda g: g["start"])
 
     query_intervals = []
