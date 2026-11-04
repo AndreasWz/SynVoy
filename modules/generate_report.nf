@@ -21,6 +21,8 @@ process GENERATE_REPORT {
     path effective_params      // RESOLVE_EFFECTIVE_PARAMS output, or a sentinel -> run_settings
     path home_db               // the home protein database folder: without a home GFF its
                                // home_annotation.json (batch HG-5b) -> home_annotation
+    path goi_info              // ANNOTATE_GOI's goi_info.json: in easy mode what the home
+                               // chromosome filter removed (home_filter) -> home_genome_filter
 
     output:
     path "synvoy_report.json", emit: report
@@ -110,6 +112,7 @@ process GENERATE_REPORT {
         ${params.phylo_placement_promote.toString().toBoolean() ? '--phylo_placement_promote' : ''} \\
         --effective_params ${effective_params} \\
         --home_db_dir ${home_db} \\
+        --goi_info ${goi_info} \\
         --output synvoy_report.json
     """
 }

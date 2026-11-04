@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+from collections import defaultdict
 import subprocess
 import sys
 import tempfile
@@ -101,7 +102,7 @@ def fetch_uniprot_names(query_id):
 # =============================================================================
 
 def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mmseqs_hits,
-                     gff_search_window, gene_name='', max_evalue=None):
+                     gff_search_window, gene_name='', max_evalue=None, removed_file=None):
     """
     Try to match the GOI to an annotated gene in the GFF.
 
@@ -153,7 +154,8 @@ def match_goi_in_gff(query_id, query_seq, gff_file, genome_file, blast_hits, mms
 
     # --- Strategy 1: Name-based search in GFF ---
     match = _search_gff_by_name(gff_file, candidate_names,
-                                query_seq=query_seq, genome_file=genome_file)
+                                query_seq=query_seq, genome_file=genome_file,
+                                removed_file=removed_file)
     if match:
         print(f"[GFF Match] Found by name: {match['gene_id']}")
         return match
@@ -300,7 +302,23 @@ def _evidence(found_by, transcript_id=None, identity=None, score_fraction=None,
     }
 
 
-def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=None):
+class GoiOnRemovedSequence(Exception):
+    """The GOI's home gene lies on a sequence the easy-mode chromosome filter removed from the
+    home genome (fetch_home_genome.filter_chromosomes_only; fix-phase d3, item 9)."""
+
+    def __init__(self, what, chrom, identity, score_frac):
+        self.chrom = chrom
+        super().__init__(
+            f"The GOI's home gene ({what}, {identity:.1f}% identity, score fraction {score_frac:.2f} "
+            f"against the query) lies on {chrom}, which the easy-mode chromosome filter removed from "
+            f"the home genome (<outdir>/home_genome/home_genome/home_genome.removed.tsv lists what it removed), and no "
+            f"sequence the filter kept holds as good a match. The search would anchor on another "
+            f"gene. Run in pro mode with the whole assembly: --home_genome <the NCBI .fna> "
+            f"--home_gff <its GFF>.")
+
+
+def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=None,
+                        removed_file=None):
     """
     Search GFF for genes matching any of the candidate names.
     
@@ -315,6 +333,11 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
     whose protein agrees with the query is returned, with the transcript that agrees
     best (see ``_is_home_gene``); a gene without CDS can only pass when the translation
     of its span does. Without them the highest-scoring gene is returned unchecked.
+
+    A gene on a sequence that ``genome_file`` does not hold is skipped. With
+    ``removed_file`` (the records the easy-mode chromosome filter removed) such genes are
+    compared too, after every gene on the genome: when none of those agrees and one of
+    these does, GoiOnRemovedSequence is raised (fix-phase d3).
     """
     # Build a set of lowercased names for fast lookup
     name_set = set(n.lower() for n in candidate_names)
@@ -489,7 +512,114 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
                        score_fraction=score_frac,
                        runner_up=runner)
 
+    if removed_file:
+        missing = [g for g in ranked[:HOME_GENE_MAX_NAME_CANDIDATES]
+                   if gene_features[g]['chrom'] not in genome_seqs]
+        removed_seqs = load_genome_subset(removed_file, {gene_features[g]['chrom'] for g in missing})
+        for gene_id in missing:
+            info = gene_features[gene_id]
+            chrom_seq = removed_seqs.get(info['chrom'])
+            if not chrom_seq:
+                continue
+            chosen = _best_transcript(gene_id, info['strand'], chrom_seq,
+                                      transcript_to_gene, cds_by_parent, query_seq)
+            if chosen is None:
+                continue
+            _parts, _protein, (score_frac, identity), _tid = chosen
+            if _is_home_gene(score_frac, identity):
+                raise GoiOnRemovedSequence(f"gene {gene_id}, found by name", info['chrom'],
+                                           identity, score_frac)
+
     print("[GFF Match] No gene found by name agrees with the query sequence.")
+    return None
+
+
+def _best_miniprot_model(query_seq, fasta, what, threads=2):
+    """The miniprot model of the query on ``fasta`` that agrees best with it and is a home gene
+    (``_is_home_gene``): ``(chrom, start, end, identity, score_fraction)`` or None. One run under
+    the GOI model's guard; a failed run stops the step."""
+    if not MINIPROT_AVAILABLE:
+        raise StepFailed(f"miniprot is not installed here; the check of {what} needs it. Install "
+                         "miniprot (bioconda) in the run's environment.")
+    _qfd, query_file = tempfile.mkstemp(prefix="synvoy_mp_check_", suffix=".faa")
+    os.close(_qfd)
+    try:
+        write_fasta([("query", query_seq)], query_file)
+        cmd = ["miniprot", "--gff", "--trans", "-t", str(threads), "--outc=0.3",
+               *_miniprot_genetic_code_args(), fasta, query_file]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GOI_MINIPROT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise guard_failed(f"miniprot (the query against {what}, {os.path.getsize(fasta):,} bytes)",
+                               GOI_MINIPROT_TIMEOUT, "goi_miniprot_timeout") from None
+        if proc.returncode != 0:
+            raise StepFailed(f"miniprot of the query against {what} failed (exit {proc.returncode}): "
+                             f"{proc.stderr.strip()[-300:]}")
+    finally:
+        os.remove(query_file)
+    best, protein = None, ''
+    for line in proc.stdout.splitlines():
+        if line.startswith('##STA'):
+            protein = line.split('\t')[1].strip() if '\t' in line else ''
+            continue
+        cols = line.split('\t')
+        if len(cols) < 9 or cols[2] != 'mRNA' or not protein:
+            continue
+        score_frac, identity = _query_match(query_seq, protein.rstrip('*'))
+        protein = ''
+        if _is_home_gene(score_frac, identity) and (best is None or score_frac > best[4]):
+            best = (cols[0], int(cols[3]), int(cols[4]), identity, score_frac)
+    return best
+
+
+def kept_hit_windows(genome_file, hit_regions, pad, out_fasta):
+    """The kept genome's DNA around the query's home hits (each hit +/- ``pad``, overlapping
+    windows merged), written to ``out_fasta``; False when there is none."""
+    by_chrom = defaultdict(list)
+    for h in hit_regions:
+        by_chrom[h['chrom']].append((max(0, int(h['start']) - pad), int(h['end']) + pad))
+    seqs = load_genome_subset(genome_file, set(by_chrom))
+    records = []
+    for chrom in sorted(by_chrom):
+        seq = seqs.get(chrom)
+        if not seq:
+            continue
+        merged = []
+        for lo, hi in sorted(by_chrom[chrom]):
+            if merged and lo <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        records += [(f"{chrom}:{lo + 1}-{min(hi, len(seq))}", seq[lo:hi]) for lo, hi in merged]
+    if not records:
+        return False
+    write_fasta(records, out_fasta)
+    return True
+
+
+def goi_on_removed_sequence(query_seq, removed_file, placed_score_frac, kept_windows=None, threads=2):
+    """The best miniprot model of the query on the records the easy-mode chromosome filter
+    removed, when it is a home gene (``_is_home_gene``) that agrees with the query better than
+    the kept genome does, by more than HOME_GENE_POSITION_MARGIN of score fraction:
+    ``(chrom, start, end, identity, score_fraction, kept_score_fraction)``; None otherwise
+    (fix-phase d3). The kept genome's agreement is the larger of the placed gene's
+    (``placed_score_frac``) and the best miniprot model on ``kept_windows`` (the kept genome
+    around the query's hits, kept_hit_windows): the same aligner on both sides, so an annotated
+    transcript that lacks an exon of the query, or a hit-built model on the first chromosome of
+    several, does not lose to a copy on a removed record (first review of the session)."""
+    if not query_seq or not removed_file or not os.path.exists(removed_file) \
+            or os.path.getsize(removed_file) == 0:
+        return None
+    best = _best_miniprot_model(query_seq, removed_file, "the home genome's removed sequences", threads)
+    if not best or best[4] <= placed_score_frac + HOME_GENE_POSITION_MARGIN:
+        return None
+    kept = placed_score_frac
+    if kept_windows and os.path.exists(kept_windows) and os.path.getsize(kept_windows) > 0:
+        model = _best_miniprot_model(query_seq, kept_windows, "the kept genome around the query's hits", threads)
+        if model:
+            kept = max(kept, model[4])
+    if best[4] > kept + HOME_GENE_POSITION_MARGIN:
+        return best + (kept,)
     return None
 
 
@@ -2164,6 +2294,11 @@ def main():
     parser.add_argument("--output_info", required=True,
                         help="Output: annotation info JSON")
 
+    parser.add_argument("--removed_sequences", default="NO_REMOVED_SEQS",
+                        help="Records the easy-mode chromosome filter removed from the home genome "
+                             "(home_genome.removed.fna of FETCH_HOME_GENOME), or NO_REMOVED_SEQS: the "
+                             "step stops when the GOI's home gene lies on one of them, and records "
+                             "what was removed in the info JSON (home_filter)")
     parser.add_argument("--genetic_code", type=int, default=1,
                         help="NCBI genetic code of the home genome (default 1, the standard code)")
     parser.add_argument("--miniprot_timeout", type=int, default=GOI_MINIPROT_TIMEOUT,
@@ -2190,6 +2325,13 @@ def main():
     gff_available = (args.gff != "NO_GFF" and
                      os.path.exists(args.gff) and
                      os.path.getsize(args.gff) > 0)
+    removed_given = os.path.basename(args.removed_sequences) != "NO_REMOVED_SEQS"
+    if removed_given and not os.path.exists(args.removed_sequences):
+        print(f"ERROR: --removed_sequences {args.removed_sequences} does not exist.", file=sys.stderr)
+        sys.exit(1)
+    removed_records = ([(rid, len(seq)) for _h, rid, seq in parse_fasta(args.removed_sequences)]
+                       if removed_given and os.path.getsize(args.removed_sequences) > 0 else [])
+    removed_file = args.removed_sequences if removed_records else None
 
     exons = []
     full_protein = query_seq
@@ -2200,17 +2342,22 @@ def main():
     if gff_available:
         print(f"[annotate_goi_exons] GFF available, trying annotation-based approach...")
 
-        match = match_goi_in_gff(
-            query_id,
-            query_seq,
-            args.gff,
-            args.genome,
-            args.blast_hits,
-            args.mmseqs_hits,
-            args.gff_search_window,
-            gene_name=args.gene_name.strip(),
-            max_evalue=args.max_evalue,
-        )
+        try:
+            match = match_goi_in_gff(
+                query_id,
+                query_seq,
+                args.gff,
+                args.genome,
+                args.blast_hits,
+                args.mmseqs_hits,
+                args.gff_search_window,
+                gene_name=args.gene_name.strip(),
+                max_evalue=args.max_evalue,
+                removed_file=removed_file,
+            )
+        except GoiOnRemovedSequence as err:
+            print(f"ERROR: {err}", file=sys.stderr)
+            sys.exit(1)
 
         if match:
             result = extract_exons_from_gff_match(match, args.genome,
@@ -2266,6 +2413,30 @@ def main():
         else:
             print("[annotate_goi_exons] No hits provided, using full protein only")
             method_used = "full_protein_only"
+
+    # ========== The home genome's removed sequences (fix-phase d3) ==========
+    # A gene found by name agrees with the query and is the annotation's own: nothing to check.
+    # Otherwise, when the placement on the kept genome is not near-identical, the query is
+    # aligned to what the chromosome filter removed, and a clearly better home gene there stops.
+    if removed_file and not (method_used == "gff_annotation" and match
+                             and match.get('found_by') == 'name'):
+        placed_frac, placed_ident = _query_match(query_seq, full_protein) if exons else (0.0, 0.0)
+        if placed_ident < HOME_GENE_NEAR_IDENTICAL or placed_frac < 0.9:
+            _wfd, windows = tempfile.mkstemp(prefix="synvoy_kept_windows_", suffix=".fna")
+            os.close(_wfd)
+            try:
+                kept_hit_windows(args.genome, _parse_hit_regions(args.blast_hits, args.mmseqs_hits)
+                                 if (args.blast_hits or args.mmseqs_hits) else [],
+                                 args.gap_search_window, windows)
+                better = goi_on_removed_sequence(query_seq, removed_file, placed_frac, kept_windows=windows)
+            finally:
+                os.remove(windows)
+            if better:
+                chrom, start, end, identity, frac, kept = better
+                print(f"ERROR: {GoiOnRemovedSequence(f'a miniprot model at {chrom}:{start:,}-{end:,}', chrom, identity, frac)} "
+                      f"On the kept genome the best match agrees at score fraction {kept:.2f}.",
+                      file=sys.stderr)
+                sys.exit(1)
 
     # ========== Build output ==========
     fasta_records = []
@@ -2364,6 +2535,11 @@ def main():
                                           'score_fraction', 'overlaps_hit', 'runner_up_gene_id',
                                           'runner_up_score_fraction', 'home_gene_ambiguous')})
 
+    # What the easy-mode chromosome filter removed from the home genome (fix-phase d3); only
+    # when FETCH_HOME_GENOME ran, so a pro-mode goi_info.json is as before.
+    if removed_given:
+        info['home_filter'] = {'removed_sequences': len(removed_records),
+                               'removed_bp': sum(n for _r, n in removed_records)}
     with open(args.output_info, 'w') as f:
         json.dump(info, f, indent=2)
 

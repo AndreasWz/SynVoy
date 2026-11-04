@@ -245,7 +245,8 @@ workflow ADJUDICATE_AND_REPORT {
         collected_panel_meta,
         collected_phylo,
         effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS")),
-        home_db
+        home_db,
+        goi_info
     )
 
     emit:

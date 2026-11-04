@@ -8,6 +8,10 @@ process FETCH_HOME_GENOME {
     output:
     path "home_genome/home_genome.fna", emit: genome
     path "home_genome/home_genome.gff", emit: gff, optional: true
+    // What the chromosome filter removed (empty when nothing): ANNOTATE_GOI stops when the
+    // GOI's home gene lies on one of these records, and records the count (fix-phase d3).
+    path "home_genome/home_genome.removed.fna", emit: removed
+    path "home_genome/home_genome.removed.tsv", emit: removed_list
     
     script:
     def ranking_arg = "--assembly-ranking \"${params.assembly_ranking}\""

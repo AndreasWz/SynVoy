@@ -530,7 +530,21 @@ def find_closest_relative_genome(species_name):
     return None, False, species_name
 
 
-def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> None:
+# An organelle genome is no sign of a chromosome-level assembly: a scaffold-level RefSeq assembly whose only NC_
+# record is its mitochondrion kept only the mitochondrion (fix-phase d3, item 9).
+ORGANELLE_RE = re.compile(r"mitochondri|chloroplast|plastid|apicoplast", re.IGNORECASE)
+REMOVED_FNA_SUFFIX = ".removed.fna"
+REMOVED_TSV_SUFFIX = ".removed.tsv"
+
+
+def removed_paths(fna_path: Path):
+    """The side files of the chromosome filter next to ``fna_path``: the removed records
+    (``home_genome.removed.fna``) and their list (``home_genome.removed.tsv``: seqid, length)."""
+    stem = Path(fna_path).with_suffix("")
+    return Path(str(stem) + REMOVED_FNA_SUFFIX), Path(str(stem) + REMOVED_TSV_SUFFIX)
+
+
+def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> dict:
     """
     If a FASTA contains both chromosome sequences and unlocalized/placed
     scaffolds, rewrite the file keeping only the chromosome-scale sequences.
@@ -548,17 +562,36 @@ def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> N
     ``NW_``/``NZ_`` on the always-drop list preserves the exact vertebrate
     behaviour (their unplaced/alt scaffolds are NW_/NZ_ and stay dropped).
 
-    If NO chromosome sequences are found (pure scaffold assembly), the file is
-    left untouched so we do not discard all sequence data.
+    An organelle genome (mitochondrion, chloroplast, plastid, apicoplast in its
+    header) is never evidence of a chromosome-level assembly; it is kept whenever
+    the filter applies, as before. If NO chromosome sequences are found (pure
+    scaffold assembly), the file is left untouched so we do not discard all
+    sequence data.
+
+    The filter runs before the GOI is placed, so it cannot keep the sequence that
+    holds the GOI's home gene. What it removes is therefore kept beside the genome
+    (removed_paths: the records and their list, both always written, empty when
+    nothing was removed): the step that places the GOI (annotate_goi_exons.py)
+    stops when the GOI's gene lies on a removed sequence, and records what was
+    removed. Returns {kept, removed, removed_bp, organelles}.
     """
     CHROM_PREFIXES = ("NC_", "CM")
     DROP_PREFIXES = ("NW_", "NZ_")  # unplaced scaffolds / alt loci: always scaffolds
+    removed_fna, removed_tsv = removed_paths(fna_path)
+    summary = {"kept": 0, "removed": 0, "removed_bp": 0, "organelles": []}
 
-    # First pass: record sequence order and length so large non-NC_ assembled
+    def _write_list(ids, lengths):
+        with open(removed_tsv, "w") as fh:
+            fh.write("seqid\tlength_bp\n")
+            for seq_id in ids:
+                fh.write(f"{seq_id}\t{lengths.get(seq_id, 0)}\n")
+
+    # First pass: record sequence order, length and header so large non-NC_ assembled
     # molecules (e.g. fly NT_ chromosome arms) can be distinguished from small
     # unlocalized scaffolds that happen to share the NT_ prefix (human).
     order: list = []
     lengths: dict = {}
+    headers: dict = {}
     cur = None
     try:
         with open(fna_path) as fh:
@@ -567,16 +600,20 @@ def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> N
                     cur = line[1:].split()[0] if line.strip() else ""
                     order.append(cur)
                     lengths[cur] = 0
+                    headers[cur] = line[1:].strip()
                 elif cur is not None:
                     lengths[cur] += len(line.strip())
     except Exception as e:
         print(f"  [chr-filter] Warning: could not scan {fna_path}: {e}")
-        return
+        return summary
 
     chrom_ids = []
+    organelle_ids = []
     non_chrom_ids = []
     for seq_id in order:
-        if any(seq_id.startswith(p) for p in CHROM_PREFIXES):
+        if ORGANELLE_RE.search(headers.get(seq_id, "")):
+            organelle_ids.append(seq_id)
+        elif any(seq_id.startswith(p) for p in CHROM_PREFIXES):
             chrom_ids.append(seq_id)
         elif any(seq_id.startswith(p) for p in DROP_PREFIXES):
             non_chrom_ids.append(seq_id)
@@ -584,43 +621,55 @@ def filter_chromosomes_only(fna_path: Path, min_chrom_len: int = 1_000_000) -> N
             chrom_ids.append(seq_id)  # large assembled molecule (e.g. fly NT_ arm)
         else:
             non_chrom_ids.append(seq_id)
+    summary["organelles"] = organelle_ids
+    summary["kept"] = len(order)
+    removed_fna.write_text("")
+    _write_list([], lengths)
 
     if not chrom_ids:
         print(
             f"  [chr-filter] No chromosome-scale sequences found — retaining all "
-            f"{len(non_chrom_ids)} sequences as-is (scaffold assembly)."
+            f"{len(order)} sequences as-is (scaffold assembly"
+            + (f"; {len(organelle_ids)} organelle sequence(s) are no chromosome evidence" if organelle_ids else "")
+            + ")."
         )
-        return
+        return summary
 
     if not non_chrom_ids:
         print(
             f"  [chr-filter] {len(chrom_ids)} chromosome sequence(s) — no scaffolds to remove."
         )
-        return
+        return summary
 
-    keep_set = set(chrom_ids)
+    drop_set = set(non_chrom_ids)
     tmp_path = Path(str(fna_path) + ".chr_only.tmp")
     kept = 0
     skipping = False
     try:
-        with open(fna_path) as src, open(tmp_path, "w") as dst:
+        with open(fna_path) as src, open(tmp_path, "w") as dst, open(removed_fna, "w") as side:
             for line in src:
                 if line.startswith(">"):
                     seq_id = line[1:].split()[0] if line.strip() else ""
-                    skipping = seq_id not in keep_set
+                    skipping = seq_id in drop_set
                     if not skipping:
                         kept += 1
-                if not skipping:
-                    dst.write(line)
+                (side if skipping else dst).write(line)
         tmp_path.replace(fna_path)
+        _write_list(non_chrom_ids, lengths)
+        summary.update(kept=kept, removed=len(non_chrom_ids),
+                       removed_bp=sum(lengths.get(i, 0) for i in non_chrom_ids))
         print(
             f"  [chr-filter] Kept {kept} chromosome sequence(s), "
-            f"removed {len(non_chrom_ids)} scaffold/unlocalized sequence(s)."
+            f"removed {len(non_chrom_ids)} scaffold/unlocalized sequence(s) "
+            f"({summary['removed_bp']:,} bp; listed in {removed_tsv.name}, kept in {removed_fna.name})."
         )
     except Exception as e:
         print(f"  [chr-filter] Warning: filter failed for {fna_path}: {e}")
         if tmp_path.exists():
             tmp_path.unlink()
+        removed_fna.write_text("")
+        _write_list([], lengths)
+    return summary
 
 
 def check_disk_space(path: Path, required_gb: float = 5.0) -> None:
@@ -918,6 +967,14 @@ def main():
         print(f"  GFF:       {gff_path}")
     print(f"{'='*60}")
     
+    # The chromosome filter's side files, empty when it removed nothing (FETCH_HOME_GENOME
+    # declares them as outputs; annotate_goi_exons.py reads the removed records).
+    removed_fna, removed_tsv = removed_paths(genome_path)
+    if not removed_fna.exists():
+        removed_fna.write_text("")
+    if not removed_tsv.exists():
+        removed_tsv.write_text("seqid\tlength_bp\n")
+
     # Write paths to files for Nextflow to pick up
     (Path(args.outdir) / "genome_path.txt").write_text(str(genome_path))
     if gff_path:

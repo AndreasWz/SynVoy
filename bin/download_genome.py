@@ -262,7 +262,8 @@ def download_genome_robust(
 
     Strategy:
       1. Resolve FTP URL via E-utilities.
-      2. If resolved: wget -c .fna.gz → decompress → filter chromosomes.
+      2. If resolved: wget -c .fna.gz → decompress (every record is kept: the
+         chromosome filter of fetch_home_genome.py runs on the home genome only).
                       wget -c .gff.gz → decompress.
       3. If FTP not available: fall back to datasets download (streaming).
 

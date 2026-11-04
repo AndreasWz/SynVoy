@@ -11,6 +11,7 @@ process ANNOTATE_GOI {
     path mmseqs_hits
     val query_id
     val gene_name   // --home_goi_gene: the gene's name in the home annotation, or ''
+    path removed_seqs  // records the easy-mode chromosome filter removed, or the NO_REMOVED_SEQS sentinel
     
     output:
     path "goi_exons.faa", emit: exons
@@ -34,6 +35,7 @@ process ANNOTATE_GOI {
         ${qid_arg} \\
         ${name_arg} \\
         ${gc_arg} \\
+        --removed_sequences ${removed_seqs} \\
         --max_evalue ${params.search_evalue} \\
         --gff_search_window ${params.gff_search_window} \\
         --gap_search_window ${params.gap_search_window} \\

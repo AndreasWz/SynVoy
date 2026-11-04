@@ -993,6 +993,7 @@ workflow {
         }
         // Use GFF if available, otherwise mark as missing
         home_gff_ch = FETCH_HOME_GENOME.out.gff.ifEmpty(no_gff_file)
+        home_removed_ch = FETCH_HOME_GENOME.out.removed
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
@@ -1019,6 +1020,7 @@ workflow {
 
         // 2. Home Genome Setup
         home_genome_ch = channel.fromPath(params.home_genome)
+        home_removed_ch = channel.value(file("${projectDir}/assets/sentinels/NO_REMOVED_SEQS"))
         
         if (params.home_gff) {
             home_gff_ch = channel.value(file(params.home_gff, checkIfExists: true))
@@ -1093,7 +1095,8 @@ workflow {
         LOCATE_GENE.out.blast_hits,
         LOCATE_GENE.out.mmseqs_hits,
         effective_query_id,
-        (params.home_goi_gene ?: '').toString().trim()
+        (params.home_goi_gene ?: '').toString().trim(),
+        home_removed_ch
     )
     
     ANNOTATE_GOI.out.info.view { info ->

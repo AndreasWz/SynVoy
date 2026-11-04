@@ -2391,6 +2391,20 @@ def copies_in_slot_by_genome(records, home_copies):
     return out
 
 
+def load_goi_info_block(path, key):
+    """The block ``key`` of ANNOTATE_GOI's goi_info.json, or None (no file, no such block, or a
+    file written before 2026-11-02)."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    block = info.get(key) if isinstance(info, dict) else None
+    return dict(block) if isinstance(block, dict) else None
+
+
 def load_home_annotation(folder):
     """Where the home annotation of a run without a home GFF came from (borrow_annotations.py,
     batch HG-5b: home_annotation.json in the home protein database folder), with a warning:
@@ -2512,6 +2526,11 @@ def main():
              "home annotation and proteome came from and that the proteome is partial.",
     )
     parser.add_argument(
+        "--goi_info", default=None,
+        help="goi_info.json of ANNOTATE_GOI: what it records about the home genome and the GOI's "
+             "home gene goes into the report (docs/OUTPUT.md).",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -2542,6 +2561,9 @@ def main():
     if home_annotation:
         report["home_annotation"] = home_annotation
         report.setdefault("warnings", []).append(home_annotation["warning"])
+    home_filter = load_goi_info_block(args.goi_info, "home_filter")
+    if home_filter is not None:
+        report["home_genome_filter"] = home_filter
     slot_units = copies_in_slot_by_genome(report.get("goi_dedup", {}).get("records", []),
                                           (report["run_settings"] or {}).get("home_copies"))
     if slot_units:
