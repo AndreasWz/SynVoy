@@ -7251,7 +7251,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
 GENOME_WIDE_FAMILY_PREFILTER_EVALUE = 0.1   # family count: test proteins whose SW gives KA E <= this
 GENOME_WIDE_COLUMNS = ['genome', 'parent', 'chrom', 'start', 'end', 'hits', 'best_hit_identity',
                        'evalue_genome', 'bits', 'best_other', 'margin', 'real_competitor',
-                       'specific', 'rank', 'cap', 'decision']
+                       'specific', 'rank', 'cap', 'decision', 'own_copy_set_aside', 'own_copy_bits']
 _FAMILY_SIZE_CACHE: Dict[Tuple[str, str, str], int] = {}
 
 
@@ -7454,7 +7454,9 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
         p['specific'] = synvoy_label.is_specific(spec['margin'], spec['real_competitor'], 'genome',
                                                  False, spec.get('in_neighbourhood'))
         p.update(bits=f"{bits:.1f}", best_other=spec['best_other'], margin=f"{float(spec['margin']):.1f}",
-                 real_competitor=int(bool(spec['real_competitor'])), specific=int(bool(p['specific'])))
+                 real_competitor=int(bool(spec['real_competitor'])), specific=int(bool(p['specific'])),
+                 own_copy_set_aside=spec.get('own_copy_set_aside') or '',
+                 own_copy_bits=(f"{float(spec['own_copy_bits']):+.1f}" if spec.get('own_copy_set_aside') else ''))
     caps = {}
 
     def cap_of(parent):

@@ -28,7 +28,10 @@ other protein of the home genome explains it as well. Used by iterative_search_r
                  SEED_MIN_MARGIN_BITS: such an x is told apart from q (a 96 % tandem neighbour of a
                  450-aa protein reads tens of bits),
                  and the copy stays its competitor. Real paralogs in the neighbourhood, below that
-                 identity, stay competitors (fix-phase item 10).
+                 identity, stay competitors (fix-phase item 10). When the best home protein for x
+                 other than q's own gene is a copy left out, the result names it and the bits by
+                 which x favours it (own_copy_set_aside, own_copy_bits; GFF OwnCopySetAside,
+                 OwnCopyBits): a trace, no label reads it (fix-phase d2).
   margin         bits(q, x) - bits(p*, x).
   real           p* is a real competitor when it aligns to x at E <= 0.01 over the whole
   competitor     proteome, or when it is a home family member of q (q and p* align at
@@ -379,7 +382,10 @@ def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_
     rule. Returns
     ``best_other`` (p*, "" when no other home protein aligns), ``best_other_bits``,
     ``margin``, ``real_competitor`` (bool), ``in_neighbourhood`` (bool, None without
-    coordinates) and ``seed_specific`` (margin >= SEED_MIN_MARGIN_BITS or no real competitor).
+    coordinates), ``seed_specific`` (margin >= SEED_MIN_MARGIN_BITS or no real competitor),
+    ``own_copy_set_aside`` (an own copy of q that would have been p* and was left out, "" when
+    none) and ``own_copy_bits`` (by how many bits x favours that copy over q and q's own gene,
+    signed; None when there is no such copy).
     """
     hull = neighbourhood
     if n_flanking:
@@ -396,6 +402,12 @@ def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_
                   and raw_to_bits(score) - goi_bits >= SEED_MIN_MARGIN_BITS}
     p_id, p_raw = proteome.best_other(x_seq, copies - told_apart, scored)
     p_bits = raw_to_bits(p_raw) if p_id else 0.0
+    # The trace of the set-aside (fix-phase d2): when the best home protein against x other than
+    # q's own gene is an own copy left out of p*, and it scores above the p* chosen (so leaving it
+    # out changed p*; a tie with a paralog changed nothing), that copy and bits(copy, x) - goi_bits.
+    top = next(((score, rid) for score, rid in scored if rid != own), None)
+    set_aside = (top[1] if top and top[0] > 0 and top[1] in copies - told_apart
+                 and (not p_id or top[0] > p_raw) else "")
     margin = bits_qx - p_bits
     real = False
     if p_id:
@@ -408,6 +420,8 @@ def specificity(proteome: HomeProteome, q_id: str, q_seq: str, x_seq: str, bits_
         "real_competitor": real,
         "in_neighbourhood": (None if neighbourhood is None or not p_id else p_id in neighbourhood),
         "seed_specific": (not real) or margin >= SEED_MIN_MARGIN_BITS,
+        "own_copy_set_aside": set_aside,
+        "own_copy_bits": raw_to_bits(top[0]) - goi_bits if set_aside else None,
     }
 
 
@@ -418,4 +432,6 @@ def gff_attrs(spec: Dict[str, object]) -> str:
            f"RealCompetitor={1 if spec['real_competitor'] else 0}")
     if near is not None:
         out += f";BestOtherInNeighbourhood={1 if near else 0}"
+    if spec.get("own_copy_set_aside"):
+        out += f";OwnCopySetAside={spec['own_copy_set_aside']};OwnCopyBits={float(spec['own_copy_bits']):+.1f}"
     return out

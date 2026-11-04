@@ -307,6 +307,9 @@ def _process_gffs_unified(gff_files):
                             "query_cov": (attrs.get("QueryCoverage", "") or "").strip(),
                             "core_cov": (attrs.get("CoreCoverage", "") or "").strip(),
                             "bits": (attrs.get("Bits", "") or "").strip(),
+                            # An own copy of q left out of p* (synvoy_specificity, fix-phase d2).
+                            "own_copy_set_aside": (attrs.get("OwnCopySetAside", "") or "").strip(),
+                            "own_copy_bits": (attrs.get("OwnCopyBits", "") or "").strip(),
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
                             "mrna_id": model_id,
@@ -815,6 +818,9 @@ def collect_genome_wide_places(paths):
                         "real_competitor": row.get("real_competitor", ""),
                         "rank": row.get("rank", ""), "cap": row.get("cap", ""),
                         "decision": row.get("decision", ""),
+                        **({"own_copy_set_aside": row["own_copy_set_aside"],
+                            "own_copy_bits": row.get("own_copy_bits", "")}
+                           if row.get("own_copy_set_aside") else {}),
                     })
         except (OSError, csv.Error):
             continue
@@ -1168,6 +1174,11 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "query_cov": rep.get("query_cov", ""),
                 # A model's core coverage (core_completeness), for the same demotion.
                 **({"core_cov": rep["core_cov"]} if rep.get("core_cov") else {}),
+                # The own copy of q that the specificity left out of p*, and by how many bits
+                # the model favours it over q (fix-phase d2); absent when there is none.
+                **({"own_copy_set_aside": rep["own_copy_set_aside"],
+                    "own_copy_bits": rep.get("own_copy_bits", "")}
+                   if rep.get("own_copy_set_aside") else {}),
                 # Set when this compact model replaced a wider model of the same gene that
                 # aligned barely more of the query (see _prefers_contained_model).
                 "superseded_wide_model": bool(rep.get("superseded_wide_model")),
@@ -2241,6 +2252,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "needs_curation_by_basis": needs_curation_by_basis,
             "ambiguous_other_home_gene_goi": ambiguous_other_home_gene,
             "ambiguous_goi": dedup_ambiguous,
+            # Calls (AMBIGUOUS or better) whose specificity left an own copy of q out of p*
+            # (record field own_copy_set_aside; fix-phase d2).
+            "own_copy_set_aside_goi": sum(1 for r in goi_dedup.get("records", [])
+                                          if r.get("own_copy_set_aside")),
             "gene_order_only_dropped": goi_dedup.get("gene_order_only_dropped", 0),
             "phylo_discordant_calls": phylo_summary["discordant"],
             "phylo_would_promote": phylo_summary["would_promote"],
