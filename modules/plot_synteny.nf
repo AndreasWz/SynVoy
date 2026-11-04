@@ -70,8 +70,10 @@ process PLOT_SYNTENY {
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
     mkdir -p "\$inputs_dir"
-    cp $home_bed "\$inputs_dir/" || true
-    cp $query_bed "\$inputs_dir/" || true
+    # The plot inputs are copied beside the figures for a re-draw (scripts/replot.sh). A copy that
+    # fails stops the task (fix-phase d5): until 2026-11-02 each ended in '|| true'.
+    cp $home_bed "\$inputs_dir/"
+    cp $query_bed "\$inputs_dir/"
     # Default to original GFF if none provided or subsetting fails
     FINAL_HOME_GFF="$home_gff"
     
@@ -89,20 +91,20 @@ process PLOT_SYNTENY {
         SUBSET_GFF="\$inputs_dir/\$(basename $home_gff)"
         awk -v chr="\$REGION_CHROM" -v start="\$PADDED_START" -v end="\$PADDED_END" \\
             'BEGIN{OFS="\\t"} /^#/{print; next} \$1==chr && \$4<=end && \$5>=start{print}' \\
-            $home_gff > "\$SUBSET_GFF" || \\
-            cp $home_gff "\$SUBSET_GFF" || true
+            $home_gff > "\$SUBSET_GFF"
         
         # Point plot_synteny to the much smaller subset GFF
         FINAL_HOME_GFF="\$SUBSET_GFF"
     fi
     target_gffs_in=""
     if [ -n "${gffs_str}" ]; then
-        ${projectDir}/bin/apply_report_drops.py --report $report --out_dir "\$inputs_dir" ${gffs_str} \\
-            || cp ${gffs_str} "\$inputs_dir/" || true
+        # The figures leave out what the report drops; a failure stops the task (fix-phase d5): the
+        # old fallback copied the GFFs whole, so the figures showed calls the report had dropped.
+        ${projectDir}/bin/apply_report_drops.py --report $report --out_dir "\$inputs_dir" ${gffs_str}
         for f in ${gffs_str}; do target_gffs_in="\$target_gffs_in \$inputs_dir/\$(basename "\$f")"; done
     fi
     if [ -n "${cands_str}" ]; then
-        cp ${cands_str} "\$inputs_dir/" || true
+        cp ${cands_str} "\$inputs_dir/"
     fi
     block_tables_in=""
     if [ -n "${tables_str}" ]; then
@@ -110,16 +112,16 @@ process PLOT_SYNTENY {
         for f in ${tables_str}; do block_tables_in="\$block_tables_in \$inputs_dir/\$(basename "\$f")"; done
     fi
     if [ -n "${homo_str}" ]; then
-        cp ${homo_str} "\$inputs_dir/" || true
+        cp ${homo_str} "\$inputs_dir/"
     fi
     if [ "$tree" != "NO_TREE" ]; then
-        cp $tree "\$inputs_dir/" || true
+        cp $tree "\$inputs_dir/"
     fi
     if [ "$species_map" != "NO_SPECIES_MAP" ]; then
-        cp $species_map "\$inputs_dir/" || true
+        cp $species_map "\$inputs_dir/"
     fi
     if [ "$genome_qc" != "NO_GENOME_QC" ]; then
-        cp $genome_qc "\$inputs_dir/genome_qc_summary.json" || true
+        cp $genome_qc "\$inputs_dir/genome_qc_summary.json"
     fi
     if [ "$effective_params" != "NO_EFFECTIVE_PARAMS" ]; then
         cp $effective_params "\$inputs_dir/effective_params.json"
@@ -149,6 +151,10 @@ process PLOT_SYNTENY {
 
     # The names table the figures were drawn with, kept beside the plot inputs: a
     # re-draw (scripts/replot.sh) then uses the same labels without asking NCBI again.
-    cp ${home_bed.baseName}_gene_names.tsv "\$inputs_dir/gene_names.tsv" || true
+    # Missing only when plot_synteny.py could not write it (it says so on stderr); a re-draw then
+    # looks the names up again.
+    if [ -e ${home_bed.baseName}_gene_names.tsv ]; then
+        cp ${home_bed.baseName}_gene_names.tsv "\$inputs_dir/gene_names.tsv"
+    fi
     """
 }

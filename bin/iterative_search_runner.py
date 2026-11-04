@@ -3978,13 +3978,16 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                                                 hit['start'], hit['end'], hit['strand']), hit['evalue'])
                     tblastn_sink.append(hit)
         except FileNotFoundError:
-            logger.warning(f"[{genome_name}] tblastn/makeblastdb not found on PATH. Install BLAST+ to enable tblastn search.")
+            # A window without its tblastn hits gets other models and E-values (fix-phase d5):
+            # until 2026-11-02 the search went on with one warning per window.
+            raise StepFailed(f"[{genome_name}] tblastn or makeblastdb is not on PATH; every window "
+                             "needs its tblastn search. Install BLAST+ in the run's environment.") from None
         except subprocess.CalledProcessError as blast_err:
             stderr_snippet = (blast_err.stderr or '')[:300].strip()
-            logger.warning(
-                f"[{genome_name}] tblastn failed (exit {blast_err.returncode}), continuing with MMseqs/SW only."
-                + (f" stderr: {stderr_snippet}" if stderr_snippet else "")
-            )
+            raise StepFailed(
+                f"[{genome_name}] tblastn of the GOI queries against a window failed (exit "
+                f"{blast_err.returncode}); the window would lose its tblastn hits."
+                + (f" stderr: {stderr_snippet}" if stderr_snippet else "")) from blast_err
         
         # ========== 3. Smith-Waterman Search ==========
         # Use Smith-Waterman for very divergent sequences (more sensitive than MMseqs2).
@@ -4227,14 +4230,22 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             print(f"[{genome_name}] Combined augmented search: {len(all_hits)} unique hits (spatially filtered).", flush=True)
         
         return all_hits
-        
+
     except Exception as e:
+        # The window's GOI hits would be lost (fix-phase d5): until 2026-11-02 the window was
+        # kept with no hits at all and one warning, so its models were missing in silence.
         import traceback
-        logger.warning(
-            f"[{genome_name}] Augmented search failed: {e}\n"
-            f"  Traceback: {traceback.format_exc().strip().splitlines()[-3:]}"
-        )
-        return []
+        raise StepFailed(
+            f"[{genome_name}] the GOI search of a window failed ({type(e).__name__}: {e}; "
+            f"{' | '.join(traceback.format_exc().strip().splitlines()[-3:])})") from e
+    finally:
+        # Every temporary file of this window (they share the prefix), also when it failed:
+        # until 2026-11-02 a failed window's files stayed in the work folder.
+        for leftover in glob.glob(glob.escape(f"{args.output_dir}/tmp_{unique_id}_{genome_name}_") + "*"):
+            if os.path.isdir(leftover):
+                shutil.rmtree(leftover, ignore_errors=True)
+            elif os.path.exists(leftover):
+                os.remove(leftover)
 
 def batch_rbh_check(
     candidates,
@@ -5771,17 +5782,17 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 })
 
     except Exception as e:
+        # The block's models would be lost (fix-phase d5): until 2026-11-02 one warning was all,
+        # and the genome's result lacked the block's calls.
         import traceback
-        logger.warning(
-            f"[{genome_name}] Block {block_idx} processing failed "
-            f"({chrom}:{block.get('start','?')}-{block.get('end','?')}): {e}\n"
-            f"  {traceback.format_exc().strip().splitlines()[-1]}"
-        )
-
-    if os.path.exists(temp_fa):
-        os.remove(temp_fa)
-    if os.path.exists(query_mini_fa):
-        os.remove(query_mini_fa)
+        raise StepFailed(
+            f"[{genome_name}] processing block {block_idx} ({chrom}:{block.get('start','?')}-"
+            f"{block.get('end','?')}) failed: {type(e).__name__}: {e} "
+            f"({traceback.format_exc().strip().splitlines()[-1]})") from e
+    finally:
+        for leftover in (temp_fa, query_mini_fa):
+            if os.path.exists(leftover):
+                os.remove(leftover)
 
     # ── PLM re-ranking: batch-embed GOI model proteins, compute embedding
     #    similarity, re-run classification where PLM boost applies, and

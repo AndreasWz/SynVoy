@@ -28,7 +28,7 @@ from typing import Dict, List, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
-from sequence_utils import load_genome_subset, parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
+from sequence_utils import genome_window, parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
 from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
 from sequence_utils import exit_step_failed  # noqa: E402
 from query_features import completeness_coverage, core_coverage  # noqa: E402
@@ -169,15 +169,9 @@ def compute_hull(intervals: List[Tuple[int, int]], cluster_max_gap: int,
 
 def _extract_window(genome_path: str, chrom: str, start: int, end: int,
                     samtools_bin: str = "samtools") -> str:
-    """genome[chrom:start..end] (1-based inclusive). samtools faidx if available,
-    else a streaming FASTA fallback (no external dependency, works in tests)."""
-    import subprocess
-    try:
-        res = subprocess.run([samtools_bin, "faidx", genome_path, f"{chrom}:{start}-{end}"],
-                             check=True, capture_output=True, text=True)
-        return "".join(l for l in res.stdout.splitlines() if not l.startswith(">"))
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return load_genome_subset(genome_path, [chrom]).get(chrom, "")[max(0, start - 1):end]
+    """genome[chrom:start..end] (1-based inclusive): sequence_utils.genome_window, the reader
+    both rescue passes share (samtools faidx, else read from the file)."""
+    return genome_window(genome_path, chrom, start, end, samtools_bin)
 
 
 def _build_hull_gff_rows(mrna, cds_rows, chrom, window_start, query_id, parent_id,

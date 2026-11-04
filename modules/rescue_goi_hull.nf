@@ -12,13 +12,14 @@
 // report machinery picks it up via canonical_genome_id() without changes.
 process RESCUE_GOI_HULL {
     tag "${locus_id}/${genome_name}"
-    // Never block the pipeline on a single failed rescue, but retry a task the scheduler
-    // killed for memory or time: 'ignore' alone overrode the config's retry for those. Exit 3
+    // A failed rescue does not block the pipeline: bin/run_step.py records the failure in the
+    // step's output and the report names it (fix-phase d5; until 2026-11-02 the task was ignored
+    // and only the console counted it). A task killed for memory or time is retried. Exit 3
     // (sequence_utils.STEP_FAILED_EXIT: a miniprot run that did not finish within its guard)
     // ends the run, and so does a kill after its retries (fix-phase item 18): until 2026-10-28
     // a slow window was skipped and a third kill dropped the genome's rescue, so the machine's
-    // speed decided what the rescue contained.
-    errorStrategy { task.exitStatus == 3 ? 'terminate' : (task.exitStatus in [137, 140, 143] ? (task.attempt <= 2 ? 'retry' : 'terminate') : 'ignore') }
+    // speed decided what the rescue contained. Any other non-zero exit is the wrapper's own.
+    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'terminate' }
     maxRetries 2
     // Publish the rescued models. Until 2026-10-05 nothing did: a hull-rescued ortholog
     // appeared in synvoy_report.json as a span only, with its exon coordinates and
@@ -64,13 +65,14 @@ process RESCUE_GOI_HULL {
         -o -name "${genome_name}.fna" -o -name "${genome_name}.fasta" -o -name "${genome_name}.fa.gz" \\
         -o -name "${genome_name}.fna.gz" -o -name "${genome_name}.fasta.gz" \\) | sort | head -n 1)
     if [[ -z "\$target_genome" ]]; then
-        echo "##gff-version 3" > ${genome_name}.hull_rescue.gff
-        echo "# RESCUE_GOI_HULL: target genome ${genome_name} not found in ${genomes_dir}" \\
-            >> ${genome_name}.hull_rescue.gff
+        printf '##gff-version 3\n# SYNVOY_STEP_FAILED\tstep=RESCUE_GOI_HULL\tlocus=%s\tgenome=%s\texit=0\treason=%s\n' \\
+            "${locus_id}" "${genome_name}" "target genome not found in ${genomes_dir}" > ${genome_name}.hull_rescue.gff
         : > ${genome_name}.hull_rescue.faa
         exit 0
     fi
 
+    run_step.py --step RESCUE_GOI_HULL --locus "${locus_id}" --genome "${genome_name}" \\
+        --record ${genome_name}.hull_rescue.gff --header '##gff-version 3' --empty ${genome_name}.hull_rescue.faa -- \\
     rescue_goi_hull.py \\
         --region_gff ${region_gff} \\
         --target_genome "\$target_genome" \\

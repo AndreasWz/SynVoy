@@ -41,10 +41,9 @@ process LOCATE_GENE {
         MM_GC=""
     fi
 
-    # MMSEQS
-    # Keep an empty placeholder so downstream steps can proceed on BLAST-only
-    # fallback if MMseqs is killed on very large/fragmented genomes.
-    touch hits_mmseqs.m8
+    # MMSEQS. A failed search stops the task (fix-phase d5): until 2026-11-02 it went on with the
+    # tblastn hits alone and one line in the log, so the home loci and the hit profile (and through
+    # it the settings) could differ from a run where MMseqs2 had enough memory. No hits is exit 0.
     mmseqs easy-search $gene $home_genome hits_mmseqs.m8 tmp \\
         --search-type \$SEARCH_TYPE \\
         --threads ${task.cpus} \\
@@ -52,7 +51,11 @@ process LOCATE_GENE {
         -v ${params.mmseqs_verbosity} \\
         -e ${params.search_evalue} \\
         --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits" \\
-        -s ${params.mmseqs_sensitivity} \$MM_GC || echo "MMSeqs search failed or found no hits"
+        -s ${params.mmseqs_sensitivity} \$MM_GC || {
+            rc=\$?
+            echo "ERROR: LOCATE_GENE: MMseqs2 search of the query against the home genome failed (exit \$rc). If it ran out of memory, raise --locate_gene_memory or --mmseqs_split_memory_limit." >&2
+            exit \$rc
+        }
 
     # 2. BLAST Search
     makeblastdb -in $home_genome -dbtype nucl
@@ -90,10 +93,11 @@ process LOCATE_GENE {
         --intron_floor ${params.goi_fallback_intron_floor} \\
         --output home_gene_location.bed
 
-    # §1f: profile the hit distribution and recommend a query-type preset (advisory).
-    # The recommendation is printed to this process log + saved to intermediate/locate_gene/
-    # so a user who didn't pick a preset can re-run with the suggested -profile preset_*.
-    # Best-effort: never fail LOCATE_GENE if profiling hiccups.
+    # §1f: profile the hit distribution and recommend a query-type preset.
+    # The recommendation is printed to this process log + saved to intermediate/locate_gene/.
+    # The settings step reads both (the preset under legacy, the module triggers otherwise), so
+    # a failure stops the task (fix-phase d5): until 2026-11-02 it was skipped with one line and
+    # the run went on with other settings.
     profile_hits.py \\
         --blast hits_blast.txt \\
         --mmseqs hits_mmseqs.m8 \\
@@ -102,13 +106,12 @@ process LOCATE_GENE {
         --gff $home_gff \\
         --locus_gap_genes ${LocusGap.genes(params)} \\
         --locus_gap ${params.locus_gap} \\
-        --output hit_profile.json \$LOCATE_RETRY || echo "hit profiling skipped"
+        --output hit_profile.json \$LOCATE_RETRY
     if [ -s hit_profile.json ]; then
         auto_select_preset.py \\
             --hit_profile hit_profile.json \\
             --output auto_preset.json \\
-            ${preset_override_arg} \\
-            || echo "preset advisor skipped"
+            ${preset_override_arg}
     fi
     """
 }

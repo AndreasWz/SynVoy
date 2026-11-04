@@ -26,19 +26,16 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import (genetic_code_flag, genetic_code_for,  # noqa: E402
                             parse_genetic_code_spec, set_genetic_code,
-                            exit_step_failed, guard_failed, StepFailed)
+                            exit_step_failed, guard_failed, StepFailed, genome_window)
 from sequence_utils import parse_gff_attributes  # noqa: E402,F401  (kept for symmetry)
 
 
 def _read_fasta_subseq(samtools_bin: str, genome_path: str,
                        chrom: str, start: int, end: int) -> str:
-    """Extract genome[chrom:start..end] (1-based inclusive) via ``samtools faidx``."""
-    region = f"{chrom}:{start}-{end}"
-    result = subprocess.run(
-        [samtools_bin, "faidx", genome_path, region],
-        check=True, capture_output=True, text=True,
-    )
-    return "".join(line for line in result.stdout.splitlines() if not line.startswith(">"))
+    """genome[chrom:start..end] (1-based inclusive): sequence_utils.genome_window, the hull
+    rescue's reader. ``samtools faidx`` alone refused a plain-gzip target, and every block of it
+    was skipped with one line (fix-phase d5, item 35)."""
+    return genome_window(genome_path, chrom, start, end, samtools_bin)
 
 
 def _read_query(query_path: str) -> tuple[str, str]:
@@ -281,13 +278,7 @@ def main() -> None:
             chrom = block["chrom"]
             ws = max(1, block["start"] - args.window_pad)
             we = block["end"] + args.window_pad
-            try:
-                subseq = _read_fasta_subseq(args.samtools_bin, args.target_genome,
-                                            chrom, ws, we)
-            except subprocess.CalledProcessError as e:
-                print(f"[rescue] samtools faidx failed for {chrom}:{ws}-{we}: "
-                      f"{e.stderr[:200] if e.stderr else e}", file=sys.stderr)
-                continue
+            subseq = _read_fasta_subseq(args.samtools_bin, args.target_genome, chrom, ws, we)
             if not subseq:
                 continue
 

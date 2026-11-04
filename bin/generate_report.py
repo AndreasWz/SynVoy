@@ -1301,6 +1301,84 @@ def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
     return rows
 
 
+# A step that failed and was recorded by bin/run_step.py (fix-phase d5): one line in its output.
+STEP_FAILED_MARKER = "# SYNVOY_STEP_FAILED"
+_STEP_FAILURE_SENTENCE = {
+    "ASSIGN_LOCUS_OWNERSHIP": "its calls were not checked against the other home genes, so a call there may be "
+                              "another home gene's (ownership_not_checked)",
+    "BUILD_HOME_PARALOG_PANEL": "no call was checked against the other home genes, so any call may be another home "
+                                "gene's (ownership_not_checked)",
+    "RECIPROCAL_BEST_PARALOG": "no paralog_confusion flag can be raised there",
+    "RESCUE_GOI_HULL": "a gene only the hull rescue would model is missing there",
+    "RESCUE_STRONG_SYNTENY": "a gene only the strong-synteny rescue would model is missing there",
+}
+
+
+def collect_step_failures(results_dir):
+    """The steps that failed and were recorded instead of being ignored (bin/run_step.py,
+    fix-phase d5): the marker line in a staged region GFF (the rescues), ownership table, paralog
+    table or the panel's meta table. Sorted list of {step, locus, genome, exit, reason}."""
+    found = set()
+    for sub in ("regions", "locus_ownership", "paralog_check"):
+        folder = os.path.join(results_dir, sub)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, errors="replace") as fh:
+                    head = [fh.readline() for _ in range(3)]
+            except OSError:
+                continue
+            for line in head:
+                if not line.startswith(STEP_FAILED_MARKER):
+                    continue
+                f = dict(kv.split("=", 1) for kv in line.rstrip("\n").split("\t")[1:] if "=" in kv)
+                genome = canonical_genome_id(f["genome"]) if f.get("genome") else ""
+                # The ownership task of a hull rescue's models runs under <genome>.hull_rescue: it
+                # checked only those models.
+                part = "hull_rescue" if (f.get("genome") or "").endswith(".hull_rescue") else ""
+                found.add((f.get("step", ""), f.get("locus", ""), genome, f.get("exit", ""), f.get("reason", ""), part))
+    out = []
+    for t in sorted(found):
+        row = dict(zip(("step", "locus", "genome", "exit", "reason"), t[:5]))
+        if t[5]:
+            row["only"] = t[5]
+        out.append(row)
+    return out
+
+
+def mark_ownership_not_checked(goi_dedup, failures):
+    """``ownership_not_checked: true`` on every record a failed ownership step would have
+    checked: the records of that genome recovered from that locus, or all of them when the
+    panel failed. Returns how many records were marked."""
+    pairs = [(f["locus"], f["genome"], f.get("only")) for f in failures if f["step"] == "ASSIGN_LOCUS_OWNERSHIP"]
+    panel_failed = any(f["step"] == "BUILD_HOME_PARALOG_PANEL" for f in failures)
+    n = 0
+    for rec in goi_dedup.get("records", []):
+        hull = "synteny_hull_rescue" in (rec.get("goi_class"), rec.get("original_goi_class"))
+        if panel_failed or any(rec.get("genome") == g and (not l or l in (rec.get("provenance") or []))
+                               and (only != "hull_rescue" or hull)
+                               for l, g, only in pairs):
+            rec["ownership_not_checked"] = True
+            n += 1
+    return n
+
+
+def step_failure_warnings(failures):
+    """One sentence per recorded failure: the step, the genome and locus, the exit and its last
+    stderr line, and what is missing from the report because of it."""
+    out = []
+    for f in failures:
+        where = ", ".join(x for x in (f["genome"], f["locus"]) if x)
+        out.append(f"{f['step']} failed" + (f" for {where}" if where else "")
+                   + f" (exit {f['exit']}" + (f": {f['reason']}" if f["reason"] else "") + "): "
+                   + _STEP_FAILURE_SENTENCE.get(f["step"], "its result is missing") + " (failed_steps).")
+    return out
+
+
 def build_gene_family_advisory(goi_class_counts, n_home_loci=0,
                                family_ratio=0.4, family_min_ambiguous=5,
                                family_min_loci=3):
@@ -2116,6 +2194,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         goi_dedup, ownership_rows, panel_meta, flanking_per_locus,
         tiebreak_gap=locus_ownership_tiebreak_gap,
     )
+    # Steps that failed and were recorded (fix-phase d5): a failed ownership check marks the
+    # calls it would have checked; every failure is a warning below.
+    step_failures = collect_step_failures(results_dir)
+    ownership_not_checked = mark_ownership_not_checked(goi_dedup, step_failures)
 
     # §1m: ownership may relabel a call goi_class=paralog_not_goi (its best home match is a
     # paralog, not the GOI — e.g. a 55% biglycan hit mislabeled GOI_DCN). Such a call is NOT
@@ -2185,6 +2267,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # every call in it carries the flag, and the report says so at the top.
     low_quality_ids, warnings = low_quality_warnings(
         qc_summary["failed_genomes"], failed_downstream)
+    warnings.extend(step_failure_warnings(step_failures))
     if not_searched:
         warnings.append(
             f"{len(not_searched)} genome(s) could not be searched and have no result: "
@@ -2334,6 +2417,10 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     sw_backend = collect_sw_backend(hits_scan["target_policy"])
     if sw_backend is not None:
         report["smith_waterman"] = sw_backend
+    # Steps that failed and were recorded (fix-phase d5); absent on a run where none failed.
+    if step_failures:
+        report["failed_steps"] = step_failures
+        report["summary"]["ownership_not_checked_calls"] = ownership_not_checked
     return report
 
 

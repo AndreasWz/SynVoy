@@ -126,11 +126,21 @@ def _invocations():
                 while chunk[-1].rstrip().endswith("\\") and i + 1 < len(body):
                     i += 1
                     chunk.append(body[i])
-                joined = "\n".join(l for l in chunk if not l.strip().startswith("#"))
-                flags = set(FLAG.findall(joined))
-                for var in VAR.findall(joined):
-                    flags |= defs.get(var, set())
-                yield nf.name, pm.group(1), sm.group(1), flags
+                # bin/run_step.py wraps a step (fix-phase d5): its own flags end at a bare '--', and
+                # the lines after it are a call of the wrapped script, checked against that one.
+                parts = [(sm.group(1), chunk)]
+                if sm.group(1) == "run_step.py":
+                    k = next((n for n, l in enumerate(chunk) if re.search(r"\s--\s*\\*\s*$", l)), None)
+                    inner = re.search(r"(?:^|[\s/])([a-z_0-9]+\.py)\b", chunk[k + 1]) \
+                        if k is not None and k + 1 < len(chunk) else None
+                    if inner and inner.group(1) in SCRIPTS:
+                        parts = [("run_step.py", chunk[:k + 1]), (inner.group(1), chunk[k + 1:])]
+                for script, lines in parts:
+                    joined = "\n".join(l for l in lines if not l.strip().startswith("#"))
+                    flags = set(FLAG.findall(joined))
+                    for var in VAR.findall(joined):
+                        flags |= defs.get(var, set())
+                    yield nf.name, pm.group(1), script, flags
                 i += 1
 
 

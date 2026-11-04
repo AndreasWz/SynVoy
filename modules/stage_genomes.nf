@@ -89,5 +89,10 @@ process STAGE_GENOMES {
         --genomes_dir staged_genomes \\
         ${params.allow_unmatched_target_gffs.toString().toBoolean() ? '--allow_unmatched' : ''} \\
         --gffs $target_gffs
+
+    # One index per genome, here, before the steps that read the folder run side by side: the
+    # rescues ran samtools faidx on these links in parallel, and each wrote <genome>.fai into this
+    # folder while another read it (fix-phase d5). Last, so the species map above never sees one.
+    index_genomes.py --dir staged_genomes
     """
 }

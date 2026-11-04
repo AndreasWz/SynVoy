@@ -30,6 +30,9 @@ process GENERATE_REPORT {
     script:
     """
     mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership staged_results/phylo_placement
+    # Each staging loop lists only files that exist (find -type f), so a copy that fails is a real
+    # failure and stops the task (fix-phase d5): until 2026-11-02 every cp ended in
+    # '2>/dev/null || true', and a full disk left the report without a genome's results in silence.
 
     # Stage F9 phylo-placement verdicts from numbered subdirs.
     for f in \$(find -L phylo_placement -type f 2>/dev/null); do
@@ -37,7 +40,7 @@ process GENERATE_REPORT {
         case "\$fname" in
             NO_PHYLO_PLACEMENT|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
-        cp "\$f" staged_results/phylo_placement/ 2>/dev/null || true
+        cp "\$f" staged_results/phylo_placement/
     done
 
     # Stage paralog-check TSVs from numbered subdirs (§1j Phase B).
@@ -46,7 +49,7 @@ process GENERATE_REPORT {
         case "\$fname" in
             NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
-        cp "\$f" staged_results/paralog_check/ 2>/dev/null || true
+        cp "\$f" staged_results/paralog_check/
     done
 
     # Stage region outputs (.faa / .gff / .homology.tsv) from numbered subdirs
@@ -55,7 +58,7 @@ process GENERATE_REPORT {
         case "\$fname" in
             NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
-        cp "\$f" staged_results/regions/ 2>/dev/null || true
+        cp "\$f" staged_results/regions/
     done
 
     # Stage the per-genome tables the search writes into its hits/ folder: the §1x
@@ -68,9 +71,10 @@ process GENERATE_REPORT {
     # reached the report (bug hunt 2026-10-13). Their names carry the locus, so one flat folder
     # is safe. The raw .m8 hits are not staged: they are large and the old copies of them were
     # never read.
-    find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\
-        -o -name '*.target_policy.tsv' -o -name '*.genome_wide.tsv' \\) \\
-        -exec cp {} staged_results/hits/ \\; 2>/dev/null || true
+    for f in \$(find -L hits -type f \\( -name '*.nonsyntenic.tsv' -o -name '*.not_searched.tsv' \\
+            -o -name '*.target_policy.tsv' -o -name '*.genome_wide.tsv' \\) 2>/dev/null); do
+        cp "\$f" staged_results/hits/
+    done
 
     # Stage structured region scores
     for f in \$(find -L scores -type f 2>/dev/null); do
@@ -78,7 +82,7 @@ process GENERATE_REPORT {
         case "\$fname" in
             NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
-        cp "\$f" staged_results/scores/ 2>/dev/null || true
+        cp "\$f" staged_results/scores/
     done
 
     # Stage §1m locus-ownership TSVs from numbered subdirs.
@@ -87,7 +91,7 @@ process GENERATE_REPORT {
         case "\$fname" in
             NO_LOCUS_OWNERSHIP|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
-        cp "\$f" staged_results/locus_ownership/ 2>/dev/null || true
+        cp "\$f" staged_results/locus_ownership/
     done
 
     # §1m panel meta sidecar (single file; sentinel when ownership disabled/empty).

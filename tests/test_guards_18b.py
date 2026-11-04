@@ -206,12 +206,15 @@ def test_f_g_a_rescue_without_miniprot_stops_the_run_too(tmp_path, monkeypatch):
 
 def test_f_g_the_rescue_modules_end_the_run_on_exit_3_and_on_spent_kills():
     """Exit 3 (a guard) ends the run; a kill for memory or time (137/140/143) is retried twice and
-    then ends the run too (until 2026-10-28 a third kill dropped the genome's rescue in silence);
-    other failures are still ignored. Checked on Nextflow 26.04.4 (preview/errstrat)."""
+    then ends the run too (until 2026-10-28 a third kill dropped the genome's rescue in silence).
+    Since fix-phase d5 (2026-11-02) bin/run_step.py passes 3 and the kill codes through and records
+    any other failure in the step's output, where 'ignore' left nothing; so any other exit is the
+    wrapper's own and ends the run too. Checked on Nextflow 26.04.4 (preview/errstrat)."""
     for name in ("rescue_strong_synteny.nf", "rescue_goi_hull.nf"):
         nf = (ROOT / "modules" / name).read_text()
-        assert ("errorStrategy { task.exitStatus == 3 ? 'terminate' : (task.exitStatus in [137, 140, 143] "
-                "? (task.attempt <= 2 ? 'retry' : 'terminate') : 'ignore') }") in nf
+        assert ("errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 "
+                "? 'retry' : 'terminate' }") in nf
+        assert "run_step.py --step RESCUE_" in nf
     assert "--miniprot_timeout ${params.goi_miniprot_timeout}" in (ROOT / "modules" / "rescue_goi_hull.nf").read_text()
     for script in ("rescue_strong_synteny.py", "rescue_goi_hull.py"):
         assert "    exit_step_failed(main)" in (BIN / script).read_text()

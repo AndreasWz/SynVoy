@@ -34,5 +34,8 @@ process FETCH_RELATED_GENOMES {
         ${bad_scaffolds_arg} \\
         ${bad_n50_arg} \\
         ${target_arg}
+
+    # One index per genome before the steps that read the folder run side by side (fix-phase d5).
+    index_genomes.py --dir easy_mode_genomes
     """
 }

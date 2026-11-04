@@ -109,7 +109,8 @@ def main():
 
     if args.preset_override:
         if args.preset_override not in VALID_PRESETS:
-            print(f"ERROR: --preset_override '{args.preset_override}' is not one of {sorted(VALID_PRESETS)}",
+            print(f"ERROR: --preset_override '{args.preset_override}' is not a preset. Use one of: "
+                  f"{', '.join(sorted(VALID_PRESETS))}.",
                   file=sys.stderr)
             sys.exit(2)
         preset, warn, reasons = args.preset_override, False, [f"user override: {args.preset_override}"]

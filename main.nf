@@ -300,6 +300,20 @@ def modulesSpec() {
     return (params.modules == null ? 'legacy' : params.modules).toString().trim()
 }
 
+// The presets --preset_override takes: bin/auto_select_preset.py VALID_PRESETS (a test keeps the two equal).
+def presetNames() {
+    return ['preset_paralog_discrimination', 'preset_short_peptide', 'preset_single_copy', 'preset_tandem_family']
+}
+
+// A mistyped --preset_override stops the run at its start (it stopped LOCATE_GENE, after the home
+// searches; before 2026-11-02 LOCATE_GENE ignored it without a word).
+def checkPresetOverride(validationErrors) {
+    def name = (params.preset_override ?: '').toString().trim()
+    if (name && !(name in presetNames())) {
+        validationErrors << "--preset_override '${name}' is not a preset. Use one of: ${presetNames().join(', ')}."
+    }
+}
+
 def checkModulesSpec(validationErrors) {
     def text = modulesSpec()
     if (params.modules instanceof Boolean || text.toLowerCase() in ['true', 'false']) {
@@ -417,6 +431,7 @@ def validateNumericParams(validationErrors, validationWarnings) {
         }
     }
     checkModulesSpec(validationErrors)
+    checkPresetOverride(validationErrors)
     if (!(params.tandem_copy_parent in ['seed', 'home'])) {
         validationErrors << "Invalid --tandem_copy_parent '${params.tandem_copy_parent}'. Must be 'seed' or 'home'."
     }
@@ -804,6 +819,7 @@ workflow {
     // Print header and params at workflow start
     printHeader()
     printParams()
+    warnEarlierOutputs()
 
     // Stable sentinel files for optional path inputs.
     def no_gff_file = file("${projectDir}/assets/sentinels/NO_GFF")
@@ -1528,9 +1544,14 @@ workflow {
             if (workflow.stats.cachedCount > 0) {
                 log.info "${done_c.dim}Tasks Cached:     ${done_c.reset} ${workflow.stats.cachedCount} (reused from previous run)"
             }
-            // The rescue / paralog / ownership steps run with errorStrategy 'ignore'.
+            // No step runs with errorStrategy 'ignore' since 2026-11-02 (a step that may fail records
+            // it, and the report names it: failed_steps); a configuration can still set one.
             if (workflow.stats.ignoredCount > 0) {
-                log.info "${done_c.yellow}Tasks FAILED (ignored): ${workflow.stats.ignoredCount} — a rescue or ownership step failed for some genomes, so their results are incomplete. See ${params.outdir}/logs/ and .nextflow.log${done_c.reset}"
+                log.info "${done_c.yellow}Tasks FAILED (ignored): ${workflow.stats.ignoredCount} — their results are missing. See ${params.outdir}/logs/ and .nextflow.log${done_c.reset}"
+            }
+            def older = olderOutputs(new File(params.outdir.toString()))
+            if (older) {
+                log.info "${done_c.yellow}${older.size()} file(s) in ${params.outdir} are older than this run (an earlier run's, or put there by hand), e.g. ${older.take(3).collect { it.name }.join(', ')}: they are not this run's results. Use an empty output folder, or -resume.${done_c.reset}"
             }
             log.info "${done_c.dim}Results Directory: ${done_c.reset} ${done_c.cyan}${params.outdir}${done_c.reset}"
             log.info uiRule()
@@ -1542,7 +1563,9 @@ workflow {
 
             // Report
             def report_file = new File(outdir, 'synvoy_report.json')
-            if (report_file.exists()) {
+            if (report_file.exists() && !fromThisRun(report_file)) {
+                log.info "${done_c.yellow}  ✗${done_c.reset} synvoy_report.json          ${done_c.yellow}(not written by this run: the file there is an earlier run's)${done_c.reset}"
+            } else if (report_file.exists()) {
                 log.info "${done_c.green}  ✓${done_c.reset} synvoy_report.json          ${done_c.dim}(analysis summary)${done_c.reset}"
                 // Try to extract key stats from report
                 try {
@@ -1574,7 +1597,7 @@ workflow {
             }
 
             // Plots
-            def plots = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_synteny_plot.html') } ?: []
+            def plots = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_synteny_plot.html') && fromThisRun(output_file) } ?: []
             if (plots) {
                 plots.each { p ->
                     log.info "${done_c.green}  ✓${done_c.reset} ${p.name.padRight(28)} ${done_c.dim}(interactive visualization)${done_c.reset}"
@@ -1583,7 +1606,7 @@ workflow {
             }
 
             // Trees
-            def trees = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_tree.nwk') } ?: []
+            def trees = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_tree.nwk') && fromThisRun(output_file) } ?: []
             if (trees) {
                 trees.each { t ->
                     log.info "${done_c.green}  ✓${done_c.reset} ${t.name.padRight(28)} ${done_c.dim}(GOI phylogeny)${done_c.reset}"
@@ -1594,7 +1617,7 @@ workflow {
             // Regions
             def regions_dir = new File(outdir, 'regions')
             if (regions_dir.exists()) {
-                def beds = regions_dir.listFiles()?.findAll { output_file -> output_file.name.endsWith('.regions.bed') } ?: []
+                def beds = regions_dir.listFiles()?.findAll { output_file -> output_file.name.endsWith('.regions.bed') && fromThisRun(output_file) } ?: []
                 if (beds) {
                     log.info "${done_c.green}  ✓${done_c.reset} regions/                      ${done_c.dim}(${beds.size()} region BED file(s))${done_c.reset}"
                     found_outputs = true
@@ -1623,6 +1646,10 @@ workflow {
             log.info "${done_c.dim}Tasks Failed:     ${done_c.reset} ${done_c.red}${workflow.stats.failedCount}${done_c.reset}"
             log.info ""
             log.info "${done_c.red}Error: ${workflow.errorMessage}${done_c.reset}"
+            def timed_out = localTimeKill()
+            if (timed_out) {
+                log.info "${done_c.red}${timed_out} ran past its time limit and was killed (\"process hasn't exited\" is how Nextflow reports a time kill on the local executor; it does not retry one). Give it more time (--default_time, or its 'time' in nextflow.config) and run again with -resume.${done_c.reset}"
+            }
             log.info ""
             log.info "${done_c.dim}Troubleshooting tips:${done_c.reset}"
             log.info "${done_c.dim}  • Check task logs:            ${params.outdir}/logs/ (collected per process)${done_c.reset}"
@@ -1634,6 +1661,40 @@ workflow {
             log.info uiRule()
         }
     }
+}
+
+// A file in the output folder that is older than this run is not this run's result: publishDir
+// overwrites what a run writes and leaves the rest (fix-phase d5). On -resume Nextflow keeps the
+// files it published before, so age says nothing there and every file counts as this run's.
+def fromThisRun(File f) {
+    if (workflow.resume) return true
+    return f.lastModified() >= workflow.start.toInstant().toEpochMilli() - 2000
+}
+
+def olderOutputs(File outdir) {
+    if (workflow.resume || !outdir.exists()) return []
+    def old = []
+    outdir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+        if (!f.path.contains("${File.separator}logs${File.separator}") && !fromThisRun(f)) old << f
+    }
+    return old.sort { it.path }
+}
+
+// At the start of a fresh run: an output folder that already holds results keeps every file this
+// run does not overwrite (fix-phase d5).
+def warnEarlierOutputs() {
+    def out = new File(params.outdir.toString())
+    if (workflow.resume || !new File(out, 'synvoy_report.json').exists()) return
+    log.warn "The output folder ${params.outdir} holds an earlier run's results. This run overwrites what it writes and leaves the rest: the end summary names the files older than this run. Use an empty folder, or -resume."
+}
+
+// The task a local time kill stopped: Nextflow reports it as "process hasn't exited", without the
+// time limit and without retrying it (Nextflow 26.04; fix-phase d5).
+def localTimeKill() {
+    def msg = "${workflow.errorMessage ?: ''}\n${workflow.errorReport ?: ''}"
+    if (!msg.contains("process hasn't exited")) return null
+    def m = (msg =~ /Error executing process > '([^']+)'/)
+    return m.find() ? m.group(1) : 'a task'
 }
 
 // Collect task logs from work/ into results/logs/ for easy debugging.

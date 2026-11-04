@@ -10,7 +10,10 @@
 // against) or when the kill switch ``--disable_paralog_check`` is set.
 process RECIPROCAL_BEST_PARALOG {
     tag "${locus_id}/${genome_name}"
-    errorStrategy 'ignore'  // one bad alignment must not block the whole report
+    // A failure is recorded in the output table by bin/run_step.py (fix-phase d5) and named in the
+    // report; a kill is retried, as elsewhere. It used to be 'ignore': only a console count said so.
+    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'terminate' }
+    maxRetries 2
 
     input:
     tuple val(locus_id), val(genome_name), path(target_faa), path(target_gff)
@@ -29,6 +32,8 @@ process RECIPROCAL_BEST_PARALOG {
 
     script:
     """
+    run_step.py --step RECIPROCAL_BEST_PARALOG --locus "${locus_id}" --genome "${genome_name}" \\
+        --record ${locus_id}__${genome_name}.paralog_check.tsv -- \\
     reciprocal_best_paralog_check.py \\
         --home_query ${home_query} \\
         --target_faa ${target_faa} \\

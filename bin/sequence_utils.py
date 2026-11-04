@@ -736,6 +736,21 @@ def iter_genome(filepath: str) -> Iterator[Tuple[str, str]]:
         yield _genome_name(seen, header, filepath), seq
 
 
+def genome_window(genome_path: str, chrom: str, start: int, end: int,
+                  samtools_bin: str = "samtools") -> str:
+    """genome[chrom:start..end] (1-based inclusive): ``samtools faidx`` when it can (a plain
+    FASTA or a bgzip file), else read from the file (a plain-gzip genome, which samtools refuses,
+    or no samtools). "" when the genome holds no such sequence. The rescue passes' one reader
+    (fix-phase d5, item 35: the strong-synteny rescue skipped every block of a plain-gzip
+    target)."""
+    try:
+        res = subprocess.run([samtools_bin, "faidx", genome_path, f"{chrom}:{start}-{end}"],
+                             check=True, capture_output=True, text=True)
+        return "".join(l for l in res.stdout.splitlines() if not l.startswith(">"))
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return load_genome_subset(genome_path, [chrom]).get(chrom, "")[max(0, start - 1):end]
+
+
 def load_genome(filepath: str) -> Dict[str, str]:
     """Load genome FASTA as dict {chrom: sequence}."""
     return dict(iter_genome(filepath))

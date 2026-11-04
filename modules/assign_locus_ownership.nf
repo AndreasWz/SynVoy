@@ -22,8 +22,10 @@ process BUILD_HOME_PARALOG_PANEL {
     // An odd/missing home GFF is handled inside the script (exit 0 + empty panel), so a
     // NON-zero exit here means a genuine failure (e.g. parasail missing → the §1m ownership
     // safety net silently dies). Fail loud by default; --require_paralog_panel false (or
-    // --disable_locus_ownership) opts back into tolerating it.
-    errorStrategy { params.require_paralog_panel.toString().toBoolean() ? 'terminate' : 'ignore' }
+    // --disable_locus_ownership) opts back into tolerating it: the failure is then recorded and
+    // the report marks every call ownership_not_checked (fix-phase d5). A kill is retried.
+    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'terminate' }
+    maxRetries 2
 
     input:
     path home_gff
@@ -51,7 +53,13 @@ process BUILD_HOME_PARALOG_PANEL {
 
     script:
     def query_arg = query.name != 'NO_QUERY' ? "--query ${query}" : ""
+    // --require_paralog_panel false: a failed panel is recorded in its meta table (bin/run_step.py,
+    // fix-phase d5), and the report marks every call ownership_not_checked, instead of skipping
+    // ownership in silence.
+    def tolerate = params.require_paralog_panel.toString().toBoolean() ? '' :
+        "run_step.py --step BUILD_HOME_PARALOG_PANEL --record home_paralog_panel.faa.meta.tsv --empty home_paralog_panel.faa --"
     """
+    ${tolerate} \\
     build_home_paralog_panel.py \\
         --home_gff ${home_gff} \\
         --home_proteome ${home_proteome} \\
@@ -72,7 +80,11 @@ process BUILD_HOME_PARALOG_PANEL {
 
 process ASSIGN_LOCUS_OWNERSHIP {
     tag "${locus_id}/${genome_name}"
-    errorStrategy 'ignore'  // one bad alignment must not block the whole report
+    // A failure is recorded in the output table by bin/run_step.py (fix-phase d5): the report marks
+    // every call of that locus and genome ownership_not_checked, since a call the check did not see
+    // can be another home gene's. It used to be 'ignore', which left those calls counted in silence.
+    errorStrategy { task.exitStatus in [137, 140, 143] && task.attempt <= 2 ? 'retry' : 'terminate' }
+    maxRetries 2
 
     input:
     tuple val(locus_id), val(genome_name), path(target_faa), path(target_gff)
@@ -97,6 +109,8 @@ process ASSIGN_LOCUS_OWNERSHIP {
     """
     # Reuse the §1j reciprocal-best machinery, but the "paralog panel" is the
     # home-locus panel (>locus_<id>|<gene>), so best_paralog names the owning locus.
+    run_step.py --step ASSIGN_LOCUS_OWNERSHIP --locus "${locus_id}" --genome "${genome_name}" \\
+        --record ${locus_id}__${genome_name}.locus_ownership.tsv -- \\
     reciprocal_best_paralog_check.py \\
         --home_query ${panel} \\
         --target_faa ${target_faa} \\

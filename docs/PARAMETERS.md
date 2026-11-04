@@ -975,7 +975,7 @@ When true (default), the preset chosen from the LOCATE_GENE hit profile is appli
 ### `preset_override`
 **Type:** String | **Default:** `''` (empty — let auto-detection choose)
 
-Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution. Under `--modules auto` (or a list) a pinned preset is applied on top of the modules.
+Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. Any other value stops the run at its start, naming the valid ones (since 2026-11-02; before, LOCATE_GENE ignored a mistyped name without a word). With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution. Under `--modules auto` (or a list) a pinned preset is applied on top of the modules.
 
 ### `modules`
 **Type:** String | **Default:** `'legacy'`

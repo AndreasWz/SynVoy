@@ -519,7 +519,7 @@ paralog — the decorin-vs-biglycan class of error.
 | Parameter | Default | Description |
 |---|---|---|
 | `--disable_locus_ownership` | `false` | Turn off reciprocal-best-hit assignment of each recovered gene to a home locus. With it on, a call whose best home match is a *family paralog* rather than the GOI, by at least `--locus_ownership_tiebreak_gap`, is relabelled `paralog_not_goi` and excluded from the headline HIGH/MEDIUM counts. A home copy near-identical to the GOI (≥ 95 % identity over ≥ 90 % of it) counts as the GOI unless the call favours it by 10 bits. |
-| `--require_paralog_panel` | `true` | Fail loud if the home-paralog panel cannot be built (e.g. parasail missing) instead of silently skipping ownership. Set `false` to tolerate a missing panel. |
+| `--require_paralog_panel` | `true` | Fail loud if the home-paralog panel cannot be built (e.g. parasail missing) instead of silently skipping ownership. Set `false` to tolerate a missing panel: the run then goes on, the report names the failure (`failed_steps`) and marks every call `ownership_not_checked`. |
 | `--paralog_panel_min_identity` | `28.0` | Min % identity (query vs a home protein, with a coverage guard) for that protein to enter the paralog panel. The panel is built from the whole home proteome, not just the split-loci spans — otherwise the real paralogs are missing and only spurious domain cross-hits are present. |
 | `--paralog_panel_max_family` | `15` | Cap on homology-derived family entries (closest paralogs by identity). Settings key: the `dispersed_family` module (A2) sets max(15, home loci of the family + 1), at most 50. |
 | `--locus_ownership_pad` | `2000` | bp padding when intersecting genes with a locus span. |
@@ -942,14 +942,32 @@ when one line of `bin/plot_synteny.py` only parsed on Python 3.12. `git pull`.
 Fixed on 2026-08-21. Your checkout is older — `git pull` (and check which branch you are
 on: the fix reached `main` later than `dev`).
 
-### The run ends with "Tasks FAILED (ignored): N"
+### A step failed but the run finished: `failed_steps` in the report
 
-The rescue, paralog-check and ownership steps are allowed to fail without stopping the
-run, because one failed rescue should not cost you a whole result. When any did fail the
-summary says so. The main search results are complete; for the genomes concerned the
-rescue or the paralog check is missing. Look in `logs/` for the step named
-`RESCUE_GOI_HULL`, `RESCUE_STRONG_SYNTENY`, `RECIPROCAL_BEST_PARALOG` or
-`ASSIGN_LOCUS_OWNERSHIP`.
+The rescue, paralog-check and ownership steps may fail without stopping the run, because
+one failed rescue should not cost you a whole result. Since 2026-11-02 such a failure is
+recorded where the step's result would be, and the report names it: a sentence in
+`warnings` and a row in `failed_steps` (step, genome, locus, exit code, the last line the
+step wrote to stderr). A failed ownership check marks every call it would have checked
+`ownership_not_checked`: such a call was not compared with the other home genes and may be
+one of theirs. A failed rescue means a gene only that rescue would model is missing there. A
+step killed for memory or time is retried as any other; after its retries it ends the run.
+Until 2026-11-02 these steps were ignored on failure and only the console's
+`Tasks FAILED (ignored): N` said so; that line now appears only if a configuration of your
+own sets `errorStrategy 'ignore'`.
+
+### "process hasn't exited"
+
+A task ran past its time limit on the local executor. Nextflow reports a time kill there with
+this message and does not retry it; the end summary names the process. Give it more time
+(`--default_time`, or the process's `time` in `nextflow.config`) and run again with `-resume`.
+
+### "The output folder ... holds an earlier run's results"
+
+A run overwrites the files it writes and leaves every other file in the output folder. When
+the folder already holds a report and the run is not resumed, the run says so at the start, and
+the end summary counts the files older than the run (an earlier run's, or put there by hand)
+and does not list them as this run's results. Use an empty output folder for a new run.
 
 ### "File name(s) with whitespace or special characters"
 
