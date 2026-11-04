@@ -51,7 +51,9 @@ def _run(tmp_path, monkeypatch, args):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(isr.subprocess, "run", fake_run)
-    monkeypatch.setattr(isr, "run_augmented_mmseqs_with_retries", lambda **k: (False, "skipped in test"))
+    # MMseqs2 finds nothing here (an empty table); a failed one stops the window since fix-phase d6.
+    monkeypatch.setattr(isr, "run_augmented_mmseqs_with_retries",
+                        lambda **k: (open(k["aug_hits_file"], "w").close(), (True, ""))[1])
     hits = isr.run_augmented_search(str(region), [{"id": "GOI_q", "seq": "M" + "A" * 79}],
                                     "g1", args, "t1", 1)
     return seen, hits

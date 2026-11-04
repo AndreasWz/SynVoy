@@ -8,6 +8,10 @@ process COMPUTE_TREE {
 
     output:
     tuple val(locus_id), path("*.nwk"), emit: tree
+    // How the tree was made (seed, threads, the bootstrap, also one dropped after a failure;
+    // bin/compute_tree.py); the report and the tree page name it (fix-phase d6). None for a
+    // placeholder tree (skip_tree, fewer than 3 sequences).
+    tuple val(locus_id), path("${locus_id}_tree.info.json"), emit: info, optional: true
 
     script:
     """

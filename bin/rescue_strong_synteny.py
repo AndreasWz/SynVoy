@@ -26,7 +26,8 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import (genetic_code_flag, genetic_code_for,  # noqa: E402
                             parse_genetic_code_spec, set_genetic_code,
-                            exit_step_failed, guard_failed, StepFailed, genome_window)
+                            exit_step_failed, guard_failed, StepFailed, genome_window,
+                            MemoryKilled, memory_killed)
 from sequence_utils import parse_gff_attributes  # noqa: E402,F401  (kept for symmetry)
 
 
@@ -88,9 +89,14 @@ def _run_miniprot_relaxed(window_fa: str, query_fa: str, min_outc: float,
     except FileNotFoundError as exc:   # an installation fault, not a window: the run stops too
         raise StepFailed(f"[rescue] miniprot is not installed here ({exc})") from exc
     if proc.returncode != 0:
-        print(f"[rescue] miniprot non-zero exit ({proc.returncode}) on "
-              f"{window_fa}: {proc.stderr[:200]}", file=sys.stderr)
-        return ""
+        # A failed run is no "no model" (fix-phase d6): killed for memory, the script exits 137
+        # and Nextflow retries it with more memory; any other failure ends the script, and
+        # bin/run_step.py records it for the report. Until 2026-11-02 both read as no model.
+        what = f"[rescue] miniprot on {place or 'the window ' + window_fa}"
+        if memory_killed(proc.returncode, proc.stderr):
+            raise MemoryKilled(f"{what} ran out of memory (exit {proc.returncode})")
+        raise RuntimeError(f"{what} failed (exit {proc.returncode}): "
+                           + " | ".join((proc.stderr or "").strip().splitlines()[-2:]))
     return proc.stdout or ""
 
 

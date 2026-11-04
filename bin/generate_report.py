@@ -2413,6 +2413,16 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     limits = collect_limits(hits_scan["target_policy"])
     if limits is not None:
         report["limits"] = limits
+        # MMseqs2 on a lower rung of its low-memory ladder (fix-phase d6): fewer hits possible.
+        for key, what in (("mmseqs_genome_lower_rung", "genome search(es)"),
+                          ("mmseqs_window_lower_rung", "window search(es)")):
+            c = limits["counts"].get(key) or {}
+            if c.get("total"):
+                report["warnings"].append(
+                    f"MMseqs2 ran on a lower rung of its low-memory ladder (sensitivity 7.0 or 6.0, one "
+                    f"thread) after a memory failure in {c['total']} {what} ({', '.join(c['genomes'])}): "
+                    f"a hit, and so a call, may be missing there (limits.{key}; the genome's GFF says "
+                    f"which, ##synvoy-reduced-search). Give MMseqs2 more memory.")
     # What ran the Smith-Waterman search (fix-phase item 18); main() moves it into run_settings.
     sw_backend = collect_sw_backend(hits_scan["target_policy"])
     if sw_backend is not None:
@@ -2475,6 +2485,26 @@ def copies_in_slot_by_genome(records, home_copies):
                         "end": best.get("end"), "confidence": best.get("confidence"),
                         "slot_rank": best.get("slot_rank") or None},
         }
+    return out
+
+
+def load_tree_infos(folder):
+    """{locus: info} of COMPUTE_TREE's <locus>_tree.info.json (fix-phase d6): seed, threads,
+    sequences and the bootstrap (status ultrafast, none_fewer_than_4_sequences,
+    dropped_after_failure, placeholder_tree; replicates; reason). {} without any."""
+    out = {}
+    if not folder or not os.path.isdir(folder):
+        return out
+    for name in sorted(os.listdir(folder)):
+        if not name.endswith("_tree.info.json"):
+            continue
+        try:
+            with open(os.path.join(folder, name)) as fh:
+                info = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(info, dict):
+            out[info.get("locus") or name[:-len("_tree.info.json")]] = info
     return out
 
 
@@ -2551,6 +2581,9 @@ def load_run_settings(path):
         "home_subtelomeric": contig_end and bool(feats.get("telomeric_repeat_at_end")),
         "dist_to_scaffold_end": feats.get("dist_to_scaffold_end"),
     }
+    # The resources the run used (fix-phase d6): absent in a file written before 2026-11-02.
+    if data.get("run_resources"):
+        out["run_resources"] = data["run_resources"]
     return out
 
 
@@ -2618,6 +2651,11 @@ def main():
              "home gene goes into the report (docs/OUTPUT.md).",
     )
     parser.add_argument(
+        "--tree_info_dir", default=None,
+        help="The <locus>_tree.info.json files of COMPUTE_TREE: how each tree was made (seed, "
+             "threads, the bootstrap, also one dropped after a failure), written as trees.",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -2651,6 +2689,14 @@ def main():
     home_filter = load_goi_info_block(args.goi_info, "home_filter")
     if home_filter is not None:
         report["home_genome_filter"] = home_filter
+    trees = load_tree_infos(args.tree_info_dir)
+    if trees:
+        report["trees"] = trees
+        for locus, t in trees.items():
+            boot = t.get("bootstrap") or {}
+            if boot.get("status") == "dropped_after_failure":
+                report.setdefault("warnings", []).append(
+                    f"The {locus} tree has no branch support: {boot.get('reason', '')} (trees).")
     unmatched = load_goi_info_block(args.goi_info, "home_gff_unmatched")
     if unmatched:
         report["home_gff_unmatched"] = unmatched

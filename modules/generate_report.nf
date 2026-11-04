@@ -23,13 +23,14 @@ process GENERATE_REPORT {
                                // home_annotation.json (batch HG-5b) -> home_annotation
     path goi_info              // ANNOTATE_GOI's goi_info.json: in easy mode what the home
                                // chromosome filter removed (home_filter) -> home_genome_filter
+    path tree_infos, stageAs: 'tree_info/?/*'  // <locus>_tree.info.json of COMPUTE_TREE -> trees
 
     output:
     path "synvoy_report.json", emit: report
 
     script:
     """
-    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership staged_results/phylo_placement
+    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership staged_results/phylo_placement staged_results/tree_info
     # Each staging loop lists only files that exist (find -type f), so a copy that fails is a real
     # failure and stops the task (fix-phase d5): until 2026-11-02 every cp ended in
     # '2>/dev/null || true', and a full disk left the report without a genome's results in silence.
@@ -41,6 +42,11 @@ process GENERATE_REPORT {
             NO_PHYLO_PLACEMENT|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
         cp "\$f" staged_results/phylo_placement/
+    done
+
+    # Stage how each tree was made (fix-phase d6).
+    for f in \$(find -L tree_info -type f -name '*_tree.info.json' 2>/dev/null); do
+        cp "\$f" staged_results/tree_info/
     done
 
     # Stage paralog-check TSVs from numbered subdirs (§1j Phase B).
@@ -117,6 +123,7 @@ process GENERATE_REPORT {
         --effective_params ${effective_params} \\
         --home_db_dir ${home_db} \\
         --goi_info ${goi_info} \\
+        --tree_info_dir staged_results/tree_info \\
         --output synvoy_report.json
     """
 }

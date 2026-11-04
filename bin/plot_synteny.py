@@ -3236,8 +3236,32 @@ def render_synteny_html(all_tracks, gene_colours,
     return html
 
 
+def _tree_support_note(report_path, output):
+    """What the tree page says about branch support, from the report's trees block (fix-phase
+    d6), or None (no report, no record of this tree). The locus is read from the output name."""
+    import json as _json
+    m = re.search(r"(locus_\d+)", os.path.basename(output or ""))
+    if not report_path or not m or not os.path.isfile(report_path):
+        return None
+    try:
+        with open(report_path) as fh:
+            info = (_json.load(fh).get("trees") or {}).get(m.group(1))
+    except (OSError, ValueError, AttributeError):
+        return None
+    boot = (info or {}).get("bootstrap") or {}
+    status = boot.get("status")
+    if status == "ultrafast":
+        return (f"{boot.get('replicates')} ultrafast bootstrap replicates (in the .nwk, not drawn); "
+                f"IQ-TREE seed {info.get('seed')}, {info.get('threads')} thread(s)")
+    if status == "dropped_after_failure":
+        return f"none: {boot.get('reason', 'the bootstrap failed')}"
+    if status == "none_fewer_than_4_sequences":
+        return "none: fewer than 4 sequences"
+    return None
+
+
 def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=None,
-                     clade_count=4, gene_legend=True):
+                     clade_count=4, gene_legend=True, support_note=None):
     """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML.
 
     The tree is midpoint-rooted and split into ``clade_count`` clades by
@@ -3442,7 +3466,8 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
             ("Leaf", "one GOI gene model, labelled with the species it was found in; "
                      "copy N = several models in one species"),
             ("Branch", "horizontal length = substitutions per site (scale bar)"),
-            ("Root", "midpoint of the longest path; the tree has no outgroup")]),
+            ("Root", "midpoint of the longest path; the tree has no outgroup")]
+            + ([("Branch support", support_note)] if support_note else [])),
         ("Colour", [
             (_lg_dot(_stree.color_for_clade(0), "#333", r=6.0),
              f"leaves and branches of one clade share a colour; the tree is cut into "
@@ -5272,6 +5297,9 @@ def main():
     ap.add_argument("--candidate_beds", nargs="*", default=[])
     ap.add_argument("--homology_tsvs",  nargs="*", default=[])
     ap.add_argument("--tree",           default=None)
+    ap.add_argument("--report", default=None,
+                    help="synvoy_report.json of the run: its trees block says how the tree was made "
+                         "(the bootstrap, also one dropped after a failure), named on the tree page")
     ap.add_argument("--species_tree_newick", default=None,
                     help="Newick file with a curated SPECIES tree (leaves = species "
                          "names). When given, it overrides the NCBI-taxonomy build for "
@@ -6323,7 +6351,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
         tree_output = args.output.replace(".html", "_tree.html")
     _render_tree_svg(args.tree, goi_genome_colours, tree_output,
                      species_map=species_map, clade_count=args.clade_count,
-                     gene_legend=getattr(args, "gene_legend", True))
+                     gene_legend=getattr(args, "gene_legend", True),
+                     support_note=_tree_support_note(getattr(args, "report", None), tree_output))
 
 
 if __name__ == "__main__":

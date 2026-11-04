@@ -996,6 +996,34 @@ class StepFailed(BaseException):
     not swallow it. The script that owns the task reports it and exits non-zero."""
 
 
+class MemoryKilled(StepFailed):
+    """A tool, or a search worker, killed for memory (fix-phase d6). The script exits
+    MEMORY_KILL_EXIT, which Nextflow retries with more memory, as item 18 did for the
+    Smith-Waterman child: a killed miniprot read as "no model", and a killed Augustus or search
+    worker exited 1, which is not retried. The message says "ran out of memory"."""
+
+
+MEMORY_KILL_EXIT = 137
+
+
+def memory_killed(returncode: int, stderr: str = "") -> bool:
+    """Whether a tool's exit means it was killed for memory: SIGKILL (-9 from subprocess, 137
+    from a shell) or an allocation failure it reported itself."""
+    text = stderr or ""
+    return returncode in (-9, 137) or "MemoryError" in text or "std::bad_alloc" in text
+
+
+def exit_on_memory_kill(main_fn) -> None:
+    """Run a script's main(); a MemoryKilled is printed and ends the script with
+    MEMORY_KILL_EXIT. For scripts that otherwise let a StepFailed end them (exit 1)."""
+    try:
+        rc = main_fn()
+    except MemoryKilled as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(MEMORY_KILL_EXIT)
+    sys.exit(rc)
+
+
 def guard_failed(what: str, guard_seconds: float, param: Optional[str] = None) -> StepFailed:
     """The StepFailed of a tool that did not finish within its guard: ``what`` names the tool
     and the place, ``param`` the pipeline parameter that sets the guard."""
@@ -1076,9 +1104,12 @@ STEP_FAILED_EXIT = 3
 def exit_step_failed(main_fn) -> None:
     """Run a script's main() and exit with its return value; a StepFailed is printed and ends the
     script with STEP_FAILED_EXIT (for a module whose errorStrategy turns that code into the
-    run's end while it ignores other failures: the rescue passes)."""
+    run's end: the rescue passes), a MemoryKilled with MEMORY_KILL_EXIT (retried)."""
     try:
         rc = main_fn()
+    except MemoryKilled as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(MEMORY_KILL_EXIT)
     except StepFailed as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(STEP_FAILED_EXIT)

@@ -45,6 +45,17 @@ process RESOLVE_EFFECTIVE_PARAMS {
 
     script:
     def override_arg = preset_override ? "--preset_override ${preset_override}" : ''
+    // The run's resources as it used them (fix-phase d6): a profile (laptop_safe, low_mem,
+    // docker_max) changes these and effective_params.json did not say so.
+    def resources = [nextflow_profile: workflow.profile, executor: task.executor,
+                     mmseqs_sensitivity: params.mmseqs_sensitivity,
+                     mmseqs_split_memory_limit: params.mmseqs_split_memory_limit,
+                     iterative_search_cpus: params.iterative_search_cpus,
+                     iterative_search_memory: params.iterative_search_memory,
+                     iterative_search_max_forks: params.iterative_search_max_forks,
+                     locate_gene_cpus: params.locate_gene_cpus, locate_gene_memory: params.locate_gene_memory,
+                     compute_tree_cpus: params.compute_tree_cpus, skip_tree: params.skip_tree.toString().toBoolean()]
+    def resources_arg = resources.collect { k, v -> "--run_resource '${k}=${v}'" }.join(' ')
     def disable_arg  = disable_auto_apply ? '--disable_auto_apply' : ''
     // lib/HomeGenes.groovy: '' under --modules legacy, so that task is the one it was before.
     def home_args = HomeGenes.resolverArgs(params, home_species, home_gff_present)
@@ -65,6 +76,7 @@ __SYNVOY_DEFAULTS__
         --window_margin_genes ${params.window_margin_genes}${home_args} \\
         --defaults defaults.json \\
         --shipped_config ${projectDir}/nextflow.config \\
+        ${resources_arg} \\
         ${override_arg} \\
         ${disable_arg} \\
         --output effective_params.json

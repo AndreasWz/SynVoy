@@ -66,6 +66,8 @@ process PLOT_SYNTENY {
     def tables_arg = tables_str ? "--block_tables \$block_tables_in" : ""
     def settings_arg = effective_params.name != 'NO_EFFECTIVE_PARAMS' ? "--effective_params ${effective_params}" : ""
     def plot_extra_args = params.plot_extra_args ?: ''
+    // The report says how the tree was made (trees): the tree page names a dropped bootstrap (d6).
+    def report_arg = report.name != 'NO_REPORT' ? "--report ${report}" : ""
     
     """
     inputs_dir="plot_inputs_${home_bed.baseName}"
@@ -146,6 +148,7 @@ process PLOT_SYNTENY {
         --scale_bar_len ${params.scale_bar_len} \\
         --plot_width ${params.plot_width} \\
         ${settings_arg} \\
+        ${report_arg} \\
         ${plot_extra_args} \\
         --output ${home_bed.baseName}_synteny_plot.html
 

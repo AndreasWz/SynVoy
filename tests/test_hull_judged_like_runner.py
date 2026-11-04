@@ -86,5 +86,5 @@ def test_the_hull_process_hands_over_the_home_database_folder():
     assert "--effective_params ${effective_params}" in module
     main_nf = open(os.path.join(root, "main.nf")).read()
     assert ("RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first(),\n"
-            "            ANNOTATE_GOI.out.exons.first()\n        )") in main_nf   # item 17: the panel's q
+            "            ANNOTATE_GOI.out.exons.first()") in main_nf   # item 17: the panel's q (inputs added since follow it)
     assert "home_db.map { d -> d.resolve('home_proteome.faa') }" in sub

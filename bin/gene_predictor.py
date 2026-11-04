@@ -34,11 +34,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from sequence_utils import (get_genetic_code, offline_ncbi_taxa, strip_species_qualifier,
-                                StepFailed, guard_failed)
+                                StepFailed, guard_failed, MemoryKilled, memory_killed)
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (get_genetic_code, offline_ncbi_taxa, strip_species_qualifier,
-                                StepFailed, guard_failed)
+                                StepFailed, guard_failed, MemoryKilled, memory_killed)
 
 logger = logging.getLogger(__name__)
 _WARNED_PRODIGAL_CODE = set()
@@ -438,6 +438,10 @@ def run_augustus(
         raise StepFailed(f"Augustus is not installed here ({exc}); the prediction does not fall "
                          f"back to Prodigal, which cannot model introns") from exc
     if result.returncode != 0:
+        if memory_killed(result.returncode, result.stderr):
+            # Retried with more memory (fix-phase d6): it exited 1, which Nextflow does not retry.
+            raise MemoryKilled(f"Augustus ({species}) on {fasta_in} ran out of memory "
+                               f"(exit {result.returncode})")
         raise StepFailed(
             f"Augustus ({species}) failed on {fasta_in} (exit {result.returncode}: "
             + " | ".join((result.stderr or "").strip().splitlines()[-3:])

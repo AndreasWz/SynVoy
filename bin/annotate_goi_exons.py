@@ -37,7 +37,8 @@ try:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers
+        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers,
+        MemoryKilled, memory_killed, exit_on_memory_kill
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +46,8 @@ except ImportError:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers
+        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers,
+        MemoryKilled, memory_killed, exit_on_memory_kill
     )
 
 
@@ -1925,6 +1927,11 @@ def _run_miniprot(query_seq, chrom_seq, chrom_name, max_intron=200000, sensitive
                 f"of {chrom_name})", timeout, f"{kind}_miniprot_timeout") from None
 
         if result.returncode != 0:
+            if memory_killed(result.returncode, result.stderr):
+                # Killed for memory (fix-phase d6): no "no model"; the task is retried with more.
+                raise MemoryKilled(f"miniprot ({kind} model: a {query_len}-aa protein against "
+                                   f"{len(chrom_seq):,} bp of {chrom_name}) ran out of memory "
+                                   f"(exit {result.returncode})")
             print(f"[miniprot] Warning: non-zero exit ({result.returncode}): "
                   f"{result.stderr[:200]}", file=sys.stderr)
             _count(f"miniprot_failed_{kind}")
@@ -2622,4 +2629,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    exit_on_memory_kill(main)

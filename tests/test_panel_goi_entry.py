@@ -383,9 +383,10 @@ def test_the_panel_gets_goi_info_and_the_home_protein():
     assert args[-3:] == ["effective_params", "goi_info", "goi_exons"]
     take = sub.split("take:", 1)[1].split("main:", 1)[0]
     names = [ln.split("//")[0].strip() for ln in take.splitlines() if ln.split("//")[0].strip()]
-    assert names[-2:] == ["goi_info", "goi_exons"]
+    i = names.index("goi_info")                      # inputs added since (tree_infos, ...) follow
+    assert names[i:i + 2] == ["goi_info", "goi_exons"]
     main = (ROOT / "main.nf").read_text()
     call = main.split("ADJUDICATE_AND_REPORT(", 1)[1].split("\n        )", 1)[0]
     args = [ln.strip().rstrip(",") for ln in call.splitlines() if ln.strip()]
-    assert args[-2:] == ["ANNOTATE_GOI.out.info.first()", "ANNOTATE_GOI.out.exons.first()"]
+    assert args[i:i + 2] == ["ANNOTATE_GOI.out.info.first()", "ANNOTATE_GOI.out.exons.first()"]
     assert len(args) == len(names)

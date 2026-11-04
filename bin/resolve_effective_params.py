@@ -445,6 +445,10 @@ def main() -> None:
     ap.add_argument("--gene_predictor", default="auto",
                     help="The run's gene_predictor: with 'auto' a eukaryotic home without a GFF "
                          "and without Augustus stops the run (exit 2)")
+    ap.add_argument("--run_resource", action="append", default=[], metavar="KEY=VAL",
+                    help="A resource value the run used (Nextflow profile, MMseqs2 sensitivity and "
+                         "split limit, CPUs, memory, skip_tree), written as run_resources: a "
+                         "profile changes these without a settings key (fix-phase d6)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -540,6 +544,8 @@ def main() -> None:
         result["source"]["augustus_species"] = home_genes["source"]
         result["derivation"]["augustus_species"] = home_genes["derivation"]
 
+    if args.run_resource:
+        result["run_resources"] = dict(kv.split("=", 1) for kv in args.run_resource if "=" in kv)
     with open(args.output, "w") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
 

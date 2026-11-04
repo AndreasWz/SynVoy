@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -85,7 +87,19 @@ def run_mafft(input_fasta, output_aln, threads=1):
         subprocess.run(cmd, stdout=out_f, check=True)
 
 
-def run_iqtree(input_aln, output_nwk, threads=1, bootstrap_reps=1000):
+# IQ-TREE's random seed: fixed, so the same alignment gives the same tree run after run (fix-phase
+# d6; without --seed IQ-TREE seeds from the clock). The seed and the threads are recorded beside
+# the tree (write_info), as the thread count can change IQ-TREE's search.
+IQTREE_SEED = 1
+
+
+def write_info(path, **info):
+    """<locus>_tree.info.json: how the tree was made (seed, threads, sequences, bootstrap)."""
+    with open(path, "w") as fh:
+        json.dump(info, fh, indent=1, sort_keys=True)
+
+
+def run_iqtree(input_aln, output_nwk, threads=1, bootstrap_reps=1000, seed=IQTREE_SEED):
     """
     Run IQ-TREE with automatic model selection and optional ultrafast bootstrap.
     """
@@ -101,6 +115,8 @@ def run_iqtree(input_aln, output_nwk, threads=1, bootstrap_reps=1000):
         str(threads),
         "--quiet",
         "--redo",
+        "--seed",
+        str(seed),
     ]
     if bootstrap_reps and bootstrap_reps > 0:
         cmd.extend(["-B", str(bootstrap_reps)])
@@ -139,7 +155,15 @@ def main():
     parser.add_argument("--input", required=True, help="Input protein FASTA")
     parser.add_argument("--output", required=True, help="Output Newick tree file")
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=IQTREE_SEED,
+                        help="IQ-TREE's random seed (fixed by default, so a rerun gives the same tree)")
+    parser.add_argument("--info", default="",
+                        help="Where to write how the tree was made (default <output stem>.info.json): "
+                             "seed, threads, sequences, and the bootstrap, also when it was dropped "
+                             "after a failure")
     args = parser.parse_args()
+    info_path = args.info or re.sub(r"\.nwk$", "", args.output) + ".info.json"
+    locus = re.sub(r"_tree$", "", os.path.basename(re.sub(r"\.nwk$", "", args.output)))
 
     if not os.path.exists(args.input):
         print(f"Input file {args.input} not found.")
@@ -166,15 +190,24 @@ def main():
     else:
         print("Inferring tree with IQ-TREE (auto model selection, no bootstrap for <4 taxa)...")
 
+    def info(status, reps, reason=""):
+        write_info(info_path, locus=locus, seed=args.seed, threads=args.threads, sequences=count,
+                   bootstrap={"status": status, "replicates": reps, "reason": reason})
+
     try:
-        run_iqtree(aln_file, args.output, args.threads, bootstrap_reps=bootstrap_reps)
+        run_iqtree(aln_file, args.output, args.threads, bootstrap_reps=bootstrap_reps, seed=args.seed)
+        info("ultrafast" if bootstrap_reps else "none_fewer_than_4_sequences", bootstrap_reps or 0)
     except subprocess.CalledProcessError as e:
         details = ((e.stdout or "") + "\n" + (e.stderr or "")).strip()
         if bootstrap_reps:
             # Retry without bootstrap for tiny alignments or short loci.
             print("IQ-TREE failed with bootstrap; retrying without bootstrap...")
+            first = (details.splitlines() or [""])[-1][:200]
             try:
-                run_iqtree(aln_file, args.output, args.threads, bootstrap_reps=None)
+                run_iqtree(aln_file, args.output, args.threads, bootstrap_reps=None, seed=args.seed)
+                # Recorded (fix-phase d6): the tree page and the report say the tree has no support.
+                info("dropped_after_failure", 0, f"IQ-TREE with {bootstrap_reps} ultrafast replicates "
+                     f"failed (exit {e.returncode}: {first}); the tree was inferred without them")
             except subprocess.CalledProcessError as e2:
                 details2 = ((e2.stdout or "") + "\n" + (e2.stderr or "")).strip()
                 if is_data_limited_iqtree_error(details2):
@@ -183,6 +216,7 @@ def main():
                         args.output,
                         reason="low-information alignment",
                     )
+                    info("placeholder_tree", 0, "low-information alignment")
                     sys.exit(0)
                 print(f"IQ-TREE failed: {e2}")
                 if details2:
@@ -190,6 +224,7 @@ def main():
                 sys.exit(1)
         elif is_data_limited_iqtree_error(details):
             write_placeholder_tree(args.input, args.output, reason="low-information alignment")
+            info("placeholder_tree", 0, "low-information alignment")
             sys.exit(0)
         else:
             print(f"IQ-TREE failed: {e}")

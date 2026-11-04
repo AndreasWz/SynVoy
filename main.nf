@@ -1492,7 +1492,8 @@ workflow {
             FILTER_SORTED_GENOMES.out.sorted_list.map { _l, f -> f }.first(),
             RESOLVE_SETTINGS.out.json,
             ANNOTATE_GOI.out.info.first(),
-            ANNOTATE_GOI.out.exons.first()
+            ANNOTATE_GOI.out.exons.first(),
+            COMPUTE_TREE.out.info.map { _l, f -> f }
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

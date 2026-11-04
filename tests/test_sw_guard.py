@@ -370,7 +370,8 @@ def test_a_child_killed_for_memory_says_so(tmp_path, monkeypatch, rc, stderr, wh
         _window_search(tmp_path, monkeypatch, child)
     src = open(isr.__file__).read()
     wave = src[src.index("Aborting iterative search due to per-genome processing errors."):]
-    assert ("if all('Smith-Waterman' in msg and 'ran out of memory' in msg for _, msg in wave_errors):\n"
+    # Since fix-phase d6 every memory kill (miniprot, Augustus, a killed worker too) exits 137.
+    assert ("if all('ran out of memory' in msg for _, msg in wave_errors):\n"
             "                sys.exit(137)\n            sys.exit(1)") in wave
 
 

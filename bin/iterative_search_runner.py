@@ -3767,6 +3767,14 @@ def run_augmented_mmseqs_with_retries(
                 f"({attempt['label']}: threads={attempt['threads']}, "
                 f"s={attempt['sens']}, split={attempt['split']})."
             )
+            # Recorded, not only logged (fix-phase d6): a rung of lower sensitivity can find fewer
+            # hits (threads and the split limit change only the row order, which is sorted away).
+            ctx = getattr(args, 'genome_ctx', None)
+            if attempt['sens'] < attempts[0]['sens'] and ctx is not None:
+                count_limit(args, 'mmseqs_window_lower_rung')
+                ctx.setdefault('reduced_search', {}).setdefault('windows', []).append(
+                    {'window': genome_name, 'rung': attempt['label'], 'sensitivity': attempt['sens'],
+                     'threads': attempt['threads'], 'split': attempt['split']})
         return True, ""
 
     return False, last_details or "unknown augmented MMseqs failure"
@@ -3917,7 +3925,11 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
                 print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
                 all_hits.extend(mmseqs_hits)
         else:
-            print(f"[{genome_name}] Augmented MMseqs failed after retries: {mmseqs_details}", flush=True)
+            # The window would lose its MMseqs2 hits (fix-phase d6): until 2026-11-02 it kept its
+            # tblastn and Smith-Waterman hits only, with one log line.
+            raise StepFailed(f"[{genome_name}] MMseqs2 search of a window failed: {mmseqs_details}. "
+                             f"After a memory failure (its low-memory retries spent) raise "
+                             f"--mmseqs_split_memory_limit or the search's memory.")
 
         # ========== 2. tblastn Search ==========
         tblastn_hits_file = f"{args.output_dir}/tmp_{unique_id}_{genome_name}_tblastn_hits.m8"
@@ -6244,9 +6256,13 @@ def run_mmseqs_easy_search_with_retries(
     args,
     threads_per_job: int,
     genome_name: str,
+    used: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, str, bool]:
     """
     Run mmseqs easy-search with conservative retries for resource failures.
+
+    ``used``: filled with the rung that ran (label, sensitivity, threads, split), so the caller
+    records a lower one (fix-phase d6).
 
     Returns:
       (success, details, resource_related_failure)
@@ -6377,6 +6393,12 @@ def run_mmseqs_easy_search_with_retries(
                 f"({attempt['label']}: threads={attempt['threads']}, "
                 f"s={attempt['sens']}, split={attempt['split']})."
             )
+        if used is not None:
+            # A lower rung is one of lower sensitivity: threads and the split limit change only the
+            # order MMseqs2 writes its rows in (measured, fix-phase d6), which parse_hits sorts away.
+            used.update(rung=attempt['label'], sensitivity=attempt['sens'],
+                        threads=attempt['threads'], split=attempt['split'],
+                        lower=attempt['sens'] < attempts[0]['sens'])
         return True, "", False
 
     return False, last_details, last_resource_fail
@@ -6635,8 +6657,12 @@ LIMIT_KEYS = [
     'blocks_capped', 'blocks_capped_goi_seeded', 'blocks_capped_without_home_order',
     'dispersed_identity', 'dispersed_evalue', 'dispersed_alnlen', 'dispersed_near_anchor',
     'dead_zone',
+    # MMseqs2 after a memory failure (fix-phase d6): the genome search, and the windows, that ran
+    # on a lower rung of the low-memory ladder (sensitivity 7.0 or 6.0, one thread, 2G split)
+    'mmseqs_genome_lower_rung', 'mmseqs_window_lower_rung',
 ]
 LIMIT_COLUMNS = [f'limit_{k}' for k in LIMIT_KEYS]
+REDUCED_SEARCH_HEADER = '##synvoy-reduced-search'
 # MMseqs2 search reports at most this many targets per query (its --max-seqs default; the
 # search does not set it): a query with this many result rows may have lost more.
 MMSEQS_DEFAULT_MAX_SEQS = 300
@@ -7596,6 +7622,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         _bridge_max_per_block = getattr(args, 'synteny_bridge_max_per_block', 2)
 
         # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
+        genome_rung: Dict[str, Any] = {}
         mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
             db_path=db_path,
             genome_path=genome_path,
@@ -7604,6 +7631,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             args=args,
             threads_per_job=threads_per_job,
             genome_name=genome_name,
+            used=genome_rung,
         )
         if not mmseqs_ok:
             if resource_fail:
@@ -7630,7 +7658,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         )
         if not hits:
             logger.info(f"[{genome_name}] No hits found in MMseqs output.")
-            _write_target_policy(args, prefix, genome_name, None, 0)
+            # A search on a lower rung that found nothing is the case where the rung matters most
+            # (fix-phase d6; first review): its counter is written here too.
+            _write_target_policy(args, prefix, genome_name, None, 0,
+                                 {'limits': {'mmseqs_genome_lower_rung': 1}} if genome_rung.get('lower') else None)
             _write_block_table(args, prefix, genome_name)
             return genome_name, [], [], None
             
@@ -7666,6 +7697,11 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # (block_place_terms, finalize_place_evalues) and the decoy calls (decoy mode).
         args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},
                            'decoy_lines': []}
+        if genome_rung.get('lower'):
+            # The genome's search ran on a lower rung of the ladder (fix-phase d6): recorded.
+            count_limit(args, 'mmseqs_genome_lower_rung')
+            args.genome_ctx['reduced_search'] = {'genome': {k: genome_rung[k] for k in
+                                                            ('rung', 'sensitivity', 'threads', 'split')}}
         count_limit(args, 'mmseqs_maxseqs_genome', queries_at_max_seqs(hits_file))
         _bridge = {'bridge_max_gap': args.synteny_bridge_max_gap,
                    'bridge_max_rank_gap': _bridge_max_rank_gap,
@@ -8262,6 +8298,11 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      gf.write(format_genome_axis_header(genome_axis_values(args)) + "\n")
                  if get_genetic_code() != 1:
                      gf.write(f"##synvoy-genetic-code {get_genetic_code()}\n")
+                 if args.genome_ctx.get('reduced_search'):
+                     # Which searches of this genome ran on a lower rung of the MMseqs2 ladder
+                     # (fix-phase d6); only then, so another run's GFF is as before.
+                     gf.write(f"{REDUCED_SEARCH_HEADER} "
+                              f"{json.dumps(args.genome_ctx['reduced_search'], sort_keys=True, separators=(',', ':'))}\n")
                  for gl in all_gff_lines:
                      gf.write(gl + "\n")
 
@@ -9880,9 +9921,17 @@ def main():
                     if tree_extras:
                         wave_tree_extras_by_idx[idx] = tree_extras
                 except Exception as exc:
-                    wave_errors.append((entry.get('name', 'unknown'), str(exc)))
+                    msg = str(exc)
+                    if isinstance(exc, concurrent.futures.BrokenExecutor):
+                        # The system killed a worker (fix-phase d6): almost always for memory. The
+                        # task exits 137 below, which Nextflow retries with more memory; it exited
+                        # 1, which is not retried.
+                        msg = (f"a search worker died abruptly ({exc}): killed by a signal, most "
+                               "often because it ran out of memory (retried with more; a crash in a "
+                               "tool's own code ends the run after the retries)")
+                    wave_errors.append((entry.get('name', 'unknown'), msg))
                     logger.error(
-                        f"  ✗ {gbase} CRASHED ({cumulative_genome_idx}/{total_genomes}): {exc}"
+                        f"  ✗ {gbase} CRASHED ({cumulative_genome_idx}/{total_genomes}): {msg}"
                     )
 
         # A0: deterministic assembly — walk the wave in its fixed genome order
@@ -9915,9 +9964,10 @@ def main():
                     "    increase the process memory in nextflow.config"
                 )
             logger.error("Aborting iterative search due to per-genome processing errors.")
-            # A Smith-Waterman search killed for memory (fix-phase item 18): exit 137, which
-            # Nextflow retries with more memory; every other failure stops the run.
-            if all('Smith-Waterman' in msg and 'ran out of memory' in msg for _, msg in wave_errors):
+            # A tool or worker killed for memory (Smith-Waterman since fix-phase item 18; miniprot,
+            # Augustus and a worker since d6): exit 137, which Nextflow retries with more memory;
+            # every other failure stops the run.
+            if all('ran out of memory' in msg for _, msg in wave_errors):
                 sys.exit(137)
             sys.exit(1)
 

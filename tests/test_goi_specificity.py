@@ -231,7 +231,9 @@ def test_window_hits_are_deduplicated_per_query(tmp_path, monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(isr.subprocess, "run", fake_run)
-    monkeypatch.setattr(isr, "run_augmented_mmseqs_with_retries", lambda **k: (False, "skipped"))
+    # MMseqs2 finds nothing here (an empty table); a failed one stops the window since fix-phase d6.
+    monkeypatch.setattr(isr, "run_augmented_mmseqs_with_retries",
+                        lambda **k: (open(k["aug_hits_file"], "w").close(), (True, ""))[1])
     args = types.SimpleNamespace(output_dir=str(tmp_path), evalue=0.01, aug_relaxed_evalue_mult=1000.0,
                                  aug_relaxed_evalue_cap=10.0, aug_relaxed_parse_evalue_mult=10.0,
                                  aug_relaxed_identity_min=15.0, aug_relaxed_identity_factor=0.6,

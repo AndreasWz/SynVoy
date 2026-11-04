@@ -12,14 +12,14 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_on_memory_kill,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_on_memory_kill,
     )
 
 try:
@@ -1168,4 +1168,5 @@ def main():
     write_fasta(all_fasta_records, args.out_faa)
 
 if __name__ == "__main__":
-    main()
+    # A memory kill of Augustus exits 137, which Nextflow retries with more memory (fix-phase d6).
+    exit_on_memory_kill(main)

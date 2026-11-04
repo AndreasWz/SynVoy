@@ -10,13 +10,13 @@ import tempfile
 try:
     from sequence_utils import (
         load_genome, write_fasta, parse_fasta,
-        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code,
+        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code, exit_on_memory_kill,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         load_genome, write_fasta, parse_fasta,
-        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code,
+        parse_bed as _parse_bed_dicts, str2bool, set_genetic_code, exit_on_memory_kill,
     )
 
 try:
@@ -291,4 +291,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # A memory kill of Augustus exits 137, which Nextflow retries with more memory (fix-phase d6).
+    exit_on_memory_kill(main)

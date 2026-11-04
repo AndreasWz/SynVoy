@@ -45,6 +45,7 @@ workflow ADJUDICATE_AND_REPORT {
                         // rescue and of the ownership panel's GOI entry
     goi_exons           // value channel: goi_exons.faa (ANNOTATE_GOI) -> the GOI's home protein, q of
                         // the ownership panel's GOI entry
+    tree_infos          // COMPUTE_TREE.out.info: <locus>_tree.info.json per tree -> the report's trees
 
     main:
 
@@ -246,7 +247,8 @@ workflow ADJUDICATE_AND_REPORT {
         collected_phylo,
         effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS")),
         home_db,
-        goi_info
+        goi_info,
+        tree_infos.ifEmpty(file("${projectDir}/assets/sentinels/NO_TREE_INFO")).collect(sort: true)
     )
 
     emit:
