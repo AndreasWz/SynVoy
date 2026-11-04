@@ -6353,6 +6353,26 @@ def _run_figures(args, show_fragments=False, suffix=""):
                      species_map=species_map, clade_count=args.clade_count,
                      gene_legend=getattr(args, "gene_legend", True),
                      support_note=_tree_support_note(getattr(args, "report", None), tree_output))
+    _write_species_name_sources(args.output)
+
+
+def _write_species_name_sources(output):
+    """<base>_species_names.tsv beside the figures: every common name a label carries and where it
+    came from (synvoy_taxa.SOURCES; fix-phase d7). A lookup NCBI did not answer is a warning: the
+    label is then the scientific name alone, where a run with an answer shows the common name."""
+    taxa = globals().get("_synvoy_taxa")
+    if taxa is None or not getattr(taxa, "SOURCES", None):
+        return
+    path = re.sub(r"(_synteny_plot)?\.html$", "", output) + "_species_names.tsv"
+    try:
+        taxa.write_sources(path)
+    except OSError as exc:
+        print(f"  (could not write the species-names table: {exc})", file=sys.stderr)
+        return
+    missed = sorted(s for s, (src, _cn) in taxa.SOURCES.items() if src == "unreachable")
+    if missed:
+        print(f"[plot] WARNING: NCBI did not answer for the common name of {', '.join(missed)}: "
+              f"their labels show the scientific name alone ({os.path.basename(path)}).", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,20 @@ def _datasets_cli_available():
         return False
 
 
+# NCBI's datasets exits 1 when it rejects a name or an accession ("is not recognized", "not exact"):
+# an answer, not a failed lookup (first review of fix-phase d7).
+DATASETS_REJECTED = re.compile(r"not recognized|not exact|no .*found|not found", re.IGNORECASE)
+
+
+def _network_failure(what, detail):
+    """A datasets lookup that did not answer (fix-phase d7): recorded in the provenance, as the
+    order of the waves, and so the search's seeds, can follow from whether NCBI answered. A
+    rejection (DATASETS_REJECTED) is an answer and is not recorded."""
+    if DATASETS_REJECTED.search(str(detail)):
+        return
+    PROVENANCE.setdefault('network_failures', []).append(f"{what}: {str(detail).strip()[:200]}")
+
+
 def _fetch_lineage_from_accessions(accessions):
     """
     Fetch taxonomy lineage for a list of assembly accessions using NCBI
@@ -102,6 +116,7 @@ def _fetch_lineage_from_accessions(accessions):
         )
         if result.returncode != 0:
             print(f"[phylo_sort] datasets genome summary error: {result.stderr[:200]}")
+            _network_failure("datasets summary genome", f"exit {result.returncode}: {result.stderr[:200]}")
             return {}
 
         data = json.loads(result.stdout)
@@ -116,6 +131,7 @@ def _fetch_lineage_from_accessions(accessions):
 
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         print(f"[phylo_sort] Error in genome summary: {e}")
+        _network_failure("datasets summary genome", e)
         return {}
 
     if not acc_to_taxid:
@@ -133,6 +149,7 @@ def _fetch_lineage_from_accessions(accessions):
         )
         if result.returncode != 0:
             print(f"[phylo_sort] datasets taxonomy error: {result.stderr[:200]}")
+            _network_failure("datasets summary taxonomy", f"exit {result.returncode}: {result.stderr[:200]}")
             # Fall back to just species names
             for acc, name in acc_to_name.items():
                 if name:
@@ -153,6 +170,7 @@ def _fetch_lineage_from_accessions(accessions):
 
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         print(f"[phylo_sort] Error in taxonomy summary: {e}")
+        _network_failure("datasets summary taxonomy", e)
 
     # Map back to accessions
     for acc, tax_id in acc_to_taxid.items():
@@ -207,6 +225,7 @@ def _fetch_species_lineage(species_name):
             cmd, capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
+            _network_failure(f"datasets summary taxonomy {clean}", f"exit {result.returncode}: {result.stderr[:200]}")
             return None
 
         data = json.loads(result.stdout)
@@ -217,8 +236,8 @@ def _fetch_species_lineage(species_name):
             if tax_id and parents:
                 return parents + [tax_id]
 
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-        pass
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+        _network_failure(f"datasets summary taxonomy {clean}", e)
 
     return None
 

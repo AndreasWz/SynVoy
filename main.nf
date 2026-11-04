@@ -1493,7 +1493,8 @@ workflow {
             RESOLVE_SETTINGS.out.json,
             ANNOTATE_GOI.out.info.first(),
             ANNOTATE_GOI.out.exons.first(),
-            COMPUTE_TREE.out.info.map { _l, f -> f }
+            COMPUTE_TREE.out.info.map { _l, f -> f },
+            PHYLO_SORT.out.provenance
         )
 
         ADJUDICATE_AND_REPORT.out.report.view { report ->

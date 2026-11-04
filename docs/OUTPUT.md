@@ -17,6 +17,7 @@ which question**, in order of how often they're useful.
 ├── synteny_block_locus_<N>_*_with_fragments.*           same figures, fragments drawn
 ├── synteny_block_locus_<N>_gene_positions.html / .svg   gene-position map
 ├── synteny_block_locus_<N>_gene_names.tsv               gene labels used in the figures
+├── synteny_block_locus_<N>_species_names.tsv            common names in the species labels, and where each came from
 ├── locus_<N>_tree.nwk  (+ synteny_block_locus_<N>_tree.html with a real tree)
 ├── plot_inputs_synteny_block_locus_<N>/    per-genome GFF + homology table, the run's effective_params.json
 ├── regions/<locus>/                        per-genome region BED + scores, one folder per home locus
@@ -310,6 +311,8 @@ Windows of the genome-wide path (`--goi_genome_wide_path`) are not blocks and ha
 | `genome_qc`, `qc_summary` | Assembly quality of each target |
 | `failed_steps` | Only when a step that may fail without stopping the run did (since 2026-11-02): one row per failure with `step` (`RESCUE_GOI_HULL`, `RESCUE_STRONG_SYNTENY`, `RECIPROCAL_BEST_PARALOG`, `ASSIGN_LOCUS_OWNERSHIP`, `BUILD_HOME_PARALOG_PANEL` with `--require_paralog_panel false`), `genome`, `locus`, `exit` and `reason` (the last line it wrote to stderr; a crash by a signal other than a kill is recorded too, e.g. exit 139), `only: hull_rescue` when the failed ownership task checked the hull rescue's models alone, and a sentence in `warnings` each. A failed ownership check marks the calls it would have checked (`ownership_not_checked`; `summary.ownership_not_checked_calls`) |
 | `trees` | Only when a tree was computed (not with `--skip_tree` or `low_mem`; since 2026-11-02): per home locus how its tree was made, from `<locus>_tree.info.json`: IQ-TREE's `seed` (fixed, so a rerun gives the same tree), `threads`, `sequences`, and `bootstrap` (`status`: `ultrafast`, `none_fewer_than_4_sequences`, `dropped_after_failure` with the `reason`, `placeholder_tree`; `replicates`). A dropped bootstrap has a sentence in `warnings`, and the tree page (`<locus>_tree.html`) names the support under "Branch support" |
+| `genome_order` | How the target genomes were ordered into the search's waves (PHYLO_SORT's `sort_provenance.json`, one entry per distinct result; since 2026-11-02): the `strategy` (`ete3_taxonomy` from the local taxonomy database; `accession_taxonomy`, looked up at NCBI during the run; `minhash`; `alphabetical`) and `network_failures`, the NCBI lookups that did not answer, with a sentence in `warnings`. The order decides which genomes seed the later waves |
+| `downloads` | Only in easy mode (since 2026-11-02): every genome the run chose, from `download_record.tsv` beside the downloaded genomes: `accession`, `species`, `genome` (`ok` or `failed`) and `gff` (`ok` or `none`). A genome that could not be downloaded, and one that came without a GFF, have a sentence in `warnings` |
 | `home_gff_unmatched` | Only when the home GFF has genes on sequences the home FASTA does not hold (since 2026-11-02): how many (`seqids`, `of` the GFF's sequences with genes) and up to five `examples`, with a sentence in `warnings`. Those genes are neither flanking genes nor competitors of a call. A GFF that shares no sequence with the FASTA stops the run |
 | `home_genome_filter` | Only in easy mode (since 2026-11-02): what the chromosome filter removed from the downloaded home assembly, `removed_sequences` and `removed_bp` (`0` and `0` when it removed nothing); the records are listed in `home_genome/home_genome/home_genome.removed.tsv` |
 | `home_annotation` | Only in a run without a home annotation: where the home annotation and proteome came from (`source`: `predicted` or `predicted+borrowed`, `target`, `target_choice`, `target_region`, the counts `borrowed`, `predicted`, `predictions_dropped`, `proteins`, `genes_left_out_over_goi`) and `partial: true`, with a sentence in `warnings`: the home proteome holds only the predicted genes near the query's hits and the gene models transferred from one target, so `BestOtherHome` and `RealCompetitor` compare a call with these alone. Borrowed genes carry ids `borrowed_<target gene>` in every output |
@@ -418,6 +421,14 @@ full name, gene ID and where the label comes from. The interactive ribbon plot
 (`*_synteny_plot.html` and its `_view.svg` copy) has no table: hover over a gene
 for its label, full name and gene ID. The table is also written to
 `<locus>_gene_names.tsv` (and copied to `plot_inputs_<locus>/gene_names.tsv`).
+
+A species label carries the species' common name (`--common_names both`, the default) when one
+is known: from `--common_names_tsv`, the per-user cache of earlier lookups
+(`~/.cache/synvoy/common_names.tsv`), or NCBI during the run. Since 2026-11-02
+`<locus>_species_names.tsv` (also in `plot_inputs_<locus>/`) lists every common name with its
+source (`table`, `cache`, `ncbi`, `none`: NCBI has none, `unreachable`: NCBI did not answer,
+`offline`: not looked up), and a lookup NCBI did not answer is a warning in the plot log: the
+label is then the scientific name alone. A label from the cache can differ between machines.
 
 A label comes from the first source that names the gene:
 

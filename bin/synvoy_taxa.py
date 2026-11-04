@@ -18,6 +18,7 @@ returns nothing useful (e.g. niche species without curator names).
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import Optional
@@ -33,6 +34,11 @@ _CACHE: dict = {}
 _CACHE_PATH: str = ""
 _DATASETS_BIN: Optional[str] = None
 _NEGATIVE: set = set()  # names we already tried and got nothing for, this run
+# Where each name of this run came from (fix-phase d7): table, cache, ncbi, none (NCBI answered
+# without a common name), unreachable (datasets failed or ran past DATASETS_TIMEOUT_S), offline (no
+# lookup: --no_network or no datasets). A figure label then says what it rests on: the per-user
+# cache makes a label differ between machines, and a lookup that did not answer drops it.
+SOURCES: dict = {}
 
 
 def _normalise(name: str) -> str:
@@ -82,19 +88,37 @@ def common_name(scientific: str) -> Optional[str]:
     if not norm:
         return None
     if norm in _OVERRIDES:
+        SOURCES.setdefault(norm, ("table", _OVERRIDES[norm]))
         return _OVERRIDES[norm] or None
     if norm in _CACHE:
+        SOURCES.setdefault(norm, ("cache", _CACHE[norm]))
         return _CACHE[norm] or None
     if norm in _NEGATIVE:
         return None
     if _DATASETS_BIN:
-        cn = _query_datasets_cli(norm)
+        cn, answered = _query_datasets_cli(norm)
         if cn:
             _CACHE[norm] = cn
             _persist_cache_entry(norm, cn)
+            SOURCES[norm] = ("ncbi", cn)
             return cn
+        SOURCES[norm] = ("none" if answered else "unreachable", "")
+    else:
+        SOURCES[norm] = ("offline", "")
     _NEGATIVE.add(norm)
     return None
+
+
+def write_sources(path: str) -> None:
+    """The run's species names and where each came from (SOURCES), as a TSV beside the figures."""
+    with open(path, "w", newline="") as fh:
+        fh.write("# SynVoy species names: the common name each figure label carries, and its source "
+                 "(table, cache = the per-user cache of an earlier lookup, ncbi, none = NCBI has none, "
+                 "unreachable = NCBI did not answer, offline = not looked up).\n")
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["scientific_name", "common_name", "source"])
+        for sci in sorted(SOURCES):
+            w.writerow([sci, SOURCES[sci][1], SOURCES[sci][0]])
 
 
 def label_for_species(scientific: str, mode: str = "both") -> str:
@@ -126,11 +150,16 @@ def _read_tsv(path: str):
             yield sci, common
 
 
-def _query_datasets_cli(name: str) -> Optional[str]:
+# NCBI's datasets exits 1 when it rejects a name ("The taxonomy name ... is not recognized", "not
+# exact"): that is an answer, not a failed lookup (first review of fix-phase d7).
+DATASETS_REJECTED = re.compile(r"not recognized|not exact|no .*found|not found", re.IGNORECASE)
+
+
+def _query_datasets_cli(name: str):
     """Shell out to `datasets summary taxonomy taxon ...` and parse the
-    response. Returns the curator common name, or None on any failure."""
+    response. Returns (the curator common name or None, whether NCBI answered)."""
     if not _DATASETS_BIN:
-        return None
+        return None, False
     try:
         proc = subprocess.run(
             [_DATASETS_BIN, "summary", "taxonomy", "taxon", name,
@@ -139,9 +168,11 @@ def _query_datasets_cli(name: str) -> Optional[str]:
             timeout=DATASETS_TIMEOUT_S,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
+        return None, False
+    if proc.returncode != 0:
+        return None, bool(DATASETS_REJECTED.search(proc.stderr or ""))
+    if not proc.stdout.strip():
+        return None, True
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -154,8 +185,8 @@ def _query_datasets_cli(name: str) -> Optional[str]:
         cn = (tax.get("curator_common_name")
               or _first_common_name(tax.get("other_names", {})))
         if cn:
-            return cn.strip()
-    return None
+            return cn.strip(), True
+    return None, True
 
 
 def _first_common_name(other_names) -> Optional[str]:

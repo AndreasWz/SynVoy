@@ -2488,6 +2488,32 @@ def copies_in_slot_by_genome(records, home_copies):
     return out
 
 
+def load_sort_provenance(folder):
+    """The sort_provenance.json files of PHYLO_SORT (one per home locus; fix-phase d7): per
+    file its strategy and the NCBI lookups that did not answer, unique, sorted. [] without any."""
+    seen = set()
+    for root, _dirs, files in os.walk(folder or ""):
+        for name in files:
+            if name != "sort_provenance.json":
+                continue
+            try:
+                with open(os.path.join(root, name)) as fh:
+                    p = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(p, dict):
+                seen.add((p.get("strategy") or "", tuple(p.get("network_failures") or ())))
+    return [{"strategy": s, **({"network_failures": list(f)} if f else {})} for s, f in sorted(seen)]
+
+
+def load_download_record(path):
+    """Rows of easy mode's download_record.tsv (fix-phase d7): accession, species, genome, gff."""
+    if not path or not os.path.isfile(path):
+        return []
+    with open(path, newline="") as fh:
+        return [dict(r) for r in csv.DictReader(fh, delimiter="\t")]
+
+
 def load_tree_infos(folder):
     """{locus: info} of COMPUTE_TREE's <locus>_tree.info.json (fix-phase d6): seed, threads,
     sequences and the bootstrap (status ultrafast, none_fewer_than_4_sequences,
@@ -2656,6 +2682,16 @@ def main():
              "threads, the bootstrap, also one dropped after a failure), written as trees.",
     )
     parser.add_argument(
+        "--sort_provenance_dir", default=None,
+        help="PHYLO_SORT's sort_provenance.json files (any depth): how the target genomes were "
+             "ordered, and the NCBI lookups that did not answer, written as genome_order.",
+    )
+    parser.add_argument(
+        "--download_record", default=None,
+        help="download_record.tsv of easy mode's genome download: the genomes and GFFs that did "
+             "not arrive are named in warnings (downloads).",
+    )
+    parser.add_argument(
         "--allow-empty",
         action="store_true",
         help="Do not exit non-zero when the staging directories contain no GFFs, scores, or hits.",
@@ -2689,6 +2725,29 @@ def main():
     home_filter = load_goi_info_block(args.goi_info, "home_filter")
     if home_filter is not None:
         report["home_genome_filter"] = home_filter
+    order = load_sort_provenance(args.sort_provenance_dir)
+    if order:
+        report["genome_order"] = order
+        for o in order:
+            if o.get("network_failures"):
+                report.setdefault("warnings", []).append(
+                    f"NCBI did not answer while the target genomes were ordered ({o['network_failures'][0]}"
+                    + (f"; {len(o['network_failures']) - 1} more" if len(o["network_failures"]) > 1 else "")
+                    + f"): they were ordered by {o.get('strategy')}. The order of the search waves, and "
+                    "so the seeds, can differ from a run where NCBI answered (genome_order).")
+    downloads = load_download_record(args.download_record)
+    if downloads:
+        report["downloads"] = downloads
+        failed = [d["accession"] for d in downloads if d["genome"] == "failed"]
+        no_gff = [d["accession"] for d in downloads if d["genome"] == "ok" and d["gff"] == "none"]
+        if failed:
+            report.setdefault("warnings", []).append(
+                f"{len(failed)} genome(s) the run chose could not be downloaded and were not searched: "
+                f"{', '.join(failed)} (downloads).")
+        if no_gff:
+            report.setdefault("warnings", []).append(
+                f"{len(no_gff)} downloaded genome(s) came without a GFF: {', '.join(no_gff)}; their genes "
+                "carry no target annotation (downloads).")
     trees = load_tree_infos(args.tree_info_dir)
     if trees:
         report["trees"] = trees
@@ -2697,6 +2756,13 @@ def main():
             if boot.get("status") == "dropped_after_failure":
                 report.setdefault("warnings", []).append(
                     f"The {locus} tree has no branch support: {boot.get('reason', '')} (trees).")
+    uniprot = load_goi_info_block(args.goi_info, "uniprot_lookup")
+    if uniprot and uniprot.get("status") == "failed":
+        # Its names can decide which home gene is the GOI (fix-phase d7).
+        report.setdefault("warnings", []).append(
+            f"UniProt did not answer for {uniprot.get('query_id')} ({uniprot.get('error', '')}): the home "
+            "gene of the GOI was chosen without the query's UniProt names (goi_info.json, "
+            "uniprot_lookup); with an answer another home gene can be chosen.")
     unmatched = load_goi_info_block(args.goi_info, "home_gff_unmatched")
     if unmatched:
         report["home_gff_unmatched"] = unmatched

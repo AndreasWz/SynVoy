@@ -46,6 +46,7 @@ workflow ADJUDICATE_AND_REPORT {
     goi_exons           // value channel: goi_exons.faa (ANNOTATE_GOI) -> the GOI's home protein, q of
                         // the ownership panel's GOI entry
     tree_infos          // COMPUTE_TREE.out.info: <locus>_tree.info.json per tree -> the report's trees
+    sort_provenance     // PHYLO_SORT.out.provenance: how the genomes were ordered -> genome_order
 
     main:
 
@@ -248,7 +249,9 @@ workflow ADJUDICATE_AND_REPORT {
         effective_params.ifEmpty(file("${projectDir}/assets/sentinels/NO_EFFECTIVE_PARAMS")),
         home_db,
         goi_info,
-        tree_infos.ifEmpty(file("${projectDir}/assets/sentinels/NO_TREE_INFO")).collect(sort: true)
+        tree_infos.ifEmpty(file("${projectDir}/assets/sentinels/NO_TREE_INFO")).collect(sort: true),
+        sort_provenance.ifEmpty(file("${projectDir}/assets/sentinels/NO_SORT_PROVENANCE")).collect(sort: true),
+        genomes_dir
     )
 
     emit:

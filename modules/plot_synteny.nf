@@ -40,6 +40,8 @@ process PLOT_SYNTENY {
     path "*_tree.html", emit: tree, optional: true
     // Label, full name and source of every home gene, as drawn in the figures.
     path "*_gene_names.tsv", emit: gene_names, optional: true
+    // Where each species' common name came from (fix-phase d7); none with --common_names off.
+    path "*_species_names.tsv", emit: species_names, optional: true
     // Ribbon plot + anchor grid that also draw ModelStatus=fragment GOI models
     // (hidden in the default figures); written only when a run has fragments.
     path "*_with_fragments.*", emit: with_fragments, optional: true
@@ -158,6 +160,9 @@ process PLOT_SYNTENY {
     # looks the names up again.
     if [ -e ${home_bed.baseName}_gene_names.tsv ]; then
         cp ${home_bed.baseName}_gene_names.tsv "\$inputs_dir/gene_names.tsv"
+    fi
+    if [ -e ${home_bed.baseName}_species_names.tsv ]; then
+        cp ${home_bed.baseName}_species_names.tsv "\$inputs_dir/species_names.tsv"
     fi
     """
 }

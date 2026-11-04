@@ -24,6 +24,8 @@ process GENERATE_REPORT {
     path goi_info              // ANNOTATE_GOI's goi_info.json: in easy mode what the home
                                // chromosome filter removed (home_filter) -> home_genome_filter
     path tree_infos, stageAs: 'tree_info/?/*'  // <locus>_tree.info.json of COMPUTE_TREE -> trees
+    path sort_provenances, stageAs: 'sort_provenance/?/*'  // PHYLO_SORT's sort_provenance.json -> genome_order
+    path genomes_dir           // the target genomes: easy mode's download_record.tsv -> downloads
 
     output:
     path "synvoy_report.json", emit: report
@@ -124,6 +126,8 @@ process GENERATE_REPORT {
         --home_db_dir ${home_db} \\
         --goi_info ${goi_info} \\
         --tree_info_dir staged_results/tree_info \\
+        --sort_provenance_dir sort_provenance \\
+        --download_record ${genomes_dir}/download_record.tsv \\
         --output synvoy_report.json
     """
 }

@@ -55,11 +55,17 @@ except ImportError:
 # UNIPROT NAME LOOKUP
 # =============================================================================
 
+# The UniProt lookup of this run, for goi_info.json (fix-phase d7): {} when none was tried (the
+# query id is no UniProt accession), else status ok or failed, with the error or the names found.
+UNIPROT_LOOKUP = {}
+
+
 def fetch_uniprot_names(query_id):
     """
     Query UniProt REST API for gene names and synonyms.
     Returns list of gene name strings (primary + synonyms).
-    Returns empty list on failure (no internet, invalid ID, etc.)
+    Returns empty list on failure (no internet, invalid ID, etc.); UNIPROT_LOOKUP records which
+    (the names can decide which home gene is the GOI, so the run records whether UniProt answered).
     """
     names = []
 
@@ -94,8 +100,15 @@ def fetch_uniprot_names(query_id):
             names.append(rec_name['fullName']['value'])
 
         print(f"[UniProt] Found names for {query_id}: {names}")
+        UNIPROT_LOOKUP.update(query_id=query_id, status="ok", names=list(names))
+    except urllib.error.HTTPError as e:
+        # 4xx: UniProt answered that it has no such entry (first review of fix-phase d7).
+        print(f"[UniProt] Could not fetch names for {query_id}: {e}")
+        UNIPROT_LOOKUP.update(query_id=query_id, status="not_found" if 400 <= e.code < 500 else "failed",
+                              error=str(e)[:200])
     except Exception as e:
         print(f"[UniProt] Could not fetch names for {query_id}: {e}")
+        UNIPROT_LOOKUP.update(query_id=query_id, status="failed", error=str(e)[:200])
 
     return names
 
@@ -2598,6 +2611,10 @@ def main():
     if removed_given:
         info['home_filter'] = {'removed_sequences': len(removed_records),
                                'removed_bp': sum(n for _r, n in removed_records)}
+    # Whether UniProt answered, when the query id is a UniProt accession (fix-phase d7): its
+    # names can decide which home gene is the GOI. Absent when no lookup was tried.
+    if UNIPROT_LOOKUP:
+        info['uniprot_lookup'] = dict(UNIPROT_LOOKUP)
     # Only when the home GFF names sequences the FASTA does not hold (fix-phase d4, item 31).
     if home_gff_unmatched:
         info['home_gff_unmatched'] = home_gff_unmatched

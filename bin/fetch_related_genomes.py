@@ -30,20 +30,51 @@ except ImportError:
 from sequence_utils import strip_species_qualifier
 
 
-def _download_one(accession: str, outdir: str) -> str | None:
-    """Download one genome, using robust FTP+wget if available."""
+# What happened to each assembly the run chose (fix-phase d7): written as download_record.tsv beside
+# the genomes; the report names a genome or a GFF that did not arrive. Until 2026-11-02 a failed
+# download left only "downloaded N/M", and a missing GFF nothing at all.
+DOWNLOAD_RECORD: list = []
+DOWNLOAD_RECORD_FILE = "download_record.tsv"
+
+
+def _download_one(accession: str, outdir: str, species: str = "") -> str | None:
+    """Download one genome, using robust FTP+wget if available, and record what arrived."""
     if _HAS_ROBUST_DOWNLOADER:
         from pathlib import Path as _Path
-        fna, _ = _download_robust(
+        fna, gff = _download_robust(
             accession,
             output_path=_Path(outdir),
             fna_name=f"{accession}.fna",
             gff_name=f"{accession}.gff",
             max_retries=5,
         )
-        return str(fna) if fna else None
-    # Legacy fallback
-    return download_genome(accession, outdir)
+        fna = str(fna) if fna else None
+    else:
+        # Legacy fallback
+        fna = download_genome(accession, outdir)
+        gff = Path(outdir) / f"{accession}.gff"
+    has_gff = bool(gff) and Path(gff).exists() and Path(gff).stat().st_size > 0
+    DOWNLOAD_RECORD.append((accession, species, "ok" if fna else "failed",
+                            "ok" if fna and has_gff else ("none" if fna else "")))
+    return fna
+
+
+def write_download_record(outdir) -> None:
+    """download_record.tsv: accession, species, genome (ok/failed), gff (ok/none); and a WARNING for
+    each genome or GFF that did not arrive."""
+    path = Path(outdir) / DOWNLOAD_RECORD_FILE
+    with open(path, "w") as fh:
+        fh.write("accession\tspecies\tgenome\tgff\n")
+        for row in DOWNLOAD_RECORD:
+            fh.write("\t".join(row) + "\n")
+    failed = [a for a, _s, g, _f in DOWNLOAD_RECORD if g == "failed"]
+    no_gff = [a for a, _s, g, f in DOWNLOAD_RECORD if g == "ok" and f == "none"]
+    if failed:
+        print(f"WARNING: {len(failed)} chosen genome(s) could not be downloaded and are not searched: "
+              f"{', '.join(failed)} ({path})", file=sys.stderr)
+    if no_gff:
+        print(f"WARNING: {len(no_gff)} downloaded genome(s) came without a GFF: {', '.join(no_gff)}",
+              file=sys.stderr)
 
 
 def run_safe_command(cmd, check=True):
@@ -962,6 +993,7 @@ def write_outputs(assemblies, downloaded_paths, output_dir):
         for path in downloaded_paths:
             f.write(f"{path}\n")
     print(f"Genome paths written to: {manifest_path}")
+    write_download_record(output_dir)
 
     downloaded_acc = {Path(p).stem for p in downloaded_paths}
     selected = [a for a in assemblies if a.get("accession") in downloaded_acc]
@@ -1138,7 +1170,7 @@ def main():
         print(f"\nDownloading genomes to {args.outdir}/...")
         downloaded = []
         for asm in assemblies:
-            fna_path = _download_one(asm["accession"], args.outdir)
+            fna_path = _download_one(asm["accession"], args.outdir, asm.get("species", ""))
             if fna_path:
                 downloaded.append(fna_path)
 
@@ -1294,7 +1326,7 @@ def main():
     print(f"\nDownloading genomes to {args.outdir}/...")
     downloaded = []
     for asm in assemblies:
-        fna_path = _download_one(asm["accession"], args.outdir)
+        fna_path = _download_one(asm["accession"], args.outdir, asm.get("species", ""))
         if fna_path:
             downloaded.append(fna_path)
 
