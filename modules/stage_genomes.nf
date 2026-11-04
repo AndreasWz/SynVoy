@@ -15,6 +15,8 @@ process STAGE_GENOMES {
     
     script:
     """
+    # Byte order for the globs and sorts below, whatever the user's locale (fix-phase d8).
+    export LC_ALL=C
     mkdir staged_genomes
     # Link (don't copy) the input genomes into one directory. Nextflow already
     # staged them into this task dir, so the old `cp -f -L -r` dereferenced those

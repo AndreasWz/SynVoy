@@ -408,10 +408,30 @@ def test_distances_follow_the_expansion_measured_in_the_target(tmp_path):
 def test_genome_size_ratio_is_the_fallback_when_order_is_not_conserved(tmp_path):
     g = _geometry(genome=1_000_000)
     genome = tmp_path / "t.fna"
-    genome.write_text("A" * 3_000_000)
+    genome.write_text(">chr1\n" + "A" * 3_000_000 + "\n")
     out = isr.genome_scale_args(_args(g), [], str(genome), "t")
     assert out.distances["expansion_source"] == "genome size"
     assert out.expansion == pytest.approx(3.0, rel=0.01)
+
+
+def test_the_genome_size_is_its_bases_not_its_file_size(tmp_path):
+    """Fix-phase d8 (item 33): the file size counted headers and line ends (x 4 for .gz), so a longer name
+    or another line width moved the distances. The bases do not move."""
+    import gzip
+    g = _geometry(genome=1_000_000)
+    seq = "ACGT" * 750_000
+    forms = {"short.fna": ">c1\n" + seq + "\n",
+             "long.fna": ">NODE_1_length_3000000_cov_1.0 a long description\n"
+                         + "\n".join(seq[i:i + 60] for i in range(0, len(seq), 60)) + "\n"}
+    ratios = []
+    for name, text in forms.items():
+        (tmp_path / name).write_text(text)
+        ratios.append(isr.genome_scale_args(_args(g), [], str(tmp_path / name), "t").expansion)
+    with gzip.open(tmp_path / "z.fna.gz", "wt") as fh:
+        fh.write(forms["long.fna"])
+    ratios.append(isr.genome_scale_args(_args(g), [], str(tmp_path / "z.fna.gz"), "t").expansion)
+    assert ratios == [3.0, 3.0, 3.0]
+    assert isr.genome_scale_args(_args(g), [], str(tmp_path / "short.fna"), "t", target_bp=2_000_000).expansion == 2.0
 
 
 def test_a_distance_set_in_bp_is_used_as_it_is(tmp_path):

@@ -124,7 +124,7 @@ workflow ADJUDICATE_AND_REPORT {
     BUILD_HOME_PARALOG_PANEL(
         home_gff,
         home_db.map { d -> d.resolve('home_proteome.faa') },
-        locus_beds.flatten().collect(),
+        locus_beds.flatten().collect(sort: true),
         query_faa,
         effective_params,
         goi_info,

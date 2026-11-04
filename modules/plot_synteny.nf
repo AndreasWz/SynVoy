@@ -84,9 +84,10 @@ process PLOT_SYNTENY {
     # Subset home GFF to synteny block region (+/- 100kb padding) to avoid
     # copying the entire (potentially 100+ MB) annotation file.
     if [ "$home_gff" != "NO_GFF" ]; then
-        REGION_CHROM=\$(awk '{print \$1}' $home_bed | sort -u | head -1)
-        REGION_START=\$(awk '{print \$2}' $home_bed | sort -n | head -1)
-        REGION_END=\$(awk '{print \$3}' $home_bed | sort -n | tail -1)
+        # Byte order, whatever the user's locale (fix-phase d8): the first scaffold name decides.
+        REGION_CHROM=\$(awk '{print \$1}' $home_bed | LC_ALL=C sort -u | head -1)
+        REGION_START=\$(awk '{print \$2}' $home_bed | LC_ALL=C sort -n | head -1)
+        REGION_END=\$(awk '{print \$3}' $home_bed | LC_ALL=C sort -n | tail -1)
         PAD=100000
         PADDED_START=\$(( REGION_START > PAD ? REGION_START - PAD : 0 ))
         PADDED_END=\$(( REGION_END + PAD ))

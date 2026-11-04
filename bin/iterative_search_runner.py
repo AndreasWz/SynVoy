@@ -3525,7 +3525,7 @@ def _expansion_note(source, run_anchors):
     return f"not measured; {longest}"
 
 
-def genome_scale_args(args, flanking_hits, genome_path, genome_name=''):
+def genome_scale_args(args, flanking_hits, genome_path, genome_name='', target_bp=None):
     """A copy of ``args`` whose distances are in base pairs for THIS target genome.
 
     Distances that describe a neighbourhood are given in gene pitches and converted with
@@ -3534,7 +3534,8 @@ def genome_scale_args(args, flanking_hits, genome_path, genome_name=''):
     coordinates in the query set, every distance keeps its former fixed value.
 
     The copy also carries ``distances`` (what was used and where each value came from,
-    written into the result GFF) and ``expansion``.
+    written into the result GFF) and ``expansion``. ``target_bp``: the genome's length, the sum of
+    its sequence lengths (read from the file when not given).
     """
     import copy as _copy
     geometry = getattr(args, 'home_geometry', None)
@@ -3542,8 +3543,11 @@ def genome_scale_args(args, flanking_hits, genome_path, genome_name=''):
     home_bp = (geometry or {}).get('home_genome_bp')
     if home_bp:
         try:
-            target_bp = os.path.getsize(genome_path) * (4 if str(genome_path).endswith(('.gz', '.gzip')) else 1)
-            size_ratio = target_bp / float(home_bp)
+            # The bases, as for the home genome (fix-phase d8, item 33): the file size, headers
+            # and line ends included and x 4 for .gz, moved with a name's length or line width.
+            if target_bp is None:
+                target_bp = sum(stream_fasta_lengths(genome_path).values())
+            size_ratio = target_bp / float(home_bp) if target_bp else None
         except OSError:
             size_ratio = None
     expansion, run_anchors, source = synvoy_scale.target_expansion(geometry, flanking_hits, size_ratio=size_ratio)
@@ -7692,7 +7696,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             logger.info(f"[{genome_name}] No flanking anchors found; falling back to GOI/mixed hits for block seeding.")
 
         # From here on `args` holds this genome's distances in base pairs.
-        args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name)
+        args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name,
+                                 target_bp=sum(sequence_names.values()))
         # What the blocks of this genome share for the E-values of their candidates
         # (block_place_terms, finalize_place_evalues) and the decoy calls (decoy mode).
         args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},

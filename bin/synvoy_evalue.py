@@ -134,8 +134,12 @@ def ranks_around_goi(genes: Dict[str, Dict[str, int]],
     if not goi:
         return {}
     lo, hi = goi
-    left = sorted((g for g, c in genes.items() if c['end'] <= lo), key=lambda g: -genes[g]['end'])
-    right = sorted((g for g, c in genes.items() if c['start'] >= hi), key=lambda g: genes[g]['start'])
+    # Total keys (fix-phase d8, item 24): genes tied on the one coordinate kept the dict's order,
+    # which came from a set (string-hash order).
+    left = sorted((g for g, c in genes.items() if c['end'] <= lo),
+                  key=lambda g: (-genes[g]['end'], -genes[g]['start'], g))
+    right = sorted((g for g, c in genes.items() if c['start'] >= hi),
+                   key=lambda g: (genes[g]['start'], genes[g]['end'], g))
     ranks = {g: -i for i, g in enumerate(left, 1)}
     ranks.update({g: i for i, g in enumerate(right, 1)})
     return ranks

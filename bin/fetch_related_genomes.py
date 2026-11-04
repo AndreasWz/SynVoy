@@ -813,7 +813,7 @@ def _extract_best_gff(extract_dir: Path, gff_target: Path) -> str:
     """
     gff_files = []
     for pat in ("*.gff", "*.gff3", "*.gff.gz", "*.gff3.gz"):
-        gff_files.extend(extract_dir.rglob(pat))
+        gff_files.extend(sorted(extract_dir.rglob(pat)))   # file-system order otherwise (d8)
     if not gff_files:
         return "absent"
 

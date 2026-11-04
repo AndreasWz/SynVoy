@@ -2610,6 +2610,9 @@ def load_run_settings(path):
     # The resources the run used (fix-phase d6): absent in a file written before 2026-11-02.
     if data.get("run_resources"):
         out["run_resources"] = data["run_resources"]
+    # The tools' versions (fix-phase d8): absent before 2026-11-02.
+    if data.get("tool_versions"):
+        out["tool_versions"] = data["tool_versions"]
     return out
 
 

@@ -399,6 +399,48 @@ def _read_json_or_empty(path: str) -> dict | None:
         return None
 
 
+# The tools whose versions the run records (fix-phase d8, item 24): environment.yml gives lower bounds
+# only, so two machines can run other versions of the same code. (name, command, stream, pattern)
+TOOL_VERSION_COMMANDS = [
+    ("mmseqs", ["mmseqs", "version"], "stdout", r"(\S+)"),
+    ("tblastn", ["tblastn", "-version"], "stdout", r"tblastn: (\S+)"),
+    ("blastp", ["blastp", "-version"], "stdout", r"blastp: (\S+)"),
+    ("miniprot", ["miniprot", "--version"], "stdout", r"(\S+)"),
+    ("samtools", ["samtools", "--version"], "stdout", r"samtools (\S+)"),
+    ("mafft", ["mafft", "--version"], "stderr", r"v(\S+)"),
+    ("iqtree2", ["iqtree2", "--version"], "stdout", r"version (\S+)"),
+    ("iqtree", ["iqtree", "--version"], "stdout", r"version (\S+)"),       # compute_tree.py's fallback
+    ("prodigal", ["prodigal", "-v"], "stderr", r"Prodigal V([0-9.]+)"),
+    ("augustus", ["augustus", "--version"], "stderr", r"AUGUSTUS \((\S+)\)"),
+    ("datasets", ["datasets", "--version"], "stdout", r"version:?\s*(\S+)"),
+]
+
+
+def tool_versions() -> dict:
+    """{tool: version} of the tools on PATH ('not found' without one, 'unknown' when its version
+    cannot be read), with python and the parasail module (fix-phase d8)."""
+    import re
+    import shutil
+    import subprocess
+    out = {"python": sys.version.split()[0]}
+    try:
+        import parasail  # type: ignore
+        out["parasail"] = getattr(parasail, "__version__", "unknown")
+    except ImportError:
+        out["parasail"] = "not found"
+    for name, cmd, stream, rx in TOOL_VERSION_COMMANDS:
+        if not shutil.which(cmd[0]):
+            out[name] = "not found"
+            continue
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            m = re.search(rx, (proc.stdout if stream == "stdout" else proc.stderr) or "")
+            out[name] = m.group(1) if m else "unknown"
+        except (OSError, subprocess.TimeoutExpired):
+            out[name] = "unknown"
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--auto_preset", default="",
@@ -449,6 +491,8 @@ def main() -> None:
                     help="A resource value the run used (Nextflow profile, MMseqs2 sensitivity and "
                          "split limit, CPUs, memory, skip_tree), written as run_resources: a "
                          "profile changes these without a settings key (fix-phase d6)")
+    ap.add_argument("--tool_versions", action="store_true",
+                    help="Record the versions of the run's tools (tool_versions; fix-phase d8)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 
@@ -546,6 +590,8 @@ def main() -> None:
 
     if args.run_resource:
         result["run_resources"] = dict(kv.split("=", 1) for kv in args.run_resource if "=" in kv)
+    if args.tool_versions:
+        result["tool_versions"] = tool_versions()
     with open(args.output, "w") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
 

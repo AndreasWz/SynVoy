@@ -128,7 +128,9 @@ def home_geometry_from_headers(headers: Iterable[str]) -> Optional[Dict[str, Any
             records[record_id] = (int(m.group(1)) + int(m.group(2))) // 2
 
     genes: Dict[str, Dict[str, int]] = {}
-    for gene in set(spans) | set(exons):
+    # Sorted (fix-phase d8, item 24): the set's order follows the string hash, and so did the
+    # order of `genes`, which ranks_around_goi breaks ties by.
+    for gene in sorted(set(spans) | set(exons)):
         parts = sorted(exons.get(gene, []))
         if gene in spans:
             start, end = spans[gene]

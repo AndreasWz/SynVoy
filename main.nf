@@ -1049,7 +1049,7 @@ workflow {
             uiStatus('RUN ', 'STAGE_GENOMES', 'Loading target genomes list')
             // Accept a folder of genomes, a glob ("genomes/*.fna"), a comma-separated
             // list ("a.fna,b.fna"), or Nextflow list syntax (see resolveTargetGenomeFiles).
-            target_genomes_list = channel.fromPath(resolveTargetGenomeFiles(params.target_genomes)).collect()
+            target_genomes_list = channel.fromPath(resolveTargetGenomeFiles(params.target_genomes)).collect(sort: true)
 
             // Show count
             target_genomes_list.view { genomes ->

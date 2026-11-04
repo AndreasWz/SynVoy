@@ -48,6 +48,7 @@ process RESOLVE_EFFECTIVE_PARAMS {
     // The run's resources as it used them (fix-phase d6): a profile (laptop_safe, low_mem,
     // docker_max) changes these and effective_params.json did not say so.
     def resources = [nextflow_profile: workflow.profile, executor: task.executor,
+                     nextflow_version: workflow.nextflow.version,
                      mmseqs_sensitivity: params.mmseqs_sensitivity,
                      mmseqs_split_memory_limit: params.mmseqs_split_memory_limit,
                      iterative_search_cpus: params.iterative_search_cpus,
@@ -77,6 +78,7 @@ __SYNVOY_DEFAULTS__
         --defaults defaults.json \\
         --shipped_config ${projectDir}/nextflow.config \\
         ${resources_arg} \\
+        --tool_versions \\
         ${override_arg} \\
         ${disable_arg} \\
         --output effective_params.json
