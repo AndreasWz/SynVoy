@@ -46,14 +46,14 @@ from pathlib import Path
 
 try:
     from sequence_utils import (
-        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate,
+        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate,
+        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
@@ -384,6 +384,8 @@ def write_home_proteome(merged_gff, genome, goi_rows, out_dir, record):
         if prot:
             proteins.append((gid, prot))
             coords.append((gid, info['chrom'], s + 1, e, info['strand']))
+    # A gene id with whitespace would be read by its first word (fix-phase d4, item 32).
+    check_gene_ids([gid for gid, _p in proteins], merged_gff, os.path.join(out_dir, 'home_proteome.faa'))
     write_fasta(proteins, os.path.join(out_dir, 'home_proteome.faa'))
     with open(os.path.join(out_dir, 'home_genes.tsv'), 'w') as fh:
         fh.write("gene_id\tchrom\tstart\tend\tstrand\n")
@@ -446,6 +448,7 @@ def main():
 
     def finish(borrowed, dropped, target_name, proteins):
         write_merged_gff(args.output_gff, args.predicted_gff, dropped, borrowed, target_name)
+        check_gene_ids([gid for gid, _n, _p in proteins], args.output_gff, args.output_proteins)
         write_fasta([(f"{gid} {name}", p) for gid, name, p in proteins], args.output_proteins)
         record.update(borrowed=len(borrowed), predictions_dropped=len(dropped),
                       predicted=len(predicted) - len(dropped))

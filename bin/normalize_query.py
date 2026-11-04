@@ -17,10 +17,10 @@ import os
 import sys
 
 try:
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of
 
 
 NUC_ALPHABET = set("ACGTUNRYWSKMBDHV")
@@ -132,6 +132,17 @@ def main():
         sys.exit(1)
 
     header, clean_id, seq = records[0]
+    # An id of the form SynVoy gives the pieces of a protein reads as a piece: the search then
+    # has no full-length GOI query and finds nothing in silence (fix-phase d4, item 36).
+    if "|exon_" in clean_id or fragment_of(clean_id) is not None:
+        print(
+            f"ERROR: The query id '{clean_id}' in '{args.input}' holds '|exon_', '|frag_' or "
+            f"'|slide_', the form SynVoy gives the pieces of a protein, so the search would read "
+            f"the query as a piece of itself and have no full-length query. Rename the query in "
+            f"its header (for example '{clean_id.split('|')[0]}').",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if len(records) > 1:
         print(

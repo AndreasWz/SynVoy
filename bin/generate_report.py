@@ -2564,6 +2564,13 @@ def main():
     home_filter = load_goi_info_block(args.goi_info, "home_filter")
     if home_filter is not None:
         report["home_genome_filter"] = home_filter
+    unmatched = load_goi_info_block(args.goi_info, "home_gff_unmatched")
+    if unmatched:
+        report["home_gff_unmatched"] = unmatched
+        report.setdefault("warnings", []).append(
+            f"{unmatched.get('seqids')} of the home GFF's {unmatched.get('of')} sequences with genes are "
+            f"not in the home FASTA (e.g. {', '.join(unmatched.get('examples', [])[:3])}): their genes "
+            "are no flanking genes and no competitors of a call (home_gff_unmatched).")
     slot_units = copies_in_slot_by_genome(report.get("goi_dedup", {}).get("records", []),
                                           (report["run_settings"] or {}).get("home_copies"))
     if slot_units:

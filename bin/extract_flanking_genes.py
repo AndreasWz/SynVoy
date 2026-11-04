@@ -12,14 +12,14 @@ try:
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids,
     )
 
 try:
@@ -959,6 +959,11 @@ def main():
             dedup_key = f"{gene['chrom']}:{gene['start']}-{gene['end']}:{gid}"
             if dedup_key in seen: continue
             seen.add(dedup_key)
+            if not gene.get('placeholder'):
+                # A flanking gene is an MMseqs2 query: an id MMseqs2 rewrites, or one with
+                # whitespace, lost its model in silence (fix-phase d4, items 29 and 32).
+                check_gene_ids([gid], args.gff if args.gff not in ('', 'NO_GFF') else 'the predicted home genes',
+                               args.out_faa, mmseqs=True)
             display_label = _preferred_gene_label(gene).replace('\t', ' ').strip() or gid
             seq_header = gid if display_label == gid else f"{gid} label={display_label}"
             

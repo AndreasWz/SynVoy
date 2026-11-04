@@ -186,6 +186,63 @@ def first_word(header: str) -> str:
     return m.group(0) if m else "unknown"
 
 
+def mmseqs_reported_name(word: str) -> str:
+    """The name MMseqs2 reports in its tables for a sequence whose header's first word is
+    ``word`` (measured on MMseqs2 18-8cc5c, fix-phase item 25): a word that starts with a database
+    tag by the accession inside (cl|, sp|, tr|, ref|, pdb|, bbs|, lcl|, gb| the 2nd field; pir||,
+    prf||, gnl|, pat| the 3rd; gi| the 4th; "" when that field is missing), a leading uc or
+    consensus_ dropped (ucon_5 -> on_5, consensus_24 -> 24). Any other word as it stands. samtools,
+    miniprot and tblastn keep the word."""
+    if word.startswith('uc'):
+        return word[2:].split('|')[0]
+    if word.startswith('consensus_'):
+        return word[len('consensus_'):]
+    p = word.split('|')
+    if len(p) < 2:
+        return word
+    if p[0] in ('cl', 'sp', 'tr', 'ref', 'pdb', 'bbs', 'lcl', 'gb'):
+        return p[1]
+    if word.startswith(('pir||', 'prf||')) or p[0] in ('gnl', 'pat'):
+        return p[2] if len(p) > 2 else ''
+    if p[0] == 'gi':
+        return p[3] if len(p) > 3 else ''
+    return word
+
+
+def id_problem(name: str, whitespace: bool = True, pipe: bool = False,
+               mmseqs: bool = True) -> Optional[str]:
+    """Why SynVoy cannot use ``name`` as a sequence's or gene's id, or None (fix-phase d4: the
+    names that lost results in silence). ``whitespace``: a FASTA record of it is read by its first
+    word, so ``ORF 1`` and ``ORF 2`` are one id (item 32). ``pipe``: a predicted home gene's id
+    holds its scaffold's name and is read up to the first '|' (item 30). ``mmseqs``: MMseqs2
+    reports it by another name, so its hits are filed under a name nothing else uses (item 29)."""
+    if whitespace and re.search(r"\s", name):
+        return ("holds whitespace: a FASTA record of it is read by its first word, so two such "
+                "ids can read as one")
+    if pipe and "|" in name:
+        return ("holds '|': the ids of the home genes predicted on it hold the sequence's name, "
+                "and SynVoy reads a gene id up to its first '|', so every gene there reads as one")
+    if mmseqs:
+        reported = mmseqs_reported_name(name)
+        if reported != name:
+            return (f"is reported by MMseqs2 as {reported!r} (MMseqs2 reads a name that starts with "
+                    "a database tag by the accession inside, and drops a leading uc or consensus_), "
+                    "so its hits would be filed under a name no other tool uses")
+    return None
+
+
+def check_gene_ids(ids, source: str, written: str, mmseqs: bool = False) -> None:
+    """Stop (StepFailed) on the first gene id of ``ids`` that id_problem rejects: ``source`` is the
+    file the id comes from (the GFF), ``written`` the file SynVoy would write it to. ``mmseqs``:
+    also the names MMseqs2 rewrites (a flanking gene is an MMseqs2 query)."""
+    for rid in ids:
+        problem = id_problem(rid, mmseqs=mmseqs)
+        if problem:
+            raise StepFailed(f"{source}: the gene id {rid!r} {problem} (SynVoy writes it to {written}). "
+                             "Rename the gene's ID in that file: a word without whitespace that does "
+                             "not start with a database tag such as lcl| or gnl|.")
+
+
 def extract_id(header: str, fallback_counter: Optional[int] = None) -> str:
     """
     Extract a clean, usable ID from any FASTA header a user wrote (parse_fasta's user_header).

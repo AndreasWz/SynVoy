@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import gzip
 from collections import defaultdict
 import subprocess
 import sys
@@ -36,7 +37,7 @@ try:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query, StepFailed, guard_failed
+        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,7 +45,7 @@ except ImportError:
         parse_fasta, write_fasta, extract_id, extract_base_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
-        continues_query, StepFailed, guard_failed
+        continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers
     )
 
 
@@ -531,6 +532,54 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
                                            identity, score_frac)
 
     print("[GFF Match] No gene found by name agrees with the query sequence.")
+    return None
+
+
+def check_home_names(genome_file, gff_file, removed_names=()):
+    """The home genome's names that lost results in silence stop the task (fix-phase d4).
+    A sequence name MMseqs2 reports as another name (item 29: LOCATE_GENE's hits would be filed
+    under it, two loci at one place); without a GFF, a '|' in a sequence name (item 30: the
+    predicted genes' ids hold it and are read up to it). With a GFF (``gff_file``), a GFF that
+    shares no seqid with the FASTA (item 31; the seqids of gene, mRNA, transcript and CDS rows).
+    Returns, when only some of the GFF's seqids are missing from the FASTA, ``{'seqids': n,
+    'examples': [...]}`` of those missing (the records the easy-mode chromosome filter removed,
+    ``removed_names``, are not counted); else None. A GFF seqid missing from the FASTA loses its
+    genes, row by row, as before."""
+    names = [first_word(h) for h in iter_fasta_headers(genome_file)]
+    for name in names:
+        problem = id_problem(name, whitespace=False, pipe=not gff_file)
+        if problem:
+            raise StepFailed(
+                f"{genome_file}: the home sequence name {name!r} {problem}. Rename it in the home "
+                f"FASTA" + (" and its GFF" if gff_file else "") + " (for example by its accession "
+                f"alone, without '|').")
+    if not gff_file:
+        return None
+    seqids = set()
+    with (gzip.open if str(gff_file).endswith('.gz') else open)(gff_file, 'rt') as fh:
+        for line in fh:
+            if line.startswith('#'):
+                continue
+            cols = line.split('\t', 3)
+            if len(cols) > 2 and cols[2] in ('gene', 'mRNA', 'transcript', 'CDS'):
+                seqids.add(cols[0])
+    seqids -= set(removed_names)       # genes on records the chromosome filter removed: as before
+    if not seqids:
+        return None
+    have = set(names)
+    if not seqids & have:
+        raise StepFailed(
+            f"{gff_file} and {genome_file} share no sequence name: the GFF's genes lie on "
+            f"{', '.join(sorted(seqids)[:3])}{', ...' if len(seqids) > 3 else ''}, the FASTA holds "
+            f"{', '.join(names[:3])}{', ...' if len(names) > 3 else ''}. The GFF's first column "
+            f"must name the FASTA's records by the first word of their header: pass the GFF of "
+            f"this assembly, or rename one side.")
+    missing = sorted(seqids - have)
+    if missing:
+        print(f"WARNING: {len(missing)} of the home GFF's {len(seqids)} sequences with genes are "
+              f"not in the home FASTA ({', '.join(missing[:3])}{', ...' if len(missing) > 3 else ''}): "
+              f"their genes are left out.", file=sys.stderr)
+        return {'seqids': len(missing), 'of': len(seqids), 'examples': missing[:5]}
     return None
 
 
@@ -2332,6 +2381,8 @@ def main():
     removed_records = ([(rid, len(seq)) for _h, rid, seq in parse_fasta(args.removed_sequences)]
                        if removed_given and os.path.getsize(args.removed_sequences) > 0 else [])
     removed_file = args.removed_sequences if removed_records else None
+    home_gff_unmatched = check_home_names(args.genome, args.gff if gff_available else None,
+                                          [r for r, _n in removed_records])
 
     exons = []
     full_protein = query_seq
@@ -2540,6 +2591,10 @@ def main():
     if removed_given:
         info['home_filter'] = {'removed_sequences': len(removed_records),
                                'removed_bp': sum(n for _r, n in removed_records)}
+    # Only when the home GFF names sequences the FASTA does not hold (fix-phase d4, item 31).
+    if home_gff_unmatched:
+        info['home_gff_unmatched'] = home_gff_unmatched
+
     with open(args.output_info, 'w') as f:
         json.dump(info, f, indent=2)
 

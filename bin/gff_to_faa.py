@@ -6,11 +6,11 @@ import sys
 
 # Use our own sequence utilities (no BioPython)
 try:
-    from sequence_utils import (cds_model_protein, cds_models_by_gene, load_genome,
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, load_genome,
                                 set_genetic_code, write_fasta)
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import (cds_model_protein, cds_models_by_gene, load_genome,
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, load_genome,
                                 set_genetic_code, write_fasta)
 
 
@@ -45,6 +45,8 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to translate {gene_id}: {e}", file=sys.stderr)
 
+    # A gene id with whitespace would be read by its first word (fix-phase d4, item 32).
+    check_gene_ids([rid for rid, _seq in records], args.gff, args.output)
     write_fasta(records, args.output)
     if args.coords_tsv:
         with open(args.coords_tsv, "w") as fh:

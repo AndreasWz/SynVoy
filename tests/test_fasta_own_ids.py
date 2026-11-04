@@ -135,7 +135,8 @@ def _normalize(tmp_path, header):
     # What item 25 changes at this entry: the word stays whole
     ("ABC_12345.1", "ABC_12345.1"),
     ("XY_0000001_exon2", "XY_0000001_exon2"),
-    ("FUN_000001|exon_2", "FUN_000001|exon_2"),
+    # FUN_000001|exon_2 stays whole too, and since fix-phase d4 (item 36) such an id stops normalize_query.py:
+    # tests/test_name_stops.py::test_a_query_id_of_a_piece_stops.
 ])
 def test_normalize_query_writes_the_id_of_the_ladder(tmp_path, header, expected):
     assert _normalize(tmp_path, header).read_text().splitlines()[0] == f">{expected}"
