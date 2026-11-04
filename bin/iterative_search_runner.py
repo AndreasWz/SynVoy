@@ -715,6 +715,15 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
 _SW_BITS_FAILED = [False]       # warned once per process that sw_bits is unavailable
 
 
+def first_best_subject(home_seq: str, subjects: List[str]) -> Tuple[float, str]:
+    """(bits, subject) of the subject that scores best against the home protein; on equal bits
+    the first in ``subjects`` (item 37: max over (bits, subject) let the letters decide). A
+    RuntimeError of sw_bits (no parasail) goes to the caller."""
+    scored = [sw_bits(home_seq, s) for s in subjects]
+    bits = max(scored)
+    return bits, subjects[scored.index(bits)]
+
+
 def score_goi_candidates(raw_candidates, by_parent) -> int:
     """Bit score of every GOI candidate against the HOME protein of its GOI.
 
@@ -743,7 +752,10 @@ def score_goi_candidates(raw_candidates, by_parent) -> int:
         if not home.get('seq') or not subjects:
             continue
         try:
-            bits, protein = max((sw_bits(home['seq'], s), s) for s in subjects)
+            # On equal bits the first subject wins: the label protein's pieces in transcript
+            # order, then the hit regions in theirs (item 37). max over (bits, protein) let the
+            # letters decide, and a joined piece ties with its stronger hit.
+            bits, protein = first_best_subject(home['seq'], subjects)
         except RuntimeError as err:
             # Without parasail every candidate type falls back alike, to the best bit score
             # of its own search hits (prepare_label_subjects); no Bits= is written. Until
@@ -7424,7 +7436,9 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
     n_flank = int(getattr(args, 'n_flanking_genes', 0) or 0)
     for p in places:
         q = (by_parent.get(p['parent']) or {}).get('seq', '')
-        subjects = sorted({piece for h in p['hit_list'] for piece in _hit_pieces(genome_seqs, h)})
+        # The place's hits in their order, each hit's pieces in transcript order, each piece once:
+        # the order item 37's rule reads (a sorted set made the letters decide a tie).
+        subjects = list(dict.fromkeys(piece for h in p['hit_list'] for piece in _hit_pieces(genome_seqs, h)))
         p.update(genome=genome_name,
                  best_hit_identity=round(max(float(h.get('pident', 0) or 0) for h in p['hit_list']), 1))
         if not q or not subjects:
@@ -7434,8 +7448,7 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
         p['evalue'], p['evalue_genome'] = e, f"{e:.3g}"
         if e > synvoy_label.MEDIUM_EVALUE:
             continue
-        best = max(subjects, key=lambda s: (sw_bits(q, s), s))
-        bits = sw_bits(q, best)
+        bits, best = first_best_subject(q, subjects)
         spec = synvoy_specificity.specificity(proteome, p['parent'], q, best, bits, hood, n_flank,
                                               own_gene_id=own_id)
         p['specific'] = synvoy_label.is_specific(spec['margin'], spec['real_competitor'], 'genome',

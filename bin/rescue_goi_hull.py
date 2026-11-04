@@ -281,7 +281,11 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     # One protein for the three terms (review fix RF-1e): the E-value is the best over the
     # label protein's pieces between stops; Bits= and the specificity use the best piece.
     subjects = synvoy_evalue.split_at_stops(protein if label_protein is None else label_protein)
-    bits, judged_protein = max(((sw_bits(query_seq, s), s) for s in subjects), default=(0.0, ""))
+    # On equal bits the first piece wins, in transcript order (item 37; max over (bits,
+    # piece) let the letters decide).
+    scored = [sw_bits(query_seq, s) for s in subjects]
+    bits = max(scored, default=0.0)
+    judged_protein = subjects[scored.index(bits)] if scored else ""
     evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, genome_len))
     spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits,
                                            neighbourhood, n_flanking, own_gene_id=own_gene_id)
