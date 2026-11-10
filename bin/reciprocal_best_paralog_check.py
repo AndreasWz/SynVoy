@@ -113,10 +113,16 @@ def _align(query_seq: str, paralog_seq: str) -> tuple[float, float]:
     parasail returns the raw SW score; we treat that as a bitscore proxy (no need
     for an evalue-based calibration since we only use it to RANK paralogs against
     each other for the same query). Identity is computed from the traceback CIGAR.
+
+    BLOSUM62 at BLAST's 11/1 (parasail 12/1: parasail charges the open cost on the first gap
+    residue), the scale of the search's specificity (synvoy_specificity.HomeProteome.scores) and the
+    one generate_report.raw_to_bits' lambda assumes. Until 2026-11-09 this was parasail 11/1 (BLAST
+    10/1), so ownership and specificity read their 10 bits on two scales, each gap one raw unit apart
+    (fix item 45); 32-bit, as the search's alignments, so a long protein does not saturate.
     """
     if parasail is None:
         raise RuntimeError("parasail is required for §1j reciprocal-best paralog check")
-    res = parasail.sw_trace_striped_16(query_seq, paralog_seq, 11, 1,
+    res = parasail.sw_trace_striped_32(query_seq, paralog_seq, 12, 1,
                                        parasail.blosum62)
     score = float(res.score)
     cigar = res.cigar

@@ -86,6 +86,41 @@ def collect_features(gff_path: str):
     return flanking, high_goi
 
 
+def collect_goi_rows(gff_path: str):
+    """{chrom: [(start, end, strand, confidence, id), ...]} of every GOI model of the main search in a
+    region GFF (gene or mRNA rows, one per model id): the twins a hull model must not repeat."""
+    rows: Dict[str, List[Tuple[int, int, str, str, str]]] = defaultdict(list)
+    seen = set()
+    for feat in parse_gff(gff_path, feature_types=["gene", "mRNA"]):
+        attrs = feat["attributes"]
+        if attrs.get("SynVoyRole") != "goi":
+            continue
+        fid = (attrs.get("ID") or "").replace(".mRNA", "")
+        if (feat["seqid"], fid) in seen:
+            continue
+        seen.add((feat["seqid"], fid))
+        rows[feat["seqid"]].append((feat["start"], feat["end"], feat.get("strand", ""),
+                                    attrs.get("Confidence", ""), fid))
+    return rows
+
+
+def main_path_twin(chrom, start, end, strand, confidence, goi_rows, min_overlap=0.8):
+    """The id of a main-path GOI model this hull model repeats: same chromosome and strand, each
+    covering more than ``min_overlap`` of the other, with an equal or better label; else None. Such
+    a twin was judged in the genome place (no block), so it could read AMBIGUOUS where the main
+    path's model holds MEDIUM (fix item 41); its record repeated the main path's (the report
+    merged them, the main model first in every case seen)."""
+    rank = synvoy_label.LABEL_RANK
+    for s, e, st, conf, fid in goi_rows.get(chrom, []):
+        ov = min(end, e) - max(start, s) + 1
+        if st != strand or ov <= 0:
+            continue
+        if ov / (end - start + 1) > min_overlap and ov / (e - s + 1) > min_overlap \
+                and rank.get(conf, 0) >= rank.get(confidence, 0):
+            return fid
+    return None
+
+
 def flanking_parent_ids(gff_path: str) -> List[str]:
     """Home gene ids of the flanking models in a region GFF (SynVoy_Parent of the
     SynVoyRole=flanking rows), sorted: the anchors of this home locus found in the genome,
@@ -440,6 +475,8 @@ def main() -> int:
     print(f"[hull] cost filters: identity >= {args.min_identity:g} %, CDS >= {min_coverage:g} "
           f"of the query ({coverage_from})" + (", or the aligned span of its core" if core_on else ""), file=sys.stderr)
     flanking, high_goi = collect_features(args.region_gff)
+    goi_rows = collect_goi_rows(args.region_gff)
+    n_twins = 0
     query_id, query_seq = _read_query(args.query)
     # Sanitise for GFF IDs (UniProt headers carry pipes, e.g. sp|P07585|PGS2_HUMAN).
     query_id = re.sub(r"[^A-Za-z0-9_.-]", "_", query_id) or "GOI"
@@ -539,6 +576,13 @@ def main() -> int:
             if best is None:
                 continue
             _key, conf, judged, bits, ident, mrna, cds_rows, prot, best_cov, best_core = best
+            twin = main_path_twin(chrom, ws + int(mrna[3]) - 1, ws + int(mrna[4]) - 1, mrna[6], conf, goi_rows)
+            if twin:
+                n_twins += 1
+                print(f"[hull] {args.genome_name} {chrom}: twin of {twin} skipped (the main path's model at "
+                      f"the same place, with an equal or better label than this hull model's {conf})",
+                      file=sys.stderr)
+                continue
             parent_id = f"GOI_{query_id}|{args.genome_name}_{chrom}_hull_rescue"
             out_lines.extend(_build_hull_gff_rows(mrna, cds_rows, chrom, ws,
                                                   query_id, parent_id, conf,
@@ -558,7 +602,8 @@ def main() -> int:
         with open(args.output_faa, "w") as fh:
             for header, prot in faa_records:
                 fh.write(f">{header}\n{prot}\n")
-    print(f"[hull] {args.genome_name}: {n_emitted} model(s) rescued.", file=sys.stderr)
+    print(f"[hull] {args.genome_name}: {n_emitted} model(s) rescued, {n_twins} twin(s) of a main-path "
+          f"model skipped.", file=sys.stderr)
     return 0
 
 

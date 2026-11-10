@@ -97,7 +97,7 @@ Fields of a record in `goi_dedup.records`:
 | `mrna_id` | The model's ID in the per-genome GFF (or in `rescue/`). |
 | `target_gene` | The target genome's own gene name at that position, when target annotations were available. |
 | `provenance`, `n_source_loci`, `n_merged_hits` | Which home loci produced the call and how many hits were merged into it. |
-| `owning_gene`, `owning_locus`, `owning_is_goi_gene`, `ownership_bit`, `ownership_gap` | Result of the paralog check: the panel entry the call matches best (a home copy near-identical to the GOI at a home locus of its own keeps `owning_gene`, and `owning_locus` is the GOI's), and by what margin. The entry is a home gene, or the GOI's home protein, named by its record in `goi_exons.faa` with '|', ';', '=' and blanks as '_' (`GOI_<query id>` for a home model without an annotated gene), when no home gene is the GOI's own (`self_consistency.locus_ownership_summary.goi_entry.found_by` = `query`, e.g. a home genome without a GFF); then `owning_locus` is the primary home locus and `owning_is_goi_gene` is true. |
+| `owning_gene`, `owning_locus`, `owning_is_goi_gene`, `ownership_bit`, `ownership_gap` | Result of the paralog check: the panel entry the call matches best (a home copy near-identical to the GOI at a home locus of its own keeps `owning_gene`, and `owning_locus` is the GOI's), and by what margin. The entry is a home gene, or the GOI's home protein, named by its record in `goi_exons.faa` with '|', ';', '=' and blanks as '_' (`GOI_<query id>` for a home model without an annotated gene), when no home gene is the GOI's own (`self_consistency.locus_ownership_summary.goi_entry.found_by` = `query`, e.g. a home genome without a GFF); then `owning_locus` is the primary home locus and `owning_is_goi_gene` is true. `ownership_bit` is the raw Smith-Waterman score (BLOSUM62, gaps 11/1, the search's scale; gaps 10/1 until 2026-11-09, so each gap read one raw unit higher than in the search). |
 | `ownership_near_tie` | `true` (absent otherwise) when a paralog is the best panel entry but beats the GOI's best entry by less than `locus_ownership_tiebreak_gap`: the call stays the GOI's, and `owning_gene` and `owning_locus` name that entry. `ownership_bit` and `ownership_gap` stay those of the best entry. A near tie, or a call owned by a home copy near-identical to the GOI, raises no `locus_reattributed` and no `goi_owner_search_fumble`: neither says which home locus the call belongs to. |
 | `phylo_verdict`, `phylo_z` | Advisory phylogenetic-placement verdict of the record's own model: its row in `phylo_placement/<locus>.phylo_placement.tsv`, or that of the same model found from another home locus (a fitted verdict first). Model ids restart per home locus, so until 2026-11-09 a record could carry the verdict of another model with its id. |
 | `superseded_wide_model` | `true` when a compact model replaced a sprawling rescue model of the same gene. |
@@ -151,7 +151,10 @@ awk -F'\t' 'NR==1 || ($3=="goi" && ($4=="HIGH"||$4=="MEDIUM") && $7=="exon_annot
 - **Models found by a rescue pass**: `rescue/locus_<N>/<species>.hull_rescue.gff`
   (+ `.faa`, the protein) and `<species>.rescue.gff`. A file is written only when a
   rescue produced a model. A `synteny_hull_rescue` record in the report has its
-  exons here, not in `plot_inputs_*`.
+  exons here, not in `plot_inputs_*`. Since 2026-11-09 the hull rescue writes no model that
+  repeats a GOI model of the main search (same strand, each covering more than 80 % of the
+  other) with an equal or better label: such a twin was judged without its block and could
+  read AMBIGUOUS where the main path's model reads MEDIUM; its log names each twin it skipped.
 - **The syntenic region** (not the gene): `regions/<locus>/<species>.regions.bed`, one row
   per candidate region, named like `<species>|Reg1_G10_CHIGH_S0.70` (rank, flanking
   genes, confidence, score).

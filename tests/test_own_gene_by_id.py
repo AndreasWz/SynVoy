@@ -70,10 +70,13 @@ def test_an_ambiguous_choice_keeps_the_identity_rule_and_warns(caplog):
             "runner_up_gene_id": "gene-Q", "runner_up_score_fraction": 0.97}
     spec._WARNED.discard("ambiguous:gene-C")
     with caplog.at_level(logging.WARNING, logger=spec.__name__):
-        assert spec.own_gene_id_from_goi_info(info) is None
+        amb = spec.own_gene_id_from_goi_info(info)
+    # Since fix item 43 the flagged gene comes marked and counts only when near-identical to q;
+    # gene-C is a relative, so the identity rule decides, as before.
+    assert amb == "gene-C" and amb.verify
     assert "ambiguous" in caplog.text and "gene-Q" in caplog.text
-    kept = spec.specificity(hp, "GOI_q", q, x, sw_bits(q, x), None, own_gene_id=None)
-    assert hp.own_gene("GOI_q", q) == "gene-Q" and kept["best_other"] == "gene-C"
+    kept = spec.specificity(hp, "GOI_q", q, x, sw_bits(q, x), None, own_gene_id=amb)
+    assert hp.own_gene("GOI_q", q, amb) == "gene-Q" and kept["best_other"] == "gene-C"
     # Taken blindly, the flagged gene would have made q's own gene p*.
     blind = spec.specificity(hp, "GOI_q", q, x, sw_bits(q, x), None, own_gene_id="gene-C")
     assert blind["best_other"] == "gene-Q" and blind["margin"] < kept["margin"]
@@ -166,3 +169,33 @@ def test_the_hull_judge_passes_the_own_gene(monkeypatch):
                                                  own_gene_id="gene-Q")
     _c, _k, attrs_rule, _b = hull.judge_hull_model("q", q, x, rows, 10 ** 7, hp, coverage=0.95)
     assert "BestOtherHome=gene-P" in attrs_id and "BestOtherHome=gene-Q" in attrs_rule
+
+
+def test_an_ambiguous_choice_near_identical_to_q_is_q_s_own_gene():
+    """Fix item 43: among q's identical copies (a position-found array, flagged ambiguous) the identity
+    rule took the smallest id, an arbitrary copy; the home step's choice counts when it is q itself."""
+    q, records, _x = _case(12)
+    copies = [("gene-A1", q), ("gene-A2", q), ("gene-A3", q)] + [(r, s) for r, s in records if r != "gene-Q"]
+    hp = spec.HomeProteome(copies, {})
+    assert hp.own_gene("GOI_q", q) == "gene-A1"                                 # the identity rule alone
+    info = {"found_by": "position", "gene_id": "gene-A2", "home_gene_ambiguous": True,
+            "runner_up_gene_id": "gene-A1", "runner_up_score_fraction": 1.0}
+    assert hp.own_gene("GOI_q", q, spec.own_gene_id_from_goi_info(info)) == "gene-A2"
+
+
+def test_a_plain_id_and_its_ambiguous_form_keep_their_own_neighbourhoods():
+    """An AmbiguousGeneId equals its plain string and hashes alike, but can resolve to another gene: the
+    neighbourhood, copy and family caches are keyed on the gene own_gene resolved (review of 9 Nov)."""
+    rng = random.Random(15)
+    q = _protein(rng, 200)
+    records = [("gene-Q2", q), ("gene-C", _mutate(rng, q, 0.08))] + [(f"gene-{i}", _protein(rng, 200)) for i in range(4)]
+    coords = {"gene-0": ("c", 100, 200), "gene-C": ("c", 1000, 1600), "gene-1": ("c", 3000, 3500),
+              "gene-2": ("d", 100, 200), "gene-Q2": ("d", 1000, 1600), "gene-3": ("d", 3000, 3500)}
+    plain, flagged = "gene-C", spec.AmbiguousGeneId("gene-C")
+    want = {False: ("gene-C", {"gene-0", "gene-C", "gene-1"}, {"gene-C"}),
+            True: ("gene-Q2", {"gene-2", "gene-Q2", "gene-3"}, {"gene-Q2"})}   # gene-C is no near-identical copy
+    for order in ((plain, flagged), (flagged, plain)):     # one dict key: equal strings, equal hashes
+        hp = spec.HomeProteome(records, coords)
+        for g in order:
+            got = (hp.own_gene("GOI_q", q, g), hp.own_neighbourhood("GOI_q", q, 1, g), hp.own_copies("GOI_q", q, 1, g))
+            assert got == want[g is flagged]

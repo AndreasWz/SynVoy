@@ -156,8 +156,24 @@ def test_an_ambiguous_choice_and_no_near_identical_protein_gives_q(tmp_path):
         goi_info=_goi_info(tmp_path / "goi_info.json", gene_id="gene-R", found_by="position",
                            ambiguous=True))
     assert _goi(meta) == {"locus_1|q1": "query"}
-    # the log says why goi_info.json gives no gene (it named one, set aside as ambiguous)
+    # the log says why goi_info.json gives no gene (it named one flagged ambiguous, not q itself)
     assert "goi_info.json names gene-R, which the home step flagged as ambiguous" in err
+    assert "not near-identical to q" in err
+
+
+def test_an_ambiguous_choice_the_proteome_lacks_is_named_so(tmp_path):
+    """Review of 9 Nov: a gene the proteome does not hold was never compared with q; the log says so."""
+    meta, _labels, err = _run_panel(
+        tmp_path,
+        genes=[("c1", 1000, 2000, "gene-N")],
+        proteins=[("gene-N", NEIGHBOUR_PARALOG)],
+        beds=[("locus_1.bed", [("c1", 900, 2100)])],
+        goi_info=_goi_info(tmp_path / "goi_info.json", gene_id="gene-R", found_by="position",
+                           ambiguous=True))
+    assert _goi(meta) == {"locus_1|q1": "query"}
+    assert "goi_info.json names gene-R, which the home step flagged as ambiguous and which the home " \
+           "proteome does not hold" in err
+    assert "not near-identical" not in err
 
 
 def test_a_query_of_another_species_finds_the_searchs_own_gene(tmp_path):
@@ -175,7 +191,9 @@ def test_a_query_of_another_species_finds_the_searchs_own_gene(tmp_path):
     info = _goi_info(tmp_path / "goi_info.json", gene_id="gene-R", found_by="position", ambiguous=True)
     with_home, _l, err = _run_panel(tmp_path, goi_info=info, home_goi=(("GOI_P99999", R),
                                     ("GOI_P99999|exon_1", R[:100])), **case)
-    assert _goi(with_home) == {"locus_1|gene-R": "identity_rule"}
+    # The flagged gene R is q itself here (the GOI's home protein is R's), so since fix item 43 it is
+    # taken as the home step's choice ('goi_info'); until then the identity rule found the same gene.
+    assert _goi(with_home) == {"locus_1|gene-R": "goi_info"}
     assert "q for the GOI entry: GOI_P99999 (300 aa, the GOI's home protein from goi_exons.faa)" in err
     query_only, _l, _err = _run_panel(tmp_path, goi_info=info, **case)
     assert _goi(query_only) == {"locus_1|P99999": "query"}         # what the query alone gave

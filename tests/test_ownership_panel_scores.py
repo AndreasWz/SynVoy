@@ -1,4 +1,11 @@
-"""Fix-phase item 10, the ownership half: the check writes every panel score, the report reads the GOI's best entry."""
+"""Fix-phase item 10, the ownership half: the check writes every panel score, the report reads the GOI's best entry.
+
+Freeze fix e5, item 45 (9 Nov 2026): ownership and specificity read their 10 bits on one alignment scale. The
+ownership panel's table was aligned at parasail 11/1 (BLAST 10/1), the search's proteome scores at parasail 12/1
+(BLAST 11/1), and generate_report._is_goi_for_call read the panel's raw scores through BLAST 11/1's lambda: each gap
+by which two alignments differ moved their difference by 1 raw, so at the bar a model could be told apart in the
+search (AMBIGUOUS) and counted as the GOI's in the report. reciprocal_best_paralog_check._align now aligns at 12/1.
+"""
 import os
 import subprocess
 import sys
@@ -9,7 +16,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 import generate_report as gr  # noqa: E402
 
-pytest.importorskip("parasail")
+parasail = pytest.importorskip("parasail")
+import reciprocal_best_paralog_check as rbp  # noqa: E402
+import synvoy_specificity as ss  # noqa: E402
 
 
 def test_the_table_holds_every_entry(tmp_path):
@@ -86,3 +95,23 @@ def test_the_goi_entry_summary_names_the_gene_not_a_copy():
             "locus_1|gene-Q": {"gene": "gene-Q", "is_goi": True, "goi_found_by": "goi_info"},
             "locus_1|gene-N": {"gene": "gene-N", "is_goi": False, "goi_found_by": ""}}
     assert gr.goi_panel_entry(meta) == {"gene": "gene-Q", "panel_ids": ["home_gene-A|gene-A", "locus_1|gene-Q"], "found_by": "goi_info"}
+
+
+# --------------------------------------------------------------------------- item 45: one scale
+
+Q = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVVHSLAKWKRQTLGQHDFSAGEGLYTHMKALRPDEDRLSPLHSVYVDQWDWERVMGDGERQFSTLKSTVEAIWAGIKATEAAVSEEFGLAPFLPDQIHFVHSQELLSRYPDLDAKGRERAIAKDLGAVFLVGIGGKLSDGHRHDVRAPDYDDWUAQVPHPA".replace("U", "")
+# Q with one deletion and one insertion (two gaps), and a few substitutions
+P = Q[:40] + Q[44:90] + "GGS" + Q[90:150].replace("L", "I") + Q[150:]
+
+
+def test_the_panel_scores_on_the_searchs_scale():
+    panel_raw, _ident = rbp._align(Q, P)
+    search_raw = ss.HomeProteome([("p", P)], {}).scores(Q)[0][0]
+    assert panel_raw == search_raw
+    old = float(parasail.sw_trace_striped_16(Q, P, 11, 1, parasail.blosum62).score)
+    assert old > panel_raw          # the old scale: one raw unit more per gap residue opened
+
+
+def test_without_gaps_the_scales_agree():
+    same = Q[:120]
+    assert rbp._align(same, same)[0] == ss.HomeProteome([("p", same)], {}).scores(same)[0][0]

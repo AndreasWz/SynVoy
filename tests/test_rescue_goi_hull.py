@@ -110,3 +110,35 @@ def test_high_goi_in_hull_blocks_rescue(tmp_path):
     hs, he, _ = h.compute_hull(flank["chr1"], 3_000_000, 20_000_000)
     blocked = any(h._interval_overlaps(hs, he, gs, ge) for gs, ge in high_goi["chr1"])
     assert blocked is True
+
+
+# Fix item 41 (9 Nov 2026): the hull rescue judged its twin of a main-path model in the genome place (no block), so
+# it could read AMBIGUOUS where the main path's model at the same coordinates holds MEDIUM; c7 kept the twin from
+# overruling the main record, but the two records still disagreed. A hull model that repeats a main-path GOI model
+# (same strand, each covering > 80 % of the other) with an equal or better label is not emitted.
+def _goi_gff(tmp_path, rows):
+    p = tmp_path / "region.gff"
+    p.write_text("##gff-version 3\n" + "".join(
+        f"c1\tsrc\tmRNA\t{s}\t{e}\t.\t{st}\t.\tID={mid};SynVoyRole=goi;Confidence={conf}\n"
+        for mid, s, e, st, conf in rows))
+    return str(p)
+
+
+def test_a_hull_twin_of_an_equal_or_better_main_model_is_skipped(tmp_path):
+    rows = h.collect_goi_rows(_goi_gff(tmp_path, [("m1", 1675275, 1675812, "-", "MEDIUM"),
+                                                  ("m2", 508980, 509438, "+", "AMBIGUOUS")]))
+    assert h.main_path_twin("c1", 1675275, 1675812, "-", "LOW", rows) == "m1"
+    assert h.main_path_twin("c1", 508980, 509438, "+", "AMBIGUOUS", rows) == "m2"      # equal label
+    assert h.main_path_twin("c1", 508980, 509438, "+", "HIGH", rows) is None           # the hull model is better
+    assert h.main_path_twin("c1", 1675275, 1675812, "+", "LOW", rows) is None          # other strand
+    assert h.main_path_twin("c1", 1675275, 1677812, "-", "LOW", rows) is None          # not a twin: much wider
+    assert h.main_path_twin("c2", 1675275, 1675812, "-", "LOW", rows) is None
+
+
+def test_the_main_paths_rows_are_read_once_per_model(tmp_path):
+    p = tmp_path / "region.gff"
+    p.write_text("##gff-version 3\n"
+                 "c1\tsrc\tgene\t100\t400\t.\t+\t.\tID=m1;SynVoyRole=goi;Confidence=HIGH\n"
+                 "c1\tsrc\tmRNA\t100\t400\t.\t+\t.\tID=m1.mRNA;SynVoyRole=goi;Confidence=HIGH\n"
+                 "c1\tsrc\tmRNA\t900\t1200\t.\t+\t.\tID=f1;SynVoyRole=flanking;Confidence=HIGH\n")
+    assert h.collect_goi_rows(str(p)) == {"c1": [(100, 400, "+", "HIGH", "m1")]}

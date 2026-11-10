@@ -971,7 +971,9 @@ coverage:
   translation in pieces between stops, since the rescue has no search hits), completeness
   as the query span of the alignment, specificity with the GOI's home neighbourhood (the
   anchors of the locus found in the genome). It has no block E-value, so its place is the
-  whole genome.
+  whole genome. Since 2026-11-09 it writes no model that repeats a GOI model of the main search
+  (same strand, each covering more than 80 % of the other) with an equal or better label: judged
+  without the block, such a twin could read AMBIGUOUS where the main path's model reads MEDIUM.
 - A model carries a provisional LOW (`InferenceReason=awaiting_label`) from the moment it
   is built; every GOI row with an E-value is relabelled at the end of its genome. A GOI
   row the judge cannot label (no Eeff) keeps the LOW, never counts and never seeds, and
@@ -1071,9 +1073,11 @@ model's protein x (the protein its `Bits=` come from) is aligned (Smith-Waterman
 the home proteome (one per gene, the longest isoform). The best one other than the GOI's
 own home gene is p* (`BestOtherHome`); `SpecMargin` = bits(home protein, x) − bits(p*, x).
 The GOI's own home gene is the gene the home step took as the query's (`gene_id` in
-`goi_info.json`, found by name or by position, [§5.6](#56-the-home-gene-model)). Without
-one, or when the home step flagged its choice as ambiguous (with a warning: the gene it
-took may be a relative of the query's own gene), it is the home protein near-identical to
+`goi_info.json`, found by name or by position, [§5.6](#56-the-home-gene-model)); a gene the
+home step flagged as ambiguous (with a warning: it may be a relative of the query's own gene)
+only when it is itself near-identical to the GOI's home protein (since 2026-11-09: among the
+query's identical copies the rule below took the smallest id, an arbitrary copy). Without
+one, it is the home protein near-identical to
 the GOI's home protein, the GOI record of the query set (§5.8; ≥ 95 % identity over ≥ 90 %
 of it; the hull rescue compares the query). Until 2026-10-16 (review fix RF-2b) only that
 identity rule existed, so where the home annotation differs from the query (an extra exon,
@@ -1292,7 +1296,9 @@ this order:
    strand and coding bases and covering no more of the query: a piece of a gene that another home
    protein explains as well is no ortholog call (`overruled_counted_piece`). A hit chain or a tandem
    row can lie over several genes, and a hull rescue's verdict can come from its place alone, so
-   neither overrules. When the record later goes to another model, such a piece is clustered on its
+   neither overrules; when one of them outranks a not-specific gene model or rescued hit of the same
+   gene in the cluster (each covering more than 0.8 of the other), the piece is tested against that
+   twin (since 2026-11-09). When the record later goes to another model, such a piece is clustered on its
    own again.
 2. **Phylogenetic placement** (`phylo_placement_check.py`). Across all calls, sequence
    divergence (1 − identity to the query) is fitted against the taxonomic distance of
@@ -1321,7 +1327,8 @@ this order:
    (≥ 95 % identity over ≥ 90 % of it) counts as the GOI for a call that does not favour it over
    the GOI's own entry by 10 bits, as in the specificity (§7.12); the call then stays at a searched
    locus. A call is relabelled `paralog_not_goi` only when a paralog beats the GOI's best panel
-   entry by at least 10 (`locus_ownership_tiebreak_gap`, SW score); below that the call stays the
+   entry by at least 10 (`locus_ownership_tiebreak_gap`, SW score of BLOSUM62 at gaps 11/1, the
+   specificity's scale; 10/1 until 2026-11-09, so each gap read one unit higher than there); below that the call stays the
    GOI's (`ownership_near_tie`). If the two best scores differ by less than 10 and both or neither
    of them are the GOI, the locus with more HIGH flanking models decides. Until 2026-10-28 the GOI entry was the panel protein the
    query aligned to best, with no minimum: without a home GFF that was a neighbour, and the

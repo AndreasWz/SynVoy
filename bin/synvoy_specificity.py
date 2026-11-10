@@ -148,16 +148,19 @@ class HomeProteome:
 
     def own_gene(self, q_id: str, q_seq: str, gene_id: Optional[str] = None) -> Optional[str]:
         """The home protein that is q itself. ``gene_id`` (own_gene_id_from_goi_info) names
-        it when the proteome holds that gene. Else the identity rule: the best-scoring home
-        protein, when it is near-identical to q (>= 95 % identity over >= 90 % of q); None
-        when there is none (a query from another species, or an unannotated ORF)."""
-        key = (q_id, gene_id or "")
+        it when the proteome holds that gene (an AmbiguousGeneId only when it also passes the
+        own-gene rule). Else the identity rule: the best-scoring home protein, when it is
+        near-identical to q (>= 95 % identity over >= 90 % of q); None when there is none (a
+        query from another species, or an unannotated ORF)."""
+        verify = bool(getattr(gene_id, "verify", False))
+        key = (q_id, gene_id or "", verify)
         if key not in self._own:
             own = None
-            if gene_id and gene_id in self._by_id:
-                own = gene_id
+            if gene_id and gene_id in self._by_id and (
+                    not verify or passes_own_gene_rule(q_seq, self._seq(gene_id))):
+                own = str(gene_id)
             else:
-                if gene_id:
+                if gene_id and gene_id not in self._by_id:
                     _warn_once(f"own:{gene_id}",
                                f"q's home gene {gene_id} is not in the home proteome: q's own "
                                f"gene is the home protein near-identical to q, if any.")
@@ -221,9 +224,11 @@ class HomeProteome:
         locus starts from). A run from a secondary home locus knew only its own locus, so a p*
         next to q's own gene was not in its neighbourhood (review fix RF-2). None when q's
         own gene is not found."""
-        key = (q_id, int(n), gene_id or "")
+        own = self.own_gene(q_id, q_seq, gene_id)
+        # Keyed on the gene own_gene resolved, not on gene_id: an AmbiguousGeneId equals its plain
+        # string and hashes alike, but can resolve to another gene (fix item 43).
+        key = (q_id, int(n), own or "")
         if key not in self._own_hood:
-            own = self.own_gene(q_id, q_seq, gene_id)
             hood = None
             if own and own in self.coords and n > 0:
                 chrom = self.coords[own][0]
@@ -247,7 +252,7 @@ class HomeProteome:
             hood |= set(hull)
         out = {own}
         for rid in sorted(hood - out):
-            key = (q_id, gene_id or "", rid)
+            key = (q_id, own, rid)
             if key not in self._own_copy:
                 seq = self._seq(rid)
                 self._own_copy[key] = bool(seq) and (passes_own_gene_rule(q_seq, seq)
@@ -267,13 +272,22 @@ def _warn_once(key: str, message: str) -> None:
         logging.getLogger(__name__).warning(message)
 
 
+class AmbiguousGeneId(str):
+    """A gene id the home step flagged as ambiguous: q's own gene only when it passes the own-gene
+    rule against q (HomeProteome.own_gene; fix item 43)."""
+    verify = True
+
+
 def own_gene_id_from_goi_info(goi_info) -> Optional[str]:
     """q's own home gene as the home step recorded it (goi_info.json of ANNOTATE_GOI, batch
     HG-3; a path or the loaded dict): its ``gene_id`` when the gene was found by name or by
     position. None without one (a miniprot model, no annotated gene, a goi_info.json written
-    before HG-3), and None with a warning when the home step flagged its choice as ambiguous:
-    the gene it took may then be a relative with q's own gene as the runner-up, so the
-    identity rule decides (review fix RF-2b)."""
+    before HG-3). When the home step flagged its choice as ambiguous, the gene it took may be a
+    relative with q's own gene as the runner-up (review fix RF-2b), so it comes as an
+    AmbiguousGeneId, which counts only when it passes the own-gene rule; else the identity rule
+    decides. Until 2026-11-09 such a gene was dropped: among q's identical copies (a position-found
+    array) the identity rule then took the smallest id, an arbitrary copy, and the copies at q's
+    real locus were left out of own_copies (fix item 43)."""
     info = goi_info
     if isinstance(goi_info, str):
         try:
@@ -290,9 +304,9 @@ def own_gene_id_from_goi_info(goi_info) -> Optional[str]:
         _warn_once(f"ambiguous:{gene_id}",
                    f"The home step flagged its gene {gene_id} as ambiguous (runner-up "
                    f"{info.get('runner_up_gene_id')} at score fraction "
-                   f"{info.get('runner_up_score_fraction')}): q's own gene for the specificity "
-                   f"terms is the home protein near-identical to q, if any.")
-        return None
+                   f"{info.get('runner_up_score_fraction')}): it is q's own gene for the specificity "
+                   f"terms only if it is near-identical to q; else the home protein that is, if any.")
+        return AmbiguousGeneId(gene_id)
     return str(gene_id)
 
 

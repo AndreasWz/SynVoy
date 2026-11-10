@@ -223,3 +223,20 @@ def test_other_genomes_and_chromosomes_stay_apart():
     b = _piece(2000, 2500, "HIGH", cov="0.4")
     b["chrom"] = "c2"
     assert len(gr.dedupe_goi_annotations([a, b])["records"]) == 2
+
+
+def test_a_hull_twin_that_outranks_its_exon_twin_still_overrules_the_piece():
+    """Fix item 44 (9 Nov 2026): c7 tested the piece against the cluster's representative only, and a hull rescue
+    (synteny_hull_rescue) is no whole gene, so when the hull twin of a gene model outranked it, the counted piece
+    under both stayed counted. The piece is now tested against the representative's whole-model twin."""
+    w = _rec(1000, 5000, "AMBIGUOUS", basis="not_specific", cov="0.900", mid="GOI_x|w",
+             goi_class="syntenic_candidate_unconfirmed", cds=[(1000, 5000)])
+    w["eeff"] = "1e-5"
+    hull = dict(_rec(1000, 5000, "AMBIGUOUS", basis="not_specific", cov="0.900", mid="GOI_x|h",
+                     goi_class="synteny_hull_rescue", evidence="synteny_hull_rescue", cds=[(1000, 5000)]),
+                eeff="1e-8")
+    piece = _piece(2000, 2600, cds=[(2000, 2600)])
+    for order in ((w, hull, piece), (piece, hull, w), (hull, w, piece)):
+        recs = gr.dedupe_goi_annotations([dict(r) for r in order])["records"]
+        assert len(recs) == 1, recs
+        assert recs[0]["confidence"] == "AMBIGUOUS" and recs[0].get("overruled_counted_piece"), recs[0]

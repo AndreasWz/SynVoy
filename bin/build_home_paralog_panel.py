@@ -120,8 +120,15 @@ def home_goi_record(path: Optional[str]) -> Optional[Tuple[str, str]]:
     return records[0]
 
 
-def _goi_info_gives_no_gene(goi_info: Optional[str], info_gene: Optional[str]) -> str:
-    """Why goi_info.json names no gene of q's own for the search (for the log)."""
+def _goi_info_gives_no_gene(goi_info: Optional[str], info_gene: Optional[str], held=()) -> str:
+    """Why goi_info.json names no gene of q's own for the search (for the log). ``held``: the home
+    proteome's gene ids."""
+    if info_gene and info_gene not in held:
+        flagged = ", which the home step flagged as ambiguous and" if getattr(info_gene, "verify", False) else ","
+        return f"goi_info.json names {info_gene}{flagged} which the home proteome does not hold"
+    if info_gene and getattr(info_gene, "verify", False):
+        return (f"goi_info.json names {info_gene}, which the home step flagged as ambiguous and which is "
+                f"not near-identical to q")
     if info_gene:
         return f"goi_info.json names {info_gene}, which the home proteome does not hold"
     try:
@@ -141,8 +148,9 @@ def goi_entry(proteome: Dict[str, str], query_id: str, query_seq: str,
               goi_info: Optional[str]) -> Tuple[Optional[str], str, str]:
     """q's own home gene, found as the search's specificity check finds it
     (synvoy_specificity.HomeProteome.own_gene): the gene the home step took as q's
-    (own_gene_id_from_goi_info: found by name or by position, not flagged ambiguous) when
-    the proteome holds it, else the home protein >= 95 % identical over >= 90 % of q.
+    (own_gene_id_from_goi_info: found by name or by position; one it flagged ambiguous only when
+    near-identical to q) when the proteome holds it, else the home protein >= 95 % identical over
+    >= 90 % of q.
     Returns (gene id or None, how: 'goi_info' / 'identity_rule' / 'query', a note for the
     log); None = no home gene is q's own, so q itself is the GOI entry."""
     info_gene = (synvoy_specificity.own_gene_id_from_goi_info(goi_info)
@@ -156,7 +164,7 @@ def goi_entry(proteome: Dict[str, str], query_id: str, query_seq: str,
         return own, "goi_info", "q's own home gene, the one the home step took (goi_info.json)"
     if own:
         return own, "identity_rule", f"q's own home gene by the identity rule: {rule}"
-    why = _goi_info_gives_no_gene(goi_info, info_gene)
+    why = _goi_info_gives_no_gene(goi_info, info_gene, proteome)
     return None, "query", f"no home gene is q's own: {why}, and no home protein has {rule}"
 
 

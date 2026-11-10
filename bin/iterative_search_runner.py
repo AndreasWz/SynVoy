@@ -7100,9 +7100,9 @@ def home_family_size(proteome, q_id: str, q_seq: str, own_gene_id: Optional[str]
     Karlin-Altschul E <= GENOME_WIDE_FAMILY_PREFILTER_EVALUE (100 x that bar) are tested.
     Checked against the test on every home protein for the 14 Candida pilot queries: the same
     count in 14 of 14 (0 to 18 members), the largest member's prefilter E 0.024."""
-    key = (q_id, q_seq, own_gene_id or '')
+    own = proteome.own_gene(q_id, q_seq, own_gene_id)
+    key = (q_id, q_seq, own or '')      # the resolved gene: an AmbiguousGeneId equals its plain id (fix item 43)
     if key not in _FAMILY_SIZE_CACHE:
-        own = proteome.own_gene(q_id, q_seq, own_gene_id)
         seqs = dict(proteome.records)
         n = 0
         for raw, rid in proteome.scores(q_seq):
@@ -9194,7 +9194,9 @@ def main():
     args.home_goi_gene_id = (synvoy_specificity.own_gene_id_from_goi_info(args.goi_info)
                              if getattr(args, "goi_info", None) else None)
     if args.home_goi_gene_id:
-        logger.info(f"Specificity: q's own home gene is {args.home_goi_gene_id} (from the home step).")
+        logger.info(f"Specificity: q's own home gene is {args.home_goi_gene_id} (from the home step"
+                    + ("; flagged ambiguous there, so only if it is near-identical to q)"
+                       if getattr(args.home_goi_gene_id, "verify", False) else ")") + ".")
 
     # GOI fallback hit-chain max-gap: derived from the home GOI's own largest
     # intron (goi_info.json) x margin, not a hand-set --max_intron. Attached to

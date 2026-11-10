@@ -1060,6 +1060,19 @@ def _is_piece_of(piece, wide, min_overlap=0.8):
     return _safe_float(wide.get("query_cov"), 1.0) >= _safe_float(piece.get("query_cov"), 0.0)
 
 
+def _whole_model_of(wide, members, piece, min_overlap=0.8):
+    """The whole gene a piece is tested against: ``wide`` itself when it is a gene model or a
+    rescued hit, else (a hull rescue, a hit chain, a tandem row) its not-specific twin of that kind
+    among the cluster's members (the same gene, each covering more than ``min_overlap`` of the
+    other): a hull rescue that outranked its exon twin left c7's piece counted (fix item 44).
+    ``wide`` when there is none."""
+    if wide.get("evidence") in WHOLE_MODEL_EVIDENCE or not wide.get("evidence"):
+        return wide
+    return next((m for m in members if m is not piece and m is not wide
+                 and m.get("evidence") in WHOLE_MODEL_EVIDENCE and _not_specific_whole_model(m)
+                 and _reciprocal_overlap(m, wide) > min_overlap), wide)
+
+
 def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                            fused_span_ratio=2.0, fused_qcov_margin=0.15):
     """Collapse HIGH/MEDIUM/AMBIGUOUS GOI hits that are the same target gene found from
@@ -1108,7 +1121,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                         if cl["rep"] is not compact:
                             compact["superseded_wide_model"] = True
                             cl["rep"] = compact
-                    elif counted_piece and _not_specific_whole_model(wide) and _is_piece_of(compact, wide, min_overlap):
+                    elif counted_piece and _not_specific_whole_model(wide) and _is_piece_of(
+                            compact, _whole_model_of(wide, cl["members"], compact, min_overlap), min_overlap):
                         # A piece of a gene another home protein explains as well is no ortholog
                         # call: the whole gene's verdict stands. Without this rule a paralog's
                         # exon, HIGH or MEDIUM on its own, won on confidence (the luciferase runs).
@@ -1131,7 +1145,9 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                     # nothing about it.
                     for piece in list(cl.get("overruled", ())):
                         rep = cl["rep"]
-                        if not (_not_specific_whole_model(rep) and _is_piece_of(piece, rep, min_overlap)
+                        if not (_not_specific_whole_model(rep)
+                                and _is_piece_of(piece, _whole_model_of(rep, cl["members"], piece, min_overlap),
+                                                 min_overlap)
                                 and _containment(piece, rep) >= contain_min):
                             cl["overruled"] = [p for p in cl["overruled"] if p is not piece]
                             cl["members"] = [m for m in cl["members"] if m is not piece]
