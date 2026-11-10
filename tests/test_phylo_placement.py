@@ -243,10 +243,13 @@ def _load_gr():
 gr = _load_gr()
 
 
-def _dedup(confidence, mrna_id, goi_class="syntenic_candidate_unconfirmed"):
+def _dedup(confidence, mrna_id, goi_class="syntenic_candidate_unconfirmed", provenance=("locus_1",)):
+    """A record as dedupe_goi_annotations builds it: the same model found from each locus of its provenance
+    (its members, which the report step drops before it writes the report)."""
     return {"genome": "G", "chrom": "c1", "start": 100, "end": 400,
             "confidence": confidence, "identity": "40.0", "goi_class": goi_class,
-            "query_cov": "0.5", "mrna_id": mrna_id}
+            "query_cov": "0.5", "mrna_id": mrna_id, "provenance": list(provenance),
+            "_rep": (provenance[0], mrna_id), "_members": [(loc, mrna_id, 100, 400) for loc in provenance]}
 
 
 def _row(mrna_id, verdict, z="0.4"):
@@ -259,7 +262,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_discordant_call_raises_a_flag(self):
         rec = _dedup("MEDIUM", "m1", "probable_goi")
         flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "phylo_discordant", "3.1")})
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_discordant", "3.1")})
         self.assertEqual(len(flags), 1)
         self.assertEqual(flags[0]["type"], "phylo_discordant")
         self.assertEqual(summary["discordant"], 1)
@@ -269,7 +272,7 @@ class TestReportIntegration(unittest.TestCase):
         """The measurement-first pattern: report what it WOULD do before doing it."""
         rec = _dedup("AMBIGUOUS", "m1")
         _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "phylo_concordant")})
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")})
         self.assertEqual(summary["would_promote"], 1)
         self.assertEqual(summary["promoted"], 0)
         self.assertEqual(rec["confidence"], "AMBIGUOUS", "must not move by default")
@@ -277,7 +280,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_promotion_when_enabled_restores_medium(self):
         rec = _dedup("AMBIGUOUS", "m1")
         _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "phylo_concordant")}, promote=True)
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")}, promote=True)
         self.assertEqual(summary["promoted"], 1)
         self.assertEqual(rec["confidence"], "MEDIUM")
         self.assertEqual(rec["goi_class"], "probable_goi")
@@ -286,7 +289,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_discordant_ambiguous_is_never_promoted(self):
         rec = _dedup("AMBIGUOUS", "m1")
         _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "phylo_discordant", "4.0")},
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_discordant", "4.0")},
             promote=True)
         self.assertEqual(rec["confidence"], "AMBIGUOUS")
         self.assertEqual(summary["promoted"], 0)
@@ -294,7 +297,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_insufficient_data_changes_nothing(self):
         rec = _dedup("AMBIGUOUS", "m1")
         flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "insufficient_data", "")},
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "insufficient_data", "")},
             promote=True)
         self.assertEqual(flags, [])
         self.assertEqual(rec["confidence"], "AMBIGUOUS")
@@ -303,7 +306,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_unmatched_record_is_untouched(self):
         rec = _dedup("AMBIGUOUS", "no_such_model")
         _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {"m1": _row("m1", "phylo_concordant")}, promote=True)
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")}, promote=True)
         self.assertEqual(summary["evaluated"], 0)
         self.assertNotIn("phylo_verdict", rec)
 
@@ -311,3 +314,48 @@ class TestReportIntegration(unittest.TestCase):
         rec = _dedup("AMBIGUOUS", "m1")
         flags, summary = gr.apply_phylo_placement({"records": [rec]}, {})
         self.assertEqual((flags, summary["evaluated"]), ([], 0))
+
+
+class TestRowsKeyedByLocus(unittest.TestCase):
+    """Fix item 28 (9 Nov): model ids restart per home locus; keyed by the id alone the last locus's file
+    won (the chicken record of r3 DCN got locus_3's insufficient_data for locus_1's verdict) and a verdict
+    landed on another model of the same id (the cow chrX AMBIGUOUS record carried decorin's)."""
+
+    def test_the_loader_keys_by_locus_and_model(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for locus, verdict in (("locus_1", "phylo_concordant"), ("locus_3", "insufficient_data")):
+                with open(os.path.join(d, f"{locus}.phylo_placement.tsv"), "w") as fh:
+                    row = _row("X", verdict)
+                    fh.write("\t".join(row) + "\n" + "\t".join(row.values()) + "\n")
+            rows = gr.load_phylo_placement_rows(d)
+        self.assertEqual(sorted(rows), [("locus_1", "X"), ("locus_3", "X")])
+
+    def test_a_fitted_verdict_of_the_records_own_loci(self):
+        rows = {("locus_1", "X"): _row("X", "phylo_concordant", "-0.674"),
+                ("locus_3", "X"): _row("X", "insufficient_data", "")}
+        same_model = _dedup("HIGH", "X", "confident_goi", provenance=("locus_1", "locus_3"))
+        other_model = dict(_dedup("AMBIGUOUS", "X", provenance=("locus_2",)), chrom="c7")
+        _flags, summary = gr.apply_phylo_placement({"records": [same_model, other_model]}, rows)
+        self.assertEqual(same_model["phylo_verdict"], "phylo_concordant")
+        self.assertNotIn("phylo_verdict", other_model)
+        self.assertEqual((summary["evaluated"], summary["would_promote"]), (1, 0))
+
+    def test_an_id_another_locus_gives_another_model_lends_no_verdict(self):
+        """The cow chrX case of r3 DCN: the record's model is locus_3's X; locus_1 is in its provenance with
+        a model of its own (Y, AMBIGUOUS, no F9 row), and locus_1's X is decorin elsewhere: no verdict."""
+        rows = {("locus_1", "X"): _row("X", "phylo_concordant", "-0.674")}
+        rec = dict(_dedup("AMBIGUOUS", "X", provenance=("locus_1", "locus_3")),
+                   _rep=("locus_3", "X"), _members=[("locus_3", "X", 100, 400), ("locus_1", "Y", 100, 400)])
+        _flags, summary = gr.apply_phylo_placement({"records": [rec]}, rows)
+        self.assertNotIn("phylo_verdict", rec)
+        self.assertEqual((summary["evaluated"], summary["would_promote"]), (0, 0))
+
+    def test_a_member_of_another_span_lends_no_verdict(self):
+        """A wider model merged into the record is another protein: its verdict is not the record's."""
+        rows = {("locus_1", "X"): _row("X", "insufficient_data", ""),
+                ("locus_2", "W"): _row("W", "phylo_discordant", "3.3")}
+        rec = dict(_dedup("HIGH", "X", "confident_goi", provenance=("locus_1", "locus_2")),
+                   _members=[("locus_1", "X", 100, 400), ("locus_2", "W", 50, 900)])
+        gr.apply_phylo_placement({"records": [rec]}, rows)
+        self.assertEqual(rec["phylo_verdict"], "insufficient_data")

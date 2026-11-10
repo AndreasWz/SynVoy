@@ -270,3 +270,40 @@ def test_tree_leaves_meet_their_species(leaf_species, expected):
                    "Candida_tropicalis.fna": "Candida tropicalis", "Apis_cerana": "Apis cerana",
                    "Apis_cerana_japonica": "Apis cerana japonica"}
     assert ps.leaf_species_name(leaf_species, species_map) == expected
+
+
+def test_a_goi_named_by_the_query_takes_its_home_genes_label(monkeypatch):
+    """Fix item 34: with FlyBase ids the GOI (named Adh) found no names-table row ('gene-Adh' fits
+    nothing), so the ribbon plot read the raw name, not the table's label (e.g. a user's override)."""
+    import plot_synteny as ps
+    monkeypatch.setattr(ps, "_GENE_NAMES", {"FBgn0000055": {"label": "ADH1", "source": "user"}})
+    monkeypatch.setattr(ps, "_GOI_NAMES", {"FBgn0000055", "GOI_2L_14615"})
+    monkeypatch.setattr(ps, "_GOI_QUERY_NAME", ["Adh"])
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])
+    assert ps._named("GOI_Adh") == {"label": "ADH1", "source": "user"}
+    assert ps._named("GOI_Adh|Dsim_fna_b0_l1_exon_ann") == {"label": "ADH1", "source": "user"}
+    assert ps._named("Adh") is None                       # only a GOI id falls back
+    # Not the GOI's own name: a placeholder of another hit, a tandem copy (review of 9 Nov)
+    assert ps._named("GOI_2L_14615") is None and ps._named("GOI_copy_2") is None
+    # The span overlap's gene (identify_goi_names: an lncRNA, or a gene holding the GOI in an intron)
+    # does not rename a curated query
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [False])
+    assert ps._named("GOI_Adh") is None
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])
+    monkeypatch.setattr(ps, "_GOI_NAMES", {"FBgn0000055", "FBgn0000056"})
+    monkeypatch.setitem(ps._GENE_NAMES, "FBgn0000056", {"label": "X", "source": "gff_symbol"})
+    assert ps._named("GOI_Adh") is None                   # two home GOI genes: no guess
+
+
+def test_the_goi_name_is_the_models_and_the_cds_rule_is_recorded():
+    import plot_synteny as ps
+    home = {"genes": [{"name": "GOI_chr1_500", "chrom": "chr1", "start": 500}, {"name": "gene-a"}]}
+    target = {"genes": [{"name": "GOI_P00334|Dsim_fna_b0_l1_exon_ann", "home_gene_id": "GOI_P00334"},
+                        {"name": "GOI_copy_1|Dsim_fna_b0_l1_by_GOI_P00334", "home_gene_id": "GOI_copy_1"},
+                        {"name": "GOI_P00334~rel|x", "home_gene_id": ""}]}
+    assert ps._goi_query_name([home, target]) == "P00334"
+    assert ps._goi_query_name([home]) is None
+    ps.set_goi_names([], [], {"gene-Adh"})
+    assert ps._GOI_FROM_CDS[0] is True
+    ps.set_goi_names([], [], set())
+    assert ps._GOI_FROM_CDS[0] is False

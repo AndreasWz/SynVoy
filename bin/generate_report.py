@@ -1190,6 +1190,12 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Join key for the F9 phylo-placement verdicts, which are computed from
                 # goi_for_tree.faa and so are keyed by model id, not coordinates.
                 "mrna_id": rep.get("mrna_id", ""),
+                # What the record is made of, for the readers of one home locus's model ids (F9's
+                # verdicts, the tree's leaves; fix item 46). Model ids restart per home locus, so a
+                # member is its (locus, model id, start, end). Private: build_report drops them.
+                "_rep": (rep["source"], rep.get("mrna_id", "")),
+                "_members": [(m["source"], m.get("mrna_id", ""), m["start"], m["end"]) for m in members],
+                "_overruled": [(m["source"], m.get("mrna_id", "")) for m in cl.get("overruled", ())],
                 # Only in a run with --report_copies_in_slot (preset plan PR-6).
                 **({"copies_in_slot": rep["copies_in_slot"], "slot_rank": rep.get("slot_rank", "")}
                    if rep.get("copies_in_slot") else {}),
@@ -1551,8 +1557,10 @@ def _panel_locus(panel_label):
 def load_phylo_placement_rows(phylo_dir):
     """Read the per-locus TSVs from PHYLO_PLACEMENT_CHECK (F9).
 
-    Returns {model_id: row}. Header-only files (the no-op case, and the sentinel) are
-    skipped, and a missing directory is not an error -- the check is optional.
+    Returns {(locus, model_id): row}, the locus from the file's name (<locus>.phylo_placement.tsv):
+    model ids restart per home locus, so keyed by the id alone the last locus's file won and a verdict
+    could land on another model of the same id (fix item 28). Header-only files (the no-op case, and
+    the sentinel) are skipped, and a missing directory is not an error -- the check is optional.
     """
     rows = {}
     if not phylo_dir or not os.path.isdir(phylo_dir):
@@ -1561,15 +1569,33 @@ def load_phylo_placement_rows(phylo_dir):
         for entry in sorted(it, key=lambda e: e.name):
             if not entry.is_file() or not entry.name.endswith(".tsv"):
                 continue
+            locus = entry.name.split(".", 1)[0]
             try:
                 with open(entry.path) as fh:
                     for row in csv.DictReader(fh, delimiter="\t"):
                         mid = (row.get("model_id") or "").strip()
                         if mid:
-                            rows[mid] = row
+                            rows[(locus, mid)] = row
             except OSError:
                 continue
     return rows
+
+
+def _phylo_row_of(rec, phylo_rows):
+    """The F9 row of a record: the row of its own model (its representative's home locus and id), or
+    of a member model at the record's span (the same model found from another home locus); a fitted
+    verdict before insufficient_data, the representative's first; None without one. A model id names
+    another model in another home locus (ids restart per locus), so a record never takes the row of
+    an id it merely shares (fix item 28: a cow chrX record took decorin's verdict that way). A record
+    without such a row gets none (F9 sees only HIGH and MEDIUM models)."""
+    rep = tuple(rec.get("_rep") or ())
+    span = (int(rec["start"]), int(rec["end"]))
+    keys = [rep] if len(rep) == 2 else []
+    keys += sorted({(m[0], m[1]) for m in rec.get("_members") or ()
+                    if (int(m[2]), int(m[3])) == span and (m[0], m[1]) != rep})
+    found = [phylo_rows[k] for k in keys if k in phylo_rows]
+    return next((r for r in found if (r.get("verdict") or "").strip() != "insufficient_data"),
+                found[0] if found else None)
 
 
 def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
@@ -1602,7 +1628,7 @@ def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
 
     flags = []
     for rec in records:
-        row = phylo_rows.get(rec.get("mrna_id", ""))
+        row = _phylo_row_of(rec, phylo_rows)
         if not row:
             continue
         verdict = (row.get("verdict") or "").strip()
@@ -2077,7 +2103,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                  locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
                  identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
                  phylo_placement_dir=None, phylo_placement_promote=False,
-                 strong_flanking_min=20, core_completeness=False):
+                 strong_flanking_min=20, core_completeness=False, tree_infos=None):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
 
@@ -2447,6 +2473,27 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     if step_failures:
         report["failed_steps"] = step_failures
         report["summary"]["ownership_not_checked_calls"] = ownership_not_checked
+    # The trees (COMPUTE_TREE's infos): the leaves the report does not count (fix item 46). Only where
+    # a tree was inferred: a run with --skip_tree has no trees block.
+    if tree_infos:
+        report["trees"] = tree_infos
+        for locus, info in sorted(tree_infos.items()):
+            if not isinstance(info, dict) or not info.get("leaves"):
+                continue
+            info["not_counted"] = tree_leaves_not_counted(goi_annotations, goi_dedup.get("records", []),
+                                                          locus, info["leaves"])
+            if info["not_counted"]:
+                models = {a.get("mrna_id") for a in goi_annotations if a.get("source") == locus}
+                n_models = sum(1 for leaf in info["leaves"] if leaf in models)
+                n_out = len(info["not_counted"])
+                verb, pron = ("is a model", "it") if n_out == 1 else ("are models", "them")
+                report["warnings"].append(
+                    f"{n_out} of the {n_models} model leaves of the {locus} tree {verb} the report does not "
+                    f"count (merged into another model's call, overruled, or another home gene's): the tree "
+                    f"page draws {pron} hollow (trees.{locus}.not_counted).")
+    for rec in goi_dedup.get("records", []):
+        for key in ("_rep", "_members", "_overruled"):
+            rec.pop(key, None)
     return report
 
 
@@ -2530,6 +2577,70 @@ def load_download_record(path):
         return [dict(r) for r in csv.DictReader(fh, delimiter="\t")]
 
 
+def tree_leaves_not_counted(goi_annotations, records, locus, leaves,
+                            not_counted_classes=("paralog_not_goi", "identity_coverage_decoupled")):
+    """The leaves of ``locus``'s tree that the report does not count, each with its reason (fix item
+    46). The tree is inferred before the report, from every HIGH or MEDIUM model of the search, so
+    a model the report merged into another, relabelled or overruled stayed a leaf, drawn as a copy
+    of its species. A leaf is a model id of this locus (ids repeat across loci); its record is the
+    one it is a member of (the dedup's members, (locus, model id)). A counted record (HIGH or
+    MEDIUM, not of a class in ``not_counted_classes``) is drawn once in each tree it has leaves in:
+    by its representative where that is a model of this locus, else by its member at the record's
+    span (the same model found from another home locus), else by the member that overlaps the
+    record most. Reasons: 'merged' (another leaf of this tree is the gene's), 'overruled_piece' (a
+    piece the record's whole gene overruled), the record's class (paralog_not_goi,
+    identity_coverage_decoupled), 'not_in_report' (no record holds it, e.g. one the report dropped),
+    else the record's confidence (no case known). Leaves without a GOI row of this locus (the home
+    protein, the query) are left out: [{'leaf', 'reason', 'record'}, ...] in the leaves' order."""
+    rows = {}
+    for a in goi_annotations:
+        if a.get("source") == locus and a.get("mrna_id"):
+            rows.setdefault(a["mrna_id"], a)
+    member_of = {}
+    for r in records:
+        for m in r.get("_members") or ():
+            if m[0] == locus and m[1]:
+                member_of.setdefault(m[1], r)
+
+    def counted(r):
+        return r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in not_counted_classes
+
+    def overlap(m, r):
+        s, e = int(m[2]), int(m[3])
+        return max(0, min(e, int(r["end"])) - max(s, int(r["start"])) + 1) / max(1, max(e, int(r["end"])) - min(s, int(r["start"])) + 1)
+
+    leaf_set = set(leaves)
+    shown = {}
+    for r in records:
+        if not counted(r):
+            continue
+        mine = [m for m in r.get("_members") or () if m[0] == locus and m[1] in leaf_set]
+        if mine:
+            rep, span = tuple(r.get("_rep") or ()), (int(r["start"]), int(r["end"]))
+            shown[id(r)] = min(mine, key=lambda m: ((m[0], m[1]) != rep, (int(m[2]), int(m[3])) != span,
+                                                    -overlap(m, r), m[1]))[1]
+    out = []
+    for leaf in leaves:
+        if leaf not in rows:
+            continue
+        rec = member_of.get(leaf)
+        if rec is None:
+            reason = "not_in_report"
+        elif counted(rec):
+            if shown.get(id(rec)) == leaf:
+                continue
+            reason = "merged"
+        elif (locus, leaf) in {tuple(p) for p in rec.get("_overruled") or ()}:
+            reason = "overruled_piece"
+        elif rec.get("goi_class") in not_counted_classes:
+            reason = rec["goi_class"]
+        else:
+            reason = rec.get("confidence") or "not_counted"
+        out.append({"leaf": leaf, "reason": reason,
+                    "record": "" if rec is None else f"{rec['genome']} {rec['chrom']}:{rec['start']}-{rec['end']}"})
+    return out
+
+
 def load_tree_infos(folder):
     """{locus: info} of COMPUTE_TREE's <locus>_tree.info.json (fix-phase d6): seed, threads,
     sequences and the bootstrap (status ultrafast, none_fewer_than_4_sequences,
@@ -2548,6 +2659,21 @@ def load_tree_infos(folder):
         if isinstance(info, dict):
             out[info.get("locus") or name[:-len("_tree.info.json")]] = info
     return out
+
+
+def load_home_goi(path):
+    """{query_id, gene_id, transcript_id, method, found_by} of ANNOTATE_GOI's goi_info.json (the keys
+    it holds), or None without a file or a gene."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict) or not info.get("gene_id"):
+        return None
+    return {k: info[k] for k in ("query_id", "gene_id", "transcript_id", "method", "found_by") if info.get(k)}
 
 
 def load_goi_info_block(path, key):
@@ -2732,6 +2858,7 @@ def main():
         core_completeness=synvoy_settings.pick(
             None, synvoy_settings.load_settings(args.effective_params), "core_completeness", False,
             synvoy_settings.flag)[0],
+        tree_infos=load_tree_infos(args.tree_info_dir),
     )
     report["run_settings"] = load_run_settings(args.effective_params)
     sw_backend = report.pop("smith_waterman", None)
@@ -2767,9 +2894,8 @@ def main():
             report.setdefault("warnings", []).append(
                 f"{len(no_gff)} downloaded genome(s) came without a GFF: {', '.join(no_gff)}; their genes "
                 "carry no target annotation (downloads).")
-    trees = load_tree_infos(args.tree_info_dir)
+    trees = report.get("trees") or {}
     if trees:
-        report["trees"] = trees
         for locus, t in trees.items():
             boot = t.get("bootstrap") or {}
             if boot.get("status") == "dropped_after_failure":
@@ -2782,6 +2908,11 @@ def main():
             f"UniProt did not answer for {uniprot.get('query_id')} ({uniprot.get('error', '')}): the home "
             "gene of the GOI was chosen without the query's UniProt names (goi_info.json, "
             "uniprot_lookup); with an answer another home gene can be chosen.")
+    # The home gene ANNOTATE_GOI matched to the query: the figures break a tie between home genes
+    # (or transcripts) under the query's hits with it (fix item 28).
+    home_goi = load_home_goi(args.goi_info)
+    if home_goi:
+        report["home_goi"] = home_goi
     unmatched = load_goi_info_block(args.goi_info, "home_gff_unmatched")
     if unmatched:
         report["home_gff_unmatched"] = unmatched

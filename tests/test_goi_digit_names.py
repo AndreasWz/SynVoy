@@ -215,15 +215,49 @@ def test_the_figures_take_a_digit_first_name_from_the_models(name):
     assert ps._goi_display_label([{"genes": [_target_model(name)]}]) == name
 
 
-@pytest.mark.parametrize("placeholder", ["GOI_1_4100", "GOI_2L_4100", "GOI_NC_000012.12_91140483", "GOI_copy_3"])
-def test_a_home_placeholder_or_a_copy_is_no_figure_name(placeholder):
-    assert ps._goi_display_label([{"genes": [{"home_gene_id": placeholder, "name": placeholder}]}]) == "GOI"
+@pytest.mark.parametrize("chrom,start", [("1", 4100), ("2L", 4100), ("NC_000012.12", 91140483),
+                                         ("ctg1|pilon", 4100), ("000000F|arrow", 4100)])
+def test_a_home_placeholder_is_no_figure_name(chrom, start):
+    """The home BED's GOI_<chrom>_<start> rows (fix item 28: a chromosome named with '|' passed)."""
+    row = {"home_gene_id": f"GOI_{chrom}_{start}", "name": f"GOI_{chrom}_{start}", "chrom": chrom, "start": start}
+    assert ps._goi_display_label([{"genes": [row]}]) == "GOI"
 
 
-@pytest.mark.parametrize("name", ["14.1", "1_venom", "14-3-3epsilon", "1700001C19Rik", "Ly6e.1", "Ly6e_1", "Serpina3n-long"])
-def test_a_name_with_a_dot_an_underscore_or_over_12_characters_is_no_figure_name(name):
-    """The rule's limit, first character aside: such a name reads "GOI" without a named home gene."""
-    assert ps._goi_display_label([{"genes": [_target_model(name)]}]) == "GOI"
+@pytest.mark.parametrize("name", ["GOI_copy_3", "GOI_copy_3|Apis_florea_fna_b0_l1_by_GOI_x"])
+def test_a_copy_is_no_figure_name(name):
+    assert ps._goi_display_label([{"genes": [{"home_gene_id": name, "name": name}]}]) == "GOI"
+
+
+@pytest.mark.parametrize("name", ["14.1", "1_venom", "14-3-3epsilon", "1700001C19Rik", "Ly6e.1", "Ly6e_1", "Serpina3n-long",
+                                  "orf19.1562"])
+def test_a_name_with_a_dot_an_underscore_or_over_12_characters_is_the_figure_name(name):
+    """Fix item 28: such a name read "GOI" without a named home gene (every run without a home GFF whose
+    query is named orf19.1562 or 14-3-3epsilon); it is the name now. A relative's alias is not."""
+    assert ps._goi_display_label([{"genes": [_target_model(name)]}]) == name
+    alias = {"home_gene_id": f"GOI_{name}~rel", "name": f"GOI_{name}~rel|Apis_florea_fna_b0_r1_exon_ann"}
+    assert ps._goi_display_label([{"genes": [alias]}]) == name
+
+
+def test_the_home_row_of_a_placeholder_shows_the_goi_name(monkeypatch):
+    """The ribbon plot's home row read the placeholder's coordinates (calb_Chr_2_474685) or 'GOI'."""
+    monkeypatch.setattr(ps, "_GOI_DISPLAY_LABEL", ["CUP1"])
+    monkeypatch.setattr(ps, "_GOI_QUERY_NAME", ["orf19.1562"])
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])
+    rows = ({"name": "GOI_calb_Chr_2_474685", "chrom": "calb_Chr_2", "start": 474685,
+             "display_name": "GOI_calb_Chr_2_474685"}, {"name": "GOI", "display_name": "GOI"})
+    for row in rows:                                   # a gene under the query hits' CDS names the GOI
+        assert ps._preferred_home_label(row, {}) == "CUP1"
+    # The gene the span overlap found (an lncRNA on a curated seed) does not: the GOI's own name
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [False])
+    for row in rows:
+        assert ps._preferred_home_label(row, {}) == "orf19.1562"
+    # A placeholder of another hit interval keeps the name of the gene there (review of 9 Nov)
+    other = {"name": "GOI_chr1_5000", "chrom": "chr1", "start": 5000, "display_name": "Apyr2"}
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])
+    assert ps._preferred_home_label(other, {}) == "Apyr2"
+    monkeypatch.setattr(ps, "_GOI_DISPLAY_LABEL", [None])
+    monkeypatch.setattr(ps, "_GOI_QUERY_NAME", [None])
+    assert ps._preferred_home_label({"name": "GOI", "display_name": "GOI"}, {}) == "GOI"
 
 
 @pytest.mark.parametrize("goi,relative", [("5-HT2A", "5-HT2B"), ("Ly6e", "Ly6d")])

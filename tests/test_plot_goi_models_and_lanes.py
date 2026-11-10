@@ -470,3 +470,61 @@ def test_cap_keeps_the_best_goi_models():
     kept, dropped = ps._cap_goi_genes(genes, 1)
     assert [g["confidence"] for g in kept if g.get("role") == "goi"] == ["HIGH"]
     assert len(dropped) == 2 and any(g["name"] == "fl" for g in kept)
+
+
+# Fix item 28 (9 Nov): a tie of CDS overlap between home genes, or between transcripts, went by the id string;
+# it goes to the gene and transcript ANNOTATE_GOI matched to the query (the report's home_goi block).
+TIE_GFF = """##gff-version 3
+chr1\t.\tgene\t1000\t1300\t.\t+\t.\tID=gene-GOI1;Name=Goi1
+chr1\t.\tmRNA\t1000\t1300\t.\t+\t.\tID=rna-GOI1a;Parent=gene-GOI1
+chr1\t.\tCDS\t1000\t1300\t.\t+\t0\tID=cds-a;Parent=rna-GOI1a
+chr1\t.\tmRNA\t1000\t1300\t.\t+\t.\tID=rna-GOI1z;Parent=gene-GOI1
+chr1\t.\tCDS\t1000\t1300\t.\t+\t0\tID=cds-z;Parent=rna-GOI1z
+chr1\t.\tgene\t1000\t5300\t.\t+\t.\tID=gene-RT9;Name=Rt9
+chr1\t.\tmRNA\t1000\t5300\t.\t+\t.\tID=rna-RT9;Parent=gene-RT9
+chr1\t.\tCDS\t1000\t1300\t.\t+\t0\tID=cds-rt1;Parent=rna-RT9
+chr1\t.\tCDS\t5000\t5300\t.\t+\t0\tID=cds-rt2;Parent=rna-RT9
+"""
+
+
+def _tie_setup(tmp_path):
+    gff = tmp_path / "home.gff"
+    gff.write_text(TIE_GFF)
+    hits = [{"chrom": "chr1", "start": 1010, "end": 1290, "strand": "+"}]
+    return str(gff), hits, [_g("GOI_chr1_1010", 1010, 1290)]
+
+
+def test_a_tie_between_home_genes_goes_to_annotate_gois_gene(tmp_path):
+    gff, hits, home = _tie_setup(tmp_path)
+    assert ps._resolve_home_goi_models(home, hits, gff) == ["gene-RT9"]          # the id, without the record
+    gff, hits, home = _tie_setup(tmp_path)
+    assert ps._resolve_home_goi_models(home, hits, gff, home_goi=("gene-GOI1", None)) == ["gene-GOI1"]
+
+
+def test_a_tie_between_transcripts_goes_to_annotate_gois_transcript(tmp_path):
+    gff, hits, home = _tie_setup(tmp_path)
+    ps._resolve_home_goi_models(home, hits, gff, home_goi=("gene-GOI1", None))
+    assert next(g for g in home if g["name"] == "gene-GOI1")["goi_model_source"] == "rna-GOI1z"
+    gff, hits, home = _tie_setup(tmp_path)
+    ps._resolve_home_goi_models(home, hits, gff, home_goi=("gene-GOI1", "rna-GOI1a"))
+    assert next(g for g in home if g["name"] == "gene-GOI1")["goi_model_source"] == "rna-GOI1a"
+
+
+def test_the_report_carries_annotate_gois_gene(tmp_path):
+    import generate_report as gr
+    info = tmp_path / "goi_info.json"
+    info.write_text('{"query_id": "q", "gene_id": "gene-GOI1", "transcript_id": "rna-GOI1a", "method": '
+                    '"gff_annotation", "found_by": "name", "exons": []}')
+    assert gr.load_home_goi(str(info)) == {"query_id": "q", "gene_id": "gene-GOI1", "transcript_id": "rna-GOI1a",
+                                           "method": "gff_annotation", "found_by": "name"}
+    report = tmp_path / "synvoy_report.json"
+    report.write_text('{"home_goi": {"gene_id": "gene-GOI1", "transcript_id": "rna-GOI1a"}}')
+    assert ps._home_goi_from_report(str(report)) == ("gene-GOI1", "rna-GOI1a")
+    assert ps._home_goi_from_report(None) == (None, None)
+
+
+def test_the_plot_inputs_keep_the_report_and_replot_reads_it():
+    nf = open(os.path.join(os.path.dirname(__file__), "..", "modules", "plot_synteny.nf")).read()
+    assert 'cp $report "\\$inputs_dir/synvoy_report.json"' in nf
+    sh = open(os.path.join(os.path.dirname(__file__), "..", "scripts", "replot.sh")).read()
+    assert '[ -f "$IN/synvoy_report.json" ] && args+=(--report "$IN/synvoy_report.json")' in sh

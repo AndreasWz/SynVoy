@@ -94,7 +94,8 @@ IQTREE_SEED = 1
 
 
 def write_info(path, **info):
-    """<locus>_tree.info.json: how the tree was made (seed, threads, sequences, bootstrap)."""
+    """<locus>_tree.info.json: how the tree was made (seed, threads, sequences, bootstrap) and its
+    leaves."""
     with open(path, "w") as fh:
         json.dump(info, fh, indent=1, sort_keys=True)
 
@@ -190,9 +191,13 @@ def main():
     else:
         print("Inferring tree with IQ-TREE (auto model selection, no bootstrap for <4 taxa)...")
 
+    # The leaves, as the tree names them (a header's first word): the report marks those it does
+    # not count, and the tree page draws them so (fix item 46).
+    leaves = [name.split()[0] for name, _seq in entries if name.split()]
+
     def info(status, reps, reason=""):
         write_info(info_path, locus=locus, seed=args.seed, threads=args.threads, sequences=count,
-                   bootstrap={"status": status, "replicates": reps, "reason": reason})
+                   bootstrap={"status": status, "replicates": reps, "reason": reason}, leaves=leaves)
 
     try:
         run_iqtree(aln_file, args.output, args.threads, bootstrap_reps=bootstrap_reps, seed=args.seed)

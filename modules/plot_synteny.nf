@@ -122,6 +122,11 @@ process PLOT_SYNTENY {
     if [ "$tree" != "NO_TREE" ]; then
         cp $tree "\$inputs_dir/"
     fi
+    # The report too: the figures read it (the tree's support and the leaves it does not count, the
+    # home gene ANNOTATE_GOI chose), so scripts/replot.sh draws them the same (fix of 9 Nov).
+    if [ "${report.name}" != "NO_REPORT" ]; then
+        cp $report "\$inputs_dir/synvoy_report.json"
+    fi
     if [ "$species_map" != "NO_SPECIES_MAP" ]; then
         cp $species_map "\$inputs_dir/"
     fi

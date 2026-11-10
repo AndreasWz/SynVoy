@@ -967,10 +967,23 @@ _GENE_NAMES = {}
 _GENE_NAMES_NOTE = [""]   # what the NCBI Gene lookup did, for the legend footnote
 
 
+# The GOI's own name, as its target models carry it (SynVoy_Parent GOI_<name>; _goi_query_name), and
+# whether _GOI_NAMES holds the home gene(s) whose CDS the query hits fall on (_resolve_home_goi_models)
+# rather than identify_goi_names' span overlap. Set in main() before the figures are drawn.
+_GOI_QUERY_NAME = [None]
+_GOI_FROM_CDS = [False]
+
+
 def _named(gene_id):
-    """Names-table row of a home gene; accepts 'gene-X', 'X', 'GOI_X' and 'X|model'."""
+    """Names-table row of a home gene; accepts 'gene-X', 'X', 'GOI_X' and 'X|model'. The GOI's own
+    name (GOI_<query name>) where it is no home gene id (FlyBase, TAIR, Ensembl or funannotate ids,
+    where 'gene-'+X fits nothing) takes the row of the one annotated home gene whose CDS the query
+    hits fall on (_GOI_NAMES; fix item 34). Not a placeholder of another hit (GOI_<chrom>_<start>),
+    a tandem copy (GOI_copy_<n>), or a gene the span overlap found (it can be an lncRNA, or hold the
+    GOI in an intron): a curated query's name stays its own."""
     gid = str(gene_id or "").split("|")[0]
-    if gid.startswith("GOI_"):
+    is_goi_id = gid.startswith("GOI_")
+    if is_goi_id:
         gid = gid[4:]
     if not gid:
         return None
@@ -978,6 +991,10 @@ def _named(gene_id):
     for cand in (gid, "gene-" + bare, "gene:" + bare, bare):   # 'gene:' too (Ensembl; fix item 34)
         if cand in _GENE_NAMES:
             return _GENE_NAMES[cand]
+    if is_goi_id and _GOI_FROM_CDS[0] and gid == _GOI_QUERY_NAME[0]:
+        homes = sorted(g for g in _GOI_NAMES if g in _GENE_NAMES)
+        if len(homes) == 1:
+            return _GENE_NAMES[homes[0]]
     return None
 
 
@@ -1162,7 +1179,21 @@ def _cds_overlap(blocks, intervals):
                for s, e in blocks for q in intervals)
 
 
-def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path):
+def _home_goi_from_report(report_path):
+    """(gene_id, transcript_id) of the home gene ANNOTATE_GOI matched to the query (the report's
+    home_goi block, from goi_info.json), or (None, None)."""
+    import json as _json
+    if not report_path or not os.path.isfile(report_path):
+        return None, None
+    try:
+        with open(report_path) as fh:
+            block = _json.load(fh).get("home_goi") or {}
+    except (OSError, ValueError, AttributeError):
+        return None, None
+    return block.get("gene_id"), block.get("transcript_id")
+
+
+def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path, home_goi=(None, None)):
     """Replace per-hit GOI placeholder rows with the annotated home gene(s).
 
     The home BED carries one `GOI_<chrom>_<pos>` row per query hit, always on the
@@ -1189,13 +1220,16 @@ def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path):
         print(f"[plot] WARN: could not read home GFF for GOI models: {exc}", file=sys.stderr)
         return []
 
+    # A tie of CDS overlap goes to the gene and transcript ANNOTATE_GOI matched to the query (the
+    # report's home_goi), then to the id as before: the id string alone decided it (fix item 28).
+    goi_gene, goi_transcript = home_goi or (None, None)
     hits_by_gene = defaultdict(list)
     for q in hits:
-        scored = [(max(_cds_overlap(b, [q]) for b in m["transcripts"].values()), gid)
+        scored = [(max(_cds_overlap(b, [q]) for b in m["transcripts"].values()), gid == goi_gene, gid)
                   for gid, m in models.items()]
-        scored = [(ov, gid) for ov, gid in scored if ov > 0]
+        scored = [sc for sc in scored if sc[0] > 0]
         if scored:
-            hits_by_gene[max(scored)[1]].append(q)
+            hits_by_gene[max(scored)[2]].append(q)
     if not hits_by_gene:
         return []
 
@@ -1203,7 +1237,7 @@ def _resolve_home_goi_models(home_genes, query_intervals, home_gff_path):
     for gid in sorted(hits_by_gene):
         m, qs = models[gid], hits_by_gene[gid]
         tid = max(m["transcripts"], key=lambda t: (
-            _cds_overlap(m["transcripts"][t], qs),
+            _cds_overlap(m["transcripts"][t], qs), t == goi_transcript,
             sum(e - s + 1 for s, e in m["transcripts"][t]), t))
         resolved.append({
             "chrom": chrom, "start": m["start"] - 1, "end": m["end"], "name": gid,
@@ -1237,6 +1271,7 @@ def set_goi_names(home_genes, query_intervals, resolved):
     in an intron of MESR3 (17 kb, under the 27 kb size cap); both covered the hit completely,
     tied, and MESR3 was drawn as a second home melittin copy with 5 exons.
     """
+    _GOI_FROM_CDS[0] = bool(resolved)
     if not resolved:
         identify_goi_names(home_genes, query_intervals)
         return
@@ -1341,7 +1376,7 @@ def clean_gene_label(name, keep_goi_prefix=False):
             m = re.match(r'copy_(\d+)', suffix)
             if m:
                 return f"GOI #{m.group(1)}"
-            return f"GOI {_home_gene_label(suffix, suffix)}" if suffix else "GOI"
+            return f"GOI {_home_gene_label(name, suffix)}" if suffix else "GOI"
         return name[4:]
     return _gnames._bare_id(name)
 
@@ -1465,8 +1500,20 @@ def _preferred_home_label(gene, home_products):
 
     display_name = gene.get("display_name", "")
     cleaned_display = clean_gene_label(display_name)
-    if cleaned_display and not _is_generic_gene_label(cleaned_display):
+    placeholder = _is_home_goi_placeholder(gene)
+    if cleaned_display and not _is_generic_gene_label(cleaned_display) and not (
+            placeholder and cleaned_display in ("GOI", clean_gene_label(gene.get("name", "")))):
         return cleaned_display
+    # A home GOI row that names no gene (the synthesized row, a GOI_<chrom>_<start> placeholder
+    # without a gene's name) shows the GOI's name (fix item 28: it read the placeholder's
+    # coordinates, calb_Chr_2_474685, or 'GOI'): the display label where a gene under the query
+    # hits' CDS gives it, else the GOI's own name (a gene the span overlap found, such as an lncRNA,
+    # does not name a curated query on the home row).
+    if placeholder:
+        own = _GOI_QUERY_NAME[0]
+        label = _GOI_DISPLAY_LABEL[0] if _GOI_FROM_CDS[0] else (_home_gene_label(own, own) if own else None)
+        if label:
+            return label
 
     name = gene.get("name", "")
     cleaned = clean_gene_label(name)
@@ -3258,6 +3305,33 @@ def leaf_species_name(leaf_species, species_map):
     return None
 
 
+def iqtree_leaf_name(name):
+    """A sequence's name as IQ-TREE writes it into the tree: every byte outside [A-Za-z0-9_./|-] as
+    '_' (measured on IQ-TREE 3.1.2: '+', '(', ')', ':', '~', '#' each as '_', 'ä' as '__')."""
+    return re.sub(rb"[^A-Za-z0-9_./|-]", b"_", str(name).encode("utf-8")).decode("ascii")
+
+
+def _tree_not_counted(report_path, output):
+    """{leaf: reason} of the leaves the report does not count (trees.<locus>.not_counted, fix item
+    46); {} without a report or such a list. The locus is read from the output name. A leaf is
+    listed under its FASTA id (the report's) and under the name IQ-TREE gave it in the tree."""
+    import json as _json
+    m = re.search(r"(locus_\d+)", os.path.basename(output or ""))
+    if not report_path or not m or not os.path.isfile(report_path):
+        return {}
+    try:
+        with open(report_path) as fh:
+            info = (_json.load(fh).get("trees") or {}).get(m.group(1)) or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    marks = {}
+    for r in info.get("not_counted") or []:
+        if r.get("leaf"):
+            marks.setdefault(iqtree_leaf_name(r["leaf"]), r.get("reason", ""))
+            marks[r["leaf"]] = r.get("reason", "")
+    return marks
+
+
 def _tree_support_note(report_path, output):
     """What the tree page says about branch support, from the report's trees block (fix-phase
     d6), or None (no report, no record of this tree). The locus is read from the output name."""
@@ -3283,7 +3357,7 @@ def _tree_support_note(report_path, output):
 
 
 def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=None,
-                     clade_count=4, gene_legend=True, support_note=None):
+                     clade_count=4, gene_legend=True, support_note=None, not_counted=None):
     """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML.
 
     The tree is midpoint-rooted and split into ``clade_count`` clades by
@@ -3407,8 +3481,11 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
         sp = _stree.species_from_leaf(name) or name.split("|", 1)[1]
         return leaf_species_name(sp, species_map) or sp.replace("_", " ")
     from collections import Counter, defaultdict as _dd
-    _sp_total = Counter(s for s in (_clean_species_for_leaf(l.name) for l in leaves)
-                        if s)
+    # The leaves the report does not count (trees.<locus>.not_counted, fix item 46): drawn hollow,
+    # with the reason, and left out of the copy numbers.
+    not_counted = not_counted or {}
+    _sp_total = Counter(s for s in (_clean_species_for_leaf(l.name) for l in leaves
+                                    if l.name not in not_counted) if s)
     _sp_seen = _dd(int)
     name_rows = []   # gene-names table: the home leaf's gene
 
@@ -3439,16 +3516,24 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
             named = _named(leaf.name)
             if named and not any(r["label"] == _gnames.display_label(named) for r in name_rows):
                 name_rows.append(_gnames.table_row(named, "", colour, is_goi=True))
+        elif leaf.name in not_counted:
+            label = f"{sp_label} (not counted: {not_counted[leaf.name]})"
         else:
             _sp_seen[sp_label] += 1
             label = (f"{sp_label} · copy {_sp_seen[sp_label]}"
                      if _sp_total[sp_label] > 1 else sp_label)
 
         cpx, cpy = tx(lx), ty(ly)
-        svg_parts.append(
-            f'<circle cx="{cpx:.1f}" cy="{cpy:.1f}" r="7" '
-            f'fill="{colour}" stroke="#333" stroke-width="1"/>'
-        )
+        if leaf.name in not_counted:
+            svg_parts.append(
+                f'<circle class="tree-leaf-not-counted" cx="{cpx:.1f}" cy="{cpy:.1f}" r="7" '
+                f'fill="none" stroke="#9ca3af" stroke-width="1.6"/>'
+            )
+        else:
+            svg_parts.append(
+                f'<circle cx="{cpx:.1f}" cy="{cpy:.1f}" r="7" '
+                f'fill="{colour}" stroke="#333" stroke-width="1"/>'
+            )
         if sp_label is None:
             label_svg = _svg_esc(label)
         else:      # the species name in italics, the copy number upright
@@ -3485,7 +3570,11 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
                      "copy N = several models in one species"),
             ("Branch", "horizontal length = substitutions per site (scale bar)"),
             ("Root", "midpoint of the longest path; the tree has no outgroup")]
-            + ([("Branch support", support_note)] if support_note else [])),
+            + ([("Branch support", support_note)] if support_note else [])
+            + ([(_lg_dot("none", "#9ca3af", r=6.0),
+                 "a model the report does not count (merged into another model's call, demoted, or "
+                 "another home gene's), with the reason; the tree is inferred before the report")]
+               if any(l.name in not_counted for l in leaves) else [])),
         ("Colour", [
             (_lg_dot(_stree.color_for_clade(0), "#333", r=6.0),
              f"leaves and branches of one clade share a colour; the tree is cut into "
@@ -4452,24 +4541,54 @@ def _rotated_header_height(anchors, font_size, angle_deg, pad=28):
     return int(longest * math.sin(math.radians(angle_deg)) + pad)
 
 
-def _goi_display_label(all_tracks):
-    """Label of the GOI column and figure title (e.g. 'Melt'), else 'GOI'.
+# The GOI's display label of this plot run (_goi_display_label), set before the figures are drawn:
+# the home row's GOI shows it when that row is a placeholder (no annotated home gene; fix item 28).
+_GOI_DISPLAY_LABEL = [None]
 
-    The annotated home GOI gene gives the label. Without one, target GOI genes
-    carry a SynVoy_Parent like 'GOI_DCN' or 'GOI_5-HT2A'; the synthetic home
-    placeholder may instead be 'GOI_<chrom>_<pos>'. Only the part before the first
-    '|' is tested: it is refused when it holds '_' or '.' or is longer than 12
-    characters, which refuses a placeholder unless its chromosome's name holds '|'.
-    """
+
+def _is_home_goi_placeholder(gene):
+    """A home GOI row that names no gene: the synthesized 'GOI' row, or the home BED's
+    GOI_<chrom>_<start> placeholder of a query hit (extract_flanking_genes)."""
+    name = gene.get("name", "") or ""
+    return name == "GOI" or name == f"GOI_{gene.get('chrom', '')}_{gene.get('start', '')}"
+
+
+def _goi_name_counts(all_tracks):
+    """Counter of the GOI's names as the models carry them (GOI_<name>, whole): not the home BED's
+    GOI_<chrom>_<start> placeholders, tandem copies (GOI_copy_<n>), or a relative's or a decoy's
+    query alias (~rel, ~rev, ~shuf)."""
     from collections import Counter
+    placeholders = {g.get("name") for tr in all_tracks[:1] for g in tr.get("genes", [])
+                    if _is_home_goi_placeholder(g)}
     cand = Counter()
     for tr in all_tracks:
         for g in tr.get("genes", []):
             for s in (g.get("home_gene_id", "") or "", g.get("name", "") or ""):
-                if s.startswith("GOI_"):
-                    suf = s[4:].split("|")[0]
-                    if re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{0,11}$", suf):
-                        cand[suf] += 1
+                if not s.startswith("GOI_") or s in placeholders \
+                        or any(s.startswith(p + "|") for p in placeholders if p):
+                    continue
+                suf = s[4:].split("|")[0].split("~")[0]
+                if suf and not re.fullmatch(r"copy_\d+", suf):
+                    cand[suf] += 1
+    return cand
+
+
+def _goi_query_name(all_tracks):
+    """The GOI's own name: the one its models carry most often; None without a GOI model."""
+    cand = _goi_name_counts(all_tracks)
+    return cand.most_common(1)[0][0] if cand else None
+
+
+def _goi_display_label(all_tracks):
+    """Label of the GOI column and figure title (e.g. 'Melt'), else 'GOI'.
+
+    The annotated home GOI gene gives the label. Without one, the GOI's name as the target models
+    carry it (SynVoy_Parent GOI_<name>), whole: a name with '.', '_' or more than 12 characters
+    (orf19.1562, 14-3-3epsilon, Ly6e_1) read 'GOI' (fix item 28). Not a name: the home BED's
+    GOI_<chrom>_<start> placeholders (a chromosome name with '|', ctg1|pilon, passed the old test),
+    tandem copies (GOI_copy_<n>), a relative's or a decoy's query alias (~rel, ~rev, ~shuf).
+    """
+    cand = _goi_name_counts(all_tracks)
     home_goi = [g for g in (all_tracks[0].get("genes", []) if all_tracks else [])
                 if is_goi(g.get("name", "") or "") and _named(g.get("name"))]
     if home_goi:
@@ -5860,7 +5979,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
     # construction sees `home_genes`.
     # Prefer the annotated gene model(s) under the query hits; synthesize from
     # the hit span only when the home GFF has no CDS there.
-    resolved_goi = _resolve_home_goi_models(home_genes, query_intervals, args.home_gff)
+    resolved_goi = _resolve_home_goi_models(home_genes, query_intervals, args.home_gff,
+                                            home_goi=_home_goi_from_report(getattr(args, "report", None)))
     if not resolved_goi:
         _synthesize_home_goi_gene(home_genes, query_intervals, args.home_gff)
 
@@ -6125,6 +6245,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
 
     # -- 7. Render SVG ---------------------------------------------------
 
+    _GOI_QUERY_NAME[0] = _goi_query_name(all_tracks)
+    _GOI_DISPLAY_LABEL[0] = _goi_display_label(all_tracks)
     html = render_synteny_html(
         all_tracks, gene_colours,
         home_products, args,
@@ -6327,7 +6449,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
     _render_tree_svg(args.tree, goi_genome_colours, tree_output,
                      species_map=species_map, clade_count=args.clade_count,
                      gene_legend=getattr(args, "gene_legend", True),
-                     support_note=_tree_support_note(getattr(args, "report", None), tree_output))
+                     support_note=_tree_support_note(getattr(args, "report", None), tree_output),
+                     not_counted=_tree_not_counted(getattr(args, "report", None), tree_output))
     _write_species_name_sources(args.output)
 
 

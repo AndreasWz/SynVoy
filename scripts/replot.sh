@@ -85,6 +85,7 @@ args=(--home_bed "$home_bed" --target_gffs "${target_gffs[@]}")
 [ -f "$IN/species_mapping.tsv" ] && args+=(--species_map "$IN/species_mapping.tsv")
 [ -f "$IN/genome_qc_summary.json" ] && args+=(--genome_qc "$IN/genome_qc_summary.json")
 [ -f "$IN/effective_params.json" ] && args+=(--effective_params "$IN/effective_params.json")
+[ -f "$IN/synvoy_report.json" ] && args+=(--report "$IN/synvoy_report.json")
 if [ -f "$IN/gene_names.tsv" ] && ! grep -qE '^# NCBI Gene lookup: (FAILED|skipped)' "$IN/gene_names.tsv"; then
     args+=(--gene_names_tsv "$IN/gene_names.tsv")
 else
