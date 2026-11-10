@@ -1649,7 +1649,7 @@ def _phylo_row_of(rec, phylo_rows):
                 found[0] if found else None)
 
 
-def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
+def apply_phylo_placement(goi_dedup, phylo_rows):
     """Attach F9 phylogenetic-placement verdicts to the deduped GOI records.
 
     Why this check and not another threshold: identity, coverage, flanking support and
@@ -1659,21 +1659,18 @@ def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
     all PER-CALL signals, and one call in isolation cannot carry the answer. Whether a
     call's divergence tracks its SPECIES' divergence is a property of the whole set.
 
-    Two effects:
-
-      * ``phylo_discordant`` -- the call is more diverged than orthology predicts for its
-        species distance. Recorded on the record and surfaced as a self-consistency flag.
-      * with ``promote``, an AMBIGUOUS call that is phylo_concordant is raised to MEDIUM.
-        This is how recall lost to the AMBIGUOUS tier is meant to come back, so it is
-        OFF by default until a run shows the verdicts are trustworthy: ``would_promote``
-        reports what it *would* have done.
+    ``phylo_discordant`` -- the call is more diverged than orthology predicts for its
+    species distance. Recorded on the record and surfaced as a self-consistency flag. No
+    label moves. (Until 2026-11-10 an option could raise a concordant AMBIGUOUS call to
+    MEDIUM; since e3 a record takes the verdict of its own model, and F9 fits only the models
+    the search labelled HIGH or MEDIUM, so no AMBIGUOUS record had a verdict and the option
+    could not act: removed, main.nf removedParams.)
 
     Mutates records in place; returns (flags, summary).
     """
     records = goi_dedup.get("records", [])
     summary = {"evaluated": 0, "concordant": 0, "discordant": 0,
-               "insufficient_data": 0, "promoted": 0, "would_promote": 0,
-               "promotion_enabled": bool(promote)}
+               "insufficient_data": 0}
     if not records or not phylo_rows:
         return [], summary
 
@@ -1702,13 +1699,6 @@ def apply_phylo_placement(goi_dedup, phylo_rows, promote=False):
             })
         elif verdict == "phylo_concordant":
             summary["concordant"] += 1
-            if rec["confidence"] == "AMBIGUOUS":
-                summary["would_promote"] += 1
-                if promote:
-                    rec["confidence"] = "MEDIUM"
-                    rec["goi_class"] = "probable_goi"
-                    rec["phylo_promoted"] = True
-                    summary["promoted"] += 1
         else:
             summary["insufficient_data"] += 1
     return flags, summary
@@ -2153,7 +2143,7 @@ def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35, core_co
 def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
                  locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
                  identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
-                 phylo_placement_dir=None, phylo_placement_promote=False,
+                 phylo_placement_dir=None,
                  strong_flanking_min=20, core_completeness=False, tree_infos=None):
     qc_records = load_qc_records(qc_json)
     qc_summary = summarize_qc(qc_records)
@@ -2243,11 +2233,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # flag bit-for-bit-identical multi-locus hits as cross_locus_duplicate. docs/TODO.md §1h.
     # ``goi_annotations`` + ``flanking_per_locus`` came out of the unified GFF pass above.
     goi_dedup = dedupe_goi_annotations(goi_annotations)
-    # F9 phylogenetic placement — runs BEFORE the headline counts are read, because
-    # promotion (when enabled) changes a record's confidence.
+    # F9 phylogenetic placement: each record gets its own model's verdict (advisory, no label
+    # moves; the counts below are read after it, as when an option could promote, until 2026-11-10).
     phylo_rows = load_phylo_placement_rows(phylo_placement_dir)
     phylo_flags, phylo_summary = apply_phylo_placement(
-        goi_dedup, phylo_rows, promote=phylo_placement_promote)
+        goi_dedup, phylo_rows)
     if phylo_flags or phylo_summary["evaluated"]:
         recount = [r for r in goi_dedup.get("records", [])]
         goi_dedup["high_confidence_goi_deduped"] = sum(
@@ -2434,7 +2424,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                                           if r.get("own_copy_set_aside")),
             "gene_order_only_dropped": goi_dedup.get("gene_order_only_dropped", 0),
             "phylo_discordant_calls": phylo_summary["discordant"],
-            "phylo_would_promote": phylo_summary["would_promote"],
             "high_confidence_goi_pre_dedup": goi_high,
             "medium_confidence_goi_pre_dedup": goi_medium,
             # Pre-ownership = before §1m relabeled paralog_not_goi calls out of the headline.
@@ -2833,13 +2822,6 @@ def main():
              "<results_dir>/phylo_placement.",
     )
     parser.add_argument(
-        "--phylo_placement_promote", action="store_true",
-        help="Raise an AMBIGUOUS call to MEDIUM when its phylogenetic placement is "
-             "concordant. OFF by default: the report first reports what it WOULD "
-             "promote (summary.phylo_would_promote), so a run can show whether the "
-             "verdicts are trustworthy before they move any number.",
-    )
-    parser.add_argument(
         "--disable_coverage_demotion", action="store_true",
         help="Keep high-identity/low-coverage GOI calls in the headline counts "
              "(advisory-only, the pre-2026-08-22 behaviour).",
@@ -2904,7 +2886,6 @@ def main():
         locus_ownership_tiebreak_gap=args.locus_ownership_tiebreak_gap,
         coverage_demotion=not args.disable_coverage_demotion,
         phylo_placement_dir=args.phylo_placement_dir,
-        phylo_placement_promote=args.phylo_placement_promote,
         identity_decoupled_min_identity=args.identity_decoupled_min_identity,
         identity_decoupled_max_qcov=args.identity_decoupled_max_qcov,
         strong_flanking_min=args.strong_flanking_min,

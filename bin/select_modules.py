@@ -73,7 +73,7 @@ SWITCHES = frozenset({
     "disable_locus_ownership", "disable_paralog_check", "require_paralog_panel",
     "rank_wave_binning", "disable_wavefront", "disable_anchor_resolution",
     "disable_relative_query", "disable_synteny_collinearity", "synteny_bridge_two_sided",
-    "goi_chain_query_aware", "tandem_query_restart", "goi_first_exon_guard",
+    "tandem_query_restart", "goi_first_exon_guard",
     "goi_join_leftover_hits", "decoy_mode",
 })
 # The genome axis (profile stage 5): keys whose value differs per target genome. The search

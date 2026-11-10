@@ -223,7 +223,7 @@ workflow ADJUDICATE_AND_REPORT {
 
     // F9 phylogenetic placement. Runs on the GOI proteins ITERATIVE_SEARCH already
     // collects for the tree, so it needs no new search work — only the species
-    // distances PHYLO_SORT computed. Advisory unless --phylo_placement_promote.
+    // distances PHYLO_SORT computed. Advisory: it moves no label.
     PHYLO_PLACEMENT_CHECK(goi_for_tree, query_faa, sorted_genomes)
 
     no_phylo_sentinel = file("${projectDir}/assets/sentinels/NO_PHYLO_PLACEMENT")

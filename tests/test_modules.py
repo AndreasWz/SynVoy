@@ -529,7 +529,8 @@ def test_a_violation_the_rules_make_alone_stops_the_run(monkeypatch, tmp_path, c
 def test_switches_n_and_the_mechanism_are_forbidden_to_the_rules():
     """C10 of the profile handoff: no rule writes a switch, n_flanking_genes, decoy_mode,
     expand_goi_similar or the module mechanism; every forbidden key is a real param."""
-    assert len(sm.SWITCHES) == 27
+    assert len(sm.SWITCHES) == 26          # 27 until goi_chain_query_aware was removed (2026-11-10)
+    assert "goi_chain_query_aware" not in sm.SWITCHES
     declared = rep.load_shipped_defaults(str(ROOT / "nextflow.config"), sm.FORBIDDEN_FOR_MODULES)
     assert set(declared) == set(sm.FORBIDDEN_FOR_MODULES)
     assert {"n_flanking_genes", "decoy_mode", "expand_goi_similar", "modules", "tandem_copy_parent",

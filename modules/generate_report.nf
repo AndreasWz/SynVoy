@@ -121,7 +121,6 @@ process GENERATE_REPORT {
         --strong_flanking_min ${FlankingCounts.value(params, 'strong_synteny_no_goi_min_flanking')} \\
         ${params.disable_coverage_demotion.toString().toBoolean() ? '--disable_coverage_demotion' : ''} \\
         --phylo_placement_dir staged_results/phylo_placement \\
-        ${params.phylo_placement_promote.toString().toBoolean() ? '--phylo_placement_promote' : ''} \\
         --effective_params ${effective_params} \\
         --home_db_dir ${home_db} \\
         --goi_info ${goi_info} \\

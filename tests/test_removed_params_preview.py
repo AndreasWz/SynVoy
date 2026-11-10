@@ -5,7 +5,8 @@ pro-mode input, about 8 s per run; skipped without Nextflow on PATH (CI has none
 
 * ``replaced``: the old value asks for something the pipeline can no longer do, so the
   run stops and the message names what does it now;
-* ``noEffect``: the run goes on with a warning.
+* ``noEffect``: the run goes on with a warning;
+* ``offOnly``: a switch set to true stops the run (the reason is said), set to false it warns.
 
 The parameters of the identity-based GOI label (removed 2026-10-15) are the cases.
 """
@@ -60,3 +61,22 @@ def test_a_parameter_without_effect_only_warns(tmp_path):
     assert ("--disable_distance_autotune no longer exists. It had no effect (the per-genome "
             "relaxation of the identity thresholds went with the thresholds") in text
     assert "All parameters validated" in text
+
+
+def test_the_promotion_option_only_warns(tmp_path):
+    code, text = _preview(tmp_path, "--phylo_placement_promote", "true")
+    assert code == 0, text[-2000:]
+    assert ("--phylo_placement_promote no longer exists. It had no effect (removed on 2026-11-10: it "
+            "was to raise an AMBIGUOUS call") in text
+    assert "All parameters validated" in text
+
+
+def test_the_query_aware_chain_stops_when_on_and_warns_when_off(tmp_path):
+    code, text = _preview(tmp_path, "--goi_chain_query_aware", "true")
+    assert code != 0
+    assert ("--goi_chain_query_aware no longer exists: removed on 2026-11-10: switched on, its hit "
+            "chain refused a continuation of the query") in text
+    code, text = _preview(tmp_path, "--goi_chain_query_aware", "false")
+    assert code == 0, text[-2000:]
+    assert ("--goi_chain_query_aware no longer exists. Set to false, its old default, it changes "
+            "nothing; remove it from the command line or config.") in text

@@ -268,37 +268,24 @@ class TestReportIntegration(unittest.TestCase):
         self.assertEqual(summary["discordant"], 1)
         self.assertEqual(rec["phylo_verdict"], "phylo_discordant")
 
-    def test_promotion_is_off_by_default_but_counted(self):
-        """The measurement-first pattern: report what it WOULD do before doing it."""
-        rec = _dedup("AMBIGUOUS", "m1")
-        _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")})
-        self.assertEqual(summary["would_promote"], 1)
-        self.assertEqual(summary["promoted"], 0)
-        self.assertEqual(rec["confidence"], "AMBIGUOUS", "must not move by default")
-
-    def test_promotion_when_enabled_restores_medium(self):
-        rec = _dedup("AMBIGUOUS", "m1")
-        _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")}, promote=True)
-        self.assertEqual(summary["promoted"], 1)
-        self.assertEqual(rec["confidence"], "MEDIUM")
-        self.assertEqual(rec["goi_class"], "probable_goi")
-        self.assertTrue(rec["phylo_promoted"])
-
-    def test_discordant_ambiguous_is_never_promoted(self):
-        rec = _dedup("AMBIGUOUS", "m1")
-        _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_discordant", "4.0")},
-            promote=True)
-        self.assertEqual(rec["confidence"], "AMBIGUOUS")
-        self.assertEqual(summary["promoted"], 0)
+    def test_a_verdict_moves_no_label(self):
+        """The promotion option was removed on 2026-11-10 (main.nf removedParams): since 2026-11-09 F9
+        judges only HIGH and MEDIUM models, so no AMBIGUOUS record had a verdict to be promoted by."""
+        import inspect
+        self.assertEqual(list(inspect.signature(gr.apply_phylo_placement).parameters),
+                         ["goi_dedup", "phylo_rows"])
+        for verdict in ("phylo_concordant", "phylo_discordant"):
+            rec = _dedup("AMBIGUOUS", "m1")
+            _flags, summary = gr.apply_phylo_placement(
+                {"records": [rec]}, {("locus_1", "m1"): _row("m1", verdict, "4.0")})
+            self.assertEqual((rec["confidence"], rec["goi_class"]), ("AMBIGUOUS", _dedup("AMBIGUOUS", "m1")["goi_class"]))
+            self.assertNotIn("phylo_promoted", rec)
+            self.assertEqual(sorted(summary), ["concordant", "discordant", "evaluated", "insufficient_data"])
 
     def test_insufficient_data_changes_nothing(self):
         rec = _dedup("AMBIGUOUS", "m1")
         flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "insufficient_data", "")},
-            promote=True)
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "insufficient_data", "")})
         self.assertEqual(flags, [])
         self.assertEqual(rec["confidence"], "AMBIGUOUS")
         self.assertEqual(summary["insufficient_data"], 1)
@@ -306,7 +293,7 @@ class TestReportIntegration(unittest.TestCase):
     def test_unmatched_record_is_untouched(self):
         rec = _dedup("AMBIGUOUS", "no_such_model")
         _flags, summary = gr.apply_phylo_placement(
-            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")}, promote=True)
+            {"records": [rec]}, {("locus_1", "m1"): _row("m1", "phylo_concordant")})
         self.assertEqual(summary["evaluated"], 0)
         self.assertNotIn("phylo_verdict", rec)
 
@@ -339,7 +326,7 @@ class TestRowsKeyedByLocus(unittest.TestCase):
         _flags, summary = gr.apply_phylo_placement({"records": [same_model, other_model]}, rows)
         self.assertEqual(same_model["phylo_verdict"], "phylo_concordant")
         self.assertNotIn("phylo_verdict", other_model)
-        self.assertEqual((summary["evaluated"], summary["would_promote"]), (1, 0))
+        self.assertEqual(summary["evaluated"], 1)
 
     def test_an_id_another_locus_gives_another_model_lends_no_verdict(self):
         """The cow chrX case of r3 DCN: the record's model is locus_3's X; locus_1 is in its provenance with
@@ -349,7 +336,7 @@ class TestRowsKeyedByLocus(unittest.TestCase):
                    _rep=("locus_3", "X"), _members=[("locus_3", "X", 100, 400), ("locus_1", "Y", 100, 400)])
         _flags, summary = gr.apply_phylo_placement({"records": [rec]}, rows)
         self.assertNotIn("phylo_verdict", rec)
-        self.assertEqual((summary["evaluated"], summary["would_promote"]), (0, 0))
+        self.assertEqual(summary["evaluated"], 0)
 
     def test_a_member_of_another_span_lends_no_verdict(self):
         """A wider model merged into the record is another protein: its verdict is not the record's."""

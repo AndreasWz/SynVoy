@@ -535,7 +535,9 @@ paralog — the decorin-vs-biglycan class of error.
 Asks whether a call's sequence divergence from the query fits its species' distance. A
 lineage-specific paralog sits further away than its species should. The verdict
 (`phylo_concordant` / `phylo_discordant` / `insufficient_data`) is written on each record
-in the report; it does **not** change a confidence unless you ask it to. On the 10-family
+of the report whose own model the search labelled HIGH or MEDIUM (the models the check
+fits); it changes **no** confidence (the option that could promote a call was removed on
+2026-11-10, PARAMETERS.md § 20). On the 10-family
 benchmark it carried no usable signal (every discordant record was a real ortholog), so
 treat it as a hint.
 
@@ -544,7 +546,6 @@ treat it as a hint.
 | `--disable_phylo_placement` | `false` | Skip the check. |
 | `--phylo_placement_min_calls` | `4` | Species with calls needed before the fit is attempted. |
 | `--phylo_placement_z_threshold` | `2.0` | Residual z-score at or above which a call is `phylo_discordant`. |
-| `--phylo_placement_promote` | `false` | Promote an `AMBIGUOUS` call that is `phylo_concordant` to `MEDIUM`. Not recommended yet. |
 
 ### Structural Discovery (experimental, GPU)
 

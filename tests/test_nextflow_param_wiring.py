@@ -240,8 +240,6 @@ def test_settings_keys_read_by_modules_are_provided_by_main_nf():
     ("legacy_strand_score", "cluster_regions.nf", "--legacy_strand_score", "cluster_grs.py"),
     ("synteny_bridge_two_sided", "iterative_search.nf", "--synteny_bridge_two_sided",
      "iterative_search_runner.py"),
-    ("phylo_placement_promote", "generate_report.nf", "--phylo_placement_promote",
-     "generate_report.py"),
 ])
 def test_documented_switches_reach_their_script(param, module, flag, script):
     """Each of these was once a switch a user could set that changed nothing,
@@ -357,6 +355,24 @@ def test_removed_parameters_are_not_declared_any_more():
         config = "\n".join(_code(cfg))
         for name in names:
             assert not re.search(rf"^\s*(params\.)?{name}\s*=", config, re.M), (cfg.name, name)
+
+
+def test_the_two_options_of_2026_11_10_are_removed():
+    """phylo_placement_promote could not act since 2026-11-09 (a warning); goi_chain_query_aware,
+    switched on, undid a gain on the curated truth (offOnly: true stops, false warns). Neither is
+    declared, passed by a module or read by a script."""
+    main_nf = (ROOT / "main.nf").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1].split("noEffectNote:")[0]))
+    off_only = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("offOnly:")[1], re.M))
+    assert "phylo_placement_promote" in no_effect
+    assert "phylo_placement_promote:" in block.split("noEffectNote:")[1].split("offOnly:")[0]
+    assert off_only == {"goi_chain_query_aware"}
+    assert not {"phylo_placement_promote", "goi_chain_query_aware"} & set(_declared_params())
+    for path in sorted((ROOT / "modules").glob("*.nf")) + sorted((ROOT / "subworkflows").glob("*.nf")) \
+            + sorted((ROOT / "bin").glob("*.py")) + sorted((ROOT / "lib").glob("*.groovy")):
+        text = path.read_text()
+        assert "phylo_placement_promote" not in text and "goi_chain_query_aware" not in text, path.name
 
 
 def test_removed_label_parameters_are_classified_as_the_handover_asks():

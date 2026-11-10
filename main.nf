@@ -218,7 +218,9 @@ def homeLocusMode() {
 // than a message, so a run that still sets one is told what to do instead:
 //   replaced   the run stops, because the old value says something the pipeline can no
 //              longer do in that form;
-//   no effect  the run goes on with a warning: the parameter changed nothing when it was removed.
+//   no effect  the run goes on with a warning: the parameter changed nothing when it was removed;
+//   off only   a switch whose removal keeps what it did when off: set to true the run stops
+//              (the reason is said), set to false (its old default) it goes on with a warning.
 def removedParams() {
     def advisor = "the LLM parameter advisor was removed on 2026-10-22: on the Nextflow versions SynVoy runs on (25.10 and later) it only printed suggested flags and applied none, and the settings that depend on the gene come from the preset modules (--modules)"
     return [
@@ -250,6 +252,7 @@ def removedParams() {
             'distance_autotune_min_flanking', 'distance_autotune_high_floor', 'distance_autotune_medium_floor',
             'auto_params', 'force_disable_advanced_search',
             'llm_provider', 'llm_api_key', 'llm_api_base_url', 'llm_model',
+            'phylo_placement_promote',
         ],
         // Said in the warning of a noEffect parameter, after "It had no effect".
         noEffectNote: [
@@ -258,6 +261,11 @@ def removedParams() {
             disable_distance_autotune: "the per-genome relaxation of the identity thresholds went with the thresholds; the judge computes each call's E-value in the expected place of its own genome (docs/ALGORITHM.md 7.8)",
             auto_params: advisor, force_disable_advanced_search: advisor,
             llm_provider: advisor, llm_api_key: advisor, llm_api_base_url: advisor, llm_model: advisor,
+            phylo_placement_promote: "removed on 2026-11-10: it was to raise an AMBIGUOUS call whose phylogenetic placement is concordant to MEDIUM, and since 2026-11-09 it could not act, because the placement check judges only the models the search labelled HIGH or MEDIUM and each record takes its own model's verdict, so no AMBIGUOUS call has one",
+        ],
+        // Said in the stop of an offOnly switch that is set to true.
+        offOnly: [
+            goi_chain_query_aware: "removed on 2026-11-10: switched on, its hit chain refused a continuation of the query in the same reading frame 24 bp on and so undid a gain on the curated truth (two hits of one stop-free frame read as one piece, 2026-11-02); every run chains the hits as it did when the switch was off, so remove it",
         ],
     ]
 }
@@ -430,6 +438,15 @@ def validateNumericParams(validationErrors, validationWarnings) {
         if (params.containsKey(name)) {
             def note = removed.noEffectNote[name] ? " (${removed.noEffectNote[name]})" : ''
             validationWarnings << "--${name} no longer exists. It had no effect${note}; remove it from the command line or config."
+        }
+    }
+    removed.offOnly.each { name, reason ->
+        if (params.containsKey(name)) {
+            if (params[name].toString().trim().toBoolean()) {
+                validationErrors << "--${name} no longer exists: ${reason}."
+            } else {
+                validationWarnings << "--${name} no longer exists. Set to false, its old default, it changes nothing; remove it from the command line or config."
+            }
         }
     }
     checkModulesSpec(validationErrors)

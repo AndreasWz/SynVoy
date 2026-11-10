@@ -514,15 +514,10 @@ A safety cap on the total number of candidate syntenic blocks evaluated per targ
 
 The minimum number of flanking gene hits required in a candidate syntenic block for it to be kept and evaluated further. Blocks with fewer than this many hits are discarded as noise. With the default of 2, at least two flanking gene anchors must map to the same target region (within `cluster_distance`). Setting this to 1 is extremely permissive — a single flanking gene hit somewhere on a chromosome does not constitute synteny evidence and is almost certainly a standalone ortholog of that flanking gene rather than a conserved syntenic block. Setting this higher than 3 is very strict and may miss real syntenic regions in organisms with high chromosomal rearrangement. The combination of `min_block_genes` and `min_synteny_score` together determines which candidate regions survive for GOI search: `min_block_genes` is the absolute floor, while `min_synteny_score` is the proportional threshold.
 
-### `goi_chain_query_aware`
-**Type:** Boolean | **Default:** `false`
-
-How the GOI's hits in a search window are chained into a gene when miniprot builds no model (`fallback_hit_span`). Off (the default, as before): the chain with the most hits whose query centres rise along the strand. On (batch G1, 2026-10-16): a hit continues the chain only when it continues the query (it starts at most 10 residues before the previous hit ends and ends after it), the residues it skips fit into the genomic gap, and a gap under 40 bp joins only two pieces of one exon, written as one CDS row; the chain with the most bits wins. It stops a repeat of the same query part, or a short hit inside a longer one, from being read as a next exon. The label is computed on the hits themselves either way, and the chain carries the bits of its best single hit (the short-query gate of 30 bits is not met by three 12-bit hits). Every chain lists its hits' query intervals as `ChainQuery=` on the mRNA row.
-
 ### `tandem_query_restart`
 **Type:** Boolean | **Default:** `false`
 
-How tandem copies of the GOI are found among its hits in a search window. Off (the default, as before): any two hits that each cover at least 35 % of the query make a tandem, and each copy is the single span of its hits. On (batch G2, 2026-10-16): copies are built per strand from hits that continue the query (as `goi_chain_query_aware` chains them), a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits (both for a query under 150 aa), copies sharing genome are one, and a tandem needs two counted copies that overlap in the query by more than half; each copy is written as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or two programs' hits of one exon, no longer make a tandem. Works with both `tandem_copy_parent` settings.
+How tandem copies of the GOI are found among its hits in a search window. Off (the default, as before): any two hits that each cover at least 35 % of the query make a tandem, and each copy is the single span of its hits. On (batch G2, 2026-10-16): copies are built per strand from hits that continue the query (a hit starts at most 10 residues before the previous one ends and ends after it), a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits (both for a query under 150 aa), copies sharing genome are one, and a tandem needs two counted copies that overlap in the query by more than half; each copy is written as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or two programs' hits of one exon, no longer make a tandem. Works with both `tandem_copy_parent` settings.
 
 ### `goi_first_exon_guard`
 **Type:** Boolean | **Default:** `false`
@@ -542,7 +537,7 @@ Only with `goi_genome_wide_path`: the genome-wide path also runs in a genome wit
 ### `goi_join_leftover_hits`
 **Type:** Boolean | **Default:** `false`
 
-A GOI hit that no gene model of its locus covers is written as a `rescued_exon` call, even when it is an exon miniprot left out of a model next to it. With this switch (batch G3B, 2026-10-16) such a hit is first offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM (the home query or its decoy): it must lie outside the model on its strand, continue the model's query from its first or last CDS (the rule of `goi_chain_query_aware`), lie within the GOI's intron bound (`goi_fallback_max_gap`), and no CDS of another gene model or tandem copy may lie in between. miniprot then models both again (± 1 kb); the new model replaces the old one only when it covers the hit and the label's order ranks it strictly first. It keeps the old model's id and lists the joined hits in `JoinedHits=`. Models found with the relative's query are not joined.
+A GOI hit that no gene model of its locus covers is written as a `rescued_exon` call, even when it is an exon miniprot left out of a model next to it. With this switch (batch G3B, 2026-10-16) such a hit is first offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM (the home query or its decoy): it must lie outside the model on its strand, continue the model's query from its first or last CDS (batch G1's link rule: it starts at most 10 residues before the other ends and ends after it, the residues it skips fit into the genomic gap, and a gap under 40 bp joins only two pieces of one exon in one reading frame), lie within the GOI's intron bound (`goi_fallback_max_gap`), and no CDS of another gene model or tandem copy may lie in between. miniprot then models both again (± 1 kb); the new model replaces the old one only when it covers the hit and the label's order ranks it strictly first. It keeps the old model's id and lists the joined hits in `JoinedHits=`. Models found with the relative's query are not joined.
 
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
 **Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
@@ -1059,9 +1054,9 @@ The size of the home-paralog panel of locus ownership ([ALGORITHM.md § 10](ALGO
 ### `disable_phylo_placement`
 **Type:** Boolean | **Default:** `false`
 
-Phylogenetic placement check (advisory). For every adjudicated GOI call SynVoy compares the call's sequence divergence from the query with its species' taxonomic distance from the home species, fits the trend across species, and labels a call that sits anomalously far for its species `phylo_discordant` (others `phylo_concordant`, or `insufficient_data` when too few species have calls). The idea: a paralog that arose before the speciation is more diverged than an ortholog in the same species. The verdict and its z-score are written on each record in `synvoy_report.json` (`goi_dedup.records[].phylo_verdict`, `phylo_z`) and summarised under `self_consistency.phylo_placement_summary`.
+Phylogenetic placement check (advisory). For every GOI model the search labelled HIGH or MEDIUM (the models the tree reads, `goi_for_tree`) SynVoy compares the model's sequence divergence from the query with its species' taxonomic distance from the home species, fits the trend across species, and labels a model that sits anomalously far for its species `phylo_discordant` (others `phylo_concordant`, or `insufficient_data` when too few species have models). The idea: a paralog that arose before the speciation is more diverged than an ortholog in the same species. The verdict and its z-score are written on each record of `synvoy_report.json` whose own model has one (`goi_dedup.records[].phylo_verdict`, `phylo_z`; an AMBIGUOUS or LOW record has none) and summarised under `self_consistency.phylo_placement_summary`.
 
-It does not change any confidence by default, and it should be read as a hint: divergence comes from a local alignment, species distance is a taxonomic rank difference rather than time, and the test assumes comparable rates across lineages — which fast-evolving genes violate. On the 10-family benchmark every `phylo_discordant` record was a real ortholog. Set `true` to skip the step.
+It changes no confidence, and it should be read as a hint: divergence comes from a local alignment, species distance is a taxonomic rank difference rather than time, and the test assumes comparable rates across lineages — which fast-evolving genes violate. On the 10-family benchmark every `phylo_discordant` record was a real ortholog. Set `true` to skip the step.
 
 ### `phylo_placement_min_calls`
 **Type:** Integer | **Default:** `4`
@@ -1072,11 +1067,6 @@ Number of species with a call needed before the trend is fitted. Below it every 
 **Type:** Float | **Default:** `2.0`
 
 Residual z-score at or above which a call is `phylo_discordant`.
-
-### `phylo_placement_promote`
-**Type:** Boolean | **Default:** `false`
-
-Promote an `AMBIGUOUS` call that is `phylo_concordant` to `MEDIUM`. Leave it off unless a run on your own data has shown the verdict is trustworthy.
 
 ### `disable_wavefront`
 **Type:** Boolean | **Default:** `false`
@@ -1172,7 +1162,7 @@ Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints 
 
 ## 20. Removed parameters
 
-Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and context-promotion options on 2026-10-14, the parameters of the identity-based GOI label on 2026-10-15, the LLM parameter advisor on 2026-10-22). Passing one of the first group stops the run at start with the replacement named; one of the other two groups prints a warning and is ignored.
+Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and context-promotion options on 2026-10-14, the parameters of the identity-based GOI label on 2026-10-15, the LLM parameter advisor on 2026-10-22, `phylo_placement_promote` and `goi_chain_query_aware` on 2026-11-10). Passing one of the first group stops the run at start with the replacement named; one of the next two groups prints a warning and is ignored; the last group is told apart by its value.
 
 **Replaced**
 
@@ -1209,6 +1199,13 @@ Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and conte
 | `distance_autotune_close_pct`, `distance_autotune_far_pct`, `distance_autotune_max_relax`, `distance_autotune_min_flanking`, `distance_autotune_high_floor`, `distance_autotune_medium_floor` | settings of the per-genome relaxation of the identity thresholds (2026-10-15), removed with it |
 | `disable_ambiguous_tier` | the switch that took AMBIGUOUS out of the label (2026-10-15). AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
 | `disable_distance_autotune` | the switch of the per-genome relaxation of the identity thresholds (§1g; 2026-10-15), which went with the thresholds. The judge computes each call's E-value in the expected place of its own genome |
+| `phylo_placement_promote` | raising an AMBIGUOUS call whose phylogenetic placement (F9) is concordant to MEDIUM (2026-11-10). Since 2026-11-09 it could not act: the placement check judges only the models the search labelled HIGH or MEDIUM, and each record takes its own model's verdict, so no AMBIGUOUS call has one. The verdicts stay advisory (`phylo_verdict` on each record, `phylo_discordant` flags) |
+
+**Stops when on, warns when off** (2026-11-10; the run keeps what the switch did when it was off)
+
+| Parameter | Why it went |
+|---|---|
+| `goi_chain_query_aware` | batch G1's hit chain that follows the query (off by default). Switched on, it refused a continuation of the query in the same reading frame 24 bp on and so undid a gain on the curated truth (two hits of one stop-free frame read as one piece, 2026-11-02). Set to `true`, the run stops at its start; set to `false`, it goes on with a warning. Its link rule stays in the leftover join (`goi_join_leftover_hits`) |
 
 **The LLM parameter advisor** (2026-10-22; read only by the advisor, which was removed with them)
 

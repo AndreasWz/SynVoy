@@ -865,24 +865,20 @@ For each GOI query:
 
    The identity of a chain is the mean over its hits, weighted by alignment length.
    The mRNA row lists the query interval of each hit (`ChainQuery=1-40,41-88,...`).
-
-   With `goi_chain_query_aware` (off by default, batch G1) the chain follows the query
-   instead: a hit continues the chain only when it starts at most 10 residues before the
-   previous hit ends and ends after it (on the minus strand the mirror image); the residues
-   it skips must fit into the genomic gap (3 bp each, less 30 bp); a gap under 40 bp joins
-   only two pieces of one exon (same reading frame, the gap within 15 bp of the skipped
-   codons), which are then written as one CDS row. The chain with the most bits wins (ties:
-   more query covered, then fewer hits). The label is still computed on the hits
-   themselves, and the chain still carries the bits of its best single hit.
+   (Batch G1's chain that follows the query was an option until 2026-11-10; switched on
+   it undid a gain on the curated truth, and it was removed. Its link rule is the one of
+   the leftover join below.)
 6. **Single hits.** Remaining hits can be written as `rescued_exon` or `raw_hit`.
    Both get an E-value in their place and are judged like every GOI candidate (§7.8); a
    `raw_hit` needs 60 % query coverage to be written, so it can be HIGH.
    With `goi_join_leftover_hits` (off by default, batch G3B) a `rescued_exon` hit is first
    offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM
    (the home query or its decoy, not the relative's query): the hit must lie outside the
-   model on its strand and continue the query from the model's first or last CDS by the
-   rule of `goi_chain_query_aware` (at most 10 residues of overlap, the skipped residues
-   fit into the gap, within the GOI's intron bound), with no CDS of another gene model or
+   model on its strand and continue the query from the model's first or last CDS by
+   batch G1's link rule (it starts at most 10 residues before the other ends and ends
+   after it, on the minus strand the mirror image; the residues it skips fit into the
+   genomic gap, 3 bp each less 30 bp; a gap under 40 bp only between two pieces of one
+   exon, in one reading frame; within the GOI's intron bound), with no CDS of another gene model or
    tandem copy in between. miniprot then runs again over the model and the hit (± 1 kb),
    and the new model, judged like every candidate, replaces the old one only when its CDS
    cover the hit and the judge's order (`rank_key`) puts it strictly first. It keeps the

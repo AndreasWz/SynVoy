@@ -1413,7 +1413,7 @@ def prepare_label_proteins(candidates, subseq, w_start) -> None:
         if evidence in HIT_EVIDENCE_TYPES or cand.get('hit_based'):
             # hit_based: a tandem copy built from its hits (--tandem_query_restart, batch G2);
             # a default copy (one span) keeps its record protein.
-            cand['label_protein'] = (hit_label_protein(cand.get('label_rows') or gff[1:], subseq, w_start)
+            cand['label_protein'] = (hit_label_protein(gff[1:], subseq, w_start)
                                      or cand['label_protein'])
             continue
         if evidence != 'exon_annotation':
@@ -2491,12 +2491,12 @@ def _split_models_into_loci(
 # Consecutive exons of one chained model may overlap by at most this much genome
 # (10 codons: local alignments bleed a few residues past a splice site).
 CHAIN_MAX_EXON_OVERLAP_BP = 30
-# The GOI's hit chain that follows the query (batch G1, --goi_chain_query_aware, off by
-# default): a hit continues the chain when it starts at most GOI_CHAIN_QUERY_TOL residues
-# before the previous hit ends and ends after it; the residues it skips must fit into the
-# genomic gap (3 bp each x GOI_CHAIN_GAP_FIT, less 3 x the tolerance); a gap shorter than
-# GOI_CHAIN_MIN_INTRON_BP joins only two pieces of one exon (same frame, the gap within
-# GOI_CHAIN_ONE_EXON_SLACK_BP of the skipped codons), which become one CDS row.
+# The link rule of batch G1 (_query_chain_link; the leftover join of batch G3B uses it): a hit
+# continues another when it starts at most GOI_CHAIN_QUERY_TOL residues before the other ends
+# and ends after it; the residues it skips must fit into the genomic gap (3 bp each x
+# GOI_CHAIN_GAP_FIT, less 3 x the tolerance); a gap shorter than GOI_CHAIN_MIN_INTRON_BP joins
+# only two pieces of one exon (same frame, the gap within GOI_CHAIN_ONE_EXON_SLACK_BP of the
+# skipped codons). G1's query-aware chain itself was removed on 2026-11-10 (main.nf removedParams).
 GOI_CHAIN_QUERY_TOL = 10
 GOI_CHAIN_GAP_FIT = 1.0
 GOI_CHAIN_MIN_INTRON_BP = 40
@@ -2517,7 +2517,7 @@ def _hit_frame(h: Dict[str, Any], strand: str) -> int:
 def _query_chain_link(a: Dict[str, Any], b: Dict[str, Any], strand: str,
                       max_gap: Optional[int]) -> Tuple[bool, bool]:
     """``(allowed, one_exon)`` for the link from hit ``a`` to hit ``b``, ``b`` after ``a`` in
-    genomic order (batch G1; the rules at GOI_CHAIN_QUERY_TOL)."""
+    genomic order (batch G1's rule, used by the leftover join; the rules at GOI_CHAIN_QUERY_TOL)."""
     gap = int(b.get("gstart", 0)) - int(a.get("gend", 0))
     if max_gap is not None and gap > max_gap:
         return False, False
@@ -2541,46 +2541,6 @@ def _query_chain_link(a: Dict[str, Any], b: Dict[str, Any], strand: str,
             return True, True
         return False, False
     return True, False
-
-
-def _query_aware_chain(ordered_hits: List[Dict[str, Any]], strand: str,
-                       max_gap: Optional[int]) -> List[Dict[str, Any]]:
-    """The chain of ``ordered_hits`` (sorted by genomic start) with the most bits whose links
-    all pass _query_chain_link; ties by the query residues covered, then fewer hits. With no
-    link possible: the best single hit."""
-    n = len(ordered_hits)
-    best_chain = [None] * n
-    for i in range(n):
-        own = [ordered_hits[i]]
-        cand = own
-        key_c = (float(ordered_hits[i].get("bits", 0.0)), _query_residues(own), -1)
-        for j in range(i):
-            if best_chain[j] is None:
-                continue
-            ok, _one = _query_chain_link(best_chain[j][-1], ordered_hits[i], strand, max_gap)
-            if not ok:
-                continue
-            chain = best_chain[j] + own
-            key = (sum(float(h.get("bits", 0.0)) for h in chain), _query_residues(chain), -len(chain))
-            if key > key_c:
-                cand, key_c = chain, key
-        best_chain[i] = cand
-    return max(best_chain, key=lambda c: (sum(float(h.get("bits", 0.0)) for h in c),
-                                          _query_residues(c), -len(c)))
-
-
-def merge_one_exon_pieces(chain: List[Dict[str, Any]], strand: str) -> List[Tuple[int, int]]:
-    """The CDS intervals of a query-aware chain (genomic order): two consecutive hits closer
-    than GOI_CHAIN_MIN_INTRON_BP are pieces of one exon (the chain only links such hits when
-    they are, _query_chain_link) and become one interval."""
-    out: List[Tuple[int, int]] = []
-    for h in chain:
-        hs, he = int(h.get("gstart", 0)), int(h.get("gend", 0))
-        if out and hs - out[-1][1] < GOI_CHAIN_MIN_INTRON_BP:
-            out[-1] = (out[-1][0], max(out[-1][1], he))
-        else:
-            out.append((hs, he))
-    return out
 
 
 def chain_query_attr(chain: List[Dict[str, Any]]) -> str:
@@ -2746,7 +2706,6 @@ def _longest_monotonic_query_chain(
     ordered_hits: List[Dict[str, Any]],
     strand: str,
     max_gap: Optional[int] = None,
-    query_aware: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Keep the longest genomic-order/query-order-consistent hit chain.
@@ -2763,15 +2722,10 @@ def _longest_monotonic_query_chain(
     intron (the "two seqs far apart called one gene" failure). If the gap bound
     leaves only single-hit chains, the single best hit (highest bitscore, then
     aligned length) is returned so a genuine compact locus is still emitted.
-
-    ``query_aware`` (the GOI's chain with --goi_chain_query_aware, batch G1): the links of
-    _query_chain_link instead, and the chain with the most bits (_query_aware_chain).
     """
     n = len(ordered_hits)
     if n <= 1:
         return ordered_hits
-    if query_aware:
-        return _query_aware_chain(ordered_hits, strand, max_gap)
 
     qcenters = []
     for h in ordered_hits:
@@ -5063,9 +5017,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 # inter-exon gap by the home-GOI-derived max-intron so two
                                 # far-apart spurious hits aren't stitched into one gene.
                                 _goi_gap = getattr(args, 'goi_fallback_max_gap', args.max_intron)
-                                _query_aware = bool(getattr(args, 'goi_chain_query_aware', False))
                                 ordered_hits = _longest_monotonic_query_chain(
-                                    ordered_hits, strand, max_gap=_goi_gap, query_aware=_query_aware)
+                                    ordered_hits, strand, max_gap=_goi_gap)
                                 if ordered_hits:
                                     query_len = max(1, len(parent_query_seq))
                                     qcov = _query_union_coverage(ordered_hits, query_len)
@@ -5101,14 +5054,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                     if valid_fallback:
                                         coding_frags = []
                                         cds_intervals = []
-                                        # One CDS per hit; with the query-aware chain two pieces
-                                        # of one exon are one CDS (batch G1). The judge still reads
-                                        # the hits themselves (label_rows below).
+                                        # One CDS per hit.
                                         hit_intervals = [(int(h.get('gstart', 0)), int(h.get('gend', 0)))
                                                          for h in ordered_hits]
-                                        row_intervals = (merge_one_exon_pieces(ordered_hits, strand)
-                                                         if _query_aware else hit_intervals)
-                                        for hs, he in row_intervals:
+                                        for hs, he in hit_intervals:
                                             if he <= hs: continue
                                             dna = subseq[hs:he]
                                             if strand == '-': dna = reverse_complement(dna)
@@ -5154,17 +5103,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                     f"{chrom}\tfallback_hits\tCDS\t{exon_gs}\t{exon_ge}\t.\t{strand}\t0\tID={copy_id}_CDS{eidx};Parent={copy_id}"
                                                 )
                                             
-                                            # The rows the judge's protein is read from: the hits
-                                            # themselves, also where CDS rows were merged (G1).
-                                            label_rows = ([f"{chrom}\tfallback_hits\tCDS\t{w_start + hs + 1}\t"
-                                                           f"{w_start + he}\t.\t{strand}\t0\tParent={copy_id}"
-                                                           for hs, he in hit_intervals if he > hs]
-                                                          if row_intervals != hit_intervals else None)
                                             raw_candidates.append({
                                                 'start': global_start,
                                                 'end': global_end,
                                                 'score': avg_pident,
-                                                'label_rows': label_rows,
                                                 # A1: carry bitscore + flanking support so GOI
                                                 # candidate ranking honours flanking-supported
                                                 # bitscore, not raw coverage/identity.
@@ -8814,11 +8756,6 @@ def main():
                              "from hits that continue the query, counted at >= 0.35 union "
                              "coverage, a tandem when two counted copies overlap in the query; each "
                              "copy one mRNA with one CDS per hit (batch G2; off by default)")
-    parser.add_argument("--goi_chain_query_aware", type=str2bool, default=False,
-                        help="The GOI's hit chain follows the query: a hit must continue the "
-                             "query, the skipped residues must fit the gap, a gap under 40 bp "
-                             "joins only two pieces of one exon (one CDS row); the chain with the "
-                             "most bits wins (batch G1; off by default)")
     parser.add_argument("--report_copies_in_slot", type=str2bool, default=False,
                         help="Write CopiesInSlot / SlotRank on the GOI models (advisory)")
     parser.add_argument("--sw_max_alignments_per_piece", type=int, default=1,

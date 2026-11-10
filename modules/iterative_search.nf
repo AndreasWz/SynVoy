@@ -100,7 +100,6 @@ process ITERATIVE_SEARCH {
         --disable_anchor_resolution ${params.disable_anchor_resolution} \\
         --anchor_max_places ${GenomeAxis.anchorMaxPlaces(params)}${axis_args} \\
         --disable_relative_query ${params.disable_relative_query} \\
-        --goi_chain_query_aware ${params.goi_chain_query_aware} \\
         --tandem_query_restart ${params.tandem_query_restart} \\
         --goi_first_exon_guard ${params.goi_first_exon_guard} \\
         --goi_join_leftover_hits ${params.goi_join_leftover_hits} \\
