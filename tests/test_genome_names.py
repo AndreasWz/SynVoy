@@ -207,9 +207,11 @@ def test_a_block_on_a_sequence_the_genome_does_not_hold_stops_the_search():
     assert "NODE_1_length_5000_cov_1.0" in text and "Target.fna" in text and "NODE_1" in text
 
 
-def test_the_message_says_what_mmseqs2_does_with_a_database_tag():
+def test_the_message_names_the_sequence_and_the_genomes_names():
+    """A backstop since fix item 29 (every MMseqs2 table is read by its FASTA headers): it names the
+    sequence, the genome and three of its names, and no longer blames MMseqs2's rewriting."""
     text = str(su.sequence_not_in_genome("contig1", "Target.fna", ["lcl|contig1", "lcl|contig2", "lcl|contig3", "lcl|contig4"]))
-    assert "contig1" in text and "Target.fna" in text and "lcl|contig1" in text and "MMseqs2" in text
+    assert "contig1" in text and "Target.fna" in text and "lcl|contig1" in text and "first word" in text
     assert "4 sequence names" in text and "lcl|contig4" not in text
 
 
@@ -227,14 +229,15 @@ def _search_args(tmp_path):
 
 def test_a_hit_on_a_sequence_the_genome_does_not_hold_stops_the_search(tmp_path, monkeypatch):
     """Before any block forms: a genome with too few anchors for a block is told too. The real call,
-    with the MMseqs2 search and its table replaced; lcl|contig1 is what MMseqs2 reports as contig1."""
+    with the MMseqs2 search and its table replaced; lcl|contig1 is what MMseqs2's own target column
+    reports as contig1 (since fix item 29 the table is read by its headers, so this is a backstop)."""
     genome = write_fasta(tmp_path / "Target.fna", [("lcl|contig1", "ACGT" * 50)])
     db = write_fasta(tmp_path / "db.faa", [("gene-a|exon_1", "MKV"), ("GOI_x", "MKT")])
     monkeypatch.setattr(isr, "run_mmseqs_easy_search_with_retries", lambda **k: (True, "", False))
     monkeypatch.setattr(isr, "parse_hits", lambda *a, **k: [{"query": "gene-a|exon_1", "chrom": "contig1", "start": 0, "end": 30}])
     name, genes, extras, error = isr.process_single_genome(genome, db, _search_args(tmp_path), None, "", 1)
     assert name == "Target.fna" and genes == [] and extras == []
-    assert "contig1" in error and "lcl|contig1" in error and "MMseqs2" in error
+    assert "contig1" in error and "lcl|contig1" in error and "first word" in error
 
 
 def test_a_hit_on_the_genomes_own_name_passes_that_check(tmp_path, monkeypatch):

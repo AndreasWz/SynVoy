@@ -974,8 +974,8 @@ def _named(gene_id):
         gid = gid[4:]
     if not gid:
         return None
-    bare = gid[5:] if gid.startswith("gene-") else gid
-    for cand in (gid, "gene-" + bare, bare):
+    bare = _gnames._bare_id(gid)
+    for cand in (gid, "gene-" + bare, "gene:" + bare, bare):   # 'gene:' too (Ensembl; fix item 34)
         if cand in _GENE_NAMES:
             return _GENE_NAMES[cand]
     return None
@@ -1327,12 +1327,13 @@ def clean_genome_name(name):
 
 
 def clean_gene_label(name, keep_goi_prefix=False):
-    """gene-LOC412898 -> LOC412898 ;  GOI_P01501 -> P01501"""
+    """gene-LOC412898 -> LOC412898 ; gene:ENSG00000141510 -> ENSG00000141510 ; GOI_P01501 -> P01501.
+    The gene prefix is the names table's (synvoy_gene_names._bare_id: 'gene-' and 'gene:'; fix
+    item 34). A tandem copy reads 'GOI #n' (Name=GOI_copy_<n>); a GOI whose own name ends in
+    _copy_<n> no longer does (fix item 28)."""
     if name is None:
         return ""
     name = str(name)
-    if name.startswith("gene-"):
-        return name[5:]
     if name.startswith("GOI_"):
         if keep_goi_prefix:
             # For target tracks: translate 'GOI_copy_3' -> 'GOI #3'
@@ -1340,12 +1341,9 @@ def clean_gene_label(name, keep_goi_prefix=False):
             m = re.match(r'copy_(\d+)', suffix)
             if m:
                 return f"GOI #{m.group(1)}"
-            m = re.match(r'(.*?)_copy_(\d+)', suffix)
-            if m:
-                return f"GOI #{m.group(2)}"
             return f"GOI {_home_gene_label(suffix, suffix)}" if suffix else "GOI"
         return name[4:]
-    return name
+    return _gnames._bare_id(name)
 
 
 # ======================================================================
@@ -3058,10 +3056,14 @@ def render_synteny_html(all_tracks, gene_colours,
                         gx0, gx1 = gene_px(g, track)
                         xs.extend([gx0, gx1])
                     cx = (min(xs) + max(xs)) / 2
-                    short = ch if len(ch) <= 14 else ch[-12:]
+                    # The whole name up to 20 characters, else its two ends: the last 12 alone read
+                    # NODE_1_length_6296_cov_1.0 as 6296_cov_1.0 (fix item 34); the full name hovers.
+                    short = ch if len(ch) <= 20 else ch[:8] + "\u2026" + ch[-8:]
+                    title = f'<title>{_svg_esc(ch)}</title>' if short != ch else ''
                     svg_parts.append(
                         f'<text x="{cx:.1f}" y="{yb + th + TRACK_PAD + 10:.1f}" '
-                        f'text-anchor="middle" class="chrom-label track-item" data-track-idx="{ti}">{_svg_esc(short)}</text>'
+                        f'text-anchor="middle" class="chrom-label track-item" data-track-idx="{ti}">'
+                        f'{title}{_svg_esc(short)}</text>'
                     )
 
     # ---- Scale bar ----
@@ -3240,6 +3242,22 @@ def render_synteny_html(all_tracks, gene_colours,
     return html
 
 
+def leaf_species_name(leaf_species, species_map):
+    """The species name a tree leaf's genome maps to: the map's keys read as the search writes a
+    genome into the model ids ('.', '-' and ' ' as '_', the FASTA extension dropped), the leaf's
+    genome equal to a key or a key followed by '_', the longest key first. The test was a substring
+    either way, so an accession key (GCA_963969585.1, easy mode) never met its leaf
+    (GCA_963969585_1) and the page printed the accession for every leaf (fix item 28), and
+    Apis_cerana could take Apis_cerana_japonica's leaves."""
+    def key(k):
+        return re.sub(r"_(fa|fna|fasta)$", "", re.sub(r"[.\- ]", "_", k))
+    for k, name in sorted(((key(k), v) for k, v in (species_map or {}).items() if k),
+                          key=lambda kv: (-len(kv[0]), kv[0])):
+        if leaf_species == k or leaf_species.startswith(k + "_"):
+            return name
+    return None
+
+
 def _tree_support_note(report_path, output):
     """What the tree page says about branch support, from the report's trees block (fix-phase
     d6), or None (no report, no record of this tree). The locus is read from the output name."""
@@ -3387,11 +3405,7 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
         if "|" not in name:
             return None  # home / query leaf
         sp = _stree.species_from_leaf(name) or name.split("|", 1)[1]
-        if species_map:
-            for acc, sp_name in species_map.items():
-                if acc and (acc in sp or sp in acc):
-                    return sp_name
-        return sp.replace("_", " ")
+        return leaf_species_name(sp, species_map) or sp.replace("_", " ")
     from collections import Counter, defaultdict as _dd
     _sp_total = Counter(s for s in (_clean_species_for_leaf(l.name) for l in leaves)
                         if s)
@@ -5487,12 +5501,13 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     (parse_target_gff), the GOI cap steering the choice (_cap_goi_genes); the models inside
     this genome's CLUSTER_REGIONS regions (--candidate_beds), narrowed to the regions with a
     GOI model when those keep enough flanking context; a GOI-centred window when the regions
-    miss every GOI model; when they give two genes or fewer, a step meant to take the richest
-    search block, which finds no block (it reads the block number from the Name attribute;
-    NB below); on a chromosome-level assembly, the GOI chromosomes with flanking support plus
+    miss every GOI model; on a chromosome-level assembly, the GOI chromosomes with flanking support plus
     every chromosome with >= 3 flanking genes; then the capped GOI models inside that view. Taken
     out of _run_figures unchanged (2026-10-19), so scripts/compare_plot_selection.py reads
-    today's choice from the same code; it prints its choices as before."""
+    today's choice from the same code; it prints its choices as before. A step meant to take the
+    richest search block when the regions gave two genes or fewer read the block number from the
+    Name attribute, which holds none, so it never acted; with a GOI named like Ly6e_b3_l1 it took
+    every GOI model and no flanking gene (fix item 26, removed 2026-11-09)."""
     genes_all, capped_goi = _cap_goi_genes(parse_target_gff(gff_file, cap=False),
                                            _MAX_GOI_PER_GENOME)
     candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
@@ -5526,50 +5541,6 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
                 f"[plot] {genome_id}: candidate regions missed GOI; "
                 f"using GOI-centered fallback ({len(genes)} genes)."
             )
-
-    # Richest-block fallback: if candidate regions yielded very few genes
-    # (≤2), they likely cover low-quality scoring windows rather than the
-    # block with the best synteny evidence.  Find the block containing
-    # a GOI gene with the most flanking genes, or fall back to the globally
-    # richest block.
-    # NB (2026-10-19, not changed): it reads the block number from "name", the GFF Name
-    # attribute, which never holds _b<N>_ (only the ID does), so it finds no block.
-    if len(genes) <= 2 and len(genes_all) > len(genes):
-        from collections import Counter
-        block_counter = Counter()
-        block_genes = defaultdict(list)
-        for g in genes_all:
-            gname = g.get("name", "")
-            m = re.search(r'_b(\d+)_', gname)
-            if m:
-                bid = m.group(1)
-                block_counter[bid] += 1
-                block_genes[bid].append(g)
-
-        if block_counter:
-            # Blocks that contain at least one GOI gene
-            goi_bids = set()
-            for g in genes_all:
-                if _is_goi_target_gene(g):
-                    m = re.search(r'_b(\d+)_', g.get("name", ""))
-                    if m:
-                        goi_bids.add(m.group(1))
-
-            if goi_bids:
-                # Pick richest block that contains a GOI
-                # sorted(): a tie in max() over a set of strings resolves by hash order
-                best_block = max(sorted(goi_bids, key=int),
-                                 key=lambda bid: block_counter.get(bid, 0))
-            else:
-                best_block = block_counter.most_common(1)[0][0]
-
-            best_genes = block_genes[best_block]
-            if len(best_genes) > len(genes):
-                genes = best_genes
-                print(
-                    f"[plot] {genome_id}: candidate regions had ≤2 genes; "
-                    f"using richest block b{best_block} ({len(genes)} genes)."
-                )
 
     # Focus on the most informative chromosomes for chromosome-level assemblies.
     # For scaffold/contig-level assemblies (many distinct contigs), flanking genes

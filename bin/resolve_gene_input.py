@@ -32,8 +32,12 @@ UNIPROT_RE = re.compile(
 # as a gene symbol.
 NCBI_REFSEQ_RE = re.compile(r'^[XNWY]P_\d+(\.\d+)?$')
 
-# NCBI GenBank protein accessions  (e.g., KAF1234567.1, AAB12345.1, AAB12345)
-NCBI_GENBANK_RE = re.compile(r'^[A-Z]{3}\d{5,}(\.\d+)?$')
+# NCBI GenBank protein accessions  (e.g., KAF1234567.1, AAB12345.1, AAB12345): three letters and
+# five or seven digits. Any three letters and five or more digits read LOC123456 (NCBI Gene's
+# provisional symbol) as a protein accession, which efetch does not know (fix item 28).
+NCBI_GENBANK_RE = re.compile(r'^[A-Z]{3}(\d{5}|\d{7})(\.\d+)?$')
+# NCBI Gene's provisional symbol of a gene without a name (LOC + its GeneID): a symbol.
+NCBI_LOC_SYMBOL_RE = re.compile(r'^LOC\d+$')
 
 
 def detect_input_type(gene_input):
@@ -45,6 +49,9 @@ def detect_input_type(gene_input):
     # Strip version suffix for matching (e.g., P01501.2 → P01501)
     clean = gene_input.strip().split('.')[0] if '.' in gene_input else gene_input.strip()
     
+    if NCBI_LOC_SYMBOL_RE.match(gene_input.strip()):
+        return 'symbol', gene_input.strip()
+
     if UNIPROT_RE.match(clean):
         return 'uniprot', gene_input.strip()
     
@@ -181,13 +188,31 @@ def fetch_uniprot(uniprot_id, output_dir):
     }
 
 
+def uniprot_term(value):
+    """A value as one quoted term of a UniProt query: unquoted, Su(H) was read as the query
+    syntax's own parentheses and the search returned Su(dx) (fix item 28)."""
+    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def uniprot_gene_names(entry):
+    """Every gene name of a UniProt JSON entry: the name, its synonyms, ORF and locus names."""
+    names = []
+    for g in entry.get('genes') or []:
+        if (g.get('geneName') or {}).get('value'):
+            names.append(g['geneName']['value'])
+        for key in ('synonyms', 'orfNames', 'orderedLocusNames'):
+            names += [x.get('value', '') for x in g.get(key) or [] if x.get('value')]
+    return names
+
+
 def search_uniprot(gene_name, species, output_dir):
-    """Search UniProt for a gene name + species."""
+    """Search UniProt for a gene name + species. The hit must carry the name among its gene names:
+    the query is a search, and its first hit was taken as it came (fix item 28)."""
     print(f"  Searching UniProt for gene '{gene_name}' in '{species}'...")
     base_url = "https://rest.uniprot.org/uniprotkb/search"
     
     # URL encode query
-    query = f"gene_exact:{gene_name} AND organism_name:\"{species}\" AND reviewed:true"
+    query = f"gene_exact:{uniprot_term(gene_name)} AND organism_name:\"{species}\" AND reviewed:true"
     params = urllib.parse.urlencode({'query': query, 'format': 'json', 'size': 1})
     search_url = f"{base_url}?{params}"
     
@@ -203,7 +228,7 @@ def search_uniprot(gene_name, species, output_dir):
     if not results:
         # Try unreviewed
         print("  No Swiss-Prot hit, trying TrEMBL...")
-        query = f"gene_exact:{gene_name} AND organism_name:\"{species}\""
+        query = f"gene_exact:{uniprot_term(gene_name)} AND organism_name:\"{species}\""
         params = urllib.parse.urlencode({'query': query, 'format': 'json', 'size': 1})
         search_url = f"{base_url}?{params}"
         try:
@@ -227,9 +252,18 @@ def search_uniprot(gene_name, species, output_dir):
         )
         return None
         
-    # Take first hit
+    # Take first hit, if it is the gene asked for
     hit = results[0]
     accession = hit.get('primaryAccession')
+    names = uniprot_gene_names(hit)
+    if gene_name.strip().lower() not in {n.lower() for n in names}:
+        print(
+            f"  ERROR: UniProt's first hit for gene '{gene_name}' in '{species}' is {accession}, whose "
+            f"gene names ({', '.join(names) or 'none'}) do not include '{gene_name}'. Pass the protein's "
+            f"UniProt or NCBI accession instead of the symbol.",
+            file=sys.stderr,
+        )
+        return None
     print(f"  Found accession: {accession}")
     
     return fetch_uniprot(accession, output_dir)
@@ -275,6 +309,16 @@ def fetch_ncbi(accession, output_dir):
             f"https://www.ncbi.nlm.nih.gov/protein/{accession}; "
             f"(2) include the version suffix (e.g. '.1' or '.2'); "
             f"(3) retry if NCBI is rate-limiting.",
+            file=sys.stderr,
+        )
+        return None
+
+    # efetch answers an id it does not know with its error text and exit 0 ("Error: F a i l e d  t o
+    # u n d e r s t a n d  i d ..."), which was written as the query (fix item 28).
+    if fasta_content and not (fasta_content.startswith('>') and len(fasta_content.splitlines()) > 1):
+        print(
+            f"  ERROR: NCBI did not return a FASTA record for '{accession}' but: "
+            f"{' '.join(fasta_content.split())[:200]}",
             file=sys.stderr,
         )
         return None

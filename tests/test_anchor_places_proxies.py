@@ -102,5 +102,5 @@ def test_the_user_path_passes_the_proxies():
     call = re.search(r"seed_hits = limit_anchor_places\(flanking_seed_hits, _max_places, _gene_gap,"
                      r"\s*keep=goi_proxy_flanking_parents\)", body)
     assert call, "the user path does not pass keep=goi_proxy_flanking_parents"
-    assert body.index("goi_proxy_flanking_parents: set = set()") < call.start()
+    assert body.index("goi_proxy_flanking_parents = goi_proxy_parents(") < call.start()
     assert len(re.findall(r"limit_anchor_places\(", body)) == 1

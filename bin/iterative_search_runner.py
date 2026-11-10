@@ -109,6 +109,7 @@ try:
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
         StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
+        MMSEQS_FORMAT_OUTPUT, mmseqs_table_first_words, strip_copy_parent,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -130,6 +131,7 @@ except ImportError:
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
         StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
+        MMSEQS_FORMAT_OUTPUT, mmseqs_table_first_words, strip_copy_parent,
     )
     from annotate_goi_exons import (annotate_exons_from_hit_list, annotate_models_from_hit_list,
                                     MINIPROT_AVAILABLE)
@@ -528,7 +530,7 @@ def build_home_goi_ids(initial_db_path) -> set:
 def _model_genome_tag(model_id: str) -> str:
     """The genome a wave model came from, read from its id
     (``GOI_X|<genome>_b<block>_l<locus>_<kind>``); '' for anything else."""
-    suffix = model_id.split('|', 1)[1] if '|' in model_id else ''
+    suffix = strip_copy_parent(model_id.split('|', 1)[1] if '|' in model_id else '')
     m = _MODEL_GENOME_RE.match(suffix)
     return m.group('genome') if m else ''
 
@@ -628,7 +630,8 @@ def _parse_gff_attr_string(text: str) -> Dict[str, str]:
     return out
 
 
-def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bool = False):
+def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bool = False,
+                               genome_tag: Optional[str] = None):
     """Report every gene model found with a relative's model against the HOME protein.
 
     ``cand_parents[i]`` is the parent id (home parent, or its ``~rel`` alias) under which
@@ -638,9 +641,13 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
     classified with those numbers, and it gets the home parent's id. The relative that
     found it and the identity to that relative stay on the record as ``SearchQuery`` and
     ``SearchQueryIdentity``. With ``core`` a gene model also gets CoreCoverage, from the
-    aligned part of the home protein.
+    aligned part of the home protein. ``genome_tag``: the genome's name as the model ids carry
+    it; the locus token is renamed right behind it (``|<tag>_b<N>_l<L>`` -> ``_r<L>``), so a
+    genome whose name holds a block-like part keeps it (freeze fix e2).
     """
     real_models = {'exon_annotation', 'tandem_copy', 'fallback_hit_span'}
+    token = (re.compile(r'(\|' + re.escape(genome_tag) + r'_b\d+)_l(\d+)') if genome_tag
+             else re.compile(r'(\|[^|;=\s]*?_b\d+)_l(\d+)'))
     home_spans = defaultdict(list)
     for cand, parent in zip(raw_candidates, cand_parents):
         if parent.endswith(RELATIVE_QUERY_TAG) or not cand.get('gff'):
@@ -676,8 +683,11 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
         evidence = old.get('EvidenceType', '')
 
         def _rename(text):
+            # The block token is read right behind the genome's name, as block_index_of reads it: a
+            # GOI named like Ly6e_b3_l1 lost its parent here (fix item 26), and a genome named like
+            # Sample_b2_l3 lost its name (freeze fix e2).
             text = text.replace(parent, home_parent)
-            return re.sub(r'(_b\d+)_l(\d+)', r'\1_r\2', text)
+            return token.sub(r'\1_r\2', text)
 
         base = {k: _rename(old[k]) for k in ('ID', 'Name', 'SynVoy_Parent') if k in old}
         for k in ('Type', 'Exons', 'StartCodon', 'StopCodon'):
@@ -1591,7 +1601,7 @@ def relabel_goi_lines(gff_lines: List[str],
 
 
 # A copy's parent ends its seed-form id; these would mislead the readers of the id's tail.
-_COPY_PARENT_UNSAFE = re.compile(r'\s|\||_b\d+_[lr]\d+')
+_COPY_PARENT_UNSAFE = re.compile(r'\s|\|')
 _WARNED_COPY_PARENTS: set = set()
 
 
@@ -1613,12 +1623,13 @@ def tandem_copy_record_id(copy_name: str, parent_id: str, genome_tag: str, block
     judged against the home protein.
 
     The readers of the part behind ``|`` (_model_genome_tag, block_index_of, species_from_leaf,
-    the renaming of a relative's model) need a parent without whitespace, ``|`` or a block-like
-    token ``_b<d>_l<d>`` / ``_b<d>_r<d>``; a parent that holds one is logged once."""
+    the renaming of a relative's model) need a parent without whitespace or ``|``; a parent that
+    holds one is logged once. A block-like token ``_b<d>_l<d>`` in the parent is read right since
+    fix item 26 (each reader cuts the parent first, or reads the first token only)."""
     if _COPY_PARENT_UNSAFE.search(parent_id) and parent_id not in _WARNED_COPY_PARENTS:
         _WARNED_COPY_PARENTS.add(parent_id)
-        logger.warning(f"tandem copy parent {parent_id!r} holds whitespace, '|' or a block-like "
-                       "token: the genome, block or species read from its copies' ids can be wrong")
+        logger.warning(f"tandem copy parent {parent_id!r} holds whitespace or '|': the genome, block "
+                       "or species read from its copies' ids can be wrong")
     if parent_mode == 'home':
         n = copy_name[len('GOI_copy_'):] if copy_name.startswith('GOI_copy_') else copy_name
         return f"{parent_id}|{genome_tag}_b{block_idx}_l{locus_idx}_tc{n}"
@@ -3700,7 +3711,7 @@ def run_augmented_mmseqs_with_retries(
     # Create query and target databases ONCE.
     query_db = os.path.join(aug_tmp_dir, "queryDB")
     target_db = os.path.join(aug_tmp_dir, "targetDB")
-    fmt_output = "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
+    fmt_output = MMSEQS_FORMAT_OUTPUT   # + the two FASTA headers: names by their first word (fix item 29)
 
     proc_qdb = subprocess.run(
         ["mmseqs", "createdb", variants_fasta, query_db],
@@ -3758,10 +3769,10 @@ def run_augmented_mmseqs_with_retries(
                 break
             continue
 
-        # convertalis
+        # convertalis, then the names by the first word of the FASTA headers (fix item 29)
         conv_cmd = [
             "mmseqs", "convertalis",
-            query_db, target_db, result_db, aug_hits_file,
+            query_db, target_db, result_db, aug_hits_file + ".raw",
             "--format-output", fmt_output,
             "-v", str(args.mmseqs_verbosity),
         ]
@@ -3772,6 +3783,8 @@ def run_augmented_mmseqs_with_retries(
         if conv_proc.returncode != 0:
             last_details = _format_mmseqs_failure(conv_proc)
             break
+        mmseqs_table_first_words(aug_hits_file + ".raw", aug_hits_file)
+        os.remove(aug_hits_file + ".raw")
 
         if i > 1:
             logger.warning(
@@ -5290,7 +5303,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                 cand_parents.append(cand_marks[mark_idx][1] if cand_marks else '')
             raw_candidates[:] = rebase_relative_candidates(
                 raw_candidates, cand_parents, goi_query_by_parent,
-                core=bool(getattr(args, 'core_completeness', False)))
+                core=bool(getattr(args, 'core_completeness', False)), genome_tag=clean_gname)
 
         # Flanking gene annotation pass (kept separate from GOI logic).
         flanking_parent_ids = {
@@ -6054,7 +6067,7 @@ def run_mmseqs_easy_search_with_retries(
     # Create query and target databases ONCE (outside retry loop).
     query_db = os.path.join(tmp_dir, "queryDB")
     target_db = os.path.join(tmp_dir, "targetDB")
-    fmt_output = "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits"
+    fmt_output = MMSEQS_FORMAT_OUTPUT   # + the two FASTA headers: names by their first word (fix item 29)
 
     # -- createdb for query (protein FASTA) --
     proc_qdb = subprocess.run(
@@ -6118,10 +6131,11 @@ def run_mmseqs_easy_search_with_retries(
                 break
             continue
 
-        # -- mmseqs convertalis → m8 output --
+        # -- mmseqs convertalis → m8 output, the names by the first word of the FASTA headers --
+        # (fix item 29: MMseqs2's own name columns read lcl|X as X, gnl|a|1 and gnl|b|1 both as 1)
         conv_cmd = [
             "mmseqs", "convertalis",
-            query_db, target_db, result_db, hits_file,
+            query_db, target_db, result_db, hits_file + ".raw",
             "--format-output", fmt_output,
             "-v", str(args.mmseqs_verbosity),
         ]
@@ -6136,6 +6150,8 @@ def run_mmseqs_easy_search_with_retries(
             last_details = details
             logger.warning(f"[{genome_name}] mmseqs convertalis failed: {details}")
             break
+        mmseqs_table_first_words(hits_file + ".raw", hits_file)
+        os.remove(hits_file + ".raw")
 
         if i > 1:
             logger.warning(
@@ -7282,6 +7298,26 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
     return genes, gff
 
 
+def full_length_goi_templates(all_goi):
+    """The structural discovery's GOI templates: the full-length GOI proteins, by the rule the rest
+    of the search uses (is_full_length_goi_query_id: no |exon_ piece, no fragment). A name that
+    holds 'exon' (Hexon, exonuclease1) dropped every template, and the fallback then kept the
+    exon pieces (fix item 28). All of them when none is full length, as before."""
+    full = [(cid, seq) for cid, seq in all_goi if is_full_length_goi_query_id(cid)]
+    return full or list(all_goi)
+
+
+def goi_proxy_parents(ids) -> set:
+    """The flanking parents among ``ids`` that are proxies of a GOI: the same gene under another
+    prefix (gene-LY6E for GOI_LY6E). A tandem copy (GOI_copy_<n>) names no home gene, so it gives
+    no bare name: its number made the flanking genes '1' or 'gene-1' proxies (fix item 28)."""
+    ids = list(ids)
+    bare = {rid[len('GOI_'):] if rid.startswith('GOI_') else rid
+            for rid in ids if is_goi_query_id(rid) and '|' not in rid and not rid.startswith('GOI_copy_')}
+    return {rid for rid in ids if not is_goi_query_id(rid) and '|' not in rid
+            and (rid[len('gene-'):] if rid.startswith('gene-') else rid) in bare}
+
+
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
     """
     Worker function to search a single genome.
@@ -7339,22 +7375,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # Identify flanking proteins that are proxies for the GOI query
         # (e.g., gene-LY6E is a proxy for GOI_LY6E — same gene, different prefix).
         # Proxy blocks seeded by these genes will bypass the min_block_genes filter.
-        _goi_bare_names: set = set()
-        for _rid in list(base_db_sequences.keys()):
-            if is_goi_query_id(_rid) and '|' not in _rid:
-                _bare = _rid
-                if _bare.startswith('GOI_copy_'):
-                    _bare = _bare[9:]
-                elif _bare.startswith('GOI_'):
-                    _bare = _bare[4:]
-                _goi_bare_names.add(_bare)
-        goi_proxy_flanking_parents: set = set()
-        for _rid in list(base_db_sequences.keys()):
-            if is_goi_query_id(_rid) or '|' in _rid:
-                continue
-            _bare = _rid[5:] if _rid.startswith('gene-') else _rid
-            if _bare in _goi_bare_names:
-                goi_proxy_flanking_parents.add(_rid)
+        goi_proxy_flanking_parents = goi_proxy_parents(base_db_sequences.keys())
         if goi_proxy_flanking_parents:
             logger.info(
                 f"[{genome_name}] GOI proxy flanking parents: "
@@ -8487,10 +8508,7 @@ def run_gpu_augment_phase(args, genome_map=None):
                 _all_goi = gpu_augment.load_goi_templates_from_fasta(args.initial_db)
             except Exception:
                 _all_goi = []
-            goi_templates = [(cid, seq) for cid, seq in _all_goi
-                             if "exon" not in cid.lower() and not fragment_of(cid)]
-            if not goi_templates:            # all were fragments → fall back
-                goi_templates = _all_goi
+            goi_templates = full_length_goi_templates(_all_goi)
             # Optional home-paralog panel (guard 3). Absent by default → guard 3
             # is a no-op; guards 1/2/4 still fire.
             panel = None

@@ -10,7 +10,7 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
-from sequence_utils import longest_collinear_run  # noqa: E402
+from sequence_utils import longest_collinear_run, block_index_of  # noqa: E402
 import synvoy_scale  # noqa: E402
 
 # No BioPython needed - we parse FASTA manually for genome length
@@ -401,7 +401,26 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
 _BLOCK_ID_RE = re.compile(r"_b(\d+)_")
 
 
-def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000):
+def _block_of(model_id, genome_tag=None):
+    """The search block of a model id: block_index_of with the genome's tag (the genome name with
+    '.', '-' and ' ' replaced by '_', as the search writes it), else the first _b<N>_ behind the
+    first '|'. The whole id was searched until 2026-11-09, so a GOI named like Ly6e_b3_l1 put every
+    model under block 3 (fix item 26)."""
+    if genome_tag:
+        b = block_index_of(model_id, genome_tag)
+        if b is not None:
+            return b
+    tail = model_id.split("|", 1)[1] if "|" in (model_id or "") else ""
+    m = _BLOCK_ID_RE.search(tail)
+    return int(m.group(1)) if m else None
+
+
+def genome_tag_of(genome_name):
+    """The genome as the search's model ids carry it: X.fna -> X_fna."""
+    return re.sub(r"[.\- ]", "_", genome_name or "")
+
+
+def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000, genome_tag=None):
     """Reuse the SEARCH's blocks for region selection instead of re-deriving them.
 
     iterative_search_runner tags every model ID with its search block (`_b<N>_`) and
@@ -429,8 +448,8 @@ def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000):
                 ):
                     continue
                 attrs = parse_gff_attrs(parts[8])
-                m = _BLOCK_ID_RE.search(attrs.get("ID", ""))
-                if not m:
+                block = _block_of(attrs.get("ID", ""), genome_tag)
+                if block is None:
                     continue
                 role = (attrs.get("SynVoyRole") or "").strip().lower()
                 conf = (attrs.get("Confidence") or "").strip().upper()
@@ -440,7 +459,7 @@ def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000):
                     continue
                 if e < s:
                     s, e = e, s
-                key = (parts[0], m.group(1))
+                key = (parts[0], str(block))
                 b = blocks.setdefault(key, {
                     "chrom": parts[0], "bstart": s, "bend": e,
                     "gstart": None, "gend": None, "flank_high": 0,
@@ -1036,7 +1055,8 @@ def main():
     # Reuse the SEARCH's block structure (incl. §18 gap-bridging) for region scoring,
     # rather than scoring each proximity fragment on its own flanking. See
     # load_goi_block_anchors_from_gff. Empty for legacy GFFs without block tags.
-    goi_block_anchors = load_goi_block_anchors_from_gff(args.target_gff, padding_bp=args.goi_padding)
+    goi_block_anchors = load_goi_block_anchors_from_gff(args.target_gff, padding_bp=args.goi_padding,
+                                                        genome_tag=genome_tag_of(args.genome_name))
     if goi_block_anchors:
         print(
             f"INFO: Loaded {len(goi_block_anchors)} GOI search-block anchor(s) "

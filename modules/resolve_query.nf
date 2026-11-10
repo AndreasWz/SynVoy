@@ -32,9 +32,9 @@ process RESOLVE_GENE_INPUT {
         }
     }
 
-    def species_arg = species_override ? "--species \"${species_override}\"" : ""
+    def species_arg = species_override ? "--species ${ShellArgs.q(species_override)}" : ""   // lib/ShellArgs.groovy
     """
-    resolved_input_path="${resolved_input}"
+    resolved_input_path=${ShellArgs.q(resolved_input)}
     if [ "${inline_flag}" = "true" ]; then
         if [ "${inline_header_flag}" = "true" ]; then
             cat <<'EOF' > inline_query.fasta

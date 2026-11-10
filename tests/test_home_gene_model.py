@@ -216,7 +216,7 @@ def test_the_modules_read_the_model_through_the_helper():
 def test_the_groovy_helper(tmp_path):
     """Under legacy 'auto' is 'fly' and the resolver gets no argument, as before 5c."""
     (tmp_path / "lib").mkdir()
-    for f in ("GenomeAxis.groovy", "HomeGenes.groovy"):
+    for f in ("GenomeAxis.groovy", "HomeGenes.groovy", "ShellArgs.groovy"):
         shutil.copy(ROOT / "lib" / f, tmp_path / "lib" / f)
     (tmp_path / "t.nf").write_text(
         "workflow {\n"

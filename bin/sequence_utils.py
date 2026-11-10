@@ -132,8 +132,19 @@ ID_PATTERNS = [
     # NCBI accession with version: NC_123456.1, NZ_CP123456.1
     (r'^((?:NC|NZ|NW|NT|AC|NG)_[A-Z]*\d+(?:\.\d+)?)(?=$|[\s|])', 'ncbi_nucl'),
     
-    # NCBI assembly accession in sequence name: lcl|NC_123456.1_cds_XP_123456.1_1
-    (r'cds_([XNYWZ]P_\d+(?:\.\d+)?)(?=$|[\s|])_', 'ncbi_cds'),
+    # NCBI's "FASTA Nucleotide CDS" and "FASTA Protein" downloads of a nucleotide record:
+    # lcl|NC_123456.1_cds_XP_123456.1_1 [gene=...] and lcl|NC_123456.1_prot_XP_123456.1_1 -> the
+    # protein, a RefSeq or a GenBank one (KAF1234567.1). The pattern stood here since c6bd07a with
+    # a lookahead that can never hold, so such a header kept its whole first word (fix item 28).
+    (r'^lcl\|\S*?_(?:cds|prot)_((?:[XNYWZ]P_\d+|[A-Z]{3}(?:\d{5}|\d{7}))(?:\.\d+)?)_\d+(?=$|\s)', 'ncbi_cds'),
+
+    # A local id, lcl|X -> X; NCBI's database tags, ref|X|, gb|X|LOCUS, emb|X|, dbj|X| -> X; ENA's
+    # ENA|X|X.1 -> X.1. The query id becomes the GOI's name, and SynVoy reads a GOI's name up to its
+    # first '|', so such an id read as its tag ('ref', 'ENA') (freeze fix e2); an id that still
+    # holds a '|' stops normalize_query.py.
+    (r'^lcl\|([^|\s]+)(?=$|\s)', 'local_id'),
+    (r'^(?:ref|gb|emb|dbj)\|([^|\s]+)(?:\|\S*)?(?=$|\s)', 'ncbi_tagged'),
+    (r'^ENA\|[^|\s]+\|([^|\s]+)(?=$|\s)', 'ena'),
     
     # UniProt: P12345, Q9NXB0, A0A1B2C3D4
     (r'^([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})(?=$|[\s|])', 'uniprot'),
@@ -178,69 +189,90 @@ _FIRST_WORD = re.compile(r'\S+', re.ASCII)
 
 def first_word(header: str) -> str:
     """A FASTA record's name: its header up to the first whitespace, verbatim. samtools, miniprot
-    and tblastn call a sequence by this word, MMseqs2 too unless the word starts with a database
-    tag or uc or consensus_ (sequence_not_in_genome). ASCII whitespace, the C library's: samtools,
-    miniprot and MMseqs2 keep a no-break space in the word. "unknown" for an empty header, as
-    extract_id."""
+    and tblastn call a sequence by this word, and SynVoy reads MMseqs2's tables by it too (the
+    header columns, mmseqs_first_words). ASCII whitespace, the C library's: samtools, miniprot and
+    MMseqs2 keep a no-break space in the word. "unknown" for an empty header, as extract_id."""
     m = _FIRST_WORD.search(header or '')
     return m.group(0) if m else "unknown"
 
 
-def mmseqs_reported_name(word: str) -> str:
-    """The name MMseqs2 reports in its tables for a sequence whose header's first word is
-    ``word`` (measured on MMseqs2 18-8cc5c, fix-phase item 25): a word that starts with a database
-    tag by the accession inside (cl|, sp|, tr|, ref|, pdb|, bbs|, lcl|, gb| the 2nd field; pir||,
-    prf||, gnl|, pat| the 3rd; gi| the 4th; "" when that field is missing), a leading uc or
-    consensus_ dropped (ucon_5 -> on_5, consensus_24 -> 24). Any other word as it stands. samtools,
-    miniprot and tblastn keep the word."""
-    if word.startswith('uc'):
-        return word[2:].split('|')[0]
-    if word.startswith('consensus_'):
-        return word[len('consensus_'):]
-    p = word.split('|')
-    if len(p) < 2:
-        return word
-    if p[0] in ('cl', 'sp', 'tr', 'ref', 'pdb', 'bbs', 'lcl', 'gb'):
-        return p[1]
-    if word.startswith(('pir||', 'prf||')) or p[0] in ('gnl', 'pat'):
-        return p[2] if len(p) > 2 else ''
-    if p[0] == 'gi':
-        return p[3] if len(p) > 3 else ''
-    return word
+# Every MMseqs2 table SynVoy parses: the 12 BLAST-tabular columns, then the query's and the target's
+# FASTA header. MMseqs2's own query and target columns rewrite some names (measured on MMseqs2
+# 18-8cc5c, fix-phase item 25): a word that starts with a database tag by the accession inside
+# (lcl|X, ref|X|, sp|X|Y, gnl|db|X, gi|1|ref|X| as X; gnl|a|1 and gnl|b|1 both as 1), a leading uc
+# or consensus_ dropped (ucon_5 as on_5, consensus_24 as 24, which can be another record's name).
+# The headers hold each record's name as its FASTA does, so the tables are read by their first word
+# (fix item 29; until then such names stopped the run, since 2026-11-02). The target header comes
+# last: a tab inside it stays part of it. A query header must hold none: SynVoy writes the queries.
+MMSEQS_FORMAT_OUTPUT = ("query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,"
+                        "qheader,theader")
 
 
-def id_problem(name: str, whitespace: bool = True, pipe: bool = False,
-               mmseqs: bool = True) -> Optional[str]:
+def mmseqs_first_words(line: str) -> List[str]:
+    """One row of an MMSEQS_FORMAT_OUTPUT table as the 12 BLAST-tabular columns, the query and the
+    target named by the first word of their FASTA headers; StepFailed on a row without the headers,
+    and on a row whose own names are no part of those words. MMseqs2 names a record by a part of
+    its header's first word (a field of a tagged word, or the word without a leading uc or
+    consensus_; an empty name included), so such a row is misaligned (a tab inside the query's
+    header would make the target the first word of the query's description), not renamed."""
+    p = line.rstrip('\n').split('\t')
+    if len(p) < 14:
+        raise StepFailed(f"an MMseqs2 table row has {len(p)} columns, not the 12 BLAST-tabular ones and "
+                         f"the two headers (--format-output {MMSEQS_FORMAT_OUTPUT}): {line[:200]!r}")
+    query, target = first_word(p[12]), first_word('\t'.join(p[13:]))
+    if p[0] not in query or p[1] not in target:
+        raise StepFailed(f"an MMseqs2 table row names its query {p[0]!r} and its target {p[1]!r}, but its "
+                         f"header columns read {query!r} and {target!r}: the row is misaligned (a tab inside "
+                         f"the query's header?): {line[:200]!r}")
+    return [query, target] + p[2:12]
+
+
+def mmseqs_table_first_words(raw_path: str, out_path: str) -> int:
+    """Rewrite an MMSEQS_FORMAT_OUTPUT table into the 12-column table every reader of the pipeline
+    parses, rows in their order, columns 3-12 verbatim: the number of rows."""
+    n = 0
+    with open(raw_path, errors='surrogateescape') as src, \
+            open(out_path, 'w', errors='surrogateescape') as out:
+        for line in src:
+            if line.strip():
+                out.write('\t'.join(mmseqs_first_words(line)) + '\n')
+                n += 1
+    return n
+
+
+def id_problem(name: str, whitespace: bool = True, pipe: bool = False, gff: bool = False) -> Optional[str]:
     """Why SynVoy cannot use ``name`` as a sequence's or gene's id, or None (fix-phase d4: the
     names that lost results in silence). ``whitespace``: a FASTA record of it is read by its first
-    word, so ``ORF 1`` and ``ORF 2`` are one id (item 32). ``pipe``: a predicted home gene's id
-    holds its scaffold's name and is read up to the first '|' (item 30). ``mmseqs``: MMseqs2
-    reports it by another name, so its hits are filed under a name nothing else uses (item 29)."""
+    word, so ``ORF 1`` and ``ORF 2`` are one id (item 32). ``pipe``: SynVoy reads a gene id up to
+    its first '|' (a predicted home gene's id holds its scaffold's name, item 30; a flanking gene
+    id, fix item 29), so two such ids can read as one. ``gff``: the id is written into GFF column
+    9, where ',' makes a Parent a list, ';' ends the attribute, '=' and '&' are reserved and '%'
+    is decoded (fix item 28)."""
+    if gff:
+        bad = sorted(set(re.findall(r"[,;=&%]", name)))
+        if bad:
+            return ("holds " + " and ".join(f"'{c}'" for c in bad) + ", reserved in GFF3: SynVoy writes "
+                    "the GOI's name into the ID, Parent and SynVoy_Parent of its models, where ',' makes a "
+                    "list, ';' ends the attribute and '%' is decoded")
     if whitespace and re.search(r"\s", name):
         return ("holds whitespace: a FASTA record of it is read by its first word, so two such "
                 "ids can read as one")
     if pipe and "|" in name:
-        return ("holds '|': the ids of the home genes predicted on it hold the sequence's name, "
-                "and SynVoy reads a gene id up to its first '|', so every gene there reads as one")
-    if mmseqs:
-        reported = mmseqs_reported_name(name)
-        if reported != name:
-            return (f"is reported by MMseqs2 as {reported!r} (MMseqs2 reads a name that starts with "
-                    "a database tag by the accession inside, and drops a leading uc or consensus_), "
-                    "so its hits would be filed under a name no other tool uses")
+        return ("holds '|': SynVoy reads a gene id up to its first '|' (the ids of the home genes "
+                "predicted on a sequence hold the sequence's name), so two such ids can read as one")
     return None
 
 
-def check_gene_ids(ids, source: str, written: str, mmseqs: bool = False) -> None:
+def check_gene_ids(ids, source: str, written: str, pipe: bool = False) -> None:
     """Stop (StepFailed) on the first gene id of ``ids`` that id_problem rejects: ``source`` is the
-    file the id comes from (the GFF), ``written`` the file SynVoy would write it to. ``mmseqs``:
-    also the names MMseqs2 rewrites (a flanking gene is an MMseqs2 query)."""
+    file the id comes from (the GFF), ``written`` the file SynVoy would write it to. ``pipe``: also
+    a '|' (a flanking gene's id is read up to it)."""
     for rid in ids:
-        problem = id_problem(rid, mmseqs=mmseqs)
+        problem = id_problem(rid, pipe=pipe)
         if problem:
             raise StepFailed(f"{source}: the gene id {rid!r} {problem} (SynVoy writes it to {written}). "
-                             "Rename the gene's ID in that file: a word without whitespace that does "
-                             "not start with a database tag such as lcl| or gnl|.")
+                             "Rename the gene's ID in that file: a word without whitespace"
+                             + (" or '|'." if pipe else "."))
 
 
 def extract_id(header: str, fallback_counter: Optional[int] = None) -> str:
@@ -655,6 +687,17 @@ def get_sequence_lengths(filepath: str) -> Dict[str, int]:
     return {name: len(seq) for name, seq in iter_genome(filepath)}
 
 
+_COPY_PARENT_RE = re.compile(r'_b\d+_[lr]\d+(?:m\d+)?_by_')
+
+
+def strip_copy_parent(suffix: str) -> str:
+    """A model id's part behind the first '|' without a seed-form tandem copy's parent:
+    ``<genome>_b<k>_<l|r><j>_by_<parent>`` -> ``<genome>_b<k>_<l|r><j>``. The parent comes last
+    and can hold a block-like token of its own (a GOI named Ly6e_b3_l1; fix item 26)."""
+    m = _COPY_PARENT_RE.search(suffix or '')
+    return suffix[:m.end() - len('_by_')] if m else (suffix or '')
+
+
 def block_index_of(model_id: str, genome_tag: str) -> Optional[int]:
     """The search block a model of this genome was found in: N of
     ``<parent>|<genome_tag>_b<N>_...`` (``genome_tag`` = the genome name with '.', '-' and
@@ -879,17 +922,16 @@ def guard_failed(what: str, guard_seconds: float, param: Optional[str] = None) -
 
 def sequence_not_in_genome(chrom: str, genome: str, names) -> StepFailed:
     """The StepFailed of a hit or search block on a sequence the loaded genome does not hold
-    (fix-phase item 25). The hits come from this genome's own FASTA, so it can only mean that an
-    aligner and the FASTA name the sequence differently. ``names``: the genome's sequence names."""
+    (fix-phase item 25). The hits come from this genome's own FASTA and every table is read by the
+    first word of its headers (fix item 29), so it can only mean that a tool and the FASTA name the
+    sequence differently. ``names``: the genome's sequence names."""
     names = sorted(names)
     shown = ", ".join(names[:3]) + (", ..." if len(names) > 3 else "")
     return StepFailed(
         f"[{genome}] a hit or search block lies on the sequence {chrom!r}, which this genome's FASTA "
-        f"does not hold (its {len(names)} sequence names: {shown}). An aligner and the FASTA name the "
-        "sequence differently. MMseqs2 reports a name that starts with a database tag by the "
-        "accession inside (lcl|X, ref|X|, sp|X|Y, gnl|db|X, gi|1|ref|X| as X) and drops a leading "
-        "uc or consensus_, while samtools, miniprot and tblastn keep the whole first word: rename "
-        "such sequences in the FASTA.")
+        f"does not hold (its {len(names)} sequence names: {shown}). A tool and the FASTA name the "
+        "sequence differently; every tool of the search names a sequence by the first word of its "
+        "header. Please report this with the genome's first header lines.")
 
 
 def run_guarded(cmd: Sequence[str], guard_seconds: float, what: str, param: Optional[str] = None,

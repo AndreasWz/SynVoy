@@ -131,7 +131,7 @@ def _normalize(tmp_path, header):
     ("FAM_Genus_species_XY_0000002", "FAM_Genus_species_XY_0000002"),
     ("orf19.1562", "orf19.1562"),
     ("LOC123456789", "LOC123456789"),
-    ("lcl|ORF1 d", "lcl|ORF1"),
+    ("lcl|ORF1 d", "ORF1"),           # a local id reads as its name since freeze fix e2 (a GOI name is read up to its '|')
     # What item 25 changes at this entry: the word stays whole
     ("ABC_12345.1", "ABC_12345.1"),
     ("XY_0000001_exon2", "XY_0000001_exon2"),
@@ -144,7 +144,7 @@ def test_normalize_query_writes_the_id_of_the_ladder(tmp_path, header, expected)
 
 @pytest.mark.parametrize("header,expected", [
     ("P12345|LY6E_HUMAN", "P12345"), ("sp|P12345|LY6E_HUMAN d", "P12345"), ("gi|12345|ref|XP_1.1| d", "12345"),
-    ("XP_123456.1 d", "XP_123456.1"), ("lcl|ORF1", "lcl|ORF1"), ("ABC_12345.1", "ABC_12345.1"),
+    ("XP_123456.1 d", "XP_123456.1"), ("lcl|ORF1", "ORF1"), ("ABC_12345.1", "ABC_12345.1"),
 ])
 def test_every_later_step_reads_the_id_normalize_query_wrote(tmp_path, header, expected):
     """The query's id is settled once: a later reader gets the same id, ladder or not."""

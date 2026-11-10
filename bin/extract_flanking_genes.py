@@ -960,10 +960,12 @@ def main():
             if dedup_key in seen: continue
             seen.add(dedup_key)
             if not gene.get('placeholder'):
-                # A flanking gene is an MMseqs2 query: an id MMseqs2 rewrites, or one with
-                # whitespace, lost its model in silence (fix-phase d4, items 29 and 32).
+                # An id with whitespace lost its model in silence (fix-phase d4, item 32), and SynVoy
+                # reads a flanking gene's id up to its first '|' (extract_base_gene_id), so ctg|1 and
+                # ctg|2 read as one anchor (fix item 29; the ids MMseqs2 rewrites, lcl|X as X, work
+                # since every MMseqs2 table is read by its FASTA headers).
                 check_gene_ids([gid], args.gff if args.gff not in ('', 'NO_GFF') else 'the predicted home genes',
-                               args.out_faa, mmseqs=True)
+                               args.out_faa, pipe=True)
             display_label = _preferred_gene_label(gene).replace('\t', ' ').strip() or gid
             seq_header = gid if display_label == gid else f"{gid} label={display_label}"
             

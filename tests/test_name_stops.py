@@ -2,7 +2,8 @@
 
 - 29: a flanking gene id, or a home sequence name, that MMseqs2 reports as another name (lcl|X as X, gnl|db|X as X, ucon_5 as
   on_5 ...): the flanking gene's hits were filed under a name nothing else used and its model was lost; a home sequence gave two
-  loci at one place. Since item 25a a target named so stops the search; now these stop too. Making them work waits.
+  loci at one place. d4 stopped them; since 9 Nov (fix item 29) every MMseqs2 table is read by its FASTA headers and these
+  names work (tests/test_mmseqs_first_words.py). A '|' in a flanking gene id still stops: SynVoy reads a gene id up to it.
 - 30: a '|' in a home sequence name when the home genes are predicted (no GFF): their ids hold the name and are read up to it.
 - 31: a home FASTA and GFF that share no seqid stop; a partial overlap is a report warning (the per-row skipping stays: the
   easy-mode chromosome filter removes records from the FASTA alone, and those are not counted).
@@ -32,30 +33,19 @@ CODON = {'A': 'GCT', 'C': 'TGT', 'D': 'GAT', 'E': 'GAA', 'F': 'TTT', 'G': 'GGT',
 
 # --------------------------------------------------------------------------- the rule
 
-@pytest.mark.parametrize("word,reported", [
-    ("lcl|X", "X"), ("ref|NC_1.1|", "NC_1.1"), ("sp|P12345|Y_HUMAN", "P12345"), ("tr|A0A1|B", "A0A1"),
-    ("gb|X1.1|", "X1.1"), ("pdb|1ABC|A", "1ABC"), ("bbs|123", "123"), ("cl|X", "X"), ("gnl|db|X", "X"),
-    ("pat|US|X", "X"), ("pir||X", "X"), ("prf||X", "X"), ("gi|1|ref|X|", "X"), ("gi|2", ""),
-    ("ucon_5", "on_5"), ("uc001aaa.3", "001aaa.3"), ("consensus_24", "24"),
-    ("emb|X|", "emb|X|"), ("dbj|X|", "dbj|X|"), ("NC_000012.12", "NC_000012.12"), ("ctg1|arrow", "ctg1|arrow")])
-def test_the_names_mmseqs2_reports(word, reported):
-    """Item 25's measurement on MMseqs2 18-8cc5c."""
-    assert su.mmseqs_reported_name(word) == reported
-
-
-@pytest.mark.parametrize("name", ["gene-LOC408474", "NC_000012.12", "NT_033777.3", "FBgn0000508", "AT1G01010",
+@pytest.mark.parametrize("name", ["gene-LOC100004", "NC_000012.12", "NT_033777.3", "FBgn0000508", "AT1G01010",
                                   "orf19.1562", "gene-orf19.1562", "NODE_1_length_5000_cov_1.0", "Ca22chr1A",
                                   "SUPER_10_unloc_1", "scaffold_12"])
 def test_ordinary_names_pass(name):
-    assert su.id_problem(name, pipe=True, mmseqs=True) is None
+    assert su.id_problem(name, pipe=True) is None
 
 
 def test_each_class_is_named():
     assert "whitespace" in su.id_problem("ORF 1")
-    assert "'|'" in su.id_problem("ctg|arrow", pipe=True, mmseqs=False)
-    assert su.id_problem("ctg|arrow") is None               # '|' alone is no MMseqs2 rewrite
-    assert "MMseqs2 as 'X'" in su.id_problem("lcl|X")
-    assert su.id_problem("lcl|X", mmseqs=False) is None
+    assert "'|'" in su.id_problem("ctg|arrow", pipe=True)
+    assert su.id_problem("ctg|arrow") is None               # '|' only where SynVoy cuts at it
+    for name in ("lcl|X", "ucon_5", "consensus_24", "gi|1|ref|X|"):   # MMseqs2 rewrites: no problem since item 29
+        assert su.id_problem(name) is None
 
 
 def test_check_gene_ids_names_the_id_and_both_files():
@@ -63,9 +53,9 @@ def test_check_gene_ids_names_the_id_and_both_files():
         su.check_gene_ids(["gene-a", "ORF 1"], "home.gff", "home_proteome.faa")
     msg = str(stop.value)
     assert "'ORF 1'" in msg and "home.gff" in msg and "home_proteome.faa" in msg and "Rename" in msg
-    su.check_gene_ids(["lcl|X"], "home.gff", "out.faa")       # MMseqs2 only when asked
-    with pytest.raises(su.StepFailed):
-        su.check_gene_ids(["lcl|X"], "home.gff", "out.faa", mmseqs=True)
+    su.check_gene_ids(["lcl|X"], "home.gff", "out.faa")       # '|' only when asked
+    with pytest.raises(su.StepFailed, match="first '\\|'"):
+        su.check_gene_ids(["lcl|X"], "home.gff", "out.faa", pipe=True)
 
 
 # --------------------------------------------------------------------------- the home genome (ANNOTATE_GOI)
@@ -82,10 +72,13 @@ def _home(tmp_path, names, gff_seqids=None):
     return str(fna), (str(gff) if gff else None)
 
 
-def test_a_home_name_mmseqs2_rewrites_stops(tmp_path):
+def test_a_home_name_mmseqs2_rewrites_runs_with_a_gff(tmp_path):
+    """Fix item 29: LOCATE_GENE reads its table by the FASTA headers, so lcl|chr2 is one locus, not two.
+    Without a GFF the '|' still stops (item 30: the predicted genes' ids hold the name)."""
     fna, gff = _home(tmp_path, ["chr1", "lcl|chr2"], ["chr1", "lcl|chr2"])
+    assert ag.check_home_names(fna, gff) is None
     with pytest.raises(su.StepFailed) as stop:
-        ag.check_home_names(fna, gff)
+        ag.check_home_names(fna, None)
     assert "'lcl|chr2'" in str(stop.value) and fna in str(stop.value) and "Rename it" in str(stop.value)
 
 
@@ -164,7 +157,16 @@ def test_flanking_genes_with_ordinary_ids_run(tmp_path):
     assert "gene-a" in (tmp_path / "out.bed").read_text()
 
 
-@pytest.mark.parametrize("flank_id,shown", [("lcl|gene-a", "'lcl|gene-a'"), ("ucp1", "'ucp1'"),
+def test_a_flanking_gene_id_mmseqs2_rewrites_runs(tmp_path):
+    """Fix item 29: ucp1 (MMseqs2 reports it as p1) stopped since 2026-11-02; its hits are now read by the
+    FASTA header, so it runs."""
+    _flank_inputs(tmp_path, "ucp1")
+    p = _flank(tmp_path)
+    assert p.returncode == 0, p.stderr
+    assert "ucp1" in (tmp_path / "out.bed").read_text()
+
+
+@pytest.mark.parametrize("flank_id,shown", [("lcl|gene-a", "'lcl|gene-a'"), ("ctg|1", "'ctg|1'"),
                                             ("ORF 1", "'ORF 1'")])
 def test_a_flanking_gene_id_that_loses_its_hits_stops(tmp_path, flank_id, shown):
     _flank_inputs(tmp_path, flank_id)
@@ -224,9 +226,15 @@ def test_a_query_id_of_a_piece_stops(tmp_path, qid):
     assert not (tmp_path / "n.faa").exists()
 
 
-@pytest.mark.parametrize("qid", ["my_gene", "XP_006563422.1", "sp|P01501|MEL_APIME", "exon_2", "my|gene"])
+@pytest.mark.parametrize("qid", ["my_gene", "XP_100003.1", "sp|P01501|MEL_APIME", "exon_2"])
 def test_other_query_ids_run(tmp_path, qid):
     assert _normalize(tmp_path, qid).returncode == 0
+
+
+def test_a_pipe_left_in_a_query_id_stops(tmp_path):
+    """my|gene ran until freeze fix e2, and the GOI was named 'my' (tests/test_name_points.py)."""
+    p = _normalize(tmp_path, "my|gene")
+    assert p.returncode == 1 and "'|'" in p.stderr and "my_gene" in p.stderr
 
 
 # --------------------------------------------------------------------------- the report

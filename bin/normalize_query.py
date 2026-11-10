@@ -14,13 +14,14 @@ protein sequence is written out.
 
 import argparse
 import os
+import re
 import sys
 
 try:
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of, id_problem
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of
+    from sequence_utils import parse_fasta, write_fasta, translate, reverse_complement, set_genetic_code, fragment_of, id_problem
 
 
 NUC_ALPHABET = set("ACGTUNRYWSKMBDHV")
@@ -142,6 +143,16 @@ def main():
             f"its header (for example '{clean_id.split('|')[0]}').",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    # The GOI's name goes into GFF column 9 of every model: a character reserved there split or cut
+    # the ids in silence (fix item 28). A '|' too: SynVoy reads a GOI's name up to it, so
+    # ref|XP_1.1| was read as 'ref' (sequence_utils.extract_id reads the common tagged forms to
+    # their accession first; freeze fix e2).
+    problem = id_problem(clean_id, whitespace=False, pipe=True, gff=True)
+    if problem:
+        print(f"ERROR: The query id '{clean_id}' in '{args.input}' {problem}. Rename the query in its "
+              f"header (for example '{re.sub(r'[,;=&%|]', '_', clean_id)}').", file=sys.stderr)
         sys.exit(1)
 
     if len(records) > 1:

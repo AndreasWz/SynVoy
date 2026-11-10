@@ -44,18 +44,22 @@ process LOCATE_GENE {
     # MMSEQS. A failed search stops the task (fix-phase d5): until 2026-11-02 it went on with the
     # tblastn hits alone and one line in the log, so the home loci and the hit profile (and through
     # it the settings) could differ from a run where MMseqs2 had enough memory. No hits is exit 0.
-    mmseqs easy-search $gene $home_genome hits_mmseqs.m8 tmp \\
+    # The table carries both FASTA headers and is read by their first word (fix item 29): MMseqs2's
+    # own name columns read lcl|chr1 as chr1, and gnl|a|1 and gnl|b|1 both as 1.
+    mmseqs easy-search $gene $home_genome hits_mmseqs.raw tmp \\
         --search-type \$SEARCH_TYPE \\
         --threads ${task.cpus} \\
         --split-memory-limit ${params.mmseqs_split_memory_limit} \\
         -v ${params.mmseqs_verbosity} \\
         -e ${params.search_evalue} \\
-        --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits" \\
+        --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qheader,theader" \\
         -s ${params.mmseqs_sensitivity} \$MM_GC || {
             rc=\$?
             echo "ERROR: LOCATE_GENE: MMseqs2 search of the query against the home genome failed (exit \$rc). If it ran out of memory, raise --locate_gene_memory or --mmseqs_split_memory_limit." >&2
             exit \$rc
         }
+    mmseqs_first_words.py --input hits_mmseqs.raw --output hits_mmseqs.m8
+    rm -f hits_mmseqs.raw
 
     # 2. BLAST Search
     makeblastdb -in $home_genome -dbtype nucl

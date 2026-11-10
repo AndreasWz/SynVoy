@@ -552,9 +552,10 @@ def _search_gff_by_name(gff_file, candidate_names, query_seq=None, genome_file=N
 
 def check_home_names(genome_file, gff_file, removed_names=()):
     """The home genome's names that lost results in silence stop the task (fix-phase d4).
-    A sequence name MMseqs2 reports as another name (item 29: LOCATE_GENE's hits would be filed
-    under it, two loci at one place); without a GFF, a '|' in a sequence name (item 30: the
-    predicted genes' ids hold it and are read up to it). With a GFF (``gff_file``), a GFF that
+    Without a GFF, a '|' in a sequence name (item 30: the predicted genes' ids hold it and are read
+    up to it). A name MMseqs2 reports as another name (lcl|X as X) stopped here from 2026-11-02 to
+    2026-11-09; since then every MMseqs2 table is read by the first word of its headers (fix item
+    29), so such names work. With a GFF (``gff_file``), a GFF that
     shares no seqid with the FASTA (item 31; the seqids of gene, mRNA, transcript and CDS rows).
     Returns, when only some of the GFF's seqids are missing from the FASTA, ``{'seqids': n,
     'examples': [...]}`` of those missing (the records the easy-mode chromosome filter removed,
@@ -2516,7 +2517,6 @@ def main():
     # Enforce a consistent prefix across the full sequence and all exon sequences.
     base_goi_name = query_id
     if exons and exons[0].get('id', '').startswith('GOI_'):
-        import re
         m = re.match(r'^GOI_([A-Za-z0-9_.-]+)(?:\||$)', exons[0]['id'])
         if m:
             base_goi_name = m.group(1)
@@ -2524,7 +2524,22 @@ def main():
     # Fallback if base_goi_name is empty (e.g. Pro Mode with no query_id)
     if not base_goi_name:
         base_goi_name = "target"
-        
+
+    # A GOI name the search cannot carry stops here, named (fix item 28): whitespace, a '|' (a
+    # GOI's name is read up to it; an easy-mode --query_id, since normalize_query.py stops a query
+    # header's), a character GFF3 reserves in column 9 (the name goes into every model's ID,
+    # Parent and SynVoy_Parent), or the form SynVoy gives a tandem copy (copy_<n>: the GOI would
+    # be read as a copy, its exons dropped, and its bare number taken for a GOI proxy among the
+    # flanking genes).
+    problem = id_problem(base_goi_name, pipe=True, gff=True)
+    if problem is None and re.match(r'copy_\d', base_goi_name):
+        problem = ("has the form SynVoy gives a tandem copy (copy_<n>), so the GOI would be read as a "
+                   "copy of another gene")
+    if problem:
+        source = ("--query_id" if args.query_id else "the query's header") if base_goi_name == query_id \
+            else "the home GFF's gene name"
+        raise StepFailed(f"The GOI name {base_goi_name!r} (from {source}) {problem}. Rename it there.")
+
     goi_full_id = f"GOI_{base_goi_name}"
     fasta_records.append((goi_full_id, full_protein))
 

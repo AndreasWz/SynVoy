@@ -19,8 +19,7 @@ class HomeGenes {
         if (!GenomeAxis.on(params)) {
             return ''
         }
-        def species = homeSpecies.toString().replace("'", "'\"'\"'")
-        return " --home_gff_present ${homeGffPresent} --home_species '${species}'" +
-               " --augustus_species '${params.augustus_species}' --gene_predictor ${params.gene_predictor}"
+        return " --home_gff_present ${homeGffPresent} --home_species ${ShellArgs.q(homeSpecies)}" +
+               " --augustus_species ${ShellArgs.q(params.augustus_species)} --gene_predictor ${params.gene_predictor}"
     }
 }

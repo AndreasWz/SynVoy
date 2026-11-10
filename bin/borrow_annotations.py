@@ -47,6 +47,7 @@ from pathlib import Path
 try:
     from sequence_utils import (
         load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_step_failed,
+        MMSEQS_FORMAT_OUTPUT, mmseqs_first_words,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
@@ -54,6 +55,7 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
         load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_step_failed,
+        MMSEQS_FORMAT_OUTPUT, mmseqs_first_words,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
@@ -181,11 +183,11 @@ def mmseqs_hits(query_faa, genome_fna, evalue=1e-3):
     chrom, start (0-based), end, pident, evalue, bits; [] when the search fails."""
     with tempfile.TemporaryDirectory(prefix="synvoy_borrow_") as tmp:
         out = os.path.join(tmp, "hits.m8")
+        # The two FASTA headers ride along and name the rows (fix item 29): MMseqs2's own target
+        # column read a contig lcl|ctg1 as ctg1, which the genome does not hold, so no model came.
         cmd = ['mmseqs', 'easy-search', query_faa, genome_fna, out, os.path.join(tmp, 'tmp'),
                '--search-type', '2', '-s', '7.5', '-e', str(evalue), '-v', '1',
-               '--format-output',
-               'query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits'
-               ] + genetic_code_flag('mmseqs')
+               '--format-output', MMSEQS_FORMAT_OUTPUT] + genetic_code_flag('mmseqs')
         try:
             subprocess.run(cmd, check=True, capture_output=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
@@ -193,11 +195,11 @@ def mmseqs_hits(query_faa, genome_fna, evalue=1e-3):
             return []
         hits = []
         if os.path.exists(out):
-            with open(out) as fh:
+            with open(out, errors='surrogateescape') as fh:
                 for line in fh:
-                    p = line.rstrip('\n').split('\t')
-                    if len(p) < 12:
+                    if not line.strip():
                         continue
+                    p = mmseqs_first_words(line)
                     a, b = int(p[8]), int(p[9])
                     hits.append({'query': p[0], 'chrom': p[1], 'start': min(a, b) - 1,
                                  'end': max(a, b), 'pident': float(p[2]),

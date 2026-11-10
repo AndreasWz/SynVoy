@@ -629,6 +629,9 @@ _SPECIES_TAIL_SUFFIXES = ("_exon_ann", "_fallback", "_flank_ann", "_full")
 # The block and locus of a search model: _b<block>_l<locus> (_l1m2 = second model of a
 # locus, _r1 = found with a relative's model as query, _fl2 = a flanking gene's locus).
 _BLOCK_TOKEN = re.compile(r"_b\d+_(?:[lr]\d+(?:m\d+)?|fl\d+)")
+# The first block token followed by _by_: where a seed-form tandem copy's parent begins
+# (GOI_copy_<n>|<genome>_b<k>_<l|r><j>_by_<parent>). Same rule as sequence_utils.strip_copy_parent.
+_COPY_PARENT = re.compile(r"_b\d+_[lr]\d+(?:m\d+)?_by_")
 
 
 def species_from_leaf(leaf: str) -> Optional[str]:
@@ -646,6 +649,11 @@ def species_from_leaf(leaf: str) -> Optional[str]:
     if not leaf or "|" not in leaf:
         return None
     tail = leaf.split("|", 1)[1]
+    # A seed-form copy's parent comes last and can hold a block-like token of its own (a GOI named
+    # Ly6e_b3_l1): it is cut first, so the last token is the copy's own (fix item 26).
+    by = _COPY_PARENT.search(tail)
+    if by:
+        tail = tail[: by.end() - len("_by_")]
     tokens = list(_BLOCK_TOKEN.finditer(tail))
     if tokens:
         tail = tail[: tokens[-1].start()]

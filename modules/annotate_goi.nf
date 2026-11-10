@@ -22,8 +22,8 @@ process ANNOTATE_GOI {
     def gff_arg = home_gff.name != 'NO_GFF' ? home_gff : 'NO_GFF'
     def blast_arg = blast_hits.name != 'NO_BLAST_HITS' ? "--blast_hits ${blast_hits}" : ""
     def mmseqs_arg = mmseqs_hits.name != 'NO_MMSEQS_HITS' ? "--mmseqs_hits ${mmseqs_hits}" : ""
-    def qid_arg = query_id ? "--query_id ${query_id}" : ""
-    def name_arg = gene_name ? "--gene_name '${gene_name}'" : ""
+    def qid_arg = query_id ? "--query_id ${ShellArgs.q(query_id)}" : ""      // lib/ShellArgs.groovy
+    def name_arg = gene_name ? "--gene_name ${ShellArgs.q(gene_name)}" : ""
     def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
     """
     annotate_goi_exons.py \\

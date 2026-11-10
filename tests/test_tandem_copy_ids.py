@@ -66,16 +66,17 @@ def test_species_of_the_home_copy_form_and_of_a_numbered_fallback(tag, species):
 
 
 def test_a_parent_that_would_mislead_the_readers_is_logged_once(caplog):
-    isr._WARNED_COPY_PARENTS.discard("GOI_b1_l2")
+    """Whitespace or '|' in the parent is logged once. A block-like token (GOI_b1_l2) was logged too
+    and misread; since fix item 26 the readers cut the parent first, so it reads right."""
+    isr._WARNED_COPY_PARENTS.discard("GOI_a|b")
     with caplog.at_level(logging.WARNING, logger=isr.logger.name):
         model_id = isr.tandem_copy_record_id("GOI_copy_1", "GOI_b1_l2", "GenA_fna", 0, 1)
-        isr.tandem_copy_record_id("GOI_copy_2", "GOI_b1_l2", "GenA_fna", 0, 1)
-        isr.tandem_copy_record_id("GOI_copy_1", "GOI_X", "GenA_fna", 0, 1)
-    assert [r.getMessage() for r in caplog.records].count(
-        "tandem copy parent 'GOI_b1_l2' holds whitespace, '|' or a block-like token: the genome, "
-        "block or species read from its copies' ids can be wrong") == 1
-    assert len(caplog.records) == 1
-    assert isr._model_genome_tag(model_id) != "GenA_fna"        # why it is logged
+        isr.tandem_copy_record_id("GOI_copy_1", "GOI_a|b", "GenA_fna", 0, 1)
+        isr.tandem_copy_record_id("GOI_copy_2", "GOI_a|b", "GenA_fna", 0, 1)
+    assert [r.getMessage() for r in caplog.records] == [
+        "tandem copy parent 'GOI_a|b' holds whitespace or '|': the genome, block or species read from "
+        "its copies' ids can be wrong"]
+    assert isr._model_genome_tag(model_id) == "GenA_fna"
 
 
 def test_copies_of_a_relatives_query_are_renamed_to_the_home_parent():
