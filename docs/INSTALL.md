@@ -14,7 +14,8 @@ Full setup instructions for SynVoy. For the short version, see the [README](../R
 | **Internet** | Easy Mode needs access to NCBI/UniProt for genome downloads |
 
 > **Note on Java, Nextflow and Python:** All three are provided by the `synvoy_env`
-> conda environment (`openjdk >=17`, `nextflow >=25.10`, `python >=3.10,<3.13`). You
+> conda environment (`openjdk >=17`, Nextflow 26.04.3, Python 3.12.13; since 2026-11-09 the tools are
+> pinned to the versions the benchmark ran, which every run records in `effective_params.json`). You
 > do **not** need to install them separately. CI tests Python 3.10 and 3.12. See the
 > [HPC / standalone Nextflow](#hpc--standalone-nextflow-no-conda) section
 > below if your environment forbids conda.

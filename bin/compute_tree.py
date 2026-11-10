@@ -125,7 +125,7 @@ def run_iqtree(input_aln, output_nwk, threads=1, bootstrap_reps=1000, seed=IQTRE
     try:
         subprocess.run(["iqtree2"] + cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError:
-        # Try iqtree v1 if iqtree2 is unavailable.
+        # Without iqtree2: `iqtree` (IQ-TREE 1, or IQ-TREE 3's own name for itself; environment.yml pins 3.1.2).
         subprocess.run(["iqtree"] + cmd, check=True, capture_output=True, text=True)
 
     treefile = prefix + ".treefile"

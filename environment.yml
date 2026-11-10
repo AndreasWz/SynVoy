@@ -8,31 +8,36 @@ channels:
   # bioconda. 'nodefaults' also blocks a user's global .condarc from re-adding it.
   - nodefaults
 dependencies:
+  # The tools are pinned to the versions the benchmark's container ran (r3 on LRZ, 2026-11-08; every
+  # run's effective_params.json records them as tool_versions, and Nextflow's as
+  # run_resources.nextflow_version): until 2026-11-09 only lower bounds stood here, so two machines
+  # could run other versions of the same code. Packages without a recorded version keep their bounds.
   # Core
-  # Python 3.13 removed stdlib cgi, which ete3 still imports.
-  - python >=3.10,<3.13
+  # Python 3.13 removed stdlib cgi, which ete3 still imports. The code itself still parses on 3.10
+  # (CI tests 3.10 and 3.12 with pip, not this file).
+  - python ==3.12.13
   # Nextflow 24.11+ requires Java 17+. Keep Java in the env so `mamba run`
   # works even when the login shell has no system Java.
   - openjdk >=17,<26
-  - nextflow >=25.10.0
+  - nextflow ==26.04.3
 
   # Bioinformatics tools
-  - mmseqs2 >=14.7e284
-  - blast >=2.13.0        # tblastn / makeblastdb
-  - prodigal >=2.6.3      # prokaryotic gene prediction (fallback)
-  - augustus >=3.4.0       # eukaryotic gene prediction (default)
-  - mafft >=7.505
-  - miniprot
-  - samtools >=1.15        # samtools faidx — strong-synteny / GOI-hull rescue windows
-  - iqtree >=2.2.0         # binary may be `iqtree2` or `iqtree` depending on package version
+  - mmseqs2 ==18.8cc5c
+  - blast ==2.17.0         # tblastn / makeblastdb / blastp
+  - prodigal ==2.6.3       # prokaryotic gene prediction (fallback)
+  - augustus ==3.5.0       # eukaryotic gene prediction (default)
+  - mafft ==7.526          # on conda-forge (bioconda stops at 7.525)
+  - miniprot ==0.18
+  - samtools ==1.23        # samtools faidx — strong-synteny / GOI-hull rescue windows
+  - iqtree ==3.1.2         # binaries `iqtree3` and `iqtree`; compute_tree.py tries `iqtree2` first, then `iqtree`
 
   # Genome fetching (easy mode)
-  - ncbi-datasets-cli
+  - ncbi-datasets-cli ==18.30.1
   - entrez-direct
 
   # Python packages
   - ete3                  # tree I/O in plot_synteny & phylo_sort
-  - parasail-python       # Smith-Waterman via parasail (GOI search)
+  - parasail-python ==1.3.4   # Smith-Waterman via parasail (GOI search)
   - numpy
 
   # Utilities
