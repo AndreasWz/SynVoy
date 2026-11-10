@@ -956,7 +956,11 @@ coverage:
   at the bar of 1e-6, a margin of 9.96 bits as 10.0 and allowed to seed).
 - **Ranking among candidates** (`rank_key`): label, then E-value (values below 1e-10
   count as equal), then the block's E_syn, then bits, then the shorter span, then
-  position. In a window the label is provisional, on the E-value of the place before the
+  position, then a tail without the GOI's name: the kind of model (gene model, tandem copy,
+  hit chain, rescued exon, raw hit), strand, CDS rows and the id behind its `|`. Until
+  2026-11-09 the last key was the id, so a GOI name that sorts before `GOI_copy_` and one that
+  sorts after it chose differently between a tandem copy and a hit-built candidate at one place.
+  In a window the label is provisional, on the E-value of the place before the
   genome's multiplier; the final label is set at the end of the genome on Eeff.
 - **Frame guard**: a miniprot model's E-value is computed on the translation of its CDS
   (first exon's phase honoured). When that has a stop before its end or a length that is
@@ -1016,6 +1020,12 @@ of its own when:
 - it is not already within the GOI margin of a flanking gene (a block keeps the GOI hits
   within the GOI margin of it; until 2026-10-22 the radius here was the window margin, so a
   hit between the two was used by neither path).
+
+Of the hits that pass, one per stretch of `region_padding` of a scaffold seeds the block: the
+home protein's hit first, then those of its exons, pieces and earlier genomes' models, then other
+GOI parents (seeded copies), decoys last; within one of these by the query id behind its `|` (a
+copy's parent cut), then by position, strand and bits. Until 2026-11-09 it was the first hit in
+the order of the query ids, so the GOI's name decided between the home protein and a tandem copy.
 
 A strong GOI hit that fails these conditions is written to
 `hits/<genome>.nonsyntenic.tsv`, so the report can say "found, not syntenic".

@@ -81,10 +81,11 @@ def judge(e_eff: Optional[float], place: str, block_significant: bool,
 
 
 def rank_key(confidence: str, e_eff: Optional[float], block_esyn: Optional[float],
-             bits: Optional[float], span: int, position: int, ident: str = "") -> Tuple[Any, ...]:
+             bits: Optional[float], span: int, position: int, ident: Any = "") -> Tuple[Any, ...]:
     """Sort key, best first, used everywhere a choice is made: label, then E (below 1e-10
     all equal), then the stronger block (E_syn), then bits, then the shorter span, then
-    position (and an id for a total order)."""
+    position, then ``ident`` for a total order: the search passes a tail without the GOI's name
+    (iterative_search_runner.name_free_tail; until 2026-11-09 the id, so the name broke ties)."""
     e = math.inf if e_eff is None else max(float(e_eff), EVALUE_TIE)
     esyn = math.inf if block_esyn is None else float(block_esyn)
     return (-LABEL_RANK.get(confidence, 0), e, esyn, -float(bits or 0.0), int(span), int(position), ident)

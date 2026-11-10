@@ -1492,6 +1492,27 @@ def _judge_attrs(a: Dict[str, str], e_key: str, numbers: Optional[Dict[str, Any]
         None if near in (None, '') else near == '1', cov)
 
 
+# Ties of label, E, E_syn, bits, span and position are broken without the GOI's name (fix item 27b):
+# the id was the last key, so a name that sorts before 'GOI_copy_' (digits, capitals, a, b) and one
+# that sorts after it (orf19.*) chose differently between a tandem copy and a hit-built candidate at
+# one place. Between a copy and a hit-built candidate the order of kinds keeps the choice of names
+# after 'GOI_copy_' (the measured case: the copy before the rescued exon). A gene model comes before
+# a copy, which names after 'GOI_copy_' chose the other way round (no such tie on the gate sets).
+TIE_KIND = {'exon_annotation': 0, 'tandem_copy': 1, 'fallback_hit_span': 2, 'rescued_exon': 3, 'raw_hit': 4}
+
+
+def name_free_tail(gff_lines, model_id: str) -> Tuple[Any, ...]:
+    """The last part of a candidate's rank key: its evidence kind (TIE_KIND, others after), strand,
+    CDS rows, and its id behind the first '|' with a tandem copy's parent cut (strip_copy_parent):
+    nothing that holds the GOI's name."""
+    cols = gff_lines[0].split('\t') if gff_lines else []
+    a = _parse_gff_attr_string(cols[8]) if len(cols) >= 9 else {}
+    cds = tuple((int(c[3]), int(c[4])) for c in (l.split('\t') for l in (gff_lines or [])[1:])
+                if len(c) > 4 and c[2] == 'CDS')
+    tail = strip_copy_parent(model_id.split('|', 1)[1] if '|' in (model_id or '') else '')
+    return (TIE_KIND.get(a.get('EvidenceType', ''), len(TIE_KIND)), cols[6] if len(cols) > 6 else '', cds, tail)
+
+
 def judge_candidates(candidates) -> None:
     """Provisional label and rank of each candidate of a window, on its E-value in its
     place before the genome-level multiplier (finalize_place_evalues relabels with Eeff):
@@ -1511,7 +1532,7 @@ def judge_candidates(candidates) -> None:
             e, esyn = float('inf'), float('inf')
         cand['rank_key'] = synvoy_label.rank_key(
             conf, e, esyn, cand.get('bits'), int(cand['end']) - int(cand['start']),
-            int(cand.get('start', 0) or 0), (cand.get('record') or {}).get('id', ''))
+            int(cand.get('start', 0) or 0), name_free_tail(gff, (cand.get('record') or {}).get('id', '')))
 
 
 def record_judge_numbers(numbers: Dict[str, Dict[str, Any]], cands,
@@ -1692,16 +1713,18 @@ def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], trun
             gff[0] = '\t'.join(cols)
 
 
-def goi_candidate_order(cand) -> Tuple[float, int, int, int, str]:
+def goi_candidate_order(cand) -> Tuple[Any, ...]:
     """Order of GOI candidates for the greedy choice among overlapping ones: bit score
     against the home protein (score_goi_candidates), then the SHORTER span (a chain over
     two copies must not win over the copy it contains at the same score), then block
-    flanking support, start, id. Until 2026-10-14: identity first, longer span first."""
+    flanking support, start, then the name-free tail (name_free_tail; the id until 2026-11-09).
+    Until 2026-10-14: identity first, longer span first. A run judges every candidate, so
+    greedy_select reads the judge's rank_key; this order is the fallback without one."""
     return (-float(cand.get('bits', 0.0) or 0.0),
             int(cand['end']) - int(cand['start']),
             -int(cand.get('flanking_support', 0) or 0),
             int(cand.get('start', 0) or 0),
-            (cand.get('record') or {}).get('id', ''))
+            name_free_tail(cand.get('gff') or [], (cand.get('record') or {}).get('id', '')))
 
 
 def is_goi_query_id(query_id: str) -> bool:
@@ -6846,7 +6869,8 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
         e_eff = n['Eeff'] if n.get('Eeff') is not None else _safe_float(a.get('Eeff'))
         b_esyn = n['BlockEsyn'] if n.get('BlockEsyn') is not None else _safe_float(a.get('BlockEsyn'))
         key = synvoy_label.rank_key(a.get('Confidence', ''), e_eff, b_esyn, _safe_float(a.get('Bits')),
-                                    int(cols[4]) - int(cols[3]) + 1, int(cols[3]), model_id)
+                                    int(cols[4]) - int(cols[3]) + 1, int(cols[3]),
+                                    name_free_tail([line], model_id) + (model_id,))
         calls[b].append((key, a.get('Confidence', ''), model_id))
     rows = []
     for b in sorted(blocks):
@@ -6897,6 +6921,15 @@ def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
                     f"candidate(s) to {os.path.basename(path)}")
     except OSError as exc:
         logger.warning(f"[{genome_name}] §1x could not write {path}: {exc}")
+
+
+def _dispersed_seed_key(h) -> Tuple[Any, ...]:
+    q = h.get('query', '') or ''
+    base = extract_base_gene_id(q)
+    kind = (3 if is_decoy_parent(base) else 2 if base.startswith('GOI_copy_')
+            else 0 if q == base else 1)
+    tail = strip_copy_parent(q.split('|', 1)[1] if '|' in q else '')
+    return (kind, tail, h.get('start', 0), h.get('end', 0), h.get('strand', ''), -float(h.get('bits', 0) or 0))
 
 
 def select_dispersed_goi_seeds(hits, flanking_hits, *,
@@ -6998,7 +7031,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
                 _reject(h, 'no_flanking_envelope_in_genome')
         return []
 
-    seeds, seen = [], set()
+    seeds, seen, bins = [], set(), {}
     for h in hits:
         if not is_goi_query_id(h.get('query', '')):
             continue
@@ -7024,11 +7057,16 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             _drop('dispersed_near_anchor', h)
             continue
         key = (h.get('chrom'), hs // max(1, region_padding))
-        if key in seen:
-            continue
-        seen.add(key)
-        seeds.append(h)
-    return seeds
+        if key not in seen:
+            seen.add(key)
+            seeds.append([])
+            bins[key] = seeds[-1]
+        bins[key].append(h)
+    # One seed per bin, chosen without the GOI's name (fix item 27b): the first hit in query order
+    # was taken, so the name decided between the home protein's hit and a tandem copy's. The home
+    # protein first, then its exons, pieces and models, then other GOI parents (copies), decoys
+    # last; then the query id behind its base (a copy's parent cut), position, strand, bits.
+    return [min(b, key=_dispersed_seed_key) for b in seeds]
 
 
 # ---------------------------------------------------------------------------
