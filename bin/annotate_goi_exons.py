@@ -34,20 +34,20 @@ import urllib.error
 
 try:
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
         continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers,
-        MemoryKilled, memory_killed, exit_on_memory_kill
+        MemoryKilled, memory_killed, exit_step_failed
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         load_genome, load_genome_subset, reverse_complement, translate, parse_gff, get_feature_id,
         parse_gff_attributes, get_genetic_code, set_genetic_code, stop_codons,
         continues_query, StepFailed, guard_failed, first_word, id_problem, iter_fasta_headers,
-        MemoryKilled, memory_killed, exit_on_memory_kill
+        MemoryKilled, memory_killed, exit_step_failed
     )
 
 
@@ -2646,4 +2646,6 @@ def main():
 
 
 if __name__ == "__main__":
-    exit_on_memory_kill(main)
+    # A stop (StepFailed: a home name, a guard) exits 3 with its message and no traceback; a memory
+    # kill of miniprot 137, which Nextflow retries with more memory.
+    exit_step_failed(main)

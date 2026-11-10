@@ -302,7 +302,7 @@ Windows of the genome-wide path (`--goi_genome_wide_path`) are not blocks and ha
 | `summary` | The headline and the counts (see below) |
 | `goi_dedup` | `records` — the adjudicated calls described above — plus dedup statistics |
 | `self_consistency` | `flags`: things the run noticed about its own result — `identity_coverage_decoupled`, `paralog_misassignment`, `locus_reattributed`, `cross_locus_duplicate`, `strong_synteny_no_goi`, `phylo_discordant`. `thresholds` gives the values the checks used, e.g. `strong_flanking_min`, the HIGH flanking models of `strong_synteny_no_goi` (`strong_synteny_no_goi_min_flanking`: 2 × `n_flanking_genes`, 20 by default). `locus_ownership_summary` counts what the paralog check did; its `goi_entry` names the panel entry that stands for the GOI and how it was found (`found_by`: `goi_info`, the home gene the home step took; `identity_rule`, the home protein ≥ 95 % identical over ≥ 90 % of the GOI's home protein; `query`, the GOI's home protein itself, when no home gene is the GOI's own, e.g. a home genome without a GFF; since 2026-10-28; `unrecorded` for a panel built before; `goi_entry` is null when no panel was built) |
-| `rejected_candidates` | GOI hits that cleared the quality bar but were refused by a synteny gate, with the gate and the distance to the nearest flanking gene. Not orthology calls — listed so a genome with a strong unplaceable hit is not read as a genome with no hit. |
+| `rejected_candidates` | GOI hits that cleared the quality bar but were refused by a synteny gate, with the gate and the nearest flanking gene on the hit's own chromosome and its distance (`nearest_anchor_bp`; `null`, with `nearest_anchor_same_chrom` false, when that chromosome carries no flanking gene: until 2026-11-09 a coordinate difference to a gene on another chromosome stood there). Not orthology calls — listed so a genome with a strong unplaceable hit is not read as a genome with no hit. |
 | `genome_wide_path` | Only with `--goi_genome_wide_path`: the places of GOI hits outside every searched window (`hits/<genome>.genome_wide.tsv`), with the home protein's E over the genome, the specificity terms, the rank, the cap (home family size + 1) and the decision (`modelled`, `cut_by_cap`, `not_specific`, `not_significant`), per genome and in all; with a sentence in `warnings` when a place was modelled. Their calls carry `GenomeWide=1` and `Place=genome`; the genome place has no decoy calibration |
 | `gene_family_advisory` | Set when the query looks like a member of a large family, where calls are candidates rather than orthologs |
 | `annotations` | Counts by role, confidence, class and evidence type; `per_genome` breakdown |
@@ -428,7 +428,10 @@ is known: from `--common_names_tsv`, the per-user cache of earlier lookups
 `<locus>_species_names.tsv` (also in `plot_inputs_<locus>/`) lists every common name with its
 source (`table`, `cache`, `ncbi`, `none`: NCBI has none, `unreachable`: NCBI did not answer,
 `offline`: not looked up), and a lookup NCBI did not answer is a warning in the plot log: the
-label is then the scientific name alone. A label from the cache can differ between machines.
+label is then the scientific name alone. Since 2026-11-09 such a lookup is asked once more after
+2 s, at most twice per plot run, so a short outage (a run started right after boot) no longer
+records `unreachable` where NCBI answers a moment later. A label from the cache can differ
+between machines.
 
 A label comes from the first source that names the gene:
 

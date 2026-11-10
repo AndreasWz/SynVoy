@@ -307,87 +307,6 @@ def fragment_of(query_id: str):
     return (m.group(1), *numbers)
 
 
-def extract_base_id(id_string: str) -> str:
-    """
-    Extract the base gene/protein ID, stripping variants, fragments, versions.
-    
-    Examples:
-        "XP_123456.1" -> "XP_123456"
-        "gene|var_1" -> "gene"
-        "gene|frag_half_1" -> "gene"
-        "ENSP00000123456.2" -> "ENSP00000123456"
-        "lcl|NC_123_cds_XP_456.1_7" -> "XP_456"
-    """
-    if not id_string:
-        return id_string
-    
-    original = id_string
-    
-    # Remove our own variant/fragment suffixes
-    if '|' in id_string:
-        parts = id_string.split('|')
-        # Check if last part is a variant/fragment marker
-        if len(parts) >= 2:
-            last = parts[-1]
-            if any(last.startswith(p) for p in ['var_', 'frag_', 'half_', 'third_', 'quarter_']):
-                id_string = '|'.join(parts[:-1])
-            elif re.match(r'^(var|frag|half|third|quarter)', last):
-                id_string = '|'.join(parts[:-1])
-    
-    # Handle lcl|..._cds_XP_123.1_N format
-    cds_match = re.search(r'cds_([XNYWZ]P_\d+)', id_string)
-    if cds_match:
-        id_string = cds_match.group(1)
-    
-    # Remove version numbers (.1, .2, etc.) from the end
-    id_string = re.sub(r'\.\d+$', '', id_string)
-    
-    # Remove trailing underscore + number (like _1, _2 for CDS copies)
-    # But protect NCBI accession prefixes (XP_, NP_, WP_, YP_, XM_, NM_, NC_, etc.)
-    if not re.match(r'^[A-Z]{1,2}P_\d+$', id_string) and not re.match(r'^[A-Z]{2}_\d+$', id_string):
-        id_string = re.sub(r'_\d+$', '', id_string)
-    
-    return id_string if id_string else original
-
-
-def normalize_id(id_string: str) -> str:
-    """
-    Normalize ID for comparison (lowercase, no special chars).
-    """
-    if not id_string:
-        return ""
-    return re.sub(r'[^a-z0-9]', '', id_string.lower())
-
-
-def ids_match(id1: str, id2: str) -> bool:
-    """
-    Check if two IDs refer to the same entity (fuzzy matching).
-    """
-    if not id1 or not id2:
-        return False
-    
-    # Exact match
-    if id1 == id2:
-        return True
-    
-    # Base ID match
-    base1 = extract_base_id(id1)
-    base2 = extract_base_id(id2)
-    if base1 == base2:
-        return True
-    
-    # Normalized match
-    if normalize_id(base1) == normalize_id(base2):
-        return True
-    
-    # One contains the other (for complex IDs) - require minimum length to avoid false positives
-    if len(base1) >= 6 and len(base2) >= 6:
-        if base1 in id2 or base2 in id1:
-            return True
-    
-    return False
-
-
 # =============================================================================
 # GFF PARSING (No dependencies)
 # =============================================================================
@@ -672,45 +591,6 @@ def extract_sequence(genome_dict: Dict[str, str], chrom: str, start: int, end: i
 
 
 # =============================================================================
-# BATCH ID ASSIGNMENT
-# =============================================================================
-
-class IdAssigner:
-    """
-    Assigns clean IDs to sequences, ensuring uniqueness.
-    
-    Use when you have many sequences and need consistent, unique IDs.
-    """
-    
-    def __init__(self, prefix: str = "seq"):
-        self.prefix = prefix
-        self.seen_ids = {}
-        self.counter = 0
-    
-    def get_id(self, original_header: str) -> str:
-        """
-        Get a unique ID for a sequence.
-        
-        If the extracted ID was seen before, appends a number.
-        """
-        # Try to extract ID
-        base_id = extract_id(original_header)
-        
-        if base_id in self.seen_ids:
-            # Already seen, add suffix
-            self.seen_ids[base_id] += 1
-            return f"{base_id}_{self.seen_ids[base_id]}"
-        else:
-            self.seen_ids[base_id] = 0
-            return base_id
-    
-    def get_sequential_id(self) -> str:
-        """Get next sequential ID."""
-        self.counter += 1
-        return f"{self.prefix}_{self.counter}"
-
-
-# =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
 
@@ -773,31 +653,6 @@ def load_genome_subset(filepath: str, names) -> Dict[str, str]:
 def get_sequence_lengths(filepath: str) -> Dict[str, int]:
     """Get lengths of all sequences in FASTA."""
     return {name: len(seq) for name, seq in iter_genome(filepath)}
-
-
-def filter_fasta(input_path: str, output_path: str, keep_ids: set):
-    """Filter FASTA to keep only specified IDs."""
-    records = []
-    for header, clean_id, seq in parse_fasta(input_path):
-        if clean_id in keep_ids or extract_base_id(clean_id) in keep_ids:
-            records.append((header, seq))
-    write_fasta(records, output_path)
-
-
-def merge_fastas(input_paths: List[str], output_path: str, deduplicate: bool = True):
-    """Merge multiple FASTA files."""
-    seen = set()
-    records = []
-    
-    for path in input_paths:
-        for header, clean_id, seq in parse_fasta(path):
-            if deduplicate:
-                if clean_id in seen:
-                    continue
-                seen.add(clean_id)
-            records.append((header, seq))
-    
-    write_fasta(records, output_path)
 
 
 def block_index_of(model_id: str, genome_tag: str) -> Optional[int]:
@@ -1013,17 +868,6 @@ def memory_killed(returncode: int, stderr: str = "") -> bool:
     return returncode in (-9, 137) or "MemoryError" in text or "std::bad_alloc" in text
 
 
-def exit_on_memory_kill(main_fn) -> None:
-    """Run a script's main(); a MemoryKilled is printed and ends the script with
-    MEMORY_KILL_EXIT. For scripts that otherwise let a StepFailed end them (exit 1)."""
-    try:
-        rc = main_fn()
-    except MemoryKilled as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(MEMORY_KILL_EXIT)
-    sys.exit(rc)
-
-
 def guard_failed(what: str, guard_seconds: float, param: Optional[str] = None) -> StepFailed:
     """The StepFailed of a tool that did not finish within its guard: ``what`` names the tool
     and the place, ``param`` the pipeline parameter that sets the guard."""
@@ -1102,9 +946,10 @@ STEP_FAILED_EXIT = 3
 
 
 def exit_step_failed(main_fn) -> None:
-    """Run a script's main() and exit with its return value; a StepFailed is printed and ends the
-    script with STEP_FAILED_EXIT (for a module whose errorStrategy turns that code into the
-    run's end: the rescue passes), a MemoryKilled with MEMORY_KILL_EXIT (retried)."""
+    """Run a script's main() and exit with its return value; a StepFailed (a stop: a name, a guard,
+    a failed tool) is printed and ends the script with STEP_FAILED_EXIT, without a traceback, a
+    MemoryKilled with MEMORY_KILL_EXIT (retried). Exit 3 ends the run under the global
+    errorStrategy, and run_step.py passes it through (the rescue passes)."""
     try:
         rc = main_fn()
     except MemoryKilled as exc:
@@ -1431,42 +1276,6 @@ def sw_pair_evalue(seq_a: str, seq_b: str) -> Tuple[float, float, float]:
 # =============================================================================
 # TESTING
 # =============================================================================
-
-if __name__ == '__main__':
-    import sys
-    
-    # Test ID extraction
-    test_headers = [
-        "XP_123456.1 hypothetical protein",
-        "sp|P12345|ABC_HUMAN Some protein",
-        "ENSP00000123456.2 description",
-        "lcl|NC_001234.5_cds_XP_789012.1_15 gene description",
-        "gene|var_1",
-        "1_234 # 1000 # 2000 # 1 # ID=1_234;partial=00",
-        "random_header_with no known pattern",
-        "ABC_12345 locus tag style",
-        "",
-        "   ",
-    ]
-    
-    print("ID Extraction Tests:")
-    print("-" * 60)
-    for header in test_headers:
-        extracted = extract_id(header)
-        base = extract_base_id(extracted)
-        print(f"  '{header[:50]}...' -> '{extracted}' (base: '{base}')")
-    
-    # Test file if provided
-    if len(sys.argv) > 1:
-        filepath = sys.argv[1]
-        print(f"\nParsing: {filepath}")
-        print("-" * 60)
-        for i, (header, clean_id, seq) in enumerate(parse_fasta(filepath)):
-            if i >= 5:
-                print(f"  ... and more")
-                break
-            print(f"  {clean_id}: {len(seq)} bp")
-
 
 def longest_collinear_run(ranks):
     """Longest monotonic (non-decreasing OR non-increasing) subsequence of home ranks.

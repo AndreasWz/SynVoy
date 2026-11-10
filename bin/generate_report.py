@@ -745,7 +745,10 @@ def collect_nonsyntenic_candidates(paths):
                         "alnlen": _safe_int(row.get("alnlen")),
                         "rejected_by": row.get("rejected_by", ""),
                         "nearest_anchor_gene": row.get("nearest_anchor_gene", ""),
-                        "nearest_anchor_bp": _safe_int(row.get("nearest_anchor_bp")),
+                        # Empty when the hit's chromosome carries no anchor: null, not 0
+                        # ("overlaps an anchor"; fix item 6).
+                        "nearest_anchor_bp": (_safe_int(row.get("nearest_anchor_bp"))
+                                              if str(row.get("nearest_anchor_bp", "")).strip() else None),
                         "nearest_anchor_same_chrom":
                             str(row.get("nearest_anchor_same_chrom", "")).lower() == "true",
                     }
@@ -1377,6 +1380,19 @@ def step_failure_warnings(failures):
                    + f" (exit {f['exit']}" + (f": {f['reason']}" if f["reason"] else "") + "): "
                    + _STEP_FAILURE_SENTENCE.get(f["step"], "its result is missing") + " (failed_steps).")
     return out
+
+
+def count_home_loci(gff_files):
+    """The home loci that produced region files: their staging tags (``locus_N__``). Files without
+    a tag (an older run, a direct call) say nothing about loci, so they add none (fix item 38: the
+    advisory counted (genome, staging source, chromosome) cells with a HIGH flanking gene, which
+    gave '9 home loci' for a gene with one)."""
+    tags = set()
+    for p in gff_files or ():
+        m = _STAGING_PREFIX_RE.match(os.path.basename(p))
+        if m and m.group(1).startswith("locus_"):
+            tags.add(m.group(1))
+    return len(tags)
 
 
 def build_gene_family_advisory(goi_class_counts, n_home_loci=0,
@@ -2260,7 +2276,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # paralog families). Report-only, driven by the ambiguous-call share + home-locus count.
     gene_family_advisory = build_gene_family_advisory(
         annotation_summary.get("goi_class_counts", {}),
-        n_home_loci=len(flanking_per_locus or {}),
+        n_home_loci=count_home_loci(gff_files),
     )
 
     # A genome that failed the quality check and was searched anyway (the user chose it):

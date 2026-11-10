@@ -46,14 +46,14 @@ from pathlib import Path
 
 try:
     from sequence_utils import (
-        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_on_memory_kill,
+        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_step_failed,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_on_memory_kill,
+        load_genome, parse_gff, get_feature_id, parse_bed, write_fasta, translate, check_gene_ids, exit_step_failed,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
     )
@@ -523,5 +523,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # A memory kill of miniprot exits 137, which Nextflow retries with more memory (fix-phase d6).
-    exit_on_memory_kill(main)
+    # A memory kill of miniprot exits 137, which Nextflow retries with more memory (fix-phase d6); a
+    # stop (StepFailed: a name, a guard) exits 3 with its message and no traceback.
+    exit_step_failed(main)

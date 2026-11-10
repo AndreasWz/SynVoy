@@ -169,7 +169,8 @@ def test_flanking_genes_with_ordinary_ids_run(tmp_path):
 def test_a_flanking_gene_id_that_loses_its_hits_stops(tmp_path, flank_id, shown):
     _flank_inputs(tmp_path, flank_id)
     p = _flank(tmp_path)
-    assert p.returncode != 0
+    # A stop ends with exit 3 and its message, no traceback (fix item d4: an uncaught StepFailed, exit 1).
+    assert p.returncode == 3 and "Traceback" not in p.stderr, p.stderr
     assert shown in p.stderr and "g.gff" in p.stderr and "out.faa" in p.stderr
 
 
@@ -185,7 +186,21 @@ def test_gff_to_faa_stops_on_a_gene_id_with_whitespace(tmp_path):
     p = subprocess.run([sys.executable, os.path.join(BIN, "gff_to_faa.py"), "--gff", str(tmp_path / "g.gff"),
                         "--genome", str(tmp_path / "g.fna"), "--output", str(tmp_path / "p.faa")],
                        capture_output=True, text=True)
-    assert p.returncode != 0 and "'ORF 1'" in p.stderr and "whitespace" in p.stderr
+    assert p.returncode == 3 and "'ORF 1'" in p.stderr and "whitespace" in p.stderr
+    assert "Traceback" not in p.stderr
+
+
+def test_annotate_goi_exons_stops_with_exit_3_and_no_traceback(tmp_path):
+    """Fix item d4: ANNOTATE_GOI's name stops ended as an uncaught StepFailed (exit 1 with a traceback;
+    the loudness session's two constructed runs)."""
+    (tmp_path / "q.faa").write_text(">q\nMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKV\n")
+    (tmp_path / "h.fna").write_text(">c1|arrow\n" + "ACGT" * 50 + "\n")
+    p = subprocess.run([sys.executable, os.path.join(BIN, "annotate_goi_exons.py"), "--query", str(tmp_path / "q.faa"),
+                        "--genome", str(tmp_path / "h.fna"), "--gff", "NO_GFF",
+                        "--output_exons", str(tmp_path / "e.faa"), "--output_bed", str(tmp_path / "e.bed"),
+                        "--output_info", str(tmp_path / "i.json")], capture_output=True, text=True, cwd=tmp_path)
+    assert p.returncode == 3, p.stderr
+    assert "Traceback" not in p.stderr and "'c1|arrow'" in p.stderr and p.stderr.startswith("ERROR: ")
 
 
 def test_borrow_annotations_checks_both_protein_files():

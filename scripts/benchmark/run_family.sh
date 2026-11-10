@@ -55,8 +55,11 @@ nextflow -log "$OUT/nextflow.log" run "$REPO/main.nf" \
     --home_species 'Apis mellifera' --target_genomes "$IN/targets/*" \
     --outdir "$OUT" -w "$WORK" "$@"
 
+# FAM_TRUTH_MD5: the md5 of final_dataset/EXPORT_MANIFEST.tsv the score must be made on (the score
+# stops on another truth; it prints and records the one it read in any case).
 "$PY" "$HARNESS" --data "$DATA" score \
-    --run "$OUT" --family "$FAM" --out-prefix "$OUT/family_score" | tee "$OUT/family_score.txt"
+    --run "$OUT" --family "$FAM" --out-prefix "$OUT/family_score" \
+    ${FAM_TRUTH_MD5:+--expect-manifest-md5 "$FAM_TRUTH_MD5"} | tee "$OUT/family_score.txt"
 
 # Rescue tasks run with errorStrategy 'ignore': a failed one loses its models in silence.
 # The score must say so (bug hunt 2026-10-13, A9).

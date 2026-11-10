@@ -93,6 +93,22 @@ class TestRejectionIsRecorded(unittest.TestCase):
         self.assertEqual(r["nearest_anchor_gene"], "gene-STRAY2")
         self.assertGreater(r["nearest_anchor_bp"], 66_000_000)
 
+    def test_an_anchor_on_another_chromosome_gives_no_distance(self):
+        """Fix item 6: with no anchor on the hit's chromosome the record carried the coordinate
+        difference to an anchor on another chromosome (an arbitrary gene), and 0 bp when that
+        anchor's coordinates overlapped the hit's. Now the distance and the gene are empty."""
+        flanking = [_hit(f"gene-FL{i}", "chr1", 1_000 + i * 50_000, 3_000 + i * 50_000, pident=70.0)
+                    for i in range(4)]
+        for goi_start in (9_000_000, 1_500):   # far off, and overlapping an anchor's coordinates
+            rejected = []
+            isr.select_dispersed_goi_seeds([_hit("GOI_Def", "chr7", goi_start, goi_start + 300)] + flanking,
+                                           flanking, min_chrom_anchors=3, rejected_out=rejected,
+                                           genome_name="g")
+            self.assertEqual(len(rejected), 1)
+            r = rejected[0]
+            self.assertFalse(r["nearest_anchor_same_chrom"])
+            self.assertEqual((r["nearest_anchor_bp"], r["nearest_anchor_gene"]), ("", ""))
+
     def test_weak_hits_are_not_reported(self):
         """Only hits that CLEAR the quality bar are worth surfacing; sub-threshold
         noise would drown the signal."""
@@ -154,6 +170,20 @@ class TestReportSurfacesRejections(unittest.TestCase):
         self.assertEqual(len(recs), 1)
         self.assertIn("Anopheles_gambiae", per_genome)
         self.assertAlmostEqual(recs[0]["identity"], 54.2, places=1)
+
+    def test_an_empty_distance_is_read_as_null(self):
+        """Fix item 6: the loader read an empty distance as 0, i.e. 'overlaps an anchor'."""
+        path = self._write_nonsyntenic("Anopheles_gambiae.fna")
+        lines = open(path).read().splitlines()
+        cols = lines[0].split("\t")
+        row = lines[1].split("\t")
+        row[cols.index("nearest_anchor_bp")] = ""
+        row[cols.index("nearest_anchor_same_chrom")] = "False"
+        with open(path, "w") as fh:
+            fh.write(lines[0] + "\n" + "\t".join(row) + "\n")
+        recs, _ = gr.collect_nonsyntenic_candidates([path])
+        self.assertIsNone(recs[0]["nearest_anchor_bp"])
+        self.assertFalse(recs[0]["nearest_anchor_same_chrom"])
 
     def test_summary_ranks_best_hit_per_genome(self):
         recs = [

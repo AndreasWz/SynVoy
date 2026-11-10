@@ -231,28 +231,27 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
                 derivation[k] = dict(mod_derivation[k], default=defaults.get(k))
             modules_applied = chosen
         if preset_override:
+            # An unknown name stops (exit 2 in main): main.nf stops a mistyped --preset_override at the
+            # start (fix-phase d5), so the fallback to the defaults that stood here was reached by a
+            # hand call only, and it ran the defaults in silence (fix of 9 Nov; no accepted-and-ignored
+            # option).
             if preset_override not in VALID_PRESETS:
-                # Loud failure mode: a user-pinned override that doesn't exist is
-                # likely a typo. Fall back to defaults but flag it in the JSON.
-                apply_reason = (
-                    f"preset_override='{preset_override}' is not a known preset — "
-                    f"valid: {sorted(VALID_PRESETS)} — defaults applied"
-                )
-            else:
-                preset_applied = preset_override
-                apply_reason = f"user pinned preset_override={preset_override}"
+                raise ValueError(f"--preset_override {preset_override!r} is not a preset. Use one of: "
+                                 f"{', '.join(sorted(VALID_PRESETS))}.")
+            preset_applied = preset_override
+            apply_reason = f"user pinned preset_override={preset_override}"
         elif mode != "legacy":
             apply_reason = (f"modules {mode}: "
                             + (", ".join(f"{d['id']} {d['name']}" for d in chosen) or "none"))
         elif auto_preset:
             chosen_preset = (auto_preset.get("preset") or "").strip()
-            if chosen_preset in VALID_PRESETS:
-                preset_applied = chosen_preset
-                apply_reason = f"auto_preset.json chose {chosen_preset}"
-            elif chosen_preset:
-                apply_reason = f"auto_preset.json's preset='{chosen_preset}' is unknown — defaults applied"
-            else:
-                apply_reason = "auto_preset.json had no preset field — defaults applied"
+            # auto_select_preset.py writes one of VALID_PRESETS, always: anything else is a damaged
+            # or hand-edited file, which stops instead of running the defaults (fix of 9 Nov).
+            if chosen_preset not in VALID_PRESETS:
+                raise ValueError(f"auto_preset.json's preset {chosen_preset!r} is not a preset. Use one "
+                                 f"of: {', '.join(sorted(VALID_PRESETS))}.")
+            preset_applied = chosen_preset
+            apply_reason = f"auto_preset.json chose {chosen_preset}"
         else:
             apply_reason = "no auto_preset.json and no override — defaults applied"
 

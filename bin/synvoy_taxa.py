@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Optional
 
 DEFAULT_CACHE = os.path.join(
@@ -28,12 +29,18 @@ DEFAULT_CACHE = os.path.join(
     "synvoy", "common_names.tsv",
 )
 DATASETS_TIMEOUT_S = 8
+# A lookup NCBI did not answer is asked once more after a pause, at most RETRY_BUDGET times per
+# plot run (fix of 9 Nov: a run started two minutes after boot recorded 'unreachable' where a later
+# run recorded 'none'). The budget bounds what a dead network adds: RETRY_BUDGET x (pause + timeout).
+RETRY_BUDGET = 2
+RETRY_PAUSE_S = 2
 
 _OVERRIDES: dict = {}
 _CACHE: dict = {}
 _CACHE_PATH: str = ""
 _DATASETS_BIN: Optional[str] = None
 _NEGATIVE: set = set()  # names we already tried and got nothing for, this run
+_RETRIES_LEFT = RETRY_BUDGET
 # Where each name of this run came from (fix-phase d7): table, cache, ncbi, none (NCBI answered
 # without a common name), unreachable (datasets failed or ran past DATASETS_TIMEOUT_S), offline (no
 # lookup: --no_network or no datasets). A figure label then says what it rests on: the per-user
@@ -65,10 +72,11 @@ def init_lookup(common_names_tsv: Optional[str] = None,
     allow_network:   if False, skip the NCBI lookup (cache + overrides only).
                      Use this in CI/offline runs.
     """
-    global _OVERRIDES, _CACHE, _CACHE_PATH, _DATASETS_BIN, _NEGATIVE
+    global _OVERRIDES, _CACHE, _CACHE_PATH, _DATASETS_BIN, _NEGATIVE, _RETRIES_LEFT
     _OVERRIDES = {}
     _CACHE = {}
     _NEGATIVE = set()
+    _RETRIES_LEFT = RETRY_BUDGET
     _CACHE_PATH = cache_path or DEFAULT_CACHE
 
     if common_names_tsv and os.path.exists(common_names_tsv):
@@ -84,6 +92,7 @@ def init_lookup(common_names_tsv: Optional[str] = None,
 
 def common_name(scientific: str) -> Optional[str]:
     """Return the common name for `scientific`, or None if no mapping found."""
+    global _RETRIES_LEFT
     norm = _normalise(scientific)
     if not norm:
         return None
@@ -97,6 +106,10 @@ def common_name(scientific: str) -> Optional[str]:
         return None
     if _DATASETS_BIN:
         cn, answered = _query_datasets_cli(norm)
+        if not answered and _RETRIES_LEFT > 0:
+            _RETRIES_LEFT -= 1
+            time.sleep(RETRY_PAUSE_S)
+            cn, answered = _query_datasets_cli(norm)
         if cn:
             _CACHE[norm] = cn
             _persist_cache_entry(norm, cn)
@@ -115,7 +128,7 @@ def write_sources(path: str) -> None:
         fh.write("# SynVoy species names: the common name each figure label carries, and its source "
                  "(table, cache = the per-user cache of an earlier lookup, ncbi, none = NCBI has none, "
                  "unreachable = NCBI did not answer, offline = not looked up).\n")
-        w = csv.writer(fh, delimiter="\t")
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")   # LF like the header line
         w.writerow(["scientific_name", "common_name", "source"])
         for sci in sorted(SOURCES):
             w.writerow([sci, SOURCES[sci][1], SOURCES[sci][0]])

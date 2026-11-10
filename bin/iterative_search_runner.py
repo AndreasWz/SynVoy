@@ -100,7 +100,7 @@ def _is_mmseqs_resource_failure(details: str) -> bool:
 # Use our own sequence utilities (no BioPython dependency)
 try:
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         parse_gff, get_feature_id, load_genome, reverse_complement, translate,
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
@@ -121,7 +121,7 @@ except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         parse_gff, get_feature_id, load_genome, reverse_complement, translate,
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
@@ -380,8 +380,16 @@ def parse_hits(
                 if (drops is not None and evalue <= evalue_thresh and pident >= min_identity
                         and alnlen < effective_min_length and limit_query_kind(q_id) != 'decoy'):
                     drops['len_floor'] = drops.get('len_floor', 0) + 1
-                    if alnlen < 15 and q_len and q_len > 100:
-                        drops['len_floor_lt15_long_query'] = drops.get('len_floor_lt15_long_query', 0) + 1
+                    if alnlen < 15:
+                        # The counter reads the whole query's length, not the piece's: a window search's
+                        # queries are pieces (|frag_/|slide_ ids carry the length they were cut from,
+                        # |exon_ ids take their base query's), and the filter above keeps the piece's
+                        # length (fix item 39; counts only).
+                        frag = fragment_of(q_id)
+                        full_len = (frag[3] if frag and frag[3] else
+                                    (query_lengths or {}).get(extract_base_gene_id(q_id)) or q_len)
+                        if full_len and full_len > 100:
+                            drops['len_floor_lt15_long_query'] = drops.get('len_floor_lt15_long_query', 0) + 1
 
                 if (evalue <= evalue_thresh and
                     pident >= min_identity and
@@ -4263,268 +4271,6 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             elif os.path.exists(leftover):
                 os.remove(leftover)
 
-def batch_rbh_check(
-    candidates,
-    home_db,
-    cand_map,
-    threads=1,
-    evalue=1e-5,
-    min_coverage=0.5,
-    min_identity=25.0,
-    split_memory_limit="8G",
-    mmseqs_verbosity=1,
-):
-    """
-    Perform Reciprocal Best Hit check for multiple candidates at once.
-    
-    Enhanced validation:
-    1. RBH to home genome (traditional)
-    2. Coverage check: alignment must cover >50% of both query and target
-    3. Identity must be reasonable (>25%)
-    
-    candidates: list of dicts with 'id' and 'seq' keys (or BioPython SeqRecord)
-    """
-    if not candidates:
-        return set()
-    
-    unique_id = uuid.uuid4().hex
-    query_fasta = f"batch_candidates_{unique_id}.fasta"
-    rbh_out = f"batch_rbh_{unique_id}.m8"
-    tmp_subdir = f"tmp_rbh_batch_{unique_id}"
-    
-    valid_ids = set()
-
-    try:
-        def _ids_match(parent_name: str, target_name: str) -> bool:
-            parent_base = extract_base_gene_id(parent_name).strip()
-            target_base = extract_base_gene_id(target_name).strip()
-            return (
-                parent_base == target_base or
-                parent_name == target_name or
-                target_name == parent_name or
-                parent_base in target_base or
-                target_base in parent_base
-            )
-
-        def _best_ungapped_metrics(query_seq: str, target_seq: str) -> Tuple[float, float, float]:
-            """
-            Best ungapped overlap identity between two protein sequences.
-            Returns (identity_pct, qcov_pct, tcov_pct).
-            """
-            q = query_seq or ""
-            t = target_seq or ""
-            if not q or not t:
-                return 0.0, 0.0, 0.0
-
-            best_identity = 0.0
-            best_qcov = 0.0
-            best_tcov = 0.0
-            best_overlap = 0
-
-            # offset < 0 means target starts before query
-            for offset in range(-len(t) + 1, len(q)):
-                q_start = max(0, offset)
-                t_start = max(0, -offset)
-                overlap = min(len(q) - q_start, len(t) - t_start)
-                if overlap <= 0:
-                    continue
-
-                matches = 0
-                for idx in range(overlap):
-                    if q[q_start + idx] == t[t_start + idx]:
-                        matches += 1
-
-                identity = (matches / overlap) * 100.0
-                qcov = (overlap / len(q)) * 100.0
-                tcov = (overlap / len(t)) * 100.0
-
-                if (
-                    identity > best_identity or
-                    (identity == best_identity and overlap > best_overlap)
-                ):
-                    best_identity = identity
-                    best_qcov = qcov
-                    best_tcov = tcov
-                    best_overlap = overlap
-
-            return best_identity, best_qcov, best_tcov
-
-        def _fallback_rbh_local(records_local, db_for_convert, mapping) -> set:
-            """
-            Fallback RBH path for short proteins where mmseqs prefilter cannot run.
-            """
-            fallback_valid = set()
-            tmp_home_faa = f"home_export_{uuid.uuid4().hex}.faa"
-            try:
-                subprocess.run(
-                    ["mmseqs", "convert2fasta", db_for_convert, tmp_home_faa],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                home_records = [(hid, hseq) for _, hid, hseq in parse_fasta(tmp_home_faa)]
-                if not home_records:
-                    return fallback_valid
-
-                for cand_id, cand_seq in records_local:
-                    if cand_id not in mapping:
-                        continue
-
-                    best_target = None
-                    best_identity = -1.0
-                    best_qcov = 0.0
-                    best_tcov = 0.0
-
-                    for target_id, target_seq in home_records:
-                        ident, qcov, tcov = _best_ungapped_metrics(cand_seq, target_seq)
-                        if (
-                            ident > best_identity or
-                            (ident == best_identity and (qcov + tcov) > (best_qcov + best_tcov))
-                        ):
-                            best_identity = ident
-                            best_target = target_id
-                            best_qcov = qcov
-                            best_tcov = tcov
-
-                    if not best_target:
-                        continue
-
-                    parent = mapping[cand_id]
-                    coverage_ok = (
-                        best_qcov >= min_coverage * 100 and
-                        best_tcov >= min_coverage * 100
-                    )
-                    identity_ok = best_identity >= min_identity
-                    if _ids_match(parent, best_target) and coverage_ok and identity_ok:
-                        fallback_valid.add(cand_id)
-
-            finally:
-                if os.path.exists(tmp_home_faa):
-                    os.remove(tmp_home_faa)
-
-            return fallback_valid
-
-        def _candidate_to_pair(candidate):
-            # Dict form used by pipeline internals
-            if isinstance(candidate, dict):
-                cid = candidate.get('id')
-                cseq = candidate.get('seq')
-                return cid, str(cseq) if cseq is not None else None
-
-            # SeqRecord-like form used by unit tests
-            cid = getattr(candidate, 'id', None)
-            cseq_obj = getattr(candidate, 'seq', None)
-            cseq = str(cseq_obj) if cseq_obj is not None else None
-            return cid, cseq
-
-        # Write FASTA using our utility
-        records = []
-        for c in candidates:
-            cid, cseq = _candidate_to_pair(c)
-            if cid and cseq:
-                records.append((cid, cseq))
-
-        if not records:
-            return set()
-
-        write_fasta(records, query_fasta)
-            
-        db_path = home_db
-        if os.path.isdir(home_db):
-            db_path = os.path.join(home_db, "db")
-            
-        cmd = [
-            "mmseqs", "easy-search",
-            query_fasta, db_path, rbh_out, tmp_subdir,
-            "-e", str(evalue),
-            "--format-output", "query,target,pident,qcov,tcov,evalue,bits,qlen,tlen,alnlen",
-            "--max-seqs", "1", # Top hit only
-            # Parameters, not the module-global `args` main() creates: this function has
-            # no caller in the pipeline, and the global does not exist when it is imported.
-            "--split-memory-limit", str(split_memory_limit),
-            "-v", str(mmseqs_verbosity),
-            "--threads", str(threads)
-        ]
-
-        mmseqs_ok = True
-        try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            mmseqs_ok = False
-            logger.warning(
-                "RBH mmseqs easy-search failed; using local fallback "
-                "(expected for very short peptides)."
-            )
-            valid_ids.update(_fallback_rbh_local(records, db_path, cand_map))
-
-        seen_candidates = set()
-        if mmseqs_ok and os.path.exists(rbh_out):
-            with open(rbh_out) as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) < 9: continue
-                    
-                    cand_id = parts[0]
-                    seen_candidates.add(cand_id)
-                    target_id = parts[1]
-                    pident = float(parts[2])
-                    qcov = float(parts[3]) if len(parts) > 3 else 100
-                    tcov = float(parts[4]) if len(parts) > 4 else 100
-
-                    # MMseqs coverage can be reported as fraction [0,1] or percent [0,100]
-                    if qcov <= 1.0:
-                        qcov *= 100.0
-                    if tcov <= 1.0:
-                        tcov *= 100.0
-                    
-                    # Enhanced validation
-                    if cand_id not in cand_map:
-                        continue
-                    
-                    parent = cand_map[cand_id]
-                    
-                    # Check 1: ID matching (exact or close)
-                    ids_match = _ids_match(parent, target_id)
-                    
-                    # Check 2: Coverage (both query and target must be well-covered)
-                    coverage_ok = (qcov >= min_coverage * 100 and 
-                                  tcov >= min_coverage * 100)
-                    
-                    # Check 3: Identity must be reasonable
-                    identity_ok = pident >= min_identity
-                    
-                    if ids_match and coverage_ok and identity_ok:
-                        valid_ids.add(cand_id)
-                    elif ids_match and not coverage_ok:
-                        print(f"RBH: {cand_id} matches {target_id} but low coverage "
-                              f"(qcov={qcov:.0f}%, tcov={tcov:.0f}%). Likely fragment/paralog.",
-                              file=sys.stderr)
-                    elif ids_match and not identity_ok:
-                        logger.debug(f"RBH: {cand_id} matches {target_id} but very low identity "
-                              f"({pident:.1f}%). Possible pseudogene.")
-
-        # Peptides below the k-mer prefilter's reach get NO row rather than an error
-        # (current MMseqs2 exits 0 with an empty table), so the fallback above never
-        # ran for them and every short candidate was silently rejected.
-        if mmseqs_ok:
-            short_missed = [(cid, cseq) for cid, cseq in records
-                            if cid not in seen_candidates and len(cseq) < 30]
-            if short_missed:
-                valid_ids.update(_fallback_rbh_local(short_missed, db_path, cand_map))
-
-    except Exception as e:
-        logger.error(f"RBH check failed: {e}")
-        return set()
-    finally:
-        # Cleanup
-        if os.path.exists(query_fasta): os.remove(query_fasta)
-        if os.path.exists(rbh_out): os.remove(rbh_out)
-        if os.path.exists(tmp_subdir):
-             shutil.rmtree(tmp_subdir, ignore_errors=True)
-                          
-    return valid_ids
-
-
 def is_valid_fallback(
     ordered_hit_count: int,
     qcov: float,
@@ -6544,21 +6290,18 @@ def compute_rearrangement_score(flanking_hits, min_genes=3):
 
 
 def _nearest_anchor(chrom, hs, he, by_chrom):
-    """(distance_bp, gene_id) to the closest flanking anchor anywhere in the genome.
-
-    Distance is 0 when the hit overlaps an anchor. Same-chromosome anchors always win
-    over any off-chromosome one, so the number answers "how far is this hit from the
-    neighbourhood *on its own scaffold*" and falls back to the global nearest only when
-    the chromosome carries no anchor at all.
+    """(distance_bp, gene_id, same_chrom) of the closest flanking anchor on the hit's own
+    chromosome; the distance is 0 when the hit overlaps the anchor. With no anchor on that
+    chromosome: (None, '', False), whatever the other chromosomes carry. A coordinate difference
+    across chromosomes is no distance (fix item 6: it was reported as one, picked an arbitrary
+    gene, and an anchor whose coordinates overlapped the hit on another chromosome read as 0 bp).
     """
     best = (None, "", False)  # dist, gene, same_chrom
-    for c, genes in by_chrom.items():
-        same = (c == chrom)
-        for gene, _m, s, e in genes:
-            d = 0 if not (he < s or hs > e) else min(abs(s - he), abs(hs - e))
-            if best[0] is None or (same, -d) > (best[2], -best[0]):
-                best = (d, gene, same)
-    return best[0], best[1], best[2]
+    for gene, _m, s, e in by_chrom.get(chrom, ()):
+        d = 0 if not (he < s or hs > e) else min(abs(s - he), abs(hs - e))
+        if best[0] is None or d < best[0]:
+            best = (d, gene, True)
+    return best
 
 
 NONSYNTENIC_COLUMNS = [
@@ -7215,9 +6958,8 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({gate}): "
             f"{h.get('chrom')}:{hs}-{he} id={h.get('pident', 0):.1f}% "
             f"e={h.get('evalue')} aln={h.get('alnlen')} — nearest flanking anchor "
-            + (f"{anchor} at {dist:,} bp"
-               + ("" if same else " on a DIFFERENT chromosome") if dist is not None
-               else "none in this genome"))
+            + (f"{anchor} at {dist:,} bp" if dist is not None
+               else "none on this chromosome" if by_chrom else "none in this genome"))
 
     def _clears_quality(h):
         return (is_goi_query_id(h.get('query', ''))
@@ -7471,6 +7213,11 @@ def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, uni
     max_gap = max(margin, int(getattr(args, 'goi_fallback_max_gap', args.max_intron) or args.max_intron))
     places = genome_wide_places(hits, list(windows), home_parents, max_gap)
     if not places:
+        # Said like every other end of the path (fix item 6): one 'genome-wide path:' line per genome
+        # where the path ran, and the table with its header only.
+        _write_genome_wide_table(args, prefix, genome_name, [])
+        logger.info(f"[{genome_name}] genome-wide path: 0 place(s) outside every window (no hit of the "
+                    f"home GOI lies outside the searched windows).")
         return [], []
     genome_len = int(ctx.get('genome_len') or 0)
     own_id = getattr(args, 'home_goi_gene_id', None)

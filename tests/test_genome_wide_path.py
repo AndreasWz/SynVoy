@@ -124,6 +124,23 @@ def test_the_pass_needs_a_significant_block_and_the_home_proteome(monkeypatch):
     assert isr.genome_wide_goi_pass(args, [], {}, {}, "g", "u", 1, None, "", 5000) == ([], [])
 
 
+def test_no_place_outside_the_windows_is_said_and_tabled(monkeypatch, tmp_path, caplog):
+    """Fix item 6: with every GOI hit inside a searched window the pass returned without a word and
+    without its table; now it logs the zero like its other ends and writes the header-only table."""
+    import logging
+    args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 1e-4}, "windows": [("c1", 0, 1000)]},
+                                 home_goi_ids={"GOI_q"}, gap_search_window=500, max_intron=1000,
+                                 goi_home_span=0, expansion=1.0, output_dir=str(tmp_path))
+    monkeypatch.setattr(isr, "_home_proteome", lambda a: (object(), None))
+    with caplog.at_level(logging.INFO, logger=isr.logger.name):
+        out = isr.genome_wide_goi_pass(args, [_hit("GOI_q", "c1", 100, 400)], {}, {}, "g", "u", 1,
+                                       None, "", 5000)
+    assert out == ([], [])
+    assert "[g] genome-wide path: 0 place(s) outside every window" in caplog.text
+    table = tmp_path / "hits" / "g.genome_wide.tsv"
+    assert table.read_text().splitlines() == ["\t".join(isr.GENOME_WIDE_COLUMNS)]
+
+
 def test_the_report_lists_the_places_and_warns_only_when_one_was_modelled(tmp_path):
     path = tmp_path / "locus_1_G.fna.genome_wide.tsv"
     path.write_text("\t".join(isr.GENOME_WIDE_COLUMNS) + "\n"

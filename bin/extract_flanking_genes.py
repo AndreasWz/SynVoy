@@ -10,16 +10,16 @@ import re
 # Use our own sequence utilities (no BioPython dependency)
 try:
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_on_memory_kill,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_step_failed,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        parse_fasta, write_fasta, extract_id, extract_base_id,
+        parse_fasta, write_fasta, extract_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
-        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_on_memory_kill,
+        sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_step_failed,
     )
 
 try:
@@ -1168,5 +1168,6 @@ def main():
     write_fasta(all_fasta_records, args.out_faa)
 
 if __name__ == "__main__":
-    # A memory kill of Augustus exits 137, which Nextflow retries with more memory (fix-phase d6).
-    exit_on_memory_kill(main)
+    # A memory kill of Augustus exits 137, which Nextflow retries with more memory (fix-phase d6); a
+    # stop (StepFailed: a name, a guard) exits 3 with its message and no traceback.
+    exit_step_failed(main)

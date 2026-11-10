@@ -258,6 +258,25 @@ def test_parse_hits_without_drops_or_short_query(tmp_path):
         isr.parse_hits(str(p), 15.0, 15, 0.1, query_lengths={"GOI_q": 200}, drops={})
 
 
+def test_the_long_query_count_reads_the_query_not_the_piece(tmp_path):
+    """Fix item 39: the window search's queries are pieces of the GOI (generate_fragments: halves,
+    thirds, quarters, 50-aa slides), so a 13-aa hit through a piece of a 301-aa query was counted
+    as a drop on a short query. The filter keeps the piece's length; the hits kept do not change."""
+    from fragment_query import generate_fragments
+    q = "M" + "ACDEFGHIKLMNPQRSTVWY" * 15   # 301 aa
+    lens = {fid: len(s) for fid, s, *_ in generate_fragments(q, "GOI_q", min_size=15)}
+    slide = next(f for f in lens if "|slide_" in f)
+    quarter = next(f for f in lens if lens[f] < 100 and "|frag_" in f)
+    half = next(f for f in lens if 100 < lens[f] < 301)
+    p = tmp_path / "h.m8"
+    _m8(p, [_row(f, 13) for f in (slide, quarter, half)] + [_row(slide, 40)])
+    drops = {}
+    hits = isr.parse_hits(str(p), 15.0, 15, 0.1, query_lengths=lens, drops=drops)
+    assert drops == {"len_floor": 3, "len_floor_lt15_long_query": 3}
+    assert [h["query"] for h in hits] == [slide]
+    assert hits == isr.parse_hits(str(p), 15.0, 15, 0.1, query_lengths=lens)
+
+
 def test_queries_at_max_seqs(tmp_path):
     p = tmp_path / "h.m8"
     _m8(p, [_row("GOI_a", 40)] * 300 + [_row("GOI_b", 40)] * 299 + [_row("GOI_a~rev", 40)] * 300)

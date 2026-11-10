@@ -6,12 +6,12 @@ import sys
 
 # Use our own sequence utilities (no BioPython)
 try:
-    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, load_genome,
-                                set_genetic_code, write_fasta)
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, exit_step_failed,
+                                load_genome, set_genetic_code, write_fasta)
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, load_genome,
-                                set_genetic_code, write_fasta)
+    from sequence_utils import (cds_model_protein, cds_models_by_gene, check_gene_ids, exit_step_failed,
+                                load_genome, set_genetic_code, write_fasta)
 
 
 def main():
@@ -55,4 +55,4 @@ def main():
                 fh.write("\t".join(map(str, row)) + "\n")
 
 if __name__ == "__main__":
-    main()
+    exit_step_failed(main)   # a name stop ends with exit 3 and its message (fix item d4)

@@ -911,3 +911,55 @@ class TestOneCallOneGene:
         """A chain over an array is still a call on that locus: the rule is about recall."""
         _, calls, summary = self._score([_call(900, 3500)])
         assert calls[0]["call_class"] == "on_locus" and summary["locus_precision"] == 1.0
+
+
+class TestTruthRecordAndDecoys(RunDirMixin, unittest.TestCase):
+    """Fix items of 9 Nov: the scorer says which truth it read (LRZ's family scores were made on a
+    manifest of 27 Jul and no output said so), stops on a family the manifest lacks (zeros, exit 0),
+    and leaves the decoy searches' GFFs out of its model count (item 40)."""
+
+    def _data(self):
+        self.dtmp = tempfile.TemporaryDirectory()
+        fd = os.path.join(self.dtmp.name, "final_dataset")
+        os.makedirs(fd)
+        with open(os.path.join(fd, "EXPORT_MANIFEST.tsv"), "w") as fh:
+            fh.write("gm\tspecies\trole\tfamily\tlocus\tscaffold\tstart\tend\tstrand\t"
+                     "n_exons\tprot_len\tis_venom\tstructural_status\n"
+                     "A1\tSp a\tant\tFAM_X\tX_loc1\tachr1\t1\t9\t+\t1\t5\t1\tcf\n")
+        return self.dtmp.name
+
+    def tearDown(self):
+        super().tearDown()
+        if hasattr(self, "dtmp"):
+            self.dtmp.cleanup()
+
+    def test_the_decoy_gffs_are_not_read(self):
+        run = self.make_run({"Sp_a": [gff("achr1", "mRNA", 10000, 10500,
+                                          "ID=GOI_X|Sp_a_fna_b0_l1_exon_ann;SynVoyRole=goi;Confidence=MEDIUM")]},
+                            [])
+        os.makedirs(os.path.join(run, "decoys", "locus_1"))
+        with open(os.path.join(run, "decoys", "locus_1", "locus_1_Sp_a.fna.decoy.gff"), "w") as fh:
+            fh.write(gff("achr1", "mRNA", 20000, 20500,
+                         "ID=GOI_X~shuf1|Sp_a_fna_b0_l1_exon_ann;SynVoyRole=goi;Confidence=LOW") + "\n")
+        paths = fr.gather_run_gffs(run)
+        self.assertFalse(any("decoys" in p for p in paths))
+        self.assertEqual(len(fr.load_run_models(paths)[0]), 1)
+
+    def test_the_truth_fingerprint(self):
+        import hashlib
+        data = self._data()
+        manifest = os.path.join(data, "final_dataset", "EXPORT_MANIFEST.tsv")
+        t = fr.truth_fingerprint(data, "span")
+        self.assertEqual(t["manifest_md5"], hashlib.md5(open(manifest, "rb").read()).hexdigest())
+        self.assertEqual((t["cds_gff3_files"], t["overlap"], t["locus_anchors_md5"]), (0, "span", None))
+        os.makedirs(os.path.join(data, "final_dataset", "gff"))
+        open(os.path.join(data, "final_dataset", "gff", "Sp_a.gff3"), "w").close()
+        open(os.path.join(data, "final_dataset", "gff", "ALL_SPECIES.gff3"), "w").close()
+        self.assertEqual(fr.truth_fingerprint(data, "coding")["cds_gff3_files"], 1)
+
+    def test_another_truth_or_an_unknown_family_stops(self):
+        data = self._data()
+        run = self.make_run({}, [])
+        self.assertEqual(fr.main(["--data", data, "score", "--run", run, "--family", "FAM_X",
+                                  "--expect-manifest-md5", "0" * 32]), 2)
+        self.assertEqual(fr.main(["--data", data, "score", "--run", run, "--family", "FAM_Z"]), 2)

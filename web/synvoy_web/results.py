@@ -585,8 +585,9 @@ def build_bundle(out_dir, bundle_dir, meta, figures_dir=None):
                              out_dir, files_dir, "query.faa"))
 
     params = _read_json(out_dir / "intermediate" / "locate_gene" / "effective_params.json") or {}
-    # The report's ``gene_family_advisory`` is not shown: its locus count is the number
-    # of (genome, locus, chromosome) cells, so it fires on single-copy genes too.
+    # The report's ``gene_family_advisory`` is not shown: it fires on single-copy genes too,
+    # through its share of ambiguous_goi_family_member calls, the class every LOW row has
+    # carried since the label rework.
     notes = []
     for text in report.get("warnings") or []:
         if isinstance(text, str) and text.strip():

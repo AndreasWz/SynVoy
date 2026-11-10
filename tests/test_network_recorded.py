@@ -90,6 +90,7 @@ def taxa(monkeypatch, tmp_path):
     (tmp_path / "cache.tsv").write_text("Apis mellifera\thoney bee\n")
     (tmp_path / "table.tsv").write_text("Bombus terrestris\tbuff-tailed bumblebee\n")
     monkeypatch.setattr(st.shutil, "which", lambda b: "/usr/bin/datasets")
+    monkeypatch.setattr(st, "RETRY_PAUSE_S", 0, raising=False)
     st.init_lookup(common_names_tsv=str(tmp_path / "table.tsv"), cache_path=str(tmp_path / "cache.tsv"))
     return st
 
@@ -113,6 +114,76 @@ def test_each_name_has_its_source(taxa, monkeypatch, tmp_path):
     taxa.write_sources(str(tmp_path / "x_species_names.tsv"))
     rows = (tmp_path / "x_species_names.tsv").read_text().splitlines()
     assert rows[1] == "scientific_name\tcommon_name\tsource" and "Candida albicans\t\tunreachable" in rows
+
+
+def test_a_lookup_that_did_not_answer_is_asked_once_more(taxa, monkeypatch):
+    """Fix of 9 Nov (the loudness session's list item 3): one lookup two minutes after boot read
+    'unreachable' where a later run read 'none'. A lookup NCBI did not answer is asked once more."""
+    calls = []
+
+    def run(cmd, *a, **k):
+        calls.append(cmd[4])
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd, 8)
+        return types.SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+            {"taxonomy": {"curator_common_name": "fruit fly"}}) + "\n")
+    monkeypatch.setattr(taxa.subprocess, "run", run)
+    assert taxa.common_name("Drosophila melanogaster") == "fruit fly"
+    assert calls == ["Drosophila melanogaster"] * 2
+    assert taxa.SOURCES["Drosophila melanogaster"] == ("ncbi", "fruit fly")
+
+
+def test_the_retries_are_bounded_per_run(taxa, monkeypatch):
+    calls = []
+
+    def dead(cmd, *a, **k):
+        calls.append(cmd[4])
+        raise OSError("down")
+    monkeypatch.setattr(taxa.subprocess, "run", dead)
+    for sci in ("Aa bb", "Cc dd", "Ee ff", "Gg hh", "Ii jj"):
+        taxa.common_name(sci)
+    assert len(calls) == 5 + taxa.RETRY_BUDGET
+    assert {v for v in taxa.SOURCES.values()} == {("unreachable", "")}
+
+
+def test_the_species_table_has_lf_line_ends(taxa, tmp_path):
+    taxa.common_name("Apis mellifera")
+    taxa.write_sources(str(tmp_path / "x_species_names.tsv"))
+    assert b"\r" not in (tmp_path / "x_species_names.tsv").read_bytes()
+
+
+def test_the_ribbon_plot_does_not_look_up_the_home_row_again(taxa, monkeypatch):
+    """The home row's label is formatted when the track is built; the ribbon plot formatted it again
+    and asked NCBI for 'Apis mellifera (honey bee)': a bogus 'none' row in every family and fly
+    species table, a false 'did not answer' warning in an outage, and a lower-cased common name."""
+    import plot_synteny as ps
+    asked = []
+
+    def run(cmd, *a, **k):
+        asked.append(cmd[4])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(taxa.subprocess, "run", run)
+    monkeypatch.setitem(ps.__dict__, "_synvoy_taxa", taxa)
+    monkeypatch.setitem(ps.__dict__, "_common_name_mode", "both")
+    taxa._CACHE["Apis mellifera"] = "Jerdon's bee"
+
+    def gene(name, start, end, home=None, chrom="c1"):
+        return {"chrom": chrom, "start": start, "end": end, "start_plot": start, "end_plot": end,
+                "name": name, "home_gene_id": home or name, "strand": "+", "identity": 80.0, "exon_coords": []}
+    home = ps._format_species_label("Apis mellifera")
+    tracks = [{"label": f"{home} (NC_1)", "is_home": True, "genome_id": "home", "goi_status": "resolved",
+               "offset": 0, "breaks": [], "minus_strand_row": None,
+               "genes": [gene("geneA", 100, 180), gene("GOI_x", 240, 320), gene("geneB", 580, 660)]},
+              {"label": "Nomen nudum (t1)", "is_home": False, "genome_id": "t1", "goi_status": "resolved",
+               "offset": 0, "breaks": [], "minus_strand_row": None,
+               "genes": [gene("orthA", 120, 200, home="geneA"),
+                         dict(gene("GOI_m", 250, 330, home="GOI_x"), confidence="HIGH")]}]
+    html = ps.render_synteny_html(tracks, {"geneA": "#0072B2", "geneB": "#009E73"}, {},
+                                  types.SimpleNamespace(plot_width=0, plot_height=0, scale_bar_len=10000),
+                                  ["test"], 0, 0, 1)
+    assert not any("(" in k for k in taxa.SOURCES), taxa.SOURCES
+    assert all("(" not in name for name in asked), asked
+    assert "Apis mellifera (Jerdon&#x27;s bee)" in html or "Apis mellifera (Jerdon's bee)" in html
 
 
 def test_offline_names_say_so(taxa, monkeypatch):

@@ -117,7 +117,7 @@ def printHeader() {
     def c = colors()
     log.info ""
     log.info uiRule()
-    log.info "${c.cyan}${c.bold}SynVoy${c.reset} ${c.dim}v2.0${c.reset}"
+    log.info "${c.cyan}${c.bold}SynVoy${c.reset} ${c.dim}v${workflow.manifest.version ?: 'unknown'}${c.reset}"
     log.info "${c.dim}Phylogenetically-informed syntenic ortholog discovery${c.reset}"
     log.info uiRule()
 }
@@ -1450,7 +1450,7 @@ workflow {
                 def home_bed = entry[1]
                 def query_bed = entry[2]
                 def names = entry[3]
-                def beds = entry[4]
+                def beds = entry[4].toSorted { b -> b.name }   // name order, not completion order
                 def tree = entry[5]
                 def gffs = entry[6] ?: []
                 def tsvs = entry[7] ?: []

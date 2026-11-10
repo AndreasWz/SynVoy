@@ -73,6 +73,14 @@ def test_the_collects_are_sorted():
     assert "locus_beds.flatten().collect(sort: true)" in sub
 
 
+def test_the_plots_region_beds_are_in_name_order():
+    """The loudness session's list item 1: PLOT_SYNTENY's region BEDs came in task completion order
+    (groupTuple of one CLUSTER_REGIONS task per genome and locus), so the plot task's command line
+    and its -resume key differed from run to run (39 of 40 plot commands between two arms)."""
+    main = open(os.path.join(ROOT, "main.nf")).read()
+    assert "def beds = entry[4].toSorted { b -> b.name }" in main
+
+
 def test_the_downloaders_take_the_gff_in_name_order(tmp_path):
     import fetch_related_genomes as fr
     d = tmp_path / "x"

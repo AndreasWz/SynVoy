@@ -3135,7 +3135,11 @@ def render_synteny_html(all_tracks, gene_colours,
         # data-track-idx on EVERY per-track label so hide/reflow toggles them
         # all (the species name, accession and status used to be left behind
         # when a track was collapsed because they carried no track index).
-        species_label = _format_species_label(species) + _low_quality_mark(track)
+        # The home row's label is formatted already ("Apis mellifera (honey bee) (chrom)"): formatting
+        # it again asked NCBI for "Apis mellifera (honey bee)" (a bogus 'none' row in the species table,
+        # and a false 'did not answer' warning in an outage) and lower-cased a capitalised common name.
+        species_label = (species if track.get("is_home") else _format_species_label(species)) \
+            + _low_quality_mark(track)
         svg_parts.append(
             f'<text x="{TEXT_RIGHT_X}" y="{yb:.1f}" data-track-idx="{ti}" '
             f'text-anchor="end" class="track-label track-item" font-style="italic">'

@@ -107,6 +107,7 @@ Usage
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import math
 import os
@@ -592,11 +593,38 @@ def label_home_loci(home_loci, genes, family, home_species, slack=5000):
 
 def gather_run_gffs(run_dir):
     """Every region GFF under a run. Files only: `logs/` holds per-task DIRECTORIES
-    named after their output, e.g. `..._RESCUE_GOI_HULL__..._X.hull_rescue.gff/`."""
+    named after their output, e.g. `..._RESCUE_GOI_HULL__..._X.hull_rescue.gff/`. Not the decoy
+    searches' GFFs (`decoys/`): they matched no gene, but the console's model count held them
+    (fix item 40)."""
     if os.path.isfile(run_dir):
         return [run_dir]
     return sorted(p for p in glob.glob(os.path.join(run_dir, "**", "*.gff*"), recursive=True)
-                  if os.path.isfile(p) and os.path.basename(p) != "home_genome.gff")
+                  if os.path.isfile(p) and os.path.basename(p) != "home_genome.gff"
+                  and "decoys" not in os.path.relpath(p, run_dir).split(os.sep))
+
+
+def _md5(path):
+    if not os.path.isfile(path):
+        return None
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def truth_fingerprint(data_dir, overlap):
+    """Which truth a score was made on (fix of 9 Nov: LRZ's family scores came from a manifest of
+    27 Jul, the laptop's from a later one, and no output said which): the manifest's and the
+    anchors' md5, the number of per-species truth CDS GFF3s, and how calls met genes (``overlap``:
+    'coding', or 'span' without the GFF3s)."""
+    fd = os.path.join(data_dir, "final_dataset")
+    n_gff3 = sum(1 for folder in ("gff", "browser_gff")
+                 for p in glob.glob(os.path.join(fd, folder, "*.gff3"))
+                 if not os.path.basename(p).startswith("ALL_SPECIES"))
+    return {"data_dir": os.path.abspath(data_dir), "manifest_md5": _md5(os.path.join(fd, "EXPORT_MANIFEST.tsv")),
+            "locus_anchors_md5": _md5(os.path.join(fd, "LOCUS_ANCHORS.tsv")), "cds_gff3_files": n_gff3,
+            "overlap": overlap}
 
 
 def load_run_models(paths, home_species=DEFAULT_HOME):
@@ -1397,7 +1425,18 @@ def cmd_stage(args):
 
 def cmd_score(args):
     fd = os.path.join(args.data, "final_dataset")
+    if args.expect_manifest_md5:
+        have = _md5(os.path.join(fd, "EXPORT_MANIFEST.tsv"))
+        if have != args.expect_manifest_md5:
+            print(f"ERROR: {os.path.join(fd, 'EXPORT_MANIFEST.tsv')} has md5 {have}, not the expected "
+                  f"{args.expect_manifest_md5}: this is another truth.", file=sys.stderr)
+            return 2
     genes = load_manifest(os.path.join(fd, "EXPORT_MANIFEST.tsv"), exclude_families=())
+    if args.family not in {g["family"] for g in genes}:
+        # A family the manifest does not hold scored zeros with exit 0 (fix of 9 Nov).
+        print(f"ERROR: --family {args.family!r} is not a family of {os.path.join(fd, 'EXPORT_MANIFEST.tsv')}.",
+              file=sys.stderr)
+        return 2
     addresses = load_addresses(os.path.join(fd, "LOCUS_ANCHORS.tsv"))
     home_loci = load_home_loci(args.run)
     if not home_loci:
@@ -1444,6 +1483,10 @@ def cmd_score(args):
             args.home_species))
     summary["seed_arm"] = (seed_info or {}).get("kind", "unrecorded")
     summary["seed"] = (seed_info or {}).get("seed", "")
+    summary["truth"] = truth_fingerprint(args.data, "coding" if truth_cds else "span")
+    t = summary["truth"]
+    print(f"truth: manifest {(t['manifest_md5'] or '?')[:8]} anchors {(t['locus_anchors_md5'] or '?')[:8]} "
+          f"cds_gff3 {t['cds_gff3_files']} ({t['overlap']} overlap)")
 
     print(f"family {args.family}   seed {summary['seed'] or '?'} ({summary['seed_arm']})"
           f"   home loci: "
@@ -1531,6 +1574,8 @@ def main(argv=None):
     p.add_argument("--seed-json", help="score as if seeded by this seed.json (default: "
                                        "<run>/seed.json) -- e.g. one run under both its "
                                        "manifest label and its address label")
+    p.add_argument("--expect-manifest-md5", help="stop (exit 2) unless final_dataset/EXPORT_MANIFEST.tsv "
+                                                 "has this md5: the truth the score must be made on")
     p.set_defaults(func=cmd_score)
 
     args = ap.parse_args(argv)

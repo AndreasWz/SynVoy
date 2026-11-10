@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bin"))
 
@@ -102,21 +104,19 @@ def test_user_cli_overrides_beat_preset():
     assert res["settings"]["classify_fragment_max_qcov"] == 0.3
 
 
-def test_unknown_preset_in_auto_preset_falls_back_to_defaults():
-    """A typo (e.g. `preset_typo`) in auto_preset.json must not crash; we
-    keep defaults and report the failure mode."""
-    auto = {"preset": "preset_typo"}
-    res = rep.resolve(DEFAULTS, auto_preset=auto)
-    assert res["preset_applied"] is None
-    assert res["settings"] == DEFAULTS
-    assert "unknown" in res["apply_reason"].lower()
+def test_an_unknown_preset_in_auto_preset_stops():
+    """A preset auto_select_preset.py cannot write (a damaged or hand-edited auto_preset.json) stops
+    instead of running the defaults in silence (fix of 9 Nov: the branch was reached by no run)."""
+    for auto in ({"preset": "preset_typo"}, {"other": 1}):
+        with pytest.raises(ValueError, match="is not a preset. Use one of: preset_paralog_discrimination"):
+            rep.resolve(DEFAULTS, auto_preset=auto)
 
 
-def test_unknown_explicit_override_does_not_crash():
-    res = rep.resolve(DEFAULTS, auto_preset=None, preset_override="preset_typo")
-    assert res["preset_applied"] is None
-    assert res["settings"] == DEFAULTS
-    assert "not a known preset" in res["apply_reason"]
+def test_an_unknown_explicit_override_stops():
+    """main.nf stops a mistyped --preset_override at the start (fix-phase d5); the resolver now says
+    the same when called by hand, where it ran the defaults."""
+    with pytest.raises(ValueError, match="--preset_override 'preset_typo' is not a preset"):
+        rep.resolve(DEFAULTS, auto_preset=None, preset_override="preset_typo")
 
 
 # ──────────────────────────────────────────────────────────────────────

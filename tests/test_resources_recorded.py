@@ -240,10 +240,9 @@ def test_what_counts_as_a_memory_kill(rc, stderr, killed):
 def test_a_memory_kill_exits_137_and_a_guard_3():
     def oom():
         raise su.MemoryKilled("miniprot ran out of memory")
-    for wrapper in (su.exit_step_failed, su.exit_on_memory_kill):
-        with pytest.raises(SystemExit) as exc:
-            wrapper(oom)
-        assert exc.value.code == 137
+    with pytest.raises(SystemExit) as exc:
+        su.exit_step_failed(oom)
+    assert exc.value.code == 137
     with pytest.raises(SystemExit) as exc:
         su.exit_step_failed(lambda: (_ for _ in ()).throw(su.StepFailed("x")))
     assert exc.value.code == 3
@@ -310,4 +309,5 @@ def test_a_lower_rung_without_hits_is_still_counted():
 
 
 def test_borrow_annotations_retries_a_memory_kill():
-    assert "exit_on_memory_kill(main)" in open(os.path.join(BIN, "borrow_annotations.py")).read()
+    # exit_step_failed handles the memory kill first (137, retried), then a stop (3).
+    assert "exit_step_failed(main)" in open(os.path.join(BIN, "borrow_annotations.py")).read()
