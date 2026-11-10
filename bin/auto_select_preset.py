@@ -26,8 +26,8 @@ never recognised because all its copies fall into one locus. Xaver's luciferase 
 (50 loci, four of them strong) still lands on preset_paralog_discrimination + WARN.
 
 Prints the chosen preset + reasoning; the workflow can echo this and let the user
-override with --preset_override <profile>. Under --modules legacy (the default) this
-choice is the run's preset; under --modules auto the preset modules
+override with --preset_override <profile>. Under --modules legacy this choice is the
+run's preset; under --modules auto (the default since 2026-11-10) the preset modules
 (select_modules.py) decide instead and this choice is only recorded.
 """
 

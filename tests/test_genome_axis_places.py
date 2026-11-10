@@ -231,10 +231,12 @@ def test_the_module_passes_the_axis_through_the_helper():
 
 @pytest.mark.skipif(NEXTFLOW is None, reason="nextflow not on PATH")
 def test_the_switch_and_the_legacy_value(tmp_path):
-    """Under legacy the search gets '--anchor_max_places 0' and no switch, as before the axis."""
+    """Under legacy the search gets '--anchor_max_places 0' and no switch, as before the axis. A
+    --modules with no word in it (null, empty, only commas) is the default, auto (since 2026-11-10;
+    it was legacy), as in main.nf modulesSpec and select_modules.parse_spec (tests/test_modules.py)."""
     (tmp_path / "lib").mkdir()
     shutil.copy(ROOT / "lib" / "GenomeAxis.groovy", tmp_path / "lib" / "GenomeAxis.groovy")
-    cases = [[None, "auto"], ["", "auto"], ["legacy", "auto"], [" Legacy ", "auto"], ["auto", "auto"],
+    cases = [[None, "auto"], ["", "auto"], [" , ", "auto"], ["legacy", "auto"], [" Legacy ", "auto"], ["auto", "auto"],
              ["none", "auto"], ["auto,-dispersed_family", "auto"], ["short_query,B2", "auto"],
              ["legacy", 5], ["auto", 0], ["auto", 5], ["legacy", "0"]]
     lines = ",\n".join(f"        [{'null' if m is None else repr(m)}, {v!r}]" for m, v in cases)
@@ -247,6 +249,6 @@ def test_the_switch_and_the_legacy_value(tmp_path):
                           capture_output=True, text=True, timeout=300)
     rows = [line[len("RESULT "):] for line in proc.stdout.splitlines() if line.startswith("RESULT ")]
     on = "true|auto| --genome_axis true|"
-    assert rows == ["false|0||", "false|0||", "false|0||", "false|0||", on, on, on, on,
+    assert rows == [on, on, on, "false|0||", "false|0||", on, on, on, on,
                     "false|5||", "true|0| --genome_axis true|", "true|5| --genome_axis true|",
                     "false|0||"], proc.stdout + proc.stderr

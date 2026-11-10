@@ -1,6 +1,6 @@
 // Gene prediction for a home genome without a GFF (profile stage 5c). augustus_species 'auto' (the
 // default): under --modules legacy Augustus's 'fly' model for every home, as before; with any other
-// --modules (GenomeAxis.on) the installed model nearest the home species, which
+// --modules (GenomeAxis.on; the default auto included) the installed model nearest the home species, which
 // bin/resolve_effective_params.py chooses for a home without a GFF and records in the settings and
 // the derivation of effective_params.json. A model the user names is used as given.
 class HomeGenes {

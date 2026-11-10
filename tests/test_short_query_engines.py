@@ -169,15 +169,22 @@ def test_modules_select_in_groovy(tmp_path):
         return text[start:text.index("\n}\n", start) + 3]
 
     (tmp_path / "t.nf").write_text(
-        func("presetModules") + "\ndef modulesSpec() { return params.modules.toString().trim() }\n"
+        func("presetModules") + "\n" + func("modulesSpec")
         + func("modulesSelect")
         + "\nworkflow { println \"SELECT=\" + modulesSelect('short_query') + \",\" + modulesSelect('B1') }\n")
     cases = {"legacy": False, "auto": True, "auto,-short_query": False, "auto,-B1": False,
              "none": False, "none,+short_query": True, "short_query,A1": True,
-             "local_family": False, "auto,-local_family": True}
+             "local_family": False, "auto,-local_family": True,
+             # main.nf's own modulesSpec: a value with no word in it is the default, auto (since
+             # 2026-11-10; it was legacy), as select_modules.parse_spec and GenomeAxis.on read it
+             "": True, " , ": True}
     for spec, want in cases.items():
+        # through a config: on the command line Nextflow reads --modules '' as the string 'true'
+        # (main.nf's checkModulesSpec stops that as a boolean); a config can give an empty value
+        (tmp_path / "m.config").write_text(f"params.modules = {spec!r}\n")
         proc = subprocess.run([NEXTFLOW, "run", str(tmp_path / "t.nf"), "-ansi-log", "false",
-                               "--modules", spec], cwd=tmp_path, capture_output=True, text=True, timeout=300)
+                               "-c", str(tmp_path / "m.config")], cwd=tmp_path, capture_output=True, text=True,
+                              timeout=300)
         m = re.search(r"SELECT=(\w+),(\w+)", proc.stdout)
         assert m, proc.stdout + proc.stderr
         assert m.group(1) == m.group(2) == str(want).lower(), spec

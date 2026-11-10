@@ -23,10 +23,11 @@ profile sets every parameter they touch (profile handoff of 2026-10-20, stage 1)
   search) are forbidden to the rules (FORBIDDEN_FOR_MODULES).
 
 `--modules` (nextflow.config):
-  legacy   the default until the measured switch: the old chooser's preset is applied
-           verbatim (resolve_effective_params.PRESET_OVERRIDES); the triggers are only
-           evaluated and recorded (modules_would_fire)
-  auto     every module whose trigger fires
+  auto     every module whose trigger fires (the default since 2026-11-10; a value with no
+           word in it, such as an empty one, is the default)
+  legacy   the default before: the old chooser's preset is applied verbatim
+           (resolve_effective_params.PRESET_OVERRIDES); the triggers are only evaluated and
+           recorded (modules_would_fire)
   none     no module
   a list   exactly these modules, whether their trigger fires or not:
            "short_query,local_family" (names or ids, A1 ...)
@@ -701,14 +702,15 @@ def check_constraints(settings: Dict[str, Any], source: Dict[str, str], p: Dict[
 # ----------------------------------------------------------------------------- --modules
 def parse_spec(spec: Any) -> Tuple[str, Set[str], Set[str]]:
     """(mode, ids forced on, ids forced off) of a --modules value; mode is legacy, auto,
-    none or list. Raises ValueError for anything else."""
+    none or list; a value with no word in it (None, empty, only commas) is the default, auto
+    (main.nf: modulesSpec, lib/GenomeAxis.groovy). Raises ValueError for anything else."""
     if isinstance(spec, bool) or str(spec).strip().lower() in ("true", "false"):
         raise ValueError("--modules got a boolean: write the value in quotes, e.g. "
                          "--modules 'auto,-dispersed_family' (a bare -x is read by Nextflow as true)")
     text = str(spec if spec is not None else "").strip()
-    if not text:
-        return "legacy", set(), set()
     parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        return "auto", set(), set()
     base = parts[0].lower()
     if base in ("legacy", "auto", "none"):
         rest = parts[1:]

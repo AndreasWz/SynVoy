@@ -576,7 +576,11 @@ def test_groovy_module_list_matches_the_registry():
 
 @pytest.mark.parametrize("spec,expected", [
     ("legacy", ("legacy", set(), set())),
-    ("", ("legacy", set(), set())),
+    # A value with no word in it is the default, auto (since 2026-11-10; it was legacy), as in
+    # main.nf modulesSpec and lib/GenomeAxis.groovy (tests/test_genome_axis_places.py).
+    ("", ("auto", set(), set())),
+    (None, ("auto", set(), set())),
+    (" , ", ("auto", set(), set())),
     ("auto", ("auto", set(), set())),
     ("none", ("none", set(), set())),
     ("short_query,A1", ("list", {"B1", "A1"}, set())),

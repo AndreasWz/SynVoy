@@ -186,7 +186,8 @@ the share in repeated 4-mers, an N-terminal signal peptide (n-, h- and c-region 
 −1/−3 rule; a heuristic, not SignalP), a C-terminal GPI-anchor signal, and cysteines.
 
 **The old chooser.** `auto_select_preset.py` → `select_preset` applies the first rule
-that matches:
+that matches (its preset is applied under `--modules legacy` only; under the default
+`auto` it is recorded as `legacy_preset`):
 
 | Order | Condition | Preset |
 |---|---|---|
@@ -280,9 +281,10 @@ hold for every module:
   under `legacy`, or `--preset_override` in any mode) < a value the user set at launch
   (a `-profile preset_X` included) < `--user_override`.
 
-`--modules` selects the mode: `legacy` (**the default** until each module is measured)
-applies the chooser's preset exactly as before and only records which triggers fire;
-`auto` applies every module whose trigger fires; `none` applies nothing; a list
+`--modules` selects the mode: `auto` (**the default** since 2026-11-10; a value with no
+word in it is the default too) applies every module whose trigger fires; `legacy` (the
+default before) applies the chooser's preset exactly as before and only records which
+triggers fire; `none` applies nothing; a list
 (`short_query,local_family`) applies exactly those modules; deltas
 (`auto,-dispersed_family,+cys_framework`) edit `auto`. The old preset names are the
 module sets {B1}, {A1}, {A2} and {}, with the same values (A1 and B1 add the keys above,
@@ -432,7 +434,7 @@ Without a home GFF, a substitute annotation is built first. Genes are predicted
 around the query's hits (`prodigal_on_regions.py`, Augustus or Prodigal), and
 `borrow_annotations.py` transfers the genes of one annotated target genome (batch HG-5b).
 Augustus's model (`augustus_species`, `auto`) is the fruit-fly model under `--modules legacy`,
-as for every home before 2026-10-27; with any other `--modules` it is the installed model
+as for every home before 2026-10-27; with any other `--modules` (the default `auto` included) it is the installed model
 nearest the home species in the NCBI taxonomy on disk (`gene_predictor.nearest_augustus_model`:
 the model whose species shares the deepest taxon with the home species, so the species' own
 model first; *Candida albicans* gets `candida_albicans`, a firefly `tribolium2012` through the
@@ -567,7 +569,7 @@ not been run on the large families of the benchmark, which is why a fixed N is n
 
 **The genome axis** (`genome_axis_blocks`, since 2026-10-27). The preset modules run once
 per query and see only the home side; a value that should differ per target genome is set
-here, in the search, with any `--modules` other than `legacy` (`lib/GenomeAxis.groovy`
+here, in the search, with any `--modules` other than `legacy`, so by default (`lib/GenomeAxis.groovy`
 passes `--genome_axis`). Under `legacy` the search gets the arguments it had before. Today the
 axis holds one value, `anchor_max_places`: with `auto`, a genome whose blocks exceed the cap
 (§7.4) is built again once from the 5 best places of each flanking gene, and the cap then
@@ -1465,7 +1467,7 @@ Consequences of the rules above that a reader of the results should know.
   *A. thaliana* has 92 hits, the cap of 80 blocks per genome is reached, and one home
   locus cuts out a fifth of the genome (the FT orthologs are still found).
   `--anchor_max_places 5` (§7.1) brings that to one window; on the genome axis
-  (`--modules` other than `legacy`) a genome where the cap binds gets it on its own.
+  (`--modules` other than `legacy`, the default) a genome where the cap binds gets it on its own.
 - Where the gene order between home and target is lost (no five anchors in a row), the
   expansion is the ratio of the genome sizes, a coarse stand-in for the spacing of
   genes.

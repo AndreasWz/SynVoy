@@ -295,9 +295,11 @@ def presetModules() {
             C1: 'exon_structure', C2: 'home_context']
 }
 
-// --modules as text (default 'legacy', see nextflow.config).
+// --modules as text (default 'auto', see nextflow.config). A value with no word in it (empty, or
+// only commas) is the default, 'auto', as in bin/select_modules.parse_spec and lib/GenomeAxis.groovy.
 def modulesSpec() {
-    return (params.modules == null ? 'legacy' : params.modules).toString().trim()
+    def text = (params.modules == null ? '' : params.modules).toString().trim()
+    return text.split(',').any { p -> p.trim() } ? text : 'auto'
 }
 
 // The presets --preset_override takes: bin/auto_select_preset.py VALID_PRESETS (a test keeps the two equal).
@@ -348,7 +350,7 @@ def modulesSelect(String module) {
     def ids = presetModules().findAll { id, name -> id == module || name == module }
         .collectMany { id, name -> [id.toLowerCase(), name] } as Set
     def parts = modulesSpec().split(',').collect { p -> p.trim().toLowerCase() }.findAll { p -> p }
-    if (!parts || parts[0] == 'legacy') {
+    if (parts[0] == 'legacy') {
         return false
     }
     if (parts[0] == 'auto') {

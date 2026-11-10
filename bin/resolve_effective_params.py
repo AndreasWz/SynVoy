@@ -19,7 +19,7 @@ Resolution order (later wins):
   1. defaults from --defaults <json>          (passed in from nextflow.config params)
   2. preset modules (--modules auto or a list; select_modules.py): one rule per key
   3. preset overrides from PRESET_OVERRIDES[preset]: the chooser's preset under
-     --modules legacy (the default), or --preset_override in any mode
+     --modules legacy, or --preset_override in any mode (the default is --modules auto)
   4. values the user set themselves           (detected via --shipped_config)
   5. --user_override KEY=VAL                  (explicit, for callers that know)
 
@@ -192,7 +192,7 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             disable_auto_apply: bool = False,
             user_overrides: dict | None = None,
             user_set: dict | None = None,
-            modules_spec: object = "legacy",
+            modules_spec: object = "auto",
             features: dict | None = None,
             design: dict | None = None,
             shipped: dict | None = None) -> dict:
@@ -464,10 +464,11 @@ def main() -> None:
     ap.add_argument("--goi_info", default="", help="goi_info.json of ANNOTATE_GOI")
     ap.add_argument("--home_context", default="",
                     help="home_context.json of HOME_CONTEXT (a sentinel or missing file = none)")
-    ap.add_argument("--modules", default="legacy",
-                    help="Preset modules: legacy (default: the old preset, triggers recorded "
-                         "only), auto, none, a list (short_query,local_family) or deltas "
-                         "(auto,-dispersed_family). See select_modules.py")
+    ap.add_argument("--modules", default="auto",
+                    help="Preset modules: auto (default: every module whose trigger fires), "
+                         "legacy (the old preset, triggers recorded only), none, a list "
+                         "(short_query,local_family) or deltas (auto,-dispersed_family). An "
+                         "empty value is the default. See select_modules.py")
     ap.add_argument("--n_flanking_genes", type=int, default=None,
                     help="n_flanking_genes of the run: the profile's n (recorded; no rule reads "
                          "it yet)")

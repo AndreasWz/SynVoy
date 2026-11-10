@@ -11,10 +11,11 @@
 // stage 5c), which is set per home, not per genome, by the same rule: not under legacy.
 class GenomeAxis {
 
-    // bin/select_modules.parse_spec: an empty --modules is legacy, else its first word is the mode
+    // bin/select_modules.parse_spec: the first word of --modules is the mode; a value with no word
+    // in it is the default, auto (main.nf: modulesSpec)
     static boolean on(params) {
         def text = (params.modules == null ? '' : params.modules).toString().trim()
-        def first = text.split(',').collect { p -> p.trim() }.find { p -> p } ?: 'legacy'
+        def first = text.split(',').collect { p -> p.trim() }.find { p -> p } ?: 'auto'
         return first.toLowerCase() != 'legacy'
     }
 

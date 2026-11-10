@@ -49,8 +49,33 @@ DEFAULTS = {
 }
 
 
+# The tests of the chooser's preset name --modules legacy: since 2026-11-10 the default is auto, under which
+# auto_preset.json is recorded only (test_the_default_is_auto_and_records_the_chooser below).
+
+
+def test_the_default_is_auto_and_records_the_chooser():
+    """resolve()'s default and the CLI's --modules default are auto (nextflow.config: modules = 'auto'):
+    the chooser's preset is not applied, only recorded as legacy_preset."""
+    auto = {"preset": "preset_paralog_discrimination"}
+    res = rep.resolve(DEFAULTS, auto_preset=auto)
+    assert res["modules_mode"] == "auto" and res["preset_applied"] is None
+    assert res["legacy_preset"] == "preset_paralog_discrimination"
+    assert res["settings"]["adaptive_max_regions"] == DEFAULTS["adaptive_max_regions"]
+    assert res["apply_reason"].startswith("modules auto")
+
+
+def test_the_cli_default_is_auto(tmp_path: Path):
+    (tmp_path / "defaults.json").write_text(json.dumps(DEFAULTS))
+    (tmp_path / "auto.json").write_text(json.dumps({"preset": "preset_short_peptide"}))
+    res = _run_cli("--auto_preset", str(tmp_path / "auto.json"), "--defaults", str(tmp_path / "defaults.json"),
+                   "--output", str(tmp_path / "out.json"), cwd=tmp_path)
+    assert res["modules_mode"] == "auto" and res["preset_applied"] is None
+    assert res["legacy_preset"] == "preset_short_peptide"
+    assert res["settings"]["classify_fragment_max_qcov"] == DEFAULTS["classify_fragment_max_qcov"]
+
+
 def test_no_auto_preset_and_no_override_is_passthrough():
-    res = rep.resolve(DEFAULTS, auto_preset=None, preset_override="")
+    res = rep.resolve(DEFAULTS, auto_preset=None, preset_override="", modules_spec="legacy")
     assert res["preset_applied"] is None
     # Settings equal defaults, source is all 'default'.
     assert res["settings"] == DEFAULTS
@@ -60,7 +85,7 @@ def test_no_auto_preset_and_no_override_is_passthrough():
 
 def test_auto_preset_applies_overrides_and_traces_source():
     auto = {"preset": "preset_paralog_discrimination"}
-    res = rep.resolve(DEFAULTS, auto_preset=auto)
+    res = rep.resolve(DEFAULTS, auto_preset=auto, modules_spec="legacy")
     assert res["preset_applied"] == "preset_paralog_discrimination"
     # Spot-check the key overrides land.
     assert res["settings"]["adaptive_score_floor_frac"] == 0.45
@@ -77,7 +102,7 @@ def test_auto_preset_applies_overrides_and_traces_source():
 def test_explicit_override_beats_auto_preset():
     """User-pinned preset wins even if auto_preset.json suggested another."""
     auto = {"preset": "preset_short_peptide"}
-    res = rep.resolve(DEFAULTS, auto_preset=auto, preset_override="preset_single_copy")
+    res = rep.resolve(DEFAULTS, auto_preset=auto, preset_override="preset_single_copy", modules_spec="legacy")
     assert res["preset_applied"] == "preset_single_copy"
     # single_copy sets nothing since 2026-10-15; the short-peptide values stay out.
     assert res["settings"] == DEFAULTS
@@ -87,7 +112,7 @@ def test_explicit_override_beats_auto_preset():
 def test_disable_auto_apply_bypasses_everything():
     auto = {"preset": "preset_paralog_discrimination"}
     res = rep.resolve(DEFAULTS, auto_preset=auto, preset_override="preset_single_copy",
-                      disable_auto_apply=True)
+                      disable_auto_apply=True, modules_spec="legacy")
     assert res["preset_applied"] is None
     assert res["settings"] == DEFAULTS
     assert "auto_apply_preset=false" in res["apply_reason"]
@@ -97,7 +122,7 @@ def test_user_cli_overrides_beat_preset():
     """Explicit user CLI values must take precedence over preset overrides."""
     auto = {"preset": "preset_short_peptide"}
     user = {"classify_complete_min_qcov": 0.99}
-    res = rep.resolve(DEFAULTS, auto_preset=auto, user_overrides=user)
+    res = rep.resolve(DEFAULTS, auto_preset=auto, user_overrides=user, modules_spec="legacy")
     assert res["settings"]["classify_complete_min_qcov"] == 0.99
     assert res["source"]["classify_complete_min_qcov"] == "user_cli"
     # Other preset overrides still apply.
@@ -109,14 +134,14 @@ def test_an_unknown_preset_in_auto_preset_stops():
     instead of running the defaults in silence (fix of 9 Nov: the branch was reached by no run)."""
     for auto in ({"preset": "preset_typo"}, {"other": 1}):
         with pytest.raises(ValueError, match="is not a preset. Use one of: preset_paralog_discrimination"):
-            rep.resolve(DEFAULTS, auto_preset=auto)
+            rep.resolve(DEFAULTS, auto_preset=auto, modules_spec="legacy")
 
 
 def test_an_unknown_explicit_override_stops():
     """main.nf stops a mistyped --preset_override at the start (fix-phase d5); the resolver now says
     the same when called by hand, where it ran the defaults."""
     with pytest.raises(ValueError, match="--preset_override 'preset_typo' is not a preset"):
-        rep.resolve(DEFAULTS, auto_preset=None, preset_override="preset_typo")
+        rep.resolve(DEFAULTS, auto_preset=None, preset_override="preset_typo", modules_spec="legacy")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -328,7 +353,7 @@ def test_detect_user_set_is_type_tolerant():
 def test_user_set_value_beats_auto_preset_and_is_reported():
     defaults = dict(DEFAULTS, classify_complete_min_qcov="0.6")   # user typed 0.6
     res = rep.resolve(defaults, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"classify_complete_min_qcov": "0.6"})
+                      user_set={"classify_complete_min_qcov": "0.6"}, modules_spec="legacy")
     assert res["settings"]["classify_complete_min_qcov"] == "0.6"
     assert res["source"]["classify_complete_min_qcov"] == "user_set"
     assert res["user_set_kept"] == ["classify_complete_min_qcov"]
@@ -339,14 +364,14 @@ def test_user_set_value_beats_auto_preset_and_is_reported():
 
 def test_user_set_equal_to_preset_value_is_not_reported_as_kept():
     res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"classify_complete_min_qcov": 0.5})
+                      user_set={"classify_complete_min_qcov": 0.5}, modules_spec="legacy")
     assert res["settings"]["classify_complete_min_qcov"] == 0.5
     assert res["user_set_kept"] == []
 
 
 def test_explicit_user_override_still_beats_user_set():
     res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"sw_min_score": 15}, user_overrides={"sw_min_score": 12})
+                      user_set={"sw_min_score": 15}, user_overrides={"sw_min_score": 12}, modules_spec="legacy")
     assert res["settings"]["sw_min_score"] == 12
     assert res["source"]["sw_min_score"] == "user_cli"
 
@@ -363,7 +388,7 @@ def test_cli_keeps_a_value_the_user_set(tmp_path: Path):
     out = tmp_path / "eff.json"
     proc = subprocess.run(
         [sys.executable, str(ROOT / "bin" / "resolve_effective_params.py"),
-         "--auto_preset", str(tmp_path / "auto.json"),
+         "--modules", "legacy", "--auto_preset", str(tmp_path / "auto.json"),
          "--defaults", str(tmp_path / "defaults.json"),
          "--shipped_config", str(ROOT / "nextflow.config"),
          "--output", str(out)],
@@ -385,7 +410,7 @@ def test_cli_without_shipped_config_keeps_the_old_behaviour(tmp_path: Path):
     out = tmp_path / "eff.json"
     proc = subprocess.run(
         [sys.executable, str(ROOT / "bin" / "resolve_effective_params.py"),
-         "--auto_preset", str(tmp_path / "auto.json"),
+         "--modules", "legacy", "--auto_preset", str(tmp_path / "auto.json"),
          "--defaults", str(tmp_path / "defaults.json"), "--output", str(out)],
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr

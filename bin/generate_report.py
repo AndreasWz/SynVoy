@@ -2785,6 +2785,8 @@ def load_run_settings(path):
     except (OSError, ValueError):
         return None
     out = {k: data.get(k) for k in RUN_SETTINGS_KEYS}
+    # A record without modules_mode predates --modules (2026-10-15): such a run was legacy. The default
+    # of a run is auto since 2026-11-10, and every record since 2026-10-15 names its mode.
     out["modules_mode"] = out["modules_mode"] or "legacy"
     out["modules_applied"] = out["modules_applied"] or []
     out["modules_would_fire"] = out["modules_would_fire"] or []
