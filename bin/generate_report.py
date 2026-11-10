@@ -226,6 +226,7 @@ def _process_gffs_unified(gff_files):
         try:
             with open(gff_path) as fh:
                 cds_of_model = defaultdict(list)
+                frames_of_model = defaultdict(list)   # the genomic frame of each CDS row (_same_orf)
                 for line in fh:
                     # NB: rstrip("\n") matches the collect_goi_annotations behaviour
                     # which trimmed only the newline (not surrounding whitespace).
@@ -241,7 +242,10 @@ def _process_gffs_unified(gff_files):
                         # A model's coding rows, for the dedup's test of a piece (_is_piece_of).
                         parent = _parse_gff_attrs(parts[8]).get("Parent", "")
                         try:
-                            cds_of_model[parent].append((int(parts[3]), int(parts[4])))
+                            cs, ce = int(parts[3]), int(parts[4])
+                            cds_of_model[parent].append((cs, ce))
+                            phase = int(parts[7]) if parts[7].isdigit() else 0
+                            frames_of_model[parent].append((ce - phase) % 3 if parts[6] == "-" else (cs + phase) % 3)
                         except ValueError:
                             pass
                         continue
@@ -301,6 +305,7 @@ def _process_gffs_unified(gff_files):
                             "strand": parts[6],
                             "evidence": evidence_type,
                             "cds": cds_of_model[model_id],
+                            "cds_frames": frames_of_model[model_id],
                             "confidence": confidence,
                             "goi_class": goi_class,
                             "identity": (attrs.get("Identity", "") or "").strip(),
@@ -1060,6 +1065,31 @@ def _is_piece_of(piece, wide, min_overlap=0.8):
     return _safe_float(wide.get("query_cov"), 1.0) >= _safe_float(piece.get("query_cov"), 0.0)
 
 
+def _same_orf(a, b, min_bp=3):
+    """Two gene models that are the two halves of one reading frame, miniprot's models of one gene
+    (fix of 9 Nov, item D2: C. lusitaniae orf19.968, a HIGH and a MEDIUM model sharing 30 bp of one
+    reading frame of an expanded repeat, counted twice in both parent arms). Both exon_annotation,
+    on one strand, and meeting only where the upstream model's last CDS row and the downstream
+    model's first CDS row overlap, partly (neither row inside the other), by at least ``min_bp``
+    bases read in one frame by both: the shared bases encode the same residues in both models. A
+    model with a spurious terminal exon inside its neighbour's exon (a tandem copy) stays apart; a
+    stop between the two halves is not looked for (the report has no genome)."""
+    if a.get("evidence") != "exon_annotation" or b.get("evidence") != "exon_annotation":
+        return False
+    if a.get("strand") != b.get("strand") or a.get("strand") not in ("+", "-"):
+        return False
+    fa, fb = a.get("cds_frames") or [], b.get("cds_frames") or []
+    if not fa or len(fa) != len(a.get("cds") or []) or not fb or len(fb) != len(b.get("cds") or []):
+        return False
+    up, down = sorted((sorted(zip(a["cds"], fa)), sorted(zip(b["cds"], fb))), key=lambda rows: rows[0][0])
+    (us, ue), uf = max(up, key=lambda r: r[0][1])
+    (ds, de), df = down[0]
+    if not (us < ds and ue < de) or ue - ds + 1 < min_bp or uf != df:
+        return False
+    return (all(e < ds for (s, e), _f in up if (s, e) != (us, ue))
+            and all(s > ue for (s, e), _f in down if (s, e) != (ds, de)))
+
+
 def _whole_model_of(wide, members, piece, min_overlap=0.8):
     """The whole gene a piece is tested against: ``wide`` itself when it is a gene model or a
     rescued hit, else (a hull rescue, a hit chain, a tandem row) its not-specific twin of that kind
@@ -1108,7 +1138,10 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # loci), or one span wholly inside the other (a fused or rescue model that
                 # swallowed the compact model of the same gene).
                 contained = _containment(a, rep) >= contain_min
-                if _reciprocal_overlap(a, rep) > min_overlap or contained:
+                same_orf = _same_orf(a, rep)
+                if _reciprocal_overlap(a, rep) > min_overlap or contained or same_orf:
+                    if same_orf and not contained and _reciprocal_overlap(a, rep) <= min_overlap:
+                        cl["same_orf"] = True
                     cl["members"].append(a)
                     wide, compact = (a, rep) if _span(a) >= _span(rep) else (rep, a)
                     # The compact model must itself be a counted call (MEDIUM or better):
@@ -1203,6 +1236,8 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "superseded_wide_model": bool(rep.get("superseded_wide_model")),
                 # Set when this not-specific whole gene overruled a counted piece of itself.
                 **({"overruled_counted_piece": True} if cl.get("overruled") else {}),
+                # Set when two models of one open reading frame were merged (_same_orf).
+                **({"same_orf_merged": True} if cl.get("same_orf") else {}),
                 # Join key for the F9 phylo-placement verdicts, which are computed from
                 # goi_for_tree.faa and so are keyed by model id, not coordinates.
                 "mrna_id": rep.get("mrna_id", ""),

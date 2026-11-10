@@ -1285,7 +1285,11 @@ this order:
 
 1. **Deduplication** (`dedupe_goi_annotations`). HIGH, MEDIUM and AMBIGUOUS calls of
    one genome and scaffold are one gene when they overlap reciprocally by more than
-   80 %. The call the judge ranks first is kept (`_record_rank`: label, then
+   80 %, or (since 2026-11-09) when two gene models on one strand meet only where the upstream
+   model's last CDS row and the downstream model's first one overlap, partly and in one frame:
+   the two halves of one reading frame, which miniprot can model apart where the query aligns
+   twice inside it (`same_orf_merged`; a model whose terminal exon lies inside its neighbour's
+   exon stays apart). The call the judge ranks first is kept (`_record_rank`: label, then
    `synvoy_label.rank_key`, i.e. E-value in its place, the block's E_syn, bits, span; bits
    or identity for a record without `Eeff`, from a run before 2026-10-14 or a rescue
    pass), with the list of home loci that found it. The figures choose their
