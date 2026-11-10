@@ -81,15 +81,22 @@ def is_data_limited_iqtree_error(text):
 
 
 def run_mafft(input_fasta, output_aln, threads=1):
-    """Run MAFFT alignment."""
-    cmd = ["mafft", "--amino", "--auto", "--thread", str(threads), input_fasta]
+    """Run MAFFT alignment. The threads run MAFFT's pairwise or distance stage and its progressive
+    step; its iterative refinement runs in one thread (--threadit 0): refined by several threads, the
+    alignment depends on the threads' timing (MAFFT 7.526, L-INS-i: six GOI proteins gave two
+    alignments in 16 runs at --thread 2), and in one thread it is the same at any --thread (23 tree
+    inputs of 3 to 93 proteins). This serial refinement is not what --thread 1 ran before (the
+    parallel refinement with one worker), so a tree made at one thread can change too."""
+    cmd = ["mafft", "--amino", "--auto", "--thread", str(threads), "--threadit", "0", input_fasta]
     with open(output_aln, "w") as out_f:
         subprocess.run(cmd, stdout=out_f, check=True)
 
 
-# IQ-TREE's random seed: fixed, so the same alignment gives the same tree run after run (fix-phase
-# d6; without --seed IQ-TREE seeds from the clock). The seed and the threads are recorded beside
-# the tree (write_info), as the thread count can change IQ-TREE's search.
+# IQ-TREE's random seed: fixed (fix-phase d6; without --seed IQ-TREE seeds from the clock), so the
+# same alignment gives the same tree run after run in one thread. With more threads IQ-TREE 3.1.2 is
+# not reproducible: one alignment at -T 2 gave three tree files in three runs (branch lengths
+# differing from the 7th significant digit on, one bootstrap support 44 or 45). The seed and the threads are
+# recorded beside the tree (write_info).
 IQTREE_SEED = 1
 
 
@@ -157,7 +164,8 @@ def main():
     parser.add_argument("--output", required=True, help="Output Newick tree file")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--seed", type=int, default=IQTREE_SEED,
-                        help="IQ-TREE's random seed (fixed by default, so a rerun gives the same tree)")
+                        help="IQ-TREE's random seed (fixed by default; in one thread, --threads 1, a rerun "
+                             "gives the same tree)")
     parser.add_argument("--info", default="",
                         help="Where to write how the tree was made (default <output stem>.info.json): "
                              "seed, threads, sequences, and the bootstrap, also when it was dropped "

@@ -452,7 +452,7 @@ These control per-process resource allocation. Override them for your hardware.
 | `--locate_gene_cpus` | `1` | CPUs for LOCATE_GENE |
 | `--locate_gene_memory` | `3 GB` | RAM for LOCATE_GENE |
 | `--skip_tree` | `false` | Skip the per-locus MAFFT + IQ-TREE phylogeny (`COMPUTE_TREE`) to save time/RAM on weak machines. Emits a placeholder newick (`(GOI_placeholder:0.0);`) so plotting still works. Forced on by the `low_mem` profile (and thus by the launcher's default `auto,low_mem`). |
-| `--compute_tree_cpus` | `2` | CPUs for COMPUTE_TREE (MAFFT + IQ-TREE). |
+| `--compute_tree_cpus` | `2` | CPUs for COMPUTE_TREE (MAFFT + IQ-TREE). MAFFT's refinement runs in one thread, so the alignment is the same at any value; IQ-TREE with more than one thread is not reproducible: its branch lengths can differ from the 7th significant digit on from run to run, and its bootstrap supports slightly. With `1` the tree is the same run after run. |
 | `--compute_tree_memory` | `4 GB` | RAM for COMPUTE_TREE. |
 | `--default_cpus` | `1` | CPUs for every process without its own override. |
 | `--default_memory` | `2 GB` | RAM for every process without its own override. |

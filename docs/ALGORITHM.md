@@ -1354,9 +1354,11 @@ this order:
 
 ## 11. Tree
 
-`compute_tree.py` aligns the GOI proteins of §7.12 with MAFFT (`--auto`) and builds a
-tree with IQ-TREE (model selection `-m MFP`; 1000 ultrafast bootstrap replicates from
-4 sequences). With fewer than 3 sequences a placeholder tree is written.
+`compute_tree.py` aligns the GOI proteins of §7.12 with MAFFT (`--auto`, the iterative
+refinement in one thread, `--threadit 0`, so the alignment does not depend on the
+threads) and builds a tree with IQ-TREE (model selection `-m MFP`; 1000 ultrafast
+bootstrap replicates from 4 sequences). With fewer than 3 sequences a placeholder tree
+is written.
 
 ## 12. Figures
 
