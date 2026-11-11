@@ -40,6 +40,7 @@ CLAUDE.md
 docs/TODO.md
 docs/HOW_IT_WORKS.md
 docs/STATE_OF_THE_PROJECT.md
+docs/notes/
 
 # Benchmark outputs and truth files stay ignored (large/curated); scripts/benchmark/ is tracked
 benchmark_results/
