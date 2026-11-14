@@ -119,13 +119,13 @@ the result expires.
   `result.json`: counted from the gene models the search wrote, among the neighbours
   that were searched as proteins) and, where no call was made, how many weak matches
   of the gene itself were seen (`leads`). A genome without the gene is a result.
-  The figures draw these genomes too; that is the pipeline's default since 2026-10-09
+  The figures draw these genomes too, as the pipeline does by default
   (`hide_goi_absent_tracks`, `docs/OUTPUT.md`).
 - **Everything in one file**: `files/synvoy_<name>.zip` holds the figures, the gene
   models, the report, the table and a read-me. It is built with the result, so the
   examples have it as well.
 - **What made the result.** A version number is shown only when the checkout stands
-  exactly on the git tag of its `VERSION` file (`v1.0.0`) and has no local changes.
+  exactly on the git tag of its `VERSION` file (for example `v1.0.1`) and has no local changes.
   Anything else reads "pre-release" with the commit. `version_label` in the settings
   replaces this for an installation without git history.
 
@@ -141,8 +141,8 @@ of older code are never handed out for new code.
 
 Each line names the test that fails when the safeguard is taken out
 (`tests/test_runner.py` unless another file is named). `tests/check_safeguards.py`
-does exactly that for 31 of them: it removes one safeguard at a time in a copy and
-checks that the test notices.
+does exactly that for 53 safeguards: it removes one at a time in a copy and checks
+that a test notices.
 
 | What can go wrong | What the service does | Test |
 |---|---|---|
@@ -158,14 +158,14 @@ checks that the test notices.
 | Two workers on one data folder | The second refuses to start. | `test_only_one_worker_per_data_folder` |
 | A step of the pipeline fails for single genomes (it carries on) | The result page says how many steps failed. | `test_search_runs_to_a_result` |
 | The connection to NCBI breaks during a genome download | The download goes on from the byte it stopped at, also after a restart of the worker. NCBI being down is tried again after 4 and 16 minutes, then the waiting search fails with that reason. | `tests/test_genomes.py`: `test_broken_connection_*`, `test_stopping_the_worker_*`, `test_ncbi_being_down_*` |
-| A genome arrives damaged, or is not what its name says | It is compared with NCBI's checksum before it is unpacked, fetched once more, and refused the second time. Nothing of it stays in the store. | `test_damaged_file_*`, `test_file_that_is_not_what_its_name_says_*` |
-| The genome store is full | The genomes used least in the last `store_score_days` go first. A genome that is pinned, or that a waiting or running search needs, is never removed; if nothing can go, the request is refused at once with the reason. | `test_least_used_genome_*`, `test_pinned_and_needed_*` |
-| A genome is removed while a search that needs it waits | It is fetched again before the search starts. | `test_genome_removed_while_a_search_waited_*` |
-| One visitor asks for many or huge genomes | Size is checked at NCBI before anything is downloaded; a limit per visitor and day; only assembly accessions with a version reach a download address. | `test_genome_larger_than_the_limits_*`, `test_one_visitor_*`, `test_what_a_request_may_and_may_not_name` |
-| Two processes fetch the same genome (worker and `library fetch`) | The second finds it taken and waits. | `test_download_cut_off_by_a_restart_*` |
-| NCBI's taxonomy does not answer while a genome is fetched | The lineage is read from NCBI's Datasets service, with the older E-utilities as second source (asked up to three times: it answers "HTTP 400" now and then for a request that works a second later). A genome that still got none is kept, listed last, and gets its lineage later (after the next fetch, and by the worker every ten minutes). `library status` marks it. | `tests/test_inputs.py`: `test_taxonomy_lookup_*`; `test_genome_stored_without_its_taxonomy_*` |
-| No genome was ever registered by hand (`library add`) | Not a fault: the server runs on the genomes its store fetches. A library file that was there and is gone is a fault, and the last good library stays in use. Without a library and with the store switched off, the check and the worker say that there is nothing to search. | `test_server_can_run_on_the_genome_store_alone`, `test_server_without_any_source_of_genomes_*`, `test_no_library_file_*` |
-| The store's folder holds files that are in no record (the database was lost or replaced; files were copied in by hand) | They count against the store's size, so the folder as a whole stays within the space that was set. The store never deletes them by itself and never takes one for a genome: a genome is fetched and checked even when a file of its name lies there. `library status` and `check` name them; `library sweep --yes` deletes them. Files of genomes registered with `library add` are never among them. | `test_files_in_no_record_*`, `test_file_the_store_did_not_fetch_*`, `test_genomes_the_operator_registered_*` |
+| A genome arrives damaged, or is not what its name says | It is compared with NCBI's checksum before it is unpacked, fetched once more, and refused the second time. Nothing of it stays in the store. | `tests/test_genomes.py`: `test_damaged_file_*`, `test_file_that_is_not_what_its_name_says_*` |
+| The genome store is full | The genomes used least in the last `store_score_days` go first. A genome that is pinned, or that a waiting or running search needs, is never removed; if nothing can go, the request is refused at once with the reason. | `tests/test_genomes.py`: `test_least_used_genome_*`, `test_pinned_and_needed_*` |
+| A genome is removed while a search that needs it waits | It is fetched again before the search starts. | `tests/test_genomes.py`: `test_genome_removed_while_a_search_waited_*` |
+| One visitor asks for many or huge genomes | Size is checked at NCBI before anything is downloaded; a limit per visitor and day; only assembly accessions with a version reach a download address. | `tests/test_genomes.py`: `test_genome_larger_than_the_limits_*`, `test_one_visitor_*`, `test_what_a_request_may_and_may_not_name` |
+| Two processes fetch the same genome (worker and `library fetch`) | The second finds it taken and waits. | `tests/test_genomes.py`: `test_download_cut_off_by_a_restart_*` |
+| NCBI's taxonomy does not answer while a genome is fetched | The lineage is read from NCBI's Datasets service, with the older E-utilities as second source (asked up to three times: it answers "HTTP 400" now and then for a request that works a second later). A genome that still got none is kept, listed last, and gets its lineage later (after the next fetch, and by the worker every ten minutes). `library status` marks it. | `tests/test_inputs.py`: `test_taxonomy_lookup_*`; `tests/test_genomes.py`: `test_genome_stored_without_its_taxonomy_*` |
+| No genome was ever registered by hand (`library add`) | Not a fault: the server runs on the genomes its store fetches. A library file that was there and is gone is a fault, and the last good library stays in use. Without a library and with the store switched off, the check and the worker say that there is nothing to search. | `tests/test_genomes.py`: `test_server_can_run_on_the_genome_store_alone`, `test_server_without_any_source_of_genomes_*`; `tests/test_inputs.py`: `test_no_library_file_*` |
+| The store's folder holds files that are in no record (the database was lost or replaced; files were copied in by hand) | They count against the store's size, so the folder as a whole stays within the space that was set. The store never deletes them by itself and never takes one for a genome: a genome is fetched and checked even when a file of its name lies there. `library status` and `check` name them; `library sweep --yes` deletes them. Files of genomes registered with `library add` are never among them. | `tests/test_genomes.py`: `test_files_in_no_record_*`, `test_file_the_store_did_not_fetch_*`, `test_genomes_the_operator_registered_*` |
 | Too many or too large requests | Limits per visitor (running searches, searches per day, look-ups per hour), on the queue, on genome number and size, on the request size. | `tests/test_api.py` |
 | Someone asks for a file that is not theirs to have | Only files listed in a result are served; nothing outside `site/` is; search ids are 128 random bits and are not logged in full. | `tests/test_api.py` |
 | A name or sequence from a visitor ends up in a page | Pages insert text as text only, load scripts from this site only, and figures made by the pipeline are shown in a sandbox. | `tests/test_api.py`; browser run-through |
@@ -350,8 +350,8 @@ SYNVOY_WEB_E2E_HOME=saccharomyces_cerevisiae \
 
 ## What has been checked, and what has not
 
-**With the real pipeline, on the code before the genome store was added** (laptop,
-12 cores, 15 GB; the four yeast genomes of the demo; yeast STE2 as the query):
+**With the real pipeline, without the genome store** (laptop, 12 cores, 15 GB; the four
+yeast genomes of the demo; yeast STE2 as the query):
 
 - A search through the site gives the same report as `./run_synvoy.sh` with the same
   inputs (the two `synvoy_report.json` are identical).
@@ -361,27 +361,26 @@ SYNVOY_WEB_E2E_HOME=saccharomyces_cerevisiae \
   request and removed its working files.
 - A search whose processes were all killed (16, with 13 steps finished) was started
   again by the worker and came to the right result. All 13 finished steps were reused.
-- These runs were started from a shell with a Python virtualenv first in `PATH`, the
-  state in which searches failed before `run_job.sh` cleaned the `PATH`.
+- These runs were started from a shell with a Python virtualenv first in `PATH`, which
+  `run_job.sh` removes.
 - The pipeline's code was being edited while three of these searches ran. The worker
   noticed each time (its log; that the result is then flagged and kept out of the
   cache is checked with the stand-in pipeline only).
 - The service under gunicorn (2 workers, 4 threads each), 40 requests at once.
 
-Two faults were found only by these runs, not by the stand-in pipeline: the virtualenv
-in `PATH`, and a query file that was written again for the second attempt, after which
-Nextflow reused 5 of 13 finished steps instead of all. After a change to `runner.py`
-or `run_job.sh`, run `tests/test_end_to_end.py`.
+These runs check two things the stand-in pipeline cannot: a virtualenv in `PATH`, and
+that a second attempt reuses every finished step. After a change to `runner.py` or
+`run_job.sh`, run `tests/test_end_to_end.py`.
 
-**On the present code** (with the genome store, the new result page and the archive):
+**With the genome store, the result page and the archive:**
 
 - A fresh installation with no genome registered by hand, as in "Try it on this
   machine": four yeasts fetched from the real NCBI by species name (44 s), then yeast
   STE2 searched with the real pipeline: 5 min 21 s, found in all three other yeasts
   with the same identities (48, 42 and 66 %) as on the demo genomes.
 - During that fill NCBI's taxonomy service answered "HTTP 400" for two of the four
-  genomes and worked a moment later. That is why the lineage now has a second source
-  and is asked for again (table above).
+  genomes and worked a moment later; the lineage therefore has a second source and is
+  asked for again (table above).
 - One search with the real pipeline on registered genomes: yeast SYP1 against three
   yeasts. All three genomes are in every figure and in the table, also the one without
   a call.
@@ -417,8 +416,9 @@ Not checked:
 
 Known limits:
 
-- The gene tree is switched off by the `low_mem` profile, which is the default. The
-  result page then has no "Gene tree" tab.
+- The gene tree is switched off by the `low_mem` profile, which the service uses by
+  default (`nextflow_profile` `auto,low_mem`). The result page then has no "Gene tree"
+  tab.
 - The pipeline does not publish the proteins of the gene models it finds in a search
   (only those of the rescue steps), so the result page offers the gene models (GFF)
   and not a protein FASTA file.

@@ -1,4 +1,4 @@
-# SynVoy live demo — budding yeasts
+# SynVoy live demo - budding yeasts
 
 A pro-mode run small enough to execute in front of an audience, on real
 chromosome-level genomes with real annotation.
@@ -27,8 +27,8 @@ Total input ≈ 76 MB.
 
 | File | Gene | Length | Character |
 |---|---|---|---|
-| `STE2.faa` | **STE2** (`D6VTK4`), α-factor pheromone receptor | 431 aa | 7-TM GPCR, single copy, fast-evolving — the interesting case |
-| `PGK1.faa` | **PGK1** (`P00560`), phosphoglycerate kinase | 416 aa | highly conserved, single copy — the control that should always work |
+| `STE2.faa` | **STE2** (`D6VTK4`), α-factor pheromone receptor | 431 aa | 7-TM GPCR, single copy, fast-evolving - the interesting case |
+| `PGK1.faa` | **PGK1** (`P00560`), phosphoglycerate kinase | 416 aa | highly conserved, single copy - the control that should always work |
 
 STE2 is the default because a fast-evolving receptor is where a sequence-only
 search starts to struggle across genera, which is the case SynVoy exists for.
@@ -37,7 +37,7 @@ PGK1 is there as the safe fallback if a live run needs to be guaranteed.
 ## Running it
 
 ```bash
-demo/fetch_data.sh          # once — downloads into local_data/demo/ (gitignored)
+demo/fetch_data.sh          # once - downloads into local_data/demo/ (gitignored)
 demo/run_demo.sh            # default query STE2  -> results/demo_ste2
 demo/run_demo.sh PGK1       # the control        -> results/demo_pgk1
 demo/run_demo.sh STE2 -resume
@@ -46,14 +46,13 @@ demo/run_demo.sh STE2 -resume
 Anything after the query name is passed straight through to Nextflow.
 
 The script strips an active virtualenv from the environment before launching. A
-VS Code-activated `.venv` shadows the conda env inside Nextflow tasks and makes
-`parasail` disappear, which disables Smith–Waterman — the launcher fails loud on
-this rather than running degraded.
+`.venv` that VS Code activates shadows the conda environment, and without `parasail`
+the launcher stops rather than search without Smith-Waterman.
 
 ## The equivalent raw command
 
 ```bash
-./run_synvoy.sh -profile low_mem --mode pro \
+./run_synvoy.sh -profile low_mem -c demo/demo.config --mode pro \
     --query          local_data/demo/query/STE2.faa \
     --home_genome    local_data/demo/home/Saccharomyces_cerevisiae.fna \
     --home_gff       local_data/demo/home/Saccharomyces_cerevisiae.gff \
@@ -65,78 +64,72 @@ this rather than running degraded.
 
 ## What to show
 
-1. `results/demo_ste2/*_anchor_grid.svg` — the payoff figure: rows = species,
-   columns = genes, the GOI column filled across all four.
-2. `results/demo_ste2/synvoy_report.json` — read `summary.headline` and the three
-   records under `goi_dedup.records`, not `total_raw_search_hits` (which is a
-   diagnostic and is routinely 0 on a good run).
-3. The console `[INFO] §1m collinearity: bridged …` lines, if any fire — that is
-   the gap-bridging slide happening live.
+1. `results/demo_ste2/*_anchor_grid.html` (or its `.svg`): the payoff figure, with
+   rows = species, columns = genes, and the STE2 column filled across all four.
+2. `results/demo_ste2/synvoy_report.json`: read `summary.headline` and the records
+   under `goi_dedup.records`; `target_gene` names the gene of the target's own
+   annotation that each call lies on. Do not read `total_raw_search_hits`: it is always
+   0 in this version, because the report does not receive the raw search hits.
+3. If the search bridged a gap between flanking genes in some genome, its log says so:
+   `grep -r "collinearity: bridged" results/demo_ste2/logs/`. That is the
+   gap-bridging slide happening live.
 
-## Measured runtimes
+## Run time
 
-Workstation: 12 cores, 15 GB RAM (~4 GB free), disk at 97 %.
+A few minutes on a workstation (about 4 minutes on 12 cores), so it fits a 10-minute
+slot. Time it once on the machine you present from. `--anchor_max_places 5` makes the
+search visit fewer windows and runs faster.
 
-| Run | Config | Wall time |
-|---|---|---|
-| cold, no cache | `low_mem` as shipped | **3m49s** (50 tasks, 2026-07) |
-| cold, no cache | `low_mem`, 2026-10-05 code | 3m56s (55 tasks incl. the parameter advisor) |
-| `-resume` | `low_mem` | 3m37s (10 tasks cached) |
-| cold, 2026-10-11 code (distances in gene units) | `low_mem`, test harness without the launcher | 3m59s; the code before the gene units in the same harness: 2m30s to 3m03s |
-
-The newest code is about a third slower on this demo: it searches 101 small windows where the code before searched 28 large ones (a tenth to a third of each 11 Mb genome instead of two thirds and more). With `--anchor_max_places 5` it searches 18 windows and takes 1m10s, with the same three calls.
-
-Comfortably inside a 10-minute slot, with room to spare. If you need to fill a
-longer slot, add a 4th target genome (~+1 min) rather than slowing anything down.
-
-`low_mem` is deliberate: 4 GB per search task and serialised forks, so the demo
-cannot OOM in front of an audience. On 11 Mb genomes the ceiling never binds.
+`low_mem` is deliberate: 4 GB per search task and one task at a time, so the demo
+cannot run out of memory in front of an audience. On 11 Mb genomes that limit never
+binds.
 
 ## Why the overrides live in `demo.config`
 
-`low_mem` ships one setting that is wrong for a *demo*: it sets `skip_tree = true`.
-`demo/demo.config` restores the gene tree. It deliberately does **not** raise
-`mmseqs_sensitivity` back from 7.0 to 9.5: measured on this demo, 9.5 costs +8 min
-for identical STE2 calls.
+`low_mem` has one setting that is wrong for a *demo*: it sets `skip_tree = true`.
+`demo/demo.config` turns the gene tree back on. It does **not** raise
+`mmseqs_sensitivity` from 7.0 to 9.5: on genomes this small, with neighbours this well
+conserved, the higher sensitivity costs minutes and gave the same STE2 calls.
 
 The override is in a config file to keep the command short. Passing it as a flag
-(`--skip_tree false`) works too. (Until 2026-08-21 numeric flags such as
-`--mmseqs_sensitivity 9.5` aborted the run with `Cannot compare java.lang.String …`;
-if you still see that, your checkout is old — `git pull`.)
+(`--skip_tree false`) works too.
 
-## What the result looks like (checked 2026-10-11)
+## What to expect
 
-```
-2 high-confidence + 1 medium-confidence GOI ortholog annotation(s) (+17 low-confidence) across 3 genome(s).
-```
-
-| Species | Call | Identity | Target's own gene name |
-|---|---|---|---|
-| *N. castellii* | HIGH | 66.0 % | STE2 |
-| *K. lactis* | HIGH | 47.8 % | STE2 |
-| *L. thermotolerans* | MEDIUM | 41.9 % | STE2 |
-
-Three orthologs, one per species, each on the gene that the target's own annotation calls
-STE2. Two things decide the labels. STE2 has one exon at home, so a one-exon model can be
-HIGH (until 2026-10-09 the main path asked for two exons, and *N. castellii* was HIGH only
-through the hull rescue). And the HIGH threshold of 50 % is lowered for a genome whose
-flanking genes are themselves diverged: in *K. lactis* they match at 55 % (median), which
-puts the threshold at 45 %.
-
-(Before 2026-07-26 the same run reported "1 high + 32 medium": weak hits at 21–28 %
-identity were promoted by their neighbourhood alone. An identity floor ended that, and the
-figures now hide fragment hits by default.)
+One STE2 ortholog in each of the three targets, each on the gene that the target's own
+annotation calls STE2 (`target_gene` in the record). The labels come from one rule for
+every call: the E-value of the home protein in the place the neighbours predict, whether
+another *S. cerevisiae* protein explains the model as well, and how much of the query the
+model covers ([ALGORITHM.md § 7.8](../docs/ALGORITHM.md#78-confidence)). Identity alone
+decides no label. Run the demo once before you present and note the headline it prints,
+because labels and counts can change between versions.
 
 ## Things to know before presenting
 
-- **Report and figures agree here.** All three calls come from the search itself, so the
-  anchor grid shows the same confidence as `synvoy_report.json`. In general the figures
-  draw the search's own models and not those of the rescue passes; a call that exists only
-  as a rescue model is in the report and in `results/<run>/rescue/locus_N/`.
-- **The 17 low-confidence items are hit fragments and weak models elsewhere in the
-  genome**, not candidates worth discussing. They are in the `*_with_fragments` figures
-  if someone asks.
-- **The search visits more, smaller places than before.** Distances are counted in gene
-  spacings of the home locus (2.4 kb here), so a block is a neighbourhood of some tens of
-  kb (the largest: 130 to 630 kb) instead of one to two megabases. The log prints the
-  distances used, one line per genome.
+- **The figures draw the search's own models,** not those of the rescue passes. A call
+  that exists only as a rescue model is in the report and in
+  `results/<run>/rescue/locus_N/`, but not in the anchor grid.
+- **The LOW items in the report are hit fragments and weak models**, not candidates
+  worth discussing. The default figures hide the fragment models; when a run has some,
+  the `*_with_fragments` figures show them as well.
+- **The search works in small neighbourhoods.** Distances are counted in gene spacings
+  of the home locus (about 2.4 kb in yeast), so a block is a neighbourhood of some tens
+  of kb. The first lines of each genome's GFF in `plot_inputs_*/` give the distances
+  used (`##synvoy-distances`).
+
+## Other demos
+
+- `demo/run_demo_insect.sh` runs the same kind of pro-mode demo on *Drosophila*: home
+  *D. melanogaster*, targets *D. simulans*, *D. yakuba* and *D. pseudoobscura*, default
+  query Defensin (`Adh` as the conserved control). Fetch the data once with
+  `demo/fetch_data_insect.sh`.
+- `demo/run_uniprot.sh <UniProt ID>` lets the audience pick a *D. melanogaster*
+  protein: it downloads the protein from UniProt and searches it in *D. pseudoobscura*,
+  with the insect demo's data. The script also names an *Anopheles gambiae* genome,
+  which `demo/fetch_data_insect.sh` does not download. To search it as well, save it as
+  `local_data/demo_insect/genomes/Anopheles_gambiae.fna` and its annotation as
+  `local_data/demo_insect/target_gffs/Anopheles_gambiae.gff`; without them the run
+  searches *D. pseudoobscura* only. The script's header lists IDs that are known to work.
+- `demo/demo_yeastscale.config` fixes the distances in base pairs, an experiment kept
+  only to reproduce it. By default SynVoy derives the distances for each home locus and
+  target genome.

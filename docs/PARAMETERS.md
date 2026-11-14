@@ -1,879 +1,1843 @@
-# SynVoy — Comprehensive Parameter Reference
+# SynVoy parameters
 
-This document provides in-depth explanations for every configurable parameter in SynVoy. Each entry describes the parameter's purpose, its effect on the pipeline, practical guidance for tuning, and the biological reasoning behind its default value. Parameters are grouped by functional category.
+Every parameter of SynVoy: what it does, its default and when to change it. The defaults are
+those in `nextflow.config`. How to start a run and choose a profile: [USAGE.md](USAGE.md).
+What each step computes: [ALGORITHM.md](ALGORITHM.md).
+
+**Setting a parameter.** On the command line with two dashes (`--max_genomes 10`), in a params
+file (`-params-file run.yaml`) or in a config file (`-c my.config`, as
+`params.max_genomes = 10`). Write a switch as a word (`--skip_tree false`), and a value that
+starts with a minus sign in quotes (`--modules 'auto,-short_query'`).
+
+**What else changes a default.**
+
+- **The profile.** `./run_synvoy.sh` without `-profile` runs `-profile auto,low_mem`. The memory
+  tiers `low_mem` and `laptop_safe` change these values
+  ([USAGE.md § 2](USAGE.md#memory-tiers)):
+
+  | Parameter | Default | `low_mem` | `laptop_safe` |
+  |---|---|---|---|
+  | `mmseqs_sensitivity` | 9.5 | 7.0 | 8.0 |
+  | `mmseqs_split_memory_limit` | 8G | 2G | 4G |
+  | `mmseqs_verbosity` | 1 | 0 | 0 |
+  | `iterative_search_cpus` | 2 | 1 | 1 |
+  | `iterative_search_memory` | auto | 4 GB | 8 GB |
+  | `locate_gene_memory` | 3 GB | 2 GB | 2 GB |
+  | `skip_tree` | false | true | false |
+
+- **The preset modules.** After SynVoy has found the gene in the home genome, the modules set up
+  to 25 parameters for that gene ([§ 1](#1-presets-and-preset-modules)). The entries below say
+  which module can change them.
+- **Your values win.** A value you set is kept over a module and a preset, as long as it
+  differs from the default in `nextflow.config`.
+
+What a run used is recorded with its results: the 32 settings that modules and presets decide,
+with the source of each value, in `intermediate/locate_gene/effective_params.json`
+([OUTPUT.md](OUTPUT.md#run_settings)). A parameter that SynVoy no longer has is listed under
+[Removed parameters](#20-removed-parameters).
+
+## Contents
+
+1. [Presets and preset modules](#1-presets-and-preset-modules)
+2. [Query and mode](#2-query-and-mode)
+3. [Easy mode: target genomes](#3-easy-mode-target-genomes)
+4. [Pro mode: your files](#4-pro-mode-your-files)
+5. [The home locus](#5-the-home-locus)
+6. [Flanking genes](#6-flanking-genes)
+7. [Distances in gene units](#7-distances-in-gene-units)
+8. [Genome-wide search and blocks](#8-genome-wide-search-and-blocks)
+9. [Search inside a window](#9-search-inside-a-window)
+10. [Gene models and labels](#10-gene-models-and-labels)
+11. [Gene prediction for a home genome without a GFF](#11-gene-prediction-for-a-home-genome-without-a-gff)
+12. [Region scores](#12-region-scores)
+13. [Rescue passes](#13-rescue-passes)
+14. [Ownership, paralog check and placement](#14-ownership-paralog-check-and-placement)
+15. [Optional steps: language model, structure, discovery](#15-optional-steps-language-model-structure-discovery)
+16. [Figures and tree](#16-figures-and-tree)
+17. [Resources](#17-resources)
+18. [Output and console](#18-output-and-console)
+19. [Calibration and comparison switches](#19-calibration-and-comparison-switches)
+20. [Removed parameters](#20-removed-parameters)
 
 ---
 
-## Quick start: pick a preset
+## 1. Presets and preset modules
 
-Most users don't need to tune individual parameters, and since 2026-10-09 not the distances either: how far apart two anchors may lie, how much DNA around a block is searched and similar distances are derived for each home locus and each target genome ([§ 5, Distances in gene units](#distances-in-gene-units)).
+After SynVoy has found the gene in the home genome, it sets up to 25 parameters for that
+gene: by default with the **preset modules**, under `--modules legacy` with one of four
+**presets**. A value you set yourself is kept. The rules, with every formula and cap:
+[ALGORITHM.md § 5.3](ALGORITHM.md#53-parameter-preset-and-preset-modules).
 
-SynVoy ships four named presets. Each holds only the values that have a reason for that kind of query; everything else is the default.
+### `modules`
+**Default:** `auto`
 
-| Preset | Chosen automatically when | What it changes |
+Which preset modules are applied.
+
+| Value | Applies |
+|---|---|
+| `auto` | every module whose trigger fires; an empty value counts as `auto` |
+| `'auto,-dispersed_family,+cys_framework'` | `auto` without, or with, the modules named |
+| `'short_query,local_family'` | exactly these modules, whether their trigger fires or not |
+| `none` | no module |
+| `legacy` | no module: the preset chooser picks one of the four presets and applies it ([below](#the-preset-chooser-under---modules-legacy)) |
+
+Write a value with a minus sign in quotes: Nextflow reads a bare `-x` as `true`. A module can be
+named by its id or its name (`A1` or `local_family`).
+
+| Id | Module | Fires when | Sets |
+|---|---|---|---|
+| A1 | `local_family` | the query covers its home locus 1.5 times or more, or a family member of the gene lies among the `n_flanking_genes` home genes on either side (found only with a home GFF and blastp) | `goi_relative_evalue`, `goi_candidate_regions_per_query`, `goi_max_models_per_locus`, `goi_margin_genes`, `sw_max_alignments_per_piece`, `report_copies_in_slot`, `locus_ownership_max_genes_per_locus`, `max_goi_per_genome` |
+| A2 | `dispersed_family` | the query aligns strongly at two or more home loci, and a locus other than the best covers at least half of it | `adaptive_score_floor_frac`, `adaptive_score_floor_abs`, `adaptive_max_regions`, `paralog_panel_max_family` |
+| A3 | `shared_domain` | the query aligns strongly at two or more home loci, and every other locus covers less than half of it | nothing (recorded only) |
+| B1 | `short_query` | the query is shorter than 100 aa | `classify_complete_min_qcov`, `classify_fragment_max_qcov`, `window_tblastn_word_size`, `window_tblastn_comp_stats`, `window_mmseqs_min_length`, `miniprot_short_orf_max_len`, `aug_relaxed_length_min`, `fallback_short_min_aln_aa`, `dispersed_goi_min_alnlen`, `goi_hull_min_coverage`; and a second home search without tblastn's low-complexity filter when the query has no hit in the home genome |
+| B2 | `low_complexity` | 10 % or more of the query lies in low-complexity windows, or 25 % or more in repeated 4-mers | `goi_relative_statistic`, `report_low_complexity` |
+| B3 | `signal_anchor` | the query has a signal peptide or a GPI-anchor signal | `core_completeness` |
+| B4 | `cys_framework` | six or more cysteines lie within 90 residues | nothing (recorded only) |
+| C1 | `exon_structure` | the home gene has two or more exons | `sw_max_alignments_per_piece`, `dispersed_goi_min_alnlen` |
+| C2 | `home_context` | the home gene lies within 40 kb of the end of a scaffold of 1 Mb or more | nothing (recorded only) |
+
+A strong locus scores at least half as much as the best one. Several modules can fire for one
+gene. Each parameter has a single rule, so two modules never set it to different values. No
+module changes the rules of the label; a module can still change a call's label, because it
+changes the evidence the label reads (B3, for example, also measures completeness on the core of
+the protein, [ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)).
+
+Every mode except `legacy`, `none` included, also lets the search set `anchor_max_places` per
+target genome ([§ 8](#anchor_max_places)) and, for a home genome without a GFF, chooses the
+Augustus model nearest the home species ([§ 11](#augustus_species)). Under `legacy` neither
+happens.
+
+The console lists the applied modules in one line, each with the reason it fired
+(`[INFO] modules (auto), applied: …`), then the values their rules set. `effective_params.json` records the modules, every value and its source
+(`default`, `module:A1`, `preset:<name>` or `user_set`), and `user_set_kept` lists the values of
+yours that were kept against a module or a preset.
+
+### `auto_apply_preset`
+**Default:** `true`
+
+`false` applies no module and no preset, not even one named with `--preset_override`: every one
+of the 32 settings keeps its default or the value you set. Use it to run with the plain
+defaults. What `--modules` does outside these settings stays: `anchor_max_places` per genome,
+the Augustus model, and the second home search of `short_query`.
+
+### `preset_override`
+**Default:** none
+
+Applies one preset by name, in every mode: under `--modules legacy` instead of the chooser's
+pick, otherwise on top of the modules, whose values it replaces where both set one. A value you
+set wins over both. `preset_single_copy` adds nothing.
+
+### Presets
+
+| Preset | Chosen under `--modules legacy` when | Sets (default) |
 |---|---|---|
-| `preset_short_peptide` | the query is shorter than 100 aa | the coverage bands of the model status, 0.5 / 0.3 (one missed exon is a large share of a short protein) |
-| `preset_paralog_discrimination` | the query aligns well at two or more places of the home genome, the second at least half as strong as the first | fewer candidate regions per genome in the figures (`adaptive_max_regions 4`, stricter score floors) |
-| `preset_tandem_family` | the home locus itself holds more than one copy of the gene | a neighbour counts as a relative of the gene of interest, and is not used as an anchor, up to a pairwise E-value of 1e-3 instead of 1e-5 |
-| `preset_single_copy` | none of the above | nothing |
+| `preset_short_peptide` | the query is shorter than 100 aa | `classify_complete_min_qcov 0.5` (0.7), `classify_fragment_max_qcov 0.3` (0.4): the coverage bands of a model's status, not its label |
+| `preset_paralog_discrimination` | the query aligns strongly at two or more home loci | `adaptive_score_floor_frac 0.45` (0.30), `adaptive_score_floor_abs 0.08` (0.03), `adaptive_max_regions 4` (6): fewer candidate regions per genome |
+| `preset_tandem_family` | the query covers its home locus 1.5 times or more | `goi_relative_evalue 1e-3` (1e-5): weaker relatives of the gene are not used as anchors either |
+| `preset_single_copy` | no hits, or none of the above | nothing |
 
-No preset moves the label of a GOI call (since 2026-10-15). One judge sets HIGH / MEDIUM / AMBIGUOUS / LOW for every call, from the E-value in the expected place, specificity against the home proteome and a completeness bar of 0.7 query coverage ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)); its thresholds are significance levels, the same for every query. The identity thresholds that the presets used to move (HIGH 40 / MEDIUM 30 / tandem 40 for short peptides; `strict_goi_family` in three presets) were removed with the identity-based label ([§ 20](#20-removed-parameters)).
+The module of the same kind (B1, A2, A1, none) sets the same values, and B1, A1 and A2 set more.
 
-Until 2026-10-09 `preset_short_peptide` also lowered four hit floors (`sw_min_score 10`, `sw_min_identity 8`, `min_hit_identity 8`, `min_hit_length 8`). They are no longer part of it, because lowering them changes nothing: the E-value filters of the search are stricter. A Smith-Waterman hit must reach E ≤ 1, which needs a raw score of 31 even for a 20-aa query in a 2 kb window (the floor is 20); inside a window the identity and length floors are `max(15, …)` for either value; and no alignment of 8–9 residues or 8–10 % identity reaches E ≤ 0.01 in a genome-wide search.
+A preset can also be given as a profile, after the execution profile:
+`-profile auto,low_mem,preset_short_peptide`. Its values then count as values you set: they win
+over the modules, and the modules still set everything else. `-profile preset_short_peptide`
+alone replaces the launcher's default `auto,low_mem`. The profile files are in `conf/presets/`
+and are named differently: `short_divergent_peptide.config`, `paralog_discrimination.config`,
+`tandem_family.config` and `single_copy_conserved.config`; one can also be passed with `-c`.
 
-"Aligns well" is counted in places, not in alignment rows: each exon and each search program adds rows, so a row count says little about a family (until 2026-10-08 the chooser used `n_hits > 15` and half of all queries, most with one strong locus, were given `preset_paralog_discrimination`). A place is scored as one copy of the gene (`one_copy_score` in `bin/sequence_utils.py`).
+### The preset chooser under `--modules legacy`
 
-To pin one by hand: `-profile <execution>,preset_short_peptide` (at launch) or `--preset_override preset_short_peptide`.
-
-**Preset modules** (`--modules`, since 2026-10-15) are the successor of the four presets: every kind of gene (short, low complexity, signal peptide, family members next to it, a full-length relative elsewhere, …) is a module that tests its own trigger, and they stack. The default `--modules auto` (since 2026-11-10) applies every module whose trigger fires, and the chooser's pick below is only recorded (`legacy_preset` in `effective_params.json`); `--modules legacy`, the default before, keeps the chooser and its preset exactly as above and only records which modules would fire; see [`modules`](#modules).
-
-`<execution>` is one of `auto`, `standard`, `conda`, `docker`, `docker_max`, `singularity`,
-`slurm`, `hpc_singularity`, `hpc_conda`, `lrz_ai`, `lrz_ai_container` — see
-[USAGE.md § 2](USAGE.md#2-execution-profiles) for the full table. A memory tier
-(`laptop_safe` / `low_mem`) is a *separate* axis you may add on top; presets compose with
-both via comma, e.g. `-profile auto,low_mem,preset_short_peptide`.
-
-Equivalent invocation with `-c` (no profile composition):
-```
-./run_synvoy.sh -c conf/presets/<preset_name>.config ...
-```
-
-Preset source files live in [`conf/presets/`](../conf/presets/) — copy and edit them as a starting point for query-specific tweaks. The full reference below documents every individual parameter for users who need finer control.
-
-### Preset auto-apply (default ON since 2026-05-29)
-
-Under `--modules legacy` (the default before 2026-11-10; the default `auto` applies the preset modules instead, see above) you don't have to pick a preset by hand either. After `LOCATE_GENE` finishes, SynVoy profiles the BLAST/MMseqs2 hit distribution (`intermediate/locate_gene/hit_profile.json`), picks the matching preset (`intermediate/locate_gene/auto_preset.json`), and **applies it at runtime** to the downstream steps (`EXTRACT_FLANKING`, `ITERATIVE_SEARCH`, `CLUSTER_REGIONS`) via a value channel — no pipeline restart needed. The chosen preset is logged as:
+The chooser reads the query's hits in the home genome and takes the first rule that matches: no
+hits, `preset_single_copy`; a query shorter than 100 aa, `preset_short_peptide`; two or more
+strong loci, `preset_paralog_discrimination`; a home locus covered 1.5 times or more,
+`preset_tandem_family`; otherwise `preset_single_copy`. Under the other modes its pick is only
+recorded (`legacy_preset` in `effective_params.json`). The console names the preset:
 
 ```
 [INFO] §1f preset applied: preset_paralog_discrimination (auto_preset.json chose preset_paralog_discrimination)
 ```
 
-Knobs:
+Under the default `--modules auto` the same line reads `preset applied: none (modules auto: …)`,
+followed by the line of the modules.
 
-- **A value you set yourself wins over the preset** (since 2026-10-05). Any preset-covered parameter whose launch-time value differs from the default shipped in `nextflow.config` — whether you set it on the command line, in a params file, a `-c` config or through a `-profile` — is kept, and `intermediate/locate_gene/effective_params.json` records it (`source: user_set`, and `user_set_kept` when the preset wanted a different value). Before that date the preset silently overwrote it. The one case that cannot be detected is explicitly passing the *shipped default* (e.g. `--goi_relative_evalue 1e-5`): to pin a default against a preset, use the next option.
-- `--auto_apply_preset false` keeps the recommendation advisory-only: no preset value is applied at all.
-- `--preset_override preset_X` pins a specific preset, bypassing the hit-profile decision. Combine with `--auto_apply_preset true` (the default) to apply it at runtime, or use `-profile preset_X` to apply it at launch.
+### The 32 settings
 
-The minimum query length is not part of any preset: it is 20 aa for every run (`min_query_length`), and a query of 20–39 aa gets a warning. The preset-covered parameters are the Smith–Waterman and hit floors, the model-status coverage bounds, `expand_goi_similar`, the family names, the adaptive-region limits and `goi_relative_evalue`.
-
-The Python `PRESET_OVERRIDES` table in `bin/resolve_effective_params.py` is the single source of truth; `tests/test_resolve_effective_params.py::test_preset_overrides_match_groovy_configs` keeps the Groovy `.config` files in lockstep so `-profile preset_X` and `--auto_apply_preset` produce identical effective values.
-
----
-
-## Table of Contents
-
-1. [Input & Mode Selection](#1-input--mode-selection)
-2. [Easy Mode](#2-easy-mode)
-3. [Pro Mode](#3-pro-mode)
-4. [Synteny & Flanking Gene Extraction](#4-synteny--flanking-gene-extraction)
-5. [Search Parameters](#5-search-parameters)
-6. [Smith-Waterman Local Search](#6-smith-waterman-local-search)
-7. [Augmented / Relaxed Search](#7-augmented--relaxed-search)
-8. [MMseqs2 Configuration](#8-mmseqs2-configuration)
-9. [Annotation & Gap Filling](#9-annotation--gap-filling)
-10. [Gene Prediction](#10-gene-prediction)
-11. [Gene Model Classification](#11-gene-model-classification)
-12. [Synteny Scoring Weights](#12-synteny-scoring-weights)
-13. [PLM (Protein Language Model) Search](#13-plm-protein-language-model-search)
-14. [Structural Search (ESMFold + Foldseek)](#14-structural-search-esmfold--foldseek)
-15. [Visualization](#15-visualization)
-16. [Resource Tuning](#16-resource-tuning)
-17. [LLM Parameter Estimation (removed)](#17-llm-parameter-estimation-removed)
-18. [Advanced & Output](#18-advanced--output)
-19. [Auto-Apply Preset, Self-Consistency & Rescue](#19-auto-apply-preset-self-consistency--rescue)
-20. [Removed parameters](#20-removed-parameters)
-
-> **Not everything is in this file.** Several newer parameter groups are documented as
-> tables in [USAGE.md § 4](USAGE.md#4-full-parameter-reference) rather than as long-form
-> entries here: the multi-locus cap (`--max_loci`), the rescue passes (strong-synteny, GOI hull, dispersed-GOI),
-> locus ownership and paralog discrimination, distance auto-tuning and structural
-> discovery.
-> Between the two documents every parameter in `nextflow.config` is covered.
+Modules and presets act on 32 parameters, which travel together from the settings step to the
+later steps: the 25 a module can set (listed above) and 7 that no module sets
+(`sw_min_score`, `sw_min_identity`, `min_hit_identity`, `min_hit_length`, `expand_goi_similar`,
+`goi_family_tokens`, `adaptive_unique_gene_floor`). The minimum query length is not among them:
+it is checked before, and no module or preset changes it.
 
 ---
 
-## 1. Input & Mode Selection
+## 2. Query and mode
 
 ### `mode`
-**Type:** String | **Default:** `'easy'` | **Options:** `'easy'`, `'pro'`
+**Default:** `easy` (`easy` or `pro`)
 
-Controls which execution path the pipeline follows. In **Easy Mode**, SynVoy handles genome retrieval automatically: it resolves the query protein via UniProt or NCBI, fetches the home genome and GFF annotation from NCBI Datasets, selects related target genomes based on taxonomic relationships, and downloads them. This is the recommended mode for most users who want a turnkey experience. In **Pro Mode**, the user supplies all input files directly — the query FASTA, the home genome, an optional GFF, and target genome files. Pro Mode works entirely offline and gives the user full control over which genomes are searched. The mode choice fundamentally determines which downstream processes are activated: Easy Mode triggers genome fetching, assembly QC, and taxonomic auto-selection processes, while Pro Mode skips all of these and feeds files directly into the analysis pipeline.
+- `easy`: SynVoy fetches the query protein (by accession, gene symbol or sequence), the home
+  genome with its annotation and the target genomes from UniProt and NCBI, and chooses the
+  targets by taxonomy ([§ 3](#3-easy-mode-target-genomes)).
+- `pro`: you give the files ([§ 4](#4-pro-mode-your-files)). SynVoy downloads no query and no
+  genome. It still uses the network when it can, to order the target genomes by NCBI taxonomy;
+  without it, it orders them by a sequence distance. The first run also needs the network to
+  build the tool environment.
+
+Both modes check the target FASTA files before the search ([`qc_fail_policy`](#qc_fail_policy)).
 
 ### `query`
-**Type:** Path (String) | **Default:** `null`
+**Default:** none
 
-Path to a local query protein FASTA file. This is the primary input for Pro Mode and an alternative input for Easy Mode. The file should contain a single protein sequence (or DNA sequence, which SynVoy will auto-translate to the best open reading frame). The query protein defines the Gene of Interest (GOI) — the gene you want to find orthologs of across target genomes. When provided alongside `--mode easy`, this file is used instead of fetching the protein from UniProt/NCBI. The pipeline extracts the protein name, estimates exon count, and checks for signal peptides from this sequence. If the FASTA contains multiple sequences, only the first is used as the GOI. The file path should be absolute or relative to the Nextflow launch directory.
+A FASTA file with the query: a protein, or a DNA sequence that SynVoy translates (the longest
+open reading frame in six frames). Only the first sequence of the file is used, with a warning.
+Pro mode needs it. In easy mode it replaces the download, and then `--home_species` is required,
+because a file names no organism.
+
+Give an absolute path: `run_synvoy.sh` starts the pipeline from the SynVoy folder, so a relative
+path is read from there, not from the folder you started the launcher in.
+
+The first word of the header names the gene in every output. It may not contain `|exon_`,
+`|frag_`, `|slide_`, a `|` or any of `,` `;` `=` `&` `%`. The usual database forms are read as
+their accession: `sp|P12345|NAME` and `tr|…|…` (UniProt), `ref|XP_1.1|`, `gb|…`, `emb|…`,
+`dbj|…`, `lcl|X`.
 
 ### `query_id`
-**Type:** String | **Default:** `null`
+**Default:** none (easy mode)
 
-A UniProt accession (e.g., `P01501`, `Q16553`) or NCBI protein ID used in Easy Mode to automatically fetch the query protein sequence, its annotation, and associated metadata. When SynVoy receives a `query_id`, it contacts the UniProt API (or NCBI Protein if UniProt fails) to download the full protein sequence, identify the source organism (which becomes the home species unless overridden), and gather functional annotations including signal peptides, domain families, and gene family size estimates. Using `query_id` is the simplest way to run SynVoy — a single accession plus a target species list is enough to launch a complete analysis.
+An accession or a gene symbol. SynVoy reads the source from the format: a UniProt accession
+(`P01501`) is fetched from UniProt, an NCBI protein accession (`XP_006565763.1`, version
+optional) from NCBI Protein. Anything else is taken as a gene symbol and looked up in UniProt
+for the species given with `--home_species`. From the record SynVoy takes the sequence, the
+source organism (the home species, unless you set `--home_species`), the protein name and, from
+UniProt, the gene symbol.
 
 ### `query_seq`
-**Type:** String | **Default:** `null`
+**Default:** none (easy mode)
 
-An inline protein sequence or FASTA-formatted text passed directly on the command line, without needing a file on disk. This is useful for quick ad-hoc searches where creating a FASTA file would be unnecessary overhead. The sequence can be a raw amino acid string (e.g., `MKFLVNVALVFMVVYISYIY...`) or a complete FASTA block with a header line. When using `query_seq`, the pipeline cannot automatically determine the source organism, so **`--home_species` is required**. SynVoy writes the inline sequence to a temporary FASTA file internally, then proceeds identically to the `--query` path. This parameter is mutually exclusive with `--query` and `--query_id`; providing more than one query source will cause a validation error at pipeline startup.
+The query as text on the command line: a sequence or a whole FASTA record. `--home_species` is
+required with it. Pro mode ignores it and needs `--query`.
 
----
-
-## 2. Easy Mode
+Give one query source. With two, easy mode uses the first in the order `--query_seq`, `--query`,
+`--query_id`, and warns when one of the two is `--query`; with all three, the run stops at the
+start (unless `--query_id` holds a sequence).
 
 ### `home_species`
-**Type:** String | **Default:** `null` (auto-detected)
+**Default:** none (easy mode: the organism of the query's record)
 
-Specifies the reference organism whose genome will serve as the "home" genome — the genome in which the GOI is first located and from which flanking synteny anchors are extracted. In Easy Mode, this is normally auto-detected from the query protein's source organism in UniProt/NCBI. However, you can override it when the auto-detected species is wrong (e.g., the protein was characterized in a model organism but you want to use a different reference assembly), or when using `--query_seq` where no organism metadata exists. The species name must match an NCBI Taxonomy entry (e.g., `"Homo sapiens"`, `"Apis mellifera"`). SynVoy uses this to fetch the best available genome assembly from NCBI Datasets, query species-level genomic statistics (genome size, gene count, N50), and establish the phylogenetic root for target genome ordering.
+The species whose genome is the home genome, as an NCBI Taxonomy name (`"Apis mellifera"`).
+
+- **Easy mode.** Set it when the query names no organism (always with `--query_seq` or a local
+  `--query` file) or to use another species than the record's. SynVoy downloads that species'
+  reference genome, else its best-ranked assembly, else, with a warning, the genome of its
+  closest relative that has one.
+- **Pro mode.** It orders the target genomes. Without it, SynVoy takes the home genome's file
+  name as the species name (`Apis_mellifera.fna`), with a warning. A file name that is an
+  assembly accession (`GCF_…`, `GCA_…`) or a generic word (`genome`, `reference`, `home`, …)
+  stops the run at the start, unless you set `--allow_unknown_species true`.
+
+### `allow_unknown_species`
+**Default:** `false` (pro mode)
+
+`true` lets a pro-mode run start when no home species is given and none can be read from the
+home genome's file name. The targets are then ordered without the home species' taxonomy.
+
+### `min_query_length`
+**Default:** `20` (aa)
+
+A shorter query stops the run before the search; `0` switches the check off. A query of 20 to
+39 aa runs with a warning in the console: in another genome only a nearly identical ortholog of
+so short a sequence can be told from a chance match, so calls rest on the neighbourhood. If it
+is the mature part of a longer precursor, the precursor is the better query. No module or preset
+changes this value.
+
+---
+
+## 3. Easy mode: target genomes
 
 ### `max_genomes`
-**Type:** Integer | **Default:** `0` (auto)
+**Default:** `0` (auto)
 
-Controls how many related target genomes SynVoy fetches in Easy Mode. When set to `0` (the default), SynVoy uses an adaptive taxonomic sampling strategy: it walks up the taxonomic tree from the home species (genus → family → order → class → phylum) and selects approximately 3 representative species at each level, choosing those with the best available genome assemblies. This produces a phylogenetically balanced set that samples both close relatives (for high-confidence synteny) and distant relatives (for evolutionary reach). Setting a specific number (e.g., `--max_genomes 5`) caps the total number of target genomes fetched. Lower values speed up the pipeline and reduce downloads; higher values provide broader phylogenetic coverage but increase runtime linearly. For quick tests, `--max_genomes 1` with a specific `--target_species` is recommended.
+How many target genomes easy mode fetches. With `0` SynVoy walks up the NCBI taxonomy from the
+home species (genus, family, order and class) and takes 3 species per level, at most 20 in all,
+each with its best-ranked assembly ([`assembly_ranking`](#assembly_ranking)). A number caps the
+total; each level gets at least 2, and places a level cannot fill go to the next one. It is not
+used with `--target_species`.
 
-> **Warning — single-genome searches are under-powered.** Synteny scoring derives its signal from *consensus across species*: when 7 flanking genes appear in the same order across 3+ target genomes, fallback GOI hits can be classified as `probable_goi`. With a single target genome there is no cross-species conservation evidence, so fallback hits almost always end up labelled `ambiguous_goi_family_member` or `tandem_goi_copy`, even when the correct locus has been found. The pipeline logs a warning when `max_genomes < 3`. Prefer `max_genomes >= 3` for any analysis where orthology calls matter.
+With `--max_genomes` 1 or 2 the console warns. Each call is labelled from the evidence in its own
+genome, so the labels mean the same with one target as with many. More targets help in other
+ways: the confident calls of closer genomes become queries for the more distant ones, and the
+phylogenetic placement check needs at least 4 calls ([§ 14](#phylo_placement_min_calls)).
 
 ### `target_species`
-**Type:** String (comma-separated) | **Default:** `null` (auto-selected)
+**Default:** none
 
-A comma-separated list of species names to use as target genomes instead of automatic taxonomic sampling. When provided, SynVoy fetches the best available genome assembly for each named species from NCBI Datasets, bypassing the taxonomic tree walker entirely. This is useful when you have specific organisms of interest (e.g., `"Gallus gallus,Mus musculus,Danio rerio"`) or when the automatic selection picks unsuitable genomes. Each species name must match an NCBI Taxonomy entry. If a species cannot be found or has no genome assembly available, SynVoy logs a warning and continues with the remaining species. This parameter can be combined with `--max_genomes` — if both are provided, the explicit species list takes priority and `max_genomes` serves as a cap on how many of the listed species are actually processed.
+A comma-separated list of species to use as targets instead of the taxonomy walk
+(`"Gallus gallus,Mus musculus"`). SynVoy fetches each species' best-ranked assembly; a species
+that NCBI does not know or that has no assembly is skipped with a warning. Every listed species
+is fetched: `--max_genomes` is not used. For a quick test, name two or three species.
 
 ### `assembly_ranking`
-**Type:** String | **Default:** `'hybrid'` | **Options:** `'hybrid'`, `'counts'`, `'nstats'`
+**Default:** `hybrid` (`hybrid`, `counts` or `nstats`)
 
-Determines how SynVoy ranks multiple genome assemblies for the same species to select the best one. When NCBI has several assemblies for a species (common for model organisms), this parameter controls the selection heuristic. **`hybrid`** (recommended) combines both contiguity statistics (N50, scaffold count) and annotation completeness (gene count, RefSeq status) into a composite score, balancing assembly quality with annotation richness. **`counts`** ranks purely by annotation completeness — preferring assemblies with more annotated genes and RefSeq status, which is useful when you need GFF annotations for flanking gene extraction. **`nstats`** ranks purely by contiguity — preferring assemblies with higher N50 and fewer scaffolds, ideal when assembly completeness matters more than annotation. The hybrid approach works best in most cases because SynVoy benefits from both good contiguity (for accurate synteny blocks) and rich annotations (for flanking gene extraction).
+Which assembly of a species is used. Every mode first prefers the NCBI status (reference genome,
+representative genome, other RefSeq, GenBank) and then the assembly level (chromosome, complete,
+scaffold, contig). Then:
+
+- `hybrid`: fewer contigs, fewer scaffolds, then a larger contig N50 and scaffold N50;
+- `counts`: fewer chromosomes, scaffolds and contigs, then a larger N50;
+- `nstats`: a larger N80 and N50, then fewer contigs and scaffolds.
+
+Counts are used only where NCBI's record gives them. No mode looks at the gene annotation. For
+the home genome, the species' reference genome is taken when there is one.
 
 ### `bad_quality_policy`
-**Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'drop'`, `'keep'`, `'ask'`
+**Default:** `auto` (`auto`, `drop`, `keep` or `ask`)
 
-What happens to an assembly that fails the quality limits (`bad_min_n50`, `bad_max_contigs`, `bad_max_scaffolds`) when genomes are fetched in easy mode. Chromosome-level and complete assemblies always pass.
+What happens at download (easy mode) to an assembly of low quality: its larger N50 (contig or
+scaffold) is below `bad_min_n50`, a contig or scaffold count that NCBI gives is above
+`bad_max_contigs` or `bad_max_scaffolds`, or it is a contig-level assembly without any of these
+figures. Chromosome-level and complete assemblies always pass.
 
-- **`auto`** (default) depends on who chose the genome. An assembly the pipeline picked on its own, while walking up the taxonomy, is dropped: another species takes its place. An assembly the user asked for is kept and flagged: a species named in `--target_species`, and the home assembly, which follows from the query. For these there is nothing to fall back to, and leaving the genome out silently would read as "no gene found there".
-- **`drop`** removes every low-quality assembly, also a named species. A low-quality home assembly then stops the run.
-- **`keep`** keeps every one.
-- **`ask`** prompts on the terminal for each (see `bad_quality_timeout`).
+- `auto`: an assembly the taxonomy walk picked is dropped, and no other species takes its place,
+  so the run can have fewer targets. An assembly you asked for is kept with a warning: a species
+  named in `--target_species`, and the home assembly.
+- `drop`: every low-quality assembly is dropped. A low-quality home assembly stops the run.
+- `keep`: every one is kept at download. Without `--target_species`, a kept target can still be
+  dropped by the check of its FASTA file, unless you also set `--qc_fail_policy keep`.
+- `ask`: SynVoy asks on the terminal ([`bad_quality_timeout`](#bad_quality_timeout)).
 
-A kept low-quality genome is marked in the console, in `synvoy_report.json` (`warnings`) and in the figures (a dagger after the species name). A gene that is not found in it may be missing from the assembly, not from the species.
+A low-quality home assembly is not marked in the results: its warning appears only in the log of
+the download step. Targets are marked by the FASTA check ([`qc_fail_policy`](#qc_fail_policy)).
 
 ### `bad_quality_timeout`
-**Type:** Integer (seconds) | **Default:** `300`
+**Default:** `300` (seconds)
 
-The number of seconds SynVoy waits for a user response when `bad_quality_policy` is set to `'ask'`. During this window, the pipeline pauses and displays the assembly name, contig count, scaffold count, and N50 value, then asks whether to keep or drop the assembly. If the timeout expires without user input, the assembly is dropped (fail-safe behavior). This parameter only has an effect when `bad_quality_policy = 'ask'`; it is ignored for `'drop'` and `'keep'` policies. A 5-minute default gives users enough time to evaluate the metrics, but you can increase it for batch runs where you might not be watching the terminal continuously. Setting it very high (e.g., 86400) effectively makes the pipeline wait indefinitely for input.
-
-### `bad_max_contigs`
-**Type:** Integer | **Default:** `500000`
-
-Applies only when the contig count of an assembly is known. NCBI's assembly records carry N50 values but no counts, so for most assemblies the decision rests on the assembly level (chromosome-level and complete assemblies always pass) and on `bad_min_n50`. The same holds for `bad_max_scaffolds`.
-
-The maximum number of contigs an assembly can have before it is flagged as low quality. Assemblies with more contigs than this threshold are subject to the `bad_quality_policy`. Contig count is a proxy for assembly fragmentation — a highly fragmented assembly has hundreds of thousands of small contigs, meaning genes and their flanking regions are often split across multiple pieces. This breaks synteny analysis because the pipeline cannot reliably identify the genomic neighborhood of a gene when that neighborhood spans multiple unlinked contigs. The default of 500,000 is permissive; most reasonable genome assemblies have far fewer contigs. Lowering this threshold (e.g., to 50,000) enforces stricter quality requirements, which improves synteny reliability but may exclude draft-quality genomes for non-model organisms.
-
-### `bad_max_scaffolds`
-**Type:** Integer | **Default:** `500000`
-
-The maximum number of scaffolds an assembly can have before it is flagged as low quality. Similar to `bad_max_contigs`, this measures assembly fragmentation but at the scaffold level (scaffolds are ordered/oriented contigs joined by gaps). Scaffold count matters because SynVoy identifies syntenic blocks by clustering flanking gene hits that are nearby on the same scaffold. When a genome has too many scaffolds, flanking genes may be scattered across different scaffolds even if they are physically adjacent in the real genome, producing artificially low synteny scores and missed candidate regions. The default of 500,000 is generous. For chromosome-level assemblies this value is typically under 100, while for draft assemblies it might be in the thousands. Tighten this value if you want to restrict analysis to higher-quality assemblies only.
+Only with `bad_quality_policy ask`: how long SynVoy waits for an answer. Without an answer the
+answer is no: a target assembly is dropped, and a home assembly stops the run. Without an
+interactive terminal SynVoy waits the full time and then answers no.
 
 ### `bad_min_n50`
-**Type:** Integer (bp) | **Default:** `5000`
+**Default:** `5000` (bp)
 
-The minimum N50 value (in base pairs) an assembly must have to pass quality filtering. N50 is the length such that 50% of the total assembly is contained in contigs/scaffolds of this length or longer — it measures assembly contiguity. A low N50 means the assembly is composed of many short fragments, which is problematic for synteny analysis because candidate syntenic blocks (typically 100–500 kb) may be larger than the longest scaffold. The default of 5,000 bp is extremely permissive, accepting essentially any assembly. For reliable synteny analysis, an N50 of at least 100,000 bp (100 kb) is recommended. Consider setting this to 50,000–100,000 for stricter quality control. Assemblies below this threshold are handled according to `bad_quality_policy`.
+The smallest N50 of an assembly that is not low quality. At download it is compared with the
+larger of the contig and scaffold N50 in NCBI's record ([`bad_quality_policy`](#bad_quality_policy));
+the check of the target FASTA files compares it with the N50 of the file's sequences
+([`qc_fail_policy`](#qc_fail_policy)). The default passes almost every assembly. A gene whose
+neighbourhood is split over several pieces is hard to place, so raise it to 50,000–100,000 to
+keep only contiguous assemblies.
+
+### `bad_max_contigs`
+**Default:** `500000`
+
+The largest number of contigs of an assembly that is not low quality. At download it acts only
+when NCBI's record gives a contig count, which is rare; the check of the target FASTA files
+counts the sequences of each file and compares them with it, at every assembly level.
+
+### `bad_max_scaffolds`
+**Default:** `500000`
+
+The same for scaffolds, at download only and only when NCBI's record gives a scaffold count. To
+keep only contiguous assemblies, raise `bad_min_n50` instead.
 
 ### `qc_fail_policy`
-**Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'drop'`, `'keep'`
+**Default:** `auto` (`auto`, `drop` or `keep`)
 
-What happens to a target genome that fails the quality check made on the FASTA file itself before the search: an N50 below `bad_min_n50` or more sequences than `bad_max_contigs`. The check runs in both modes.
+What happens to a target genome that fails the check of its FASTA file before the search: an N50
+below `bad_min_n50`, or more sequences than `bad_max_contigs`. The check runs in both modes, on
+plain `.fna`, `.fa` and `.fasta` files; a gzipped target is not checked.
 
-- **`auto`** (default) keeps the genome, flagged, when the user chose the genomes: in pro mode, and in easy mode with `--target_species`. It drops the genome when the pipeline chose the targets (easy mode without `--target_species`).
-- **`drop`** removes every failed genome before the search. If all fail, all are kept.
-- **`keep`** searches every genome.
+- `auto`: the genome is kept, and marked, when you chose the targets (pro mode, or easy mode with
+  `--target_species`); it is dropped when SynVoy chose them.
+- `drop`: every failed genome is removed. If all fail, all are kept.
+- `keep`: every genome is searched.
 
-A kept genome that failed is named in a `[WARN]` line of the console and in the run summary, listed in `synvoy_report.json` under `warnings` and `summary.low_quality_genomes_searched`, its calls carry `low_quality_assembly: true`, and its row is marked with a dagger (†) in the figures, with one line in the legend. Before 2026-10-08 the default was `drop` in every mode, so a genome supplied in pro mode could disappear from the results without a row.
+A kept genome that failed is named in a `[WARN]` line of the console and in the run summary,
+listed in `synvoy_report.json` under `warnings` and `summary.low_quality_genomes_searched`, its
+calls carry `low_quality_assembly: true`, and its row in the figures has a dagger (†). A gene
+that is not found in such a genome may be missing from the assembly, not from the species.
 
 ---
 
-## 3. Pro Mode
+## 4. Pro mode: your files
+
+File names become genome names inside sequence ids and GFF attributes. Use only letters,
+digits, `.`, `_` and `-`, and give each target a name of its own before the extension
+(`Apis.fa` and `Apis.fna` collide); otherwise the run stops at the start. A sequence is named by
+the first word of its FASTA header, in the home genome and in every target; database forms such
+as `lcl|X` or `ref|X|` work. A step stops when two records share a name, when the id of a home
+gene used as a flanking gene contains a `|`, or, for a home genome without a GFF, when a sequence
+name contains a `|` (SynVoy reads a gene id up to its first `|`).
 
 ### `home_genome`
-**Type:** Path (String) | **Default:** `null`
+**Default:** none
 
-Path to the reference genome FASTA file (`.fna` or `.fna.gz`) in Pro Mode. This genome serves as the "home" where the GOI is located and flanking synteny anchors are extracted. The quality of this genome directly impacts the entire analysis: a fragmented home genome will produce incomplete flanking gene sets, reducing synteny sensitivity across all targets. Chromosome-level or scaffold-level assemblies are strongly preferred. The genome can be gzip-compressed (`.fna.gz`) — SynVoy handles decompression automatically. The file must contain nucleotide sequences (not protein). SynVoy locates the GOI within this genome using tblastn and MMseqs2, then uses the GFF annotation (if provided via `--home_gff`) or Prodigal/Augustus gene prediction to identify the flanking genes that form the synteny anchors.
-
-A sequence's name is the first word of its FASTA header, whole, in the home genome as in a target: the aligners, samtools and the GFF use that word, and SynVoy reads the MMseqs2 tables by it (their header columns; since 2026-11-09 names MMseqs2 itself rewrites, such as `lcl|X`, `ref|X|`, `gi|1|ref|X|`, `uc...`, `consensus_...`, work). Two records with one name stop the task, and so do a `|` in a flanking gene id (since 2026-11-09) and, without a home GFF, a `|` in a home sequence name (since 2026-11-02): SynVoy reads a gene id up to its first `|`. See [Troubleshooting in USAGE.md](USAGE.md#8-troubleshooting).
+The home genome as a nucleotide FASTA file. Give it uncompressed (`.fna`, `.fa` or `.fasta`):
+the home search builds its BLAST database from the file as it is. A contiguous assembly gives
+complete sets of flanking genes. Give `--home_species` with it ([§ 2](#home_species)).
 
 ### `home_gff`
-**Type:** Path (String) | **Default:** `null`
+**Default:** none (optional)
 
-Path to a GFF3 annotation file for the home genome. While optional, providing a GFF is **highly recommended** because it dramatically improves flanking gene extraction. With a GFF, SynVoy can identify the exact gene models surrounding the GOI, extract their protein sequences with correct exon-intron boundaries, and compute precise GOI-similarity scores for filtering. Without a GFF, the pipeline falls back to ab initio gene prediction using Augustus (eukaryotes) or Prodigal (prokaryotes), which is less accurate — predicted genes may have incorrect boundaries, miss small exons, or merge adjacent genes. The GFF must be in GFF3 format and correspond to the same assembly as `--home_genome`. Features of type `CDS`, `gene`, and `mRNA` are parsed. Annotations from NCBI, Ensembl, or other standard sources work without modification.
+The home genome's annotation, as plain (uncompressed) GFF3 of the same assembly. Its first column
+must name the FASTA's records by the first word of their headers; a GFF that shares no sequence
+name with the FASTA stops the run. With it, SynVoy uses the annotated gene models around the GOI
+and their proteins. Each neighbour is tested for being a relative of the GOI before it becomes
+an anchor ([`goi_relative_evalue`](#goi_relative_evalue)).
 
-### `home_genetic_code` / `target_genetic_codes` / `default_target_genetic_code`
-**Type:** Integer / Path (TSV) / Integer | **Defaults:** `1` / `''` / `1`
-
-NCBI genetic codes (since 2026-10-15). Every translation of a genome uses its table: on the home side the query (when it is DNA), the home search of `LOCATE_GENE` (MMseqs2 `--translation-table`, tblastn `-db_gencode`), the home gene model, the home proteome and the flanking proteins; on a target genome the genome-wide and window searches, Smith-Waterman, miniprot (`-T`), the label's own translations (frame guard, blastp subjects), gene prediction and the two rescue passes. `--target_genetic_codes` is a TSV of `genome<TAB>table` (the genome as its file name, with or without the extension; a header line and `#` lines are skipped); a target not named there uses `--default_target_genetic_code`. Supported are the tables every engine translates with: 1–6, 9–16, 21–31 (MMseqs2 has no 33). Examples: the CUG-Ser1 yeasts (*Candida albicans* and relatives, *Debaryomyces*, *Clavispora*) use table 12, *Pachysolen* 26, most ciliates 6. With table 1 everywhere (the default) no engine gets a genetic-code option, so a default run's commands and results do not change; a table other than 1 is written as `##synvoy-genetic-code N` into each target's result GFF and as the `genetic_code` column of `target_policy` in the report. Prodigal in metagenome mode (`-p meta`, the gene predictor used without a home annotation) translates with its own tables 11 or 4 and only warns.
+Without it, SynVoy predicts the home genes near the query's hits (Augustus when it is installed,
+Prodigal otherwise; [§ 11](#11-gene-prediction-for-a-home-genome-without-a-gff)) and adds the
+gene models of the closest annotated target genome. Predicted genes can have wrong boundaries,
+miss small exons or merge neighbouring genes, and the report marks the home annotation as
+partial.
 
 ### `target_genomes`
-**Type:** String (glob/paths) | **Default:** `null`
+**Default:** none
 
-Specifies the target genome files to search for GOI orthologs in Pro Mode. This parameter accepts three formats: (1) a glob pattern like `"genomes/*.fna"` that matches multiple files, (2) a comma-separated list of paths like `"genome_a.fna,genome_b.fna"`, or (3) a Nextflow list/channel expression. Each target genome is an independent nucleotide FASTA file (`.fna` or `.fna.gz`) representing a different species or strain. SynVoy processes targets in phylogenetic order (nearest to the home species first), using evolutionary distance estimates from NCBI taxonomy. The iterative search strategy means that genes discovered in closer relatives are added to the search database, improving sensitivity for more distant targets. Providing targets ordered from close to distant relatives maximizes this iterative benefit, though SynVoy handles reordering automatically when taxonomic information is available.
+The target genomes: a folder (every `.fna`, `.fa` or `.fasta` file in it, plain or gzipped), a
+quoted glob (`"genomes/*.fna"`), a comma-separated list (`"a.fna,b.fna"`), or a list in a config
+file (`params.target_genomes = ['a.fna', 'b.fna']`). Each file is one species or strain. The
+order in which you list them does not matter: SynVoy orders them by their distance to the home
+species, by NCBI taxonomy (a local ETE3 database, or NCBI Datasets for files named by a `GCF_` or
+`GCA_` accession) and, where that fails, by a MinHash distance to the home genome.
+`intermediate/phylo_sort/sort_provenance.json` records the method. Without targets, SynVoy only
+analyses the home genome.
 
 ### `target_gffs`
-**Type:** String (folder/glob/paths) | **Default:** `null` | **Pro Mode only**
+**Default:** none (pro mode)
 
-Optional annotations for the target genomes. `--target_genomes` is FASTA-only by design, so annotations are supplied through this separate parameter — genomes and GFFs therefore live in two different folders (or globs, or comma-separated lists). Each annotation is matched to its genome by filename stem (`cow.fna` ↔ `cow.gff`) or, failing that, by assembly accession (`GCF_002263795.1.fna` ↔ `GCF_002263795.1_ARS-UCD1.2_genomic.gff`), then linked next to that genome under the one filename the search layer probes. `.gff`, `.gff3` and `.gtf` are accepted, plain or gzipped; gzipped input is decompressed during staging so every consumer can read it. Annotating a subset of targets is legitimate and does not fail the run, but an annotation that matches *no* genome is a hard error by default — this is deliberate, because the silent failure mode (a run that quietly produces no annotation-derived evidence at all) is far more expensive than a launch-time stop. Set `allow_unmatched_target_gffs = true` to downgrade that to a warning.
+Annotations of the target genomes, given apart from the FASTA files: a folder, a glob or a
+comma-separated list of `.gff`, `.gff3` or `.gtf` files, plain or gzipped. Each annotation is
+matched to a genome by file stem (`cow.fna` and `cow.gff`), then by assembly accession, then by
+an unambiguous name prefix. A subset of the targets may be annotated. The run stops in the
+staging step, before any search, when an annotation matches no genome or several, or when a
+genome gets a second annotation; a `--target_gffs` that finds no file stops it at the start.
+Easy mode fetches the annotations with the genomes.
 
-When a model overlaps an annotated feature, SynVoy stamps `TargetGene`, `TargetProduct` and `TargetID` onto the emitted GFF row and fills the `target_gene` / `target_product` columns in the report. Easy Mode needs no equivalent flag: `fetch_related_genomes.py` already downloads each target's annotation alongside its genome, which is why this gap only ever existed in Pro Mode.
+Each gene model of the main search then takes `TargetGene`, `TargetProduct` and `TargetID` from
+the target's annotated gene or transcript that overlaps it most, or, when none overlaps, from the
+nearest one within 5 kb. The per-genome table `<genome>.homology.tsv` has them as `target_gene`
+and `target_product`, and the report's records carry `target_gene`. On the models of the two
+rescue passes, `TargetGene` holds the query's own name, not a target annotation.
 
-**Scope — what this does and does not affect.** Target annotations are consulted *after* a model has been built. They do **not** influence where SynVoy searches (synteny blocks are placed from flanking-gene search hits), nor the region scoring in `cluster_grs.py`, nor the label of a call (the judge decides that from the E-value in the expected place, specificity and completeness). With `--goi_family_tokens`, every GOI row records whether `TargetGene`/`TargetProduct` carries one of the names (`GoiFamilyConsistent`, `GoiFamilyReason`); that is annotation only since 2026-10-15, when the strict gate that demoted calls by name (`strict_goi_family`) was removed. Treat `TargetGene`/`TargetProduct` as independent evidence *for you to read*, not as a scoring input.
+When the home genome has its own GFF, target annotations are read only after a model is built:
+they do not move the blocks, the region scores or the label of a call. Without `--home_gff`, the
+closest annotated target (at least 10 CDS rows) also supplies gene models for the home genome,
+which become anchors and part of the home proteome that the specificity check compares a call
+with. With [`goi_family_tokens`](#goi_family_tokens), every GOI row records whether the target's
+annotation names the gene's family.
 
 ### `allow_unmatched_target_gffs`
-**Type:** Boolean | **Default:** `false`
+**Default:** `false`
 
-Controls what happens when a file supplied via `--target_gffs` cannot be matched to any target genome (a typo, a leftover annotation for a genome that is not in this run, or a naming scheme the stem/accession matcher cannot resolve). The default fails the run at the staging step with a list of the offending files, on the principle that an unnoticed mismatch produces a run whose annotation-derived evidence is silently absent. Setting this to `true` reports the same list as a warning and proceeds with whatever annotations *did* match — appropriate when you knowingly point at a shared GFF directory that covers more genomes than the current run uses.
+`true` turns the stop for an annotation that matches no target genome into a warning, for
+example when `--target_gffs` points at a shared folder with annotations of more genomes than
+the run uses.
+
+### `home_genetic_code` / `target_genetic_codes` / `default_target_genetic_code`
+**Defaults:** `1` / none / `1`
+
+The NCBI genetic code of each genome. `--home_genetic_code` is used for every translation on the
+home side: a DNA query, the home search, the home gene model, the home proteome and the flanking
+proteins. Each target genome uses its row of `--target_genetic_codes`, a TSV of
+`genome<TAB>table` (the genome as its file name, with or without the extension; a header line and
+`#` lines are skipped), else `--default_target_genetic_code`: in the genome-wide and window
+searches, Smith-Waterman, miniprot, the label's own translations and the two rescue passes.
+Supported are 1–6, 9–16 and 21–31, the tables every tool translates with. Examples: the CUG-Ser1
+yeasts (*Candida albicans* and relatives) use table 12, *Pachysolen* 26, most ciliates 6.
+
+With table 1 everywhere, no tool gets a genetic-code option. A table other than 1 is written as
+`##synvoy-genetic-code N` into each target's result GFF, and the `genetic_code` column of
+`target_policy` in the report gives every target's table. Augustus gets the home table; Prodigal
+(`--gene_predictor prodigal`, or `auto` without Augustus) runs in metagenome mode, translates
+with its own tables 11 or 4 and only warns.
 
 ---
 
-## 4. Synteny & Flanking Gene Extraction
+## 5. The home locus
 
-### `n_flanking_genes`
-**Type:** Integer | **Default:** `10` | **Range:** 2–30
-
-The number of non-GOI-similar flanking genes to extract on **each side** of the GOI in the home genome. These flanking genes serve as synteny anchors — their presence in target genomes indicates conserved gene order (synteny). With the default of 10, SynVoy extracts up to 10 upstream and 10 downstream genes, for up to 20 total anchors. The optimal value depends on genome architecture: gene-dense genomes (bacteria, compact insects) need fewer anchors (5–8) because genes are closely packed and synteny is well-preserved, while gene-sparse or heavily rearranged genomes (plants, large vertebrates) benefit from more anchors (12–20) to increase the chance that at least some are conserved. More anchors increase computational cost (each must be searched in every target) but improve synteny detection reliability.
-
-
-The same number decides the GOI's own home neighbourhood in the specificity check: the GOI's home gene and `n_flanking_genes` genes on each side of it, in every home locus run (`BestOtherInNeighbourhood`, docs/ALGORITHM.md §7.12).
-
-The flanking genes are also the unit of every distance of the search ([Distances in gene units](#distances-in-gene-units)): the pitch is their mean spacing, and the expansion of a target genome is measured on them. That measurement needs five of them in a row in the target, so with `n_flanking_genes` of 2 or less (at most four anchors) the ratio of the genome sizes is always used instead.
-
-Five counts follow it (constraint C9; `auto`, the default of each): the largest gap a block may bridge, `synteny_bridge_max_gap_genes` = 2 × `n_flanking_genes` pitches; the HIGH flanking genes of a strong-synteny region, `strong_synteny_min_flanking` = `n_flanking_genes` / 2, rounded up; those in the hull of the hull rescue, `goi_hull_min_flanking` = round(0.4 × `n_flanking_genes`); the HIGH flanking models at which the report flags `strong_synteny_no_goi`, `strong_synteny_no_goi_min_flanking` = 2 × `n_flanking_genes`; and the gene gap between home loci, `locus_gap_genes` = floor(`n_flanking_genes` / 2). At the default of 10 they are 20, 5, 4, 20 and 5, the fixed defaults they had (until 2026-10-23; the report's count until 2026-10-26; `locus_gap_genes` until 2026-10-15), so a different `n_flanking_genes` moves them together. A number sets a count directly. The flank walk's limit of 5 × `n_flanking_genes` visited genes per side follows it as well.
-### `min_flanking_size`
-**Type:** Integer (bp) | **Default:** `500` | **Range:** 100–5000
-
-The minimum coding length for a gene to be written as a flanking protein. **It only acts when `exon_level_search` is `false`**, and on genes predicted without an annotation; with the default exon-level search every annotated neighbour is used whatever its length. A very short protein is a weak anchor (few residues to align), so when you switch the exon-level search off, keep this at a few hundred bp.
-
-### `exon_level_search`
-**Type:** Boolean | **Default:** `true`
-
-When enabled, flanking gene protein sequences are decomposed into individual exon-level fragments for the initial MMseqs2 search in target genomes. This dramatically improves sensitivity for detecting divergent orthologs because individual exons may be conserved even when full-length protein similarity has dropped below detection thresholds. Multi-exon genes that have accumulated mutations unevenly across exons benefit most — a single well-conserved exon can anchor the synteny block even if other exons have diverged beyond recognition. The pipeline searches both the full-length protein and individual exon sequences, taking the best hit. Disabling this saves some computational overhead but significantly reduces sensitivity for cross-order or cross-class searches (>200 Mya divergence). It is strongly recommended to keep this enabled unless you are searching only within the same genus or family where full-length matches are expected.
-
-### `goi_relative_evalue`
-**Type:** Float (E-value) | **Default:** `1e-5` | `0` = off
-
-A neighbour of the gene of interest (GOI) is not used as an anchor when it is a **relative** of the GOI: its hits in a target genome would fall on the GOI's own relatives and count the same sequence evidence a second time as "neighbourhood". Relative means: the neighbour's protein aligns to the GOI protein (Smith–Waterman, BLOSUM62, gap costs 11/1) with an E-value at or below this value. The E-value is computed for the two sequences alone (search space = product of their lengths).
-
-It replaces `max_flanking_goi_similarity` (longest common subsequence divided by the longer length, threshold 35). That measure gives about 35 for two *unrelated* proteins of similar length, so it removed about half of all genes of the GOI's size whatever their sequence: on five benchmark loci 22 of 33 removed genes had no significant alignment to the GOI, and in yeast the two nearest neighbours of STE2 were dropped. With the E-value, unrelated proteins are not removed at any length (0 of 60 random pairs at 1e-5 in the tests).
-
-`preset_tandem_family` uses `1e-3`, which also removes distant members of the family. `0` switches the test off for the neighbours; the gene at the GOI's own position is never an anchor.
-
-### `goi_relative_statistic`
-**Type:** String (`sw` / `blastp_cbs`) | **Default:** `sw`
-
-The statistic of the relative test above. `sw`: the Smith–Waterman E-value. `blastp_cbs`: blastp with composition-based statistics, the test the label uses for family members (`synvoy_specificity.pairwise_evalue`). With Smith–Waterman, a neighbour that shares only a low-complexity stretch with a low-complexity GOI passes as a relative (a protein with a PEPEP stretch against melittin: E 4e-8; with `blastp_cbs`: no hit) and is lost as an anchor. The `low_complexity` preset module (B2) sets `blastp_cbs`. The gene at the GOI's own position is always tested with `sw`. Settings key.
-
-### `max_flanking_distance`
-**Type:** Integer (bp) | **Default:** `0` (unlimited) | **Range:** 0–5,000,000
-
-The maximum distance in base pairs from the GOI center that the flanking gene extractor will walk to find synteny anchors. When set to 0 (default), there is no distance limit — the extractor walks as far as needed along the chromosome to collect `n_flanking_genes` anchors per side. This can be problematic when the GOI sits adjacent to a large tandem gene array: one direction fills up entirely with relatives of the GOI (which are skipped, see `goi_relative_evalue`), forcing the extractor to walk far into a distant genomic region to find enough non-similar anchors. These distant anchors may belong to a different synteny block entirely, confusing downstream analysis. Setting a distance cap (e.g., 500,000 bp) prevents this pathological case. If fewer than `n_flanking_genes` anchors are found within the distance window, the pipeline proceeds with whatever was found.
-
-### `expand_goi_similar`
-**Type:** Boolean | **Default:** `false` (was `true` until 2026-04-25)
-
-When enabled, genes near the GOI that are similar to it (detected during flanking gene extraction) are not just excluded as anchors — they are emitted as additional GOI queries with a `GOI_NEIGHBOR_` prefix. These neighbor queries are searched in all target genomes alongside the original GOI and included in the phylogenetic tree.
-
-**Why default changed to `false`:** for paralog-rich gene families (e.g. LY6 with ~15 chr8 paralogs) the NEIGHBOR queries flood the per-target m8 hits with paralog matches. Every cluster picks up a GOI-overlap bonus from at least one paralog, so the bonus loses its discriminating power. The true ortholog scaffold drops out of `adaptive_max_regions=6`. Empirical: LY6 ground-truth scaffold recall went from **8/9 (off)** to **0/9 (on)**. Melittin (single-copy gene, no nearby paralogs) is unaffected either way.
-
-**When to turn it on:** you have a single-copy GOI sitting next to a small known tandem array, and you want the paralogs in the same tree to disambiguate. Examples: a Yellow gene with one Yellow-e3 paralog two genes away, a venom peptide flanked by 1–2 tandem duplicates. In these narrow cases the bonus does help.
-
-**When to leave it off:** any gene-family query (LY6, TP53, MRJP, 3FTx, defensins) — the paralog flood will swamp the synteny signal. The phylogenetic tree downstream still resolves paralogs from the iterative search's existing GOI-similarity classification; you don't need this flag to get a paralog-aware tree.
-
-A neighbour is "GOI-like" by the same test as for anchors (`goi_relative_evalue`).
-
-### `expand_goi_similar_distance`
-**Type:** Integer (bp) | **Default:** `300000` | **Range:** 10,000–2,000,000
-
-The maximum distance in base pairs from the GOI within which to search for GOI-similar neighbor genes for expansion (see `expand_goi_similar`). Genes beyond this distance that happen to resemble the GOI are not emitted as additional queries. The default of 300 kb covers most tandem gene arrays, which typically span 50–500 kb in eukaryotic genomes. For very large tandem arrays (e.g., olfactory receptor clusters in vertebrates, which can span several megabases), you may need to increase this value. For compact genomes (bacteria, fungi), a smaller value (50–100 kb) is more appropriate to avoid picking up unrelated genes that coincidentally share sequence similarity. Each additional GOI-similar neighbor adds a full search pass across all target genomes, so expanding this distance excessively can significantly increase runtime without improving results.
-
-### `home_chain_max_intron`
-**Type:** `auto` or Integer (bp) | **Default:** `auto`
-
-The query's hits at home are chained into one **hit interval** per copy of its gene (`merge_hits.py`, since 2026-10-16): a hit continues a chain when it continues the query (it starts at most 20 residues before the chain's last hit ends, and ends after it), lies at most this far after that hit, and the two are not in two different annotated genes. `auto` takes the largest intron of the annotated genes the hits overlap, times `goi_fallback_intron_margin` (5), at least `goi_fallback_intron_floor` (10,000) and at most 1.1 Mb; without a home annotation the floor. A number sets the bound directly (no cap). Before 2026-10-16 hits were merged when less than 1 kb apart, whatever their query coordinates.
-
-### `locus_gap_genes` / `locus_gap`
-**Type:** `auto` or Integer (genes) / `auto` or Integer (bp) | **Defaults:** `auto` / `auto`
-
-The query usually aligns at several places of the home genome (exons, relatives). Two such places are **one home locus** when at most `locus_gap_genes` annotated genes lie between them. The unit is genes because the consequence is counted in genes: each locus gets its own walk for `n_flanking_genes` neighbours on each side, and two places five genes apart would share most of them. `auto` (default since 2026-10-15) is half of that walk, floor(`n_flanking_genes` / 2): 5 at the default of 10 (the former fixed default), so the gap follows a changed `n_flanking_genes`; a number sets it directly. It counts only with `locus_gap = auto` and a home annotation: a number for `locus_gap`, and `-profile legacy_distances` (which sets 50,000), switch it off. Protein-coding genes are counted where the annotation states a biotype, every `gene` row otherwise.
-
-`locus_gap` gives the gap in base pairs instead. `auto` (default) counts genes when the home genome has an annotation and uses 50,000 bp when it has none (this was the fixed value for every genome until 2026-10-08; 50 kb are about 20 genes in yeast and about one gene or less in human).
+The query's hits in the home genome are chained into one hit interval per copy of the gene, and
+the intervals are grouped into home loci. Each home locus is searched on its own
+([ALGORITHM.md § 5.2–5.5](ALGORITHM.md#52-locating-the-query)).
 
 ### `home_locus_mode`
-**Type:** `auto` / `gene_only` / `alignment` | **Default:** `auto`
+**Default:** `auto` (`auto`, `gene_only` or `alignment`)
 
 Which home loci are searched.
 
-- `auto`: when an annotated home gene matches the query (by name or by position, verified by alignment), **that gene is the primary locus**, as one interval with the gene's own span. Further loci are other places where the query aligns at least half as well as at the primary locus (`locus_min_bit_ratio`), up to `max_loci`. Without a matching annotated gene the loci come from the alignments alone.
-- `gene_only`: only the annotated gene's locus. Use it when the further loci are relatives you do not want (replaces `--enable_name_locus`).
-- `alignment`: loci from the alignments alone, as before 2026-10-08.
+- `auto`: when an annotated home gene matches the query (by name or by position, checked by
+  alignment), that gene is the primary locus. Further loci are other places where the query
+  aligns at least half as well ([`locus_min_bit_ratio`](#locus_min_bit_ratio)), up to
+  [`max_loci`](#max_loci). Without a matching annotated gene the loci come from the alignments.
+- `gene_only`: only the annotated gene's locus. Use it when the further loci are relatives you do
+  not want. Without a matching annotated gene the loci come from the alignments, with a warning.
+- `alignment`: the loci of the alignments alone.
 
-A locus is scored as **one copy of the gene**: the best set of its hits that covers the query at most once. Before, a locus was ranked by its single best hit, so a relative sharing one well-conserved domain scored like the gene itself (human decorin: four loci of other leucine-rich-repeat genes were searched in every genome and the locus of its real relatives was cut; now the loci are decorin, the asporin cluster and biglycan). The primary locus is never removed by `max_loci`.
+Naming the home gene with [`home_goi_gene`](#home_goi_gene) sets `gene_only`, whatever this
+parameter says.
+
+### `home_goi_gene`
+**Default:** none
+
+The name of the home gene in the home GFF, when the query's own names are not in it (for
+example a query from another species). It is looked up first, and it sets
+`home_locus_mode gene_only`: only that gene's locus is searched.
+
+### `gff_search_window`
+**Default:** `100000` (bp)
+
+When no annotated home gene carries the query's name, SynVoy looks for the gene by its position:
+the annotated genes that overlap a significant hit of the query, or lie within this many bp of
+one, are compared with the query, and the best match that passes is the home gene. A gene that
+overlaps a hit comes first. Without such a gene, the home gene model is built with miniprot.
+
+### `max_loci`
+**Default:** `5`
+
+The largest number of home loci searched: the primary locus and the best-scoring others. A locus
+is scored as one copy of the gene, the best set of its hits that covers the query at most once,
+so a relative that shares one conserved domain scores below the gene itself. The primary locus
+is never removed. Each locus is a search of its own, so a large family costs time.
+
+### `locus_min_bit_ratio`
+**Default:** `0.5`
+
+A further home locus is kept only when its score reaches this share of the primary locus's.
+
+### `family_warning_threshold`
+**Default:** `10`
+
+More home loci than this, before `locus_min_bit_ratio` and `max_loci`, give a large-family
+warning.
+
+### `home_chain_max_intron`
+**Default:** `auto` (or a number of bp)
+
+How far apart two hits of the query in the home genome may lie and still be one copy of the
+gene. A hit continues a chain when it continues the query (it starts at most 20 residues before
+the chain's last hit ends, and ends after it), lies at most this far after that hit, the two are
+not in two different annotated genes, and, unless both lie in one annotated gene, no annotated
+gene lies entirely between them. `auto` takes the largest intron of the annotated genes the hits
+overlap, times [`goi_fallback_intron_margin`](#goi_fallback_intron_margin--goi_fallback_intron_floor)
+(5), at least `goi_fallback_intron_floor` (10 kb) and at most 1.1 Mb; without a home annotation,
+the floor. A number sets the bound directly.
+
+### `goi_fallback_intron_margin` / `goi_fallback_intron_floor`
+**Defaults:** `5.0` / `10000` (bp)
+
+The largest gap between two hits that are chained into one gene: the home gene's largest intron
+times the margin, but at least the floor. They set `home_chain_max_intron auto` above and, in a
+target genome, the largest gap of a GOI model built from a chain of hits, where the home gene
+model's own intron is used; without it, [`max_intron`](#max_intron).
+
+### `locus_gap_genes` / `locus_gap`
+**Defaults:** `auto` / `auto`
+
+Two places where the query aligns in the home genome are one locus when at most
+`locus_gap_genes` annotated genes lie between them (protein-coding genes when the annotation
+states a biotype, every gene otherwise). `auto` is half of
+[`n_flanking_genes`](#n_flanking_genes), rounded down: 5 at the default of 10. Two places that
+close would share most of their flanking genes.
+
+`locus_gap` gives the gap in base pairs instead, for every scaffold. `auto` counts genes when the
+home genome has an annotation, and uses 50,000 bp on a scaffold without annotated genes and for
+a home genome without annotation. `-profile legacy_distances` sets 50,000.
 
 ---
 
-## 5. Search Parameters
+## 6. Flanking genes
 
-### Distances in gene units
+### `n_flanking_genes`
+**Default:** `10` (an integer of 1 or more; 5–20 are usual)
 
-A distance that describes a neighbourhood means something else in every genome: ten neighbouring genes span about 20 kb in yeast, 150 kb in the honeybee and 1 Mb in human. Until 2026-10-08 these distances were fixed numbers of base pairs, the same for every genome. They are now given in **gene pitches** and converted to base pairs for each home locus and each target genome:
+How many protein-coding neighbours of the gene, on each side, are taken as anchors in the home
+genome. Relatives of the gene are skipped and do not count. More anchors find a neighbourhood
+that is partly rearranged and cost more search time; gene-dense, conserved genomes need fewer.
 
-- **pitch (home)** = span of the anchors of the home locus / (number of anchors − 1), i.e. the mean step from one anchor to the next.
-- **expansion** of a target genome = the length of the longest run of anchors that lie in home order on one target sequence, divided by the length of the same run at home. One step of the run goes at most three anchors ahead and may be 0.2 to 8 times as long as at home; it is measured between two hits in the target and between the two query records of those hits at home (two exons with exon-level search, otherwise two genes). The measurement is used only where the gene order is conserved: the run must hold at least 5 anchors. Otherwise the expansion is the ratio of the genome sizes (the bases of the target's sequences; until 2026-11-02 its file size, headers and line ends included and four times a .gz file's size), kept between 0.2 and 8; without that it is 1. (Until 2026-10-11 the expansion was the median of the distance ratios of nearby anchor pairs. A neighbourhood mostly grows by a few large insertions, which a median does not see: *A. lyrata* at the FT locus of *A. thaliana* got 1.5 where the neighbourhood is 4.9 times as long.)
-- **distance in bp** = number of pitches × pitch (home) × expansion.
+The same number sets:
 
-| Distance | Parameter in pitches | Default | Parameter in bp | Value before |
+- the gene's own home neighbourhood in the specificity check: the home gene and `n_flanking_genes`
+  genes on each side ([ALGORITHM.md § 7.12](ALGORITHM.md#712-what-is-added-to-the-query-set));
+- the home genes the module triggers look at for family members ([§ 1](#modules));
+- five counts, each `auto` by default (a number sets it directly):
+  `synteny_bridge_max_gap_genes` = 2 × n pitches (20 at n = 10), `strong_synteny_min_flanking` =
+  n / 2 rounded up (5), `goi_hull_min_flanking` = round(0.4 × n) (4),
+  `strong_synteny_no_goi_min_flanking` = 2 × n (20) and `locus_gap_genes` = n / 2 rounded down
+  (5);
+- the limit of the flank walk: a side stops before it has n anchors only after it has passed
+  more than 5 × n genes and has met n + R protein-coding genes, where R is the number of
+  protein-coding genes on that side of the scaffold that overlap a home hit of the query.
+
+The flanking genes are also the unit of the search's distances
+([§ 7](#7-distances-in-gene-units)). Measuring how much a neighbourhood grew in a target needs
+five anchors in a row there, so with `n_flanking_genes` of 2 or less the ratio of the genome
+sizes is always used instead.
+
+### `min_flanking_size`
+**Default:** `500` (bp of coding sequence)
+
+The shortest coding length of a flanking protein. It acts only with
+`--exon_level_search false` and on genes the flank walk predicts itself (a home genome without a
+GFF in a run without target genomes). With the default exon-level search, every gene of the home
+annotation is used whatever its length.
+
+### `exon_level_search`
+**Default:** `true`
+
+Each flanking gene is searched as its full-length protein and as each of its exons. All these
+hits count for the gene, so one conserved exon is enough to place an anchor where the whole
+protein has diverged. `false` searches the full-length proteins only (with
+[`min_flanking_size`](#min_flanking_size)). The GOI is always searched with its exons.
+
+### `goi_relative_evalue`
+**Default:** `1e-5` · module A1 sets `1e-3`
+
+A neighbour is not used as an anchor when it is a relative of the gene: its protein aligns to the
+query protein with an E-value at or below this value, computed for the two sequences alone
+(Smith-Waterman, BLOSUM62, gap costs 11/1; see `goi_relative_statistic`). Its hits would fall on
+the gene's relatives in a target and count the same evidence twice. Unrelated proteins are not
+counted as relatives at any length.
+
+The module `local_family` (A1) sets `1e-3`, which also removes distant members of the family, as
+`preset_tandem_family` does under `--modules legacy`. `0` switches the test off for the
+neighbours. A gene at the GOI's own position that aligns to the query (E ≤ 1e-5, or this value
+when it is larger) is never an anchor; another gene there, such as one that holds the GOI in an
+intron, can be.
+
+### `goi_relative_statistic`
+**Default:** `sw` · module B2 sets `blastp_cbs`
+
+How the test of `goi_relative_evalue` scores a pair: `sw` is the Smith-Waterman E-value;
+`blastp_cbs` is blastp with composition-based statistics and low-complexity masking, the test
+the specificity check uses for family members. With `blastp_cbs` a low-complexity neighbour no
+longer passes as a relative by its composition alone; the module `low_complexity` (B2) sets it.
+The gene at the GOI's own position is always tested with `sw`.
+
+### `max_flanking_distance`
+**Default:** `0` (bp; 0 = no limit)
+
+A side of the flank walk also stops this far from the gene. With 0, a side ends when it has its
+anchors, at the end of the scaffold, or at the limit given under
+[`n_flanking_genes`](#n_flanking_genes). A limit such as 500,000 keeps the walk out of a gene
+desert next to a large tandem array, at the cost of fewer anchors on that side.
+
+Set it in a config file (`params.max_flanking_distance = 500000`, passed with `-c`). Given on the
+command line, Nextflow passes the number as text, and the flank-walk step stops with
+`Cannot compare java.lang.String …`.
+
+### `expand_goi_similar` / `expand_goi_similar_distance`
+**Defaults:** `false` / `300000` (bp)
+
+With `true`, every relative of the gene that the flank walk passes within
+`expand_goi_similar_distance` of it becomes a query of its own (`GOI_NEIGHBOR_…`), searched like
+the gene. Only relatives between the gene and the last anchor on each side are candidates. In a
+gene family their hits draw many candidate regions, so the regions in the figures and the ones
+offered to the strong-synteny rescue can be those of relatives instead of the ortholog; this is
+why it is off. It can help when the targets are themselves nearby tandem copies of a single-copy
+gene. You do not need it for paralogs in the tree: the specificity check already marks calls
+that a relative explains better. No module sets either value.
+
+---
+
+## 7. Distances in gene units
+
+Ten neighbouring genes span about 20 kb in a yeast, 150 kb in the honeybee and 1 Mb in human, so
+a distance that describes a neighbourhood cannot be one number of base pairs. SynVoy gives these
+distances in **gene pitches** and converts them to base pairs for each home locus and each target
+genome:
+
+- **pitch (home)**: the span of the anchors of the home locus divided by (number of anchors − 1),
+  the mean step from one anchor to the next.
+- **expansion** of a target genome: the length of the longest run of anchors that lie in home
+  order on one target sequence, divided by the length of the same run at home. One step of the run
+  goes at most three anchors ahead and may be 0.2 to 8 times as long as at home; it is measured
+  between two hits in the target and between the two query records of those hits at home (two
+  exons with the exon-level search, otherwise two genes). The run must hold at least 5 anchors,
+  because in a genome where the gene order is lost, pairs of anchors still lie close together by
+  chance. Without such a run the expansion is the ratio of the genome sizes (in bases), kept
+  between 0.2 and 8, and without that 1.
+- **distance in bp** = pitches × pitch (home) × expansion.
+
+| Distance | In pitches | Default | In bp | Fixed value |
 |---|---|---|---|---|
 | largest gap between two anchors of one block | `block_gap_genes` | 7 | `cluster_distance` | 150,000 |
 | extent of the neighbourhood on each side of a block | `window_margin_genes` | 7 | `region_padding` | 150,000 |
-| how far outside the block a GOI hit may lie | `goi_margin_genes` | 2 | `goi_margin` | 50,000 |
-| largest gap a block may bridge | `synteny_bridge_max_gap_genes` | auto: 2 × `n_flanking_genes` = 20 | `synteny_bridge_max_gap` | 6,000,000 |
-| margin of the flanking envelope for a dispersed GOI | `dispersed_envelope_margin_genes` | 9 | `dispersed_envelope_margin` | 200,000 |
+| how far outside a block a GOI hit may lie | `goi_margin_genes` | 2 | `goi_margin` | 50,000 |
+| largest gap a block may bridge | `synteny_bridge_max_gap_genes` | `auto`: 2 × `n_flanking_genes` = 20 | `synteny_bridge_max_gap` | 6,000,000 |
+| margin of the flanking envelope of the dispersed-GOI rescue | `dispersed_envelope_margin_genes` | 9 | `dispersed_envelope_margin` | 200,000 |
 
-Each bp parameter takes `auto` (default: derive it) or a number, which is then used as it is for every genome. The defaults in pitches are the former bp values at the locus where they were set: at the median honeybee locus of the family benchmark the pitch is 23 kb, so 150 kb are 7 pitches and 50 kb are 2; the 6 Mb bridge limit was set for cow decorin, where it is 18 pitches (20 pitches are a whole home neighbourhood of 10 genes per side).
+Each bp parameter takes `auto` (the default: derive it) or a number, which is then used for every
+genome. In `cluster_distance`, `goi_margin` and `dispersed_envelope_margin`, `0` means `auto`; in
+`synteny_bridge_max_gap`, `0` switches bridging off; for `region_padding` a number changes the rule
+(see its entry). When the home locus gives no pitch (no coordinates), each distance takes its fixed
+value. The defaults in pitches match the fixed values at a typical insect locus, with a pitch of
+about 23 kb.
 
-Why "5 anchors in a row": in a genome where the gene order is lost, hits of two anchors still lie within eight times their home distance of each other by chance, and such pairs give a large factor. Measured on 23 genome–locus pairs, the longest run of anchors in home order was 6–19 where the neighbourhood is conserved (yeasts, flies, bees) and at most 3 where it is not (fruit fly against mosquito, firefly against fruit fly and mosquito). An earlier rule ("a quarter of the pairs that share a target sequence") let 11 chance pairs through for firefly against fruit fly: factor 3.7 where the genome sizes say 0.3, a block gap of 956 kb, and one search window that needed 10 GB of memory.
+**How much DNA is searched.** The window margin is the extent of the neighbourhood: blocks whose
+extents overlap are merged, and the anchors inside it count as support for a call. Hits of the
+gene of interest are used only when they touch the block or lie within the GOI margin of it, and a
+gene model may use DNA up to `gap_search_window` beyond its hits (more for a gene that is long at
+home). DNA further out would be searched for nothing, so the DNA cut out and searched is the
+smaller of the window margin and the GOI margin plus that room for a model. Where genes lie close
+together this is the whole neighbourhood; where they lie far apart it is much less. A window margin
+given in bp is searched in full, and so is the whole margin when the home locus has no
+coordinates.
 
-How much DNA is cut out around a block: the window margin is the extent of the neighbourhood (blocks whose extents overlap are merged into one, and the anchors inside it count as support for a call). Hits of the gene of interest are used only when they touch the block or lie within the GOI margin of it, and a gene model may use the DNA up to `gap_search_window` (or the gene's own span at home × expansion, if that is more) beyond its hits. DNA further out would be searched for nothing, so what is cut out and searched is the smaller of the window margin and GOI margin + that room for the model. At a yeast or honeybee locus this is the window margin; at a human locus it is about 0.7 Mb on each side where the window margin is 2.3 Mb. A window margin given in bp is searched in full, as before.
+**Two more rules follow the home locus.** The block gap is never smaller than 1.25 × the largest
+gap between two neighbouring anchors at home, times the expansion, so a neighbourhood that is
+unchanged in the target comes out as one block. Hits of one flanking gene belong to one occurrence
+of that gene up to 1.5 × the gene's own span at home × the expansion, and never less than
+[`max_intron`](#max_intron).
 
-Two more rules follow the home locus. The block gap is never smaller than 1.25 × the largest gap between two neighbouring anchors at home, so a neighbourhood that is unchanged in the target comes out as one block. And hits of one flanking gene belong to one occurrence of that gene up to 1.5 × the gene's own span at home × expansion (never less than `max_intron`), instead of a fixed 20 kb for every gene (15 of 17 honeybee benchmark loci have a flanking gene with an intron longer than 20 kb).
+What was used is written to the search log, one line per genome, and to each result GFF as a
+`##synvoy-distances` line ([OUTPUT.md](OUTPUT.md)); the region scorer and the hull rescue read it
+from there.
 
-What was used is written to the log, one line per genome, and into each result GFF as a `##synvoy-distances` line ([OUTPUT.md](OUTPUT.md)); the region scorer and the hull rescue read it from there.
-
-`-profile <execution>,legacy_distances` sets these distances, the three of the hull rescue and the gap between home loci to their former fixed values. It is meant for comparisons (what do the derived distances change?) and for a genome where a derived window turns out too large. It does not bring back an older version: the limit for hits of one flanking gene still follows that gene's span at home, and the other changes of 2026-10 (queries, anchors, gene models, thresholds) are not distances.
+`-profile <execution>,legacy_distances` sets these distances, the three sizes of the hull rescue
+and the gap between home loci to their fixed values. Use it to see what the derived distances
+change, or for a genome where a derived window turns out too large. The limit for hits of one
+flanking gene still follows that gene's span at home.
 
 ### `cluster_distance` / `block_gap_genes`
-**Type:** `auto` or Integer (bp) / Float (gene pitches) | **Defaults:** `auto` / `7`
+**Defaults:** `auto` / `7` (pitches)
 
-The largest gap between two neighbouring flanking-gene hits inside one syntenic block. With `auto` it is `block_gap_genes` pitches of the home locus times the expansion of the target genome, and at least 1.25 × the largest gap between neighbouring anchors at home (see [Distances in gene units](#distances-in-gene-units)). A number of base pairs switches the derivation off for this distance. Measured on saved runs: with the fixed 150 kb the yeast genomes (pitch 2.4 kb) gave 7–11 blocks of up to 1.2 Mb that together covered most of an 11 Mb genome; derived, the block gap there is 20–35 kb and the block with the gene is 20–130 kb long.
+The largest gap between two neighbouring flanking-gene hits inside one block. With `auto` it is
+`block_gap_genes` pitches times the expansion, and at least 1.25 × the largest gap between
+neighbouring anchors at home times the expansion. A number of bp is used for every genome.
 
 ### `window_margin_genes`
-**Type:** Float (gene pitches) | **Default:** `7`
+**Default:** `7` (pitches)
 
-The extent of the neighbourhood on each side of a block, in pitches (in bp: `region_padding`). Blocks whose extents overlap are merged, and the anchors inside the extent count as support for a call. The DNA that is cut out and searched is at most this wide, and narrower when the usable part is narrower: GOI margin plus the room for one gene model (see [Distances in gene units](#distances-in-gene-units)). The log line of each genome prints both, for example `window margin 35 kb (DNA searched: 35 kb per side)` for a yeast genome, where the two are the same.
+The extent of the neighbourhood on each side of a block (in bp: `region_padding`). Blocks whose
+extents overlap are merged, and the anchors inside the extent count as support for a call. The DNA
+that is searched is at most this wide, and narrower when the GOI margin plus the room for one gene
+model is narrower. The search log prints both for each genome, for example
+`window margin 35 kb (DNA searched: 35 kb per side)`.
+
+### `region_padding` / `padding_min` / `padding_max`
+**Defaults:** `auto` / `50000` / `200000` (bp)
+
+`auto`: `window_margin_genes` pitches times the expansion. A number switches to a margin from the
+spacing of the hits on each scaffold: twice the mean gap between consecutive hits, kept between
+`padding_min` and `padding_max`, and searched in full; the number itself is used only on a scaffold
+with fewer than two hits. `padding_min` and `padding_max` are read only then, and `padding_max`
+must not be smaller than `padding_min`.
 
 ### `goi_margin_genes` / `goi_margin`
-**Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `2` / `auto`
+**Defaults:** `2` (pitches) / `auto` · module A1 sets `goi_margin_genes`
 
-A hit of the gene of interest is used for a gene model only when it lies in the block of flanking genes or at most this far outside it. Until 2026-10-08 this was `gap_search_window` (50 kb), which also set the DNA given to miniprot; the two are separate now.
+A hit of the gene of interest is used for a gene model only when it lies in the block of flanking
+genes or at most this far outside it. A wider margin adds no DNA to the search, but it widens the
+GOI core, the place in which a call's E-value is counted
+([ALGORITHM.md § 7.13](ALGORITHM.md#713-e-values-in-the-expected-place)).
 
-`goi_margin_genes` is a settings key. The `local_family` module (A1) sets it to min(`window_margin_genes`, max(2, R + 1)), where R is the largest distance, in genes, of a family member next to the home gene: the copies of a home array that reach further than 2 genes from the GOI are then inside the margin in the target too. It never passes `window_margin_genes`, where the DNA searched ends (constraint C1). A wider margin adds no DNA but makes the GOI core, and so the place a call's E-value is counted in, larger. A `goi_margin` in bp that you set still wins.
+The module `local_family` (A1) sets `goi_margin_genes` to min(`window_margin_genes`, max(2, R + 1)),
+where R is the largest distance, in genes, of a family member next to the home gene, so the copies
+of a home array are inside the margin in the target too. It never passes `window_margin_genes`,
+where the searched DNA ends. A `goi_margin` in bp that you set wins over the rule.
 
 ### `synteny_bridge_max_gap_genes` / `synteny_bridge_max_gap`
-**Type:** `auto` or Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `auto` / `auto`
+**Defaults:** `auto` / `auto`
 
-Two clusters of flanking genes on one sequence stay one block across a gap up to this size when the flanking genes continue the home order across it (a local rearrangement the gene may sit in). `0` in either parameter switches bridging off. `auto` (in pitches) is 2 × `n_flanking_genes`, one home neighbourhood of that many genes per side: 20 at the default of 10, the fixed default until 2026-10-23. The rules for *when* a gap is bridged are `synteny_bridge_max_rank_gap`, `synteny_bridge_min_anchors`, `synteny_bridge_two_sided` and `synteny_bridge_max_per_block`.
-
-`synteny_bridge_min_anchors` (default `2`, `3` until 2026-10-14): the number of distinct flanking genes a block must hold before it may bridge a gap. With 2, a block of two genes bridges when the first gene after the gap continues their home order within `synteny_bridge_max_rank_gap` ranks, so `A B … D E F` is one block (two at `3`). Its direction then rests on those two genes. The same value is the minimum collinear run of the two-sided rule (off by default), where 2 is a weak bar.
+Two clusters of flanking genes on one sequence stay one block across a gap up to this size, when
+the flanking genes continue the home order across it (a local rearrangement the gene may sit in).
+`auto` (in pitches) is 2 × [`n_flanking_genes`](#n_flanking_genes), one home neighbourhood: 20 at
+the default of 10. `synteny_bridge_max_gap 0` switches bridging off; `synteny_bridge_max_gap_genes 0`
+does so only while `synteny_bridge_max_gap` is `auto`. When a gap is bridged:
+[`synteny_bridge_min_anchors`](#synteny_bridge_min_anchors) and the entries after it.
 
 ### `dispersed_envelope_margin_genes` / `dispersed_envelope_margin`
-**Type:** Float (gene pitches) / `auto` or Integer (bp) | **Defaults:** `9` / `auto`
+**Defaults:** `9` (pitches) / `auto`
 
-A strong hit of the gene of interest outside every block is still accepted when it lies inside the envelope of the flanking genes on that sequence, widened by this margin; outside it the hit is listed under `rejected_candidates` in the report. A hit within the GOI margin (`goi_margin_genes`) of a flanking gene is left to the blocks, which use the GOI hits within that margin; until 2026-10-22 the radius was the window margin, and a hit between the two margins was used by neither.
+How far the envelope of the flanking genes on a chromosome is widened for the dispersed-GOI rescue
+([§ 13](#enable_dispersed_goi_rescue)).
 
-### `dispersed_goi_min_alnlen`
-**Type:** Integer (aa) | **Default:** `50`
+---
 
-The aligned length a GOI hit needs before the dispersed rescue considers it (with ≥ 40 % identity and E ≤ 1e-10, which stay the rescue's noise guard). A hit does not cross an intron, so a gene whose exons are all shorter than 50 aa, or a query shorter than that, could never be rescued. A settings key: the `short_query` (B1) and `exon_structure` (C1) modules set min(50, max(10, round(0.6 × Lpiece))), with Lpiece the shorter of the query and the longest exon of the home gene (21 for a 70-aa precursor of two 35-aa exons; constraint C7).
+## 8. Genome-wide search and blocks
 
-### `min_synteny_score`
-**Type:** Float | **Default:** `0.6` | **Range:** 0.1–1.0
-
-The score from which a candidate **region** is labelled HIGH in `regions/*.bed` and the region tables; half of it is the limit for MEDIUM (`cluster_grs.py`). It is a label of the region scorer only: it does not decide which blocks are searched, and it does not enter the confidence of any gene model. Which blocks are searched is decided by `min_block_genes` and `max_blocks_per_genome`. (Earlier versions of this page described it as the fraction of flanking genes needed to trigger a search; no such gate exists.)
-
-### `min_hit_identity`
-**Type:** Float (%) | **Default:** `10` | **Range:** 0–100
-
-A floor on the identity of an alignment hit, applied in the genome-wide search for the anchors. It is a guard, not the filter that decides: hits are kept by E-value (`search_evalue`), and an alignment that reaches E ≤ 0.01 in a whole genome is far above 10 % identity. Inside a search window the floor in use is `max(aug_relaxed_identity_min, min_hit_identity × aug_relaxed_identity_factor)` = 15 % at the defaults. Lowering the value therefore changes nothing (which is why `preset_short_peptide` no longer sets it); raising it, for example to 30 for a search among close species, removes weak anchor hits and the chance blocks they create.
-
-### `min_query_length`
-**Type:** Integer (amino acids) | **Default:** `20` | `0` = no check
-
-Queries shorter than this stop the run in `NORMALIZE_QUERY` (after DNA-to-protein translation). A query of 20–39 aa runs with a warning in the console and in the end summary.
-
-The default was 30. Measured on the honeybee genome with peptides cut from annotated proteins: an exact peptide is found at its own place with E ≤ 0.01 in 98 % of cases at 18 aa and 89 % at 15 aa, so the home step works from about 20 aa. What gets weak below 40 aa is the search in other species. An ortholog at 60 % identity scores about 25 bits for a 20-aa query, 35 bits for 30 aa and 45 bits for 40 aa (simulated, BLOSUM62 11/1). A 300 Mb genome is expected to hold about 270 chance alignments as good as the first, 0.4 as good as the second and 0.0005 as good as the third. Below 40 aa a call therefore rests on the neighbourhood, not on the alignment; that is what the warning says.
-
-### `min_hit_length`
-**Type:** Integer (amino acids) | **Default:** `10` | **Range:** 5–500
-
-A floor on the aligned length of a hit, applied in the genome-wide search for the anchors. Like `min_hit_identity` it is a guard behind the E-value filter: an alignment of fewer than 10 residues scores about 20 bits at best, and E ≤ 0.01 in a genome needs 35 bits or more. Inside a search window the floor in use is `max(aug_relaxed_length_min, min_hit_length / aug_relaxed_length_div)` = 15 aa at the defaults. Lowering the value changes nothing; raising it removes short anchor hits.
+Each target genome is searched once, with MMseqs2, for the flanking proteins (and their exons) and
+for the query. The hits of the flanking genes are grouped into **blocks**: runs of anchors on one
+sequence, in home order where possible. The blocks are filtered and capped, and the neighbourhood
+of each is searched for the gene ([§ 9](#9-search-inside-a-window)). Genomes are searched from the
+closest relative outwards, in waves, and the genes found in one wave join the queries of the next
+([ALGORITHM.md § 6–7](ALGORITHM.md)).
 
 ### `search_evalue`
-**Type:** Float | **Default:** `0.01` | **Range:** 1e-10–100
+**Default:** `0.01` (greater than 0)
 
-The E-value threshold for tblastn and MMseqs2 homology searches. The E-value represents the expected number of hits with equal or better score by chance in a database of the given size. Lower values (0.001, 1e-5) are more stringent, reporting only highly significant hits; higher values (0.1, 1.0, 10) are more permissive, allowing weaker matches through. The default of 0.01 provides a good balance for typical within-class or within-order searches. For very close species (same genus), tightening to 0.001 reduces noise. For distant cross-phylum searches (>400 Mya), relaxing to 0.1–1.0 is necessary because genuine orthologs may have diverged enough that their alignment scores are only marginally above background. The pipeline applies additional filters (synteny score, identity, length) downstream, so a permissive E-value here is safer than a restrictive one — it lets the synteny context disambiguate weak hits rather than discarding them prematurely.
+The E-value bound of the searches over a whole genome: LOCATE_GENE in the home genome, the flank
+walk, and the search of each target genome for the anchors keep hits at E ≤ this value. The search
+inside a window derives its own bounds from it (`aug_relaxed_*`, [§ 9](#9-search-inside-a-window)).
+A higher value lets weaker anchors through; the blocks and the labels still decide what a hit is
+worth. For very close species, 0.001 removes chance anchors.
 
-### `max_intron`
-**Type:** Integer (bp) | **Default:** `20000` | **Range:** 0–500,000
+### `min_hit_identity`
+**Default:** `10` (%)
 
-The floor of the largest gap between two hits of one flanking gene that still count as one occurrence of that gene. The limit used is `max(max_intron, 1.5 × the gene's span at home × expansion)`, so a gene with long introns is not split into several "copies" and a compact gene keeps the floor. For the gene of interest the corresponding limit comes from its home model (`goi_fallback_intron_margin`, `goi_fallback_intron_floor`). miniprot is not bound by this value: it gets the whole stretch of DNA of a candidate and may place an intron anywhere in it.
+A floor on the identity of a hit of the genome-wide search. It is a guard, not the filter that
+decides: hits are kept by E-value, and a hit that reaches E ≤ 0.01 in a whole genome is far above
+10 % identity, so lowering it changes nothing. Raising it, for example to 30 among close species,
+removes weak anchor hits and the chance blocks they make. Inside a window the floor is
+max(`aug_relaxed_identity_min`, `min_hit_identity` × `aug_relaxed_identity_factor`), 15 % at the
+defaults. One of the 32 settings that no module changes.
 
----
+### `min_hit_length`
+**Default:** `10` (aa)
 
-## 6. Smith-Waterman Local Search
-
-### `enable_smith_waterman`
-**Type:** Boolean | **Default:** `true`
-
-Enables rigorous Smith-Waterman (SW) local alignment for GOI detection within candidate syntenic regions. After flanking gene clustering identifies candidate blocks, the pipeline extracts the genomic sequence of each block and searches for the GOI using three methods: tblastn, miniprot, and (when enabled) Smith-Waterman alignment. SW alignment via parasail or ssearch36 is the most sensitive local alignment method — it guarantees finding the optimal local alignment between the query protein and every possible six-frame translation of the region. This catches GOI copies that tblastn misses due to frameshift-tolerant scoring, compositional bias, or extreme divergence. The cost is runtime: SW alignment is O(m*n) in sequence lengths and can be slow for large regions. It is strongly recommended to keep this enabled; disabling it only makes sense if runtime is critical and you are searching very close relatives where tblastn alone suffices.
-
-### `sw_method`
-**Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'parasail'`, `'ssearch36'`
-
-Selects the Smith-Waterman backend. **`auto`** (the default) uses parasail, a SIMD library (SSE/AVX on x86): each piece of a translated frame gets its best alignment (more with `sw_max_alignments_per_piece`). Without parasail, `auto` stops the search at its start unless `allow_missing_smith_waterman` is true, which runs the search without Smith-Waterman. **`parasail`** is the same search and stops at the start without parasail. **`ssearch36`** is another search: the best alignment over all six frames, masked in all frames, then the next, round after round; with parasail installed it runs in parasail (recorded as backend `parasail_best_hit_rounds`), without parasail in the ssearch36 program of the FASTA package (the search stops at its start when neither is installed). Its hits differ from those of `auto`. The backend, the parasail version and the SIMD instruction set of a run are recorded in the target-policy tables and in the report's `run_settings.smith_waterman` (since 2026-10-29).
-
-### `sw_min_score`
-**Type:** Float | **Default:** `20` | **Range:** 5–200
-
-A floor on the raw Smith-Waterman score (BLOSUM62, gap 11/1) of a hit in a search window. Since September 2026 every Smith-Waterman hit must also reach E ≤ 1 over the six reading frames of its window, and that filter is the stricter one for any value up to about 30: the lowest raw score with E ≤ 1 is 31 for a 20-aa query in a 2 kb window, 54 for a 70-aa query in 300 kb and 60 for a 300-aa query in 300 kb. The default, and the value of 10 that `preset_short_peptide` used to set, therefore never decide anything. Only a value above those numbers has an effect (it makes the Smith-Waterman search stricter than E ≤ 1).
-
-### `sw_min_identity`
-**Type:** Float (%) | **Default:** `10.0` | **Range:** 0–100
-
-A floor on the identity of a Smith-Waterman hit, applied together with `sw_min_score` and before the E ≤ 1 filter. An alignment that reaches E ≤ 1 with less than 10 % identical residues does not occur in practice, so the default is a guard that does not bind; raising it (for example to 25) makes the Smith-Waterman search stricter.
-
-### `sw_timeout_seconds`
-**Type:** Integer (s) | **Default:** `3600` | **Range:** ≥ 1
-
-A guard, not a limit on the result (since 2026-10-29): when the Smith-Waterman search of one window has not finished after this many seconds, the genome's search stops, and the task with it; the message names the genome and block (`<genome>_b<N>`), the window's length, its queries and its cells. A Smith-Waterman child that fails, or writes no hits file, stops it the same way (until then it was a warning and the window kept its other hits). The work of a window is fixed by its inputs: every query (the home protein, the relative's model, in decoy mode three decoys of each, and the home copies) against the window's six translated frames, 2 × window bp × query aa cells, which the search log prints for each window with its seconds (`Smith-Waterman: N cells in S s, K hits kept.`). The search scores each piece of a frame without a traceback first and runs the traceback only where a hit it keeps (E ≤ 1) can come out; the kept hits are the same as with a traceback on every piece. Raise the guard on a very slow or busy machine. Until 2026-10-28 the default was 300 s, and a window that ran into it kept only its MMseqs2 and tblastn hits, so the same inputs gave other models, bits and labels on a slower or busier machine (such windows were counted in `limit_sw_timeout` of the target-policy tables, `limits.counts.sw_timeout` in the report; 0 since then). A Smith-Waterman child killed for memory (signal 9, or a MemoryError) ends the task with exit 137 when that is the only kind of failure among the genomes searched at the same time (any other failure gives exit 1), and Nextflow retries exit 137 with more memory (`iterative_search_memory`); the ssearch36 program killed under its child is a failed child (exit 1); a Smith-Waterman backend that cannot run (`--sw_method parasail` without parasail, ssearch36 without parasail or ssearch36) stops the search at its start.
-
-### `sw_max_alignments_per_piece`
-**Type:** Integer | **Default:** `1` | **Range:** 1–10
-
-How many Smith-Waterman alignments are returned per piece of a translated reading frame (a frame is one piece unless query length × frame length exceeds 200 million cells). At 1 the best alignment of each piece is returned, as before. Above 1, the residues of each alignment are masked and the piece is aligned again; further alignments are returned while their E-value is at most 1 (the filter the search applies to Smith-Waterman hits anyway), up to this number. Two copies of the gene, or two exons, in the same frame of a window are otherwise reported as one: the second is hidden behind the best alignment. A piece without an alignment at E ≤ 1 costs the same as at 1; each further alignment costs one score-only pass and one traceback. Applies to the parasail backend only.
-
-A settings key. The `local_family` (A1) and `exon_structure` (C1) modules set 3 for a gene with two or more home copies or two or more home exons. Round 2 ran 3 only together with `--tandem_copy_parent home`, so its effect alone is not measured and 1 stays the default.
-
----
-
-## 7. Augmented / Relaxed Search
-
-### `region_padding`
-**Type:** `auto` or Integer (bp) | **Default:** `auto`
-
-The extent of the neighbourhood on each side of a block, in bp. Blocks whose extents overlap are merged before the search, and the anchors inside the extent count as support for a call. `auto`: `window_margin_genes` pitches of the home locus times the expansion of the target ([Distances in gene units](#distances-in-gene-units)); the DNA that is cut out and searched is then at most this wide and no wider than GOI margin + the room for one gene model. A number of bp restores the former behaviour: the margin is adapted to the spacing of the hits (twice the mean gap between consecutive hits, between `padding_min` and `padding_max`) and searched in full.
-
-### `padding_min`
-**Type:** Integer (bp) | **Default:** `50000`
-
-Lower limit of the adaptive margin. Only read when `region_padding` is a number.
-
-### `padding_max`
-**Type:** Integer (bp) | **Default:** `200000`
-
-Upper limit of the adaptive margin. Only read when `region_padding` is a number.
-
-### The thresholds of the window search (`aug_relaxed_*`)
-
-The names come from an earlier design with several rounds of ever more relaxed searches. There is one search per window now. MMseqs2 (E 10) and tblastn (E 1000) are run on the window with a wide E-value, and of what they return a hit is kept when it reaches
-
-- E ≤ `search_evalue × aug_relaxed_parse_evalue_mult` (0.01 × 10 = **0.1**, counted over the window, not the genome),
-- identity ≥ `max(aug_relaxed_identity_min, min_hit_identity × aug_relaxed_identity_factor)` (**15 %**), and
-- aligned length ≥ `max(aug_relaxed_length_min, min_hit_length / aug_relaxed_length_div)` (**15 aa**).
-
-Smith-Waterman hits have their own rule (E ≤ 1 over the six frames of the window, see `sw_min_score`).
-
-### `aug_relaxed_parse_evalue_mult`
-**Type:** Float | **Default:** `10`
-
-The factor between the E-value for anchors in the whole genome (`search_evalue`) and the E-value at which a hit inside a search window is kept. This is the one of the seven that decides which window hits exist. An E-value is already scaled to the search space, so 0.1 in a window of a few hundred kb asks for fewer bits than 0.01 in a genome: that is the intended relaxation where anchors support the place.
-
-### `aug_relaxed_evalue_mult`
-**Type:** Float | **Default:** `1000` | **Range:** 10–100,000
-
-### `aug_relaxed_evalue_cap`
-**Type:** Float | **Default:** `10.0` | **Range:** 0.1–100
-
-Together they set the E-value handed to MMseqs2 for the window: `min(aug_relaxed_evalue_cap, search_evalue × aug_relaxed_evalue_mult)` = 10. Hits between that value and the kept threshold of 0.1 are computed and then discarded, so neither parameter changes the result as long as their product stays above the kept threshold. Lowering them below it would tighten the window search; raising them does nothing.
-
-tblastn does not use them (since 2026-10-14): it always reports to E 1000. For tblastn the cutoff is more than an output filter: through tblastn's composition-based statistics (on by default) it also changes the E-values tblastn reports, in either direction, so with the old cutoff of 10 the E-value of what it did report changed with the setting. On the Candida pilot a curated ortholog was absent from tblastn's output in SynVoy's own window at 10 and reported at E 0.005 at 1000. The kept threshold of 0.1 applies to tblastn as before.
-
-### `aug_relaxed_identity_min`
-**Type:** Float (%) | **Default:** `15.0` | **Range:** 5–50
-
-### `aug_relaxed_identity_factor`
-**Type:** Float | **Default:** `0.6` | **Range:** 0.1–1.0
-
-The identity floor of a window hit is the larger of `aug_relaxed_identity_min` and `min_hit_identity × aug_relaxed_identity_factor`. At the defaults that is max(15, 6) = 15 %; the factor only matters when `min_hit_identity` is set above 25.
-
-### `aug_relaxed_length_min`
-**Type:** Integer (aa) | **Default:** `15`
-
-### `aug_relaxed_length_div`
-**Type:** Integer | **Default:** `2`
-
-The length floor of a window hit is the larger of `aug_relaxed_length_min` and `min_hit_length / aug_relaxed_length_div`. At the defaults that is max(15, 5) = 15 aa; the divisor only matters when `min_hit_length` is set above 30. The 15 aa are a real limit for short queries: an exon of fewer than 15 residues cannot produce a window hit from MMseqs2 or tblastn (Smith-Waterman has no such floor beyond 10 aa). The `short_query` module (B1), which already opens 10-codon reading frames in the windows, sets `aug_relaxed_length_min` to 10 (a settings key).
-
-### `max_blocks_per_genome`
-**Type:** Integer | **Default:** `80` | **Range:** 5–500
-
-A safety cap on the total number of candidate syntenic blocks evaluated per target genome. In genomes with many repetitive regions or large gene families, flanking gene hits may cluster into hundreds of candidate blocks. Evaluating each block involves gene prediction, tblastn, SW alignment, and classification — so the cost is approximately linear in block count. The default of 80 is sufficient for even complex genomes with multiple GOI loci (e.g., a gene family with 10 tandem copies on 5 chromosomes = 50 blocks). For very large gene families or whole-genome searches, increase to 120–200. For quick exploratory runs, decrease to 20–30. When the cap is hit, blocks are prioritized by synteny score (highest first), so the most promising regions are always evaluated. The cap prevents runaway searches in pathological genomes from stalling the entire pipeline for hours. On the genome axis (any `--modules` other than `legacy`, `anchor_max_places` `auto`) a genome in which the cap binds is first built again from the 5 best places of each flanking gene, and the cap then applies to that rebuild (see `anchor_max_places`).
-
-### `min_block_genes`
-**Type:** Integer | **Default:** `2` | **Range:** 1–10
-
-The minimum number of flanking gene hits required in a candidate syntenic block for it to be kept and evaluated further. Blocks with fewer than this many hits are discarded as noise. With the default of 2, at least two flanking gene anchors must map to the same target region (within `cluster_distance`). Setting this to 1 is extremely permissive — a single flanking gene hit somewhere on a chromosome does not constitute synteny evidence and is almost certainly a standalone ortholog of that flanking gene rather than a conserved syntenic block. Setting this higher than 3 is very strict and may miss real syntenic regions in organisms with high chromosomal rearrangement. The combination of `min_block_genes` and `min_synteny_score` together determines which candidate regions survive for GOI search: `min_block_genes` is the absolute floor, while `min_synteny_score` is the proportional threshold.
-
-### `tandem_query_restart`
-**Type:** Boolean | **Default:** `false`
-
-How tandem copies of the GOI are found among its hits in a search window. Off (the default, as before): any two hits that each cover at least 35 % of the query make a tandem, and each copy is the single span of its hits. On (batch G2, 2026-10-16): copies are built per strand from hits that continue the query (a hit starts at most 10 residues before the previous one ends and ends after it), a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits (both for a query under 150 aa), copies sharing genome are one, and a tandem needs two counted copies that overlap in the query by more than half; each copy is written as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or two programs' hits of one exon, no longer make a tandem. Works with both `tandem_copy_parent` settings.
-
-### `goi_first_exon_guard`
-**Type:** Boolean | **Default:** `false`
-
-A GOI gene model from miniprot is extended to its own start and stop codon (`refine_model_termini`). The search's hits cannot see an exon below about 10 to 15 aa, and miniprot rarely places a first exon of 5 to 16 aa, so a model often begins at the second exon; the walk upstream then reaches an ATG in the intron. With this switch (batch G3A, 2026-10-16) the walk is skipped when the home gene has two or more exons, its first exon is at most 30 aa, and the query residues missing before the model's first CDS are within 5 aa of that exon's length; the model then carries `FirstExon=missing` and `MissingQueryStart=1-<n>`. The same holds at the stop end (`LastExon=missing`, `MissingQueryEnd`). Labels do not read these attributes. Applies to the home query and its decoys only.
-
-### `goi_genome_wide_path`
-**Type:** Boolean | **Default:** `false`
-
-A GOI hit outside every searched window is modelled today only by the dispersed-GOI rescue (`enable_dispersed_goi_rescue`: ≥ 40 % identity, E ≤ 1e-10, ≥ 50 aligned residues, inside the envelope of ≥ 3 anchors on its chromosome). With this switch (FINAL step 5, 2026-10-16), in a genome with at least one block at E_syn ≤ 0.1, the GOI hits outside every window are grouped per chromosome into places; a place is modelled when the home protein's E against its hits over the whole genome is at most 1e-3 and no other home protein explains it as well (specificity in the genome place), at most the query's home family size + 1 places per genome, best E first. Its calls are judged in the genome place and carry `GenomeWide=1`; every place, also the ones cut by the cap, is listed with its E in `hits/<genome>.genome_wide.tsv` and in the report's `genome_wide_path` block. The genome place has no decoy calibration. Needs the home proteome (a home GFF, or the borrowed one).
-
-### `goi_genome_wide_without_blocks`
-**Type:** Boolean | **Default:** `false`
-
-Only with `goi_genome_wide_path`: the genome-wide path also runs in a genome without a block at E_syn ≤ 0.1, and in one where no block is found at all (PR-9, 2026-10-16), with the same rules and judge. A genome-wide call whose CDS or hit of the home query runs across an exon junction of the home gene (annotated, two or more exons) with 10 residues on each side carries `RetrocopyCandidate=1`; advisory, no label reads it. Set without `goi_genome_wide_path`, it has no effect (the search warns).
-
-### `goi_join_leftover_hits`
-**Type:** Boolean | **Default:** `false`
-
-A GOI hit that no gene model of its locus covers is written as a `rescued_exon` call, even when it is an exon miniprot left out of a model next to it. With this switch (batch G3B, 2026-10-16) such a hit is first offered to a gene model of its own query that the window's judge calls HIGH or MEDIUM (the home query or its decoy): it must lie outside the model on its strand, continue the model's query from its first or last CDS (batch G1's link rule: it starts at most 10 residues before the other ends and ends after it, the residues it skips fit into the genomic gap, and a gap under 40 bp joins only two pieces of one exon in one reading frame), lie within the GOI's intron bound (`goi_fallback_max_gap`), and no CDS of another gene model or tandem copy may lie in between. miniprot then models both again (± 1 kb); the new model replaces the old one only when it covers the hit and the label's order ranks it strictly first. It keeps the old model's id and lists the joined hits in `JoinedHits=`. Models found with the relative's query are not joined.
-
-### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
-**Types:** Integer (aa) / Integer (aa) / Float (bits) | **Defaults:** `150` / `15` / `30`
-
-These control the **short-query GOI fallback gate** — the "fallback" model emitted (from tblastn/MMseqs2/Smith-Waterman hits) when miniprot cannot build a spliced gene model in a flanking-seeded block. The legacy gate vetoed a fallback on low *query coverage*, which is structurally low for a short precursor whose conserved region is only a fraction of the query: a 26 aa mature melittin peptide is ~37% of the 70 aa preprotein, so a perfect hit still looks "low coverage" and was rejected — while a high-coverage but low-identity artifact in a *different* block passed, stamping the GOI on the wrong locus.
-
-For a query shorter than `fallback_short_query_len` (aa), SynVoy instead gates the fallback on **absolute aligned length** (`fallback_short_min_aln_aa`) AND **bitscore** (`fallback_short_min_bits`) — coverage is no longer a veto — so the real, divergent hit is emitted in its own flanking-seeded block. A micro-window (a few aa) is still rejected by the aligned-length floor, and a statistically weak hit by the bitscore floor. Queries at or above `fallback_short_query_len` keep the coverage floor unchanged, so long single-copy or paralog-family genes (e.g. LY6, TP53) are unaffected, and a high-coverage divergent ortholog (e.g. the *Tetramorium* myrmicitoxin at ~40% identity × ~76% coverage) clears either path. Set `fallback_short_query_len 0` to disable the short-query path entirely (legacy coverage gate for all queries). Lower `fallback_short_min_aln_aa`/`fallback_short_min_bits` for extremely short or divergent peptide families; raise them if a short-query run produces spurious LOW fallbacks. This is the core of the §A1 "fumble" fix. `fallback_short_min_aln_aa` is a settings key: the `short_query` module (B1) sets 10, the same floor as the window hits it judges (constraint C7); the 30-bit floor stays.
-
----
-
-## 8. MMseqs2 Configuration
+A floor on the aligned length of a hit of the genome-wide search. Like `min_hit_identity` it is a
+guard behind the E-value: fewer than 10 residues score about 20 bits at best, and E ≤ 0.01 in a
+genome needs 35 bits or more. Inside a window the floor is max(`aug_relaxed_length_min`,
+`min_hit_length` / `aug_relaxed_length_div`), 15 aa at the defaults. One of the 32 settings that no
+module changes.
 
 ### `mmseqs_sensitivity`
-**Type:** Float | **Default:** `9.5` | **Range:** 1–12
+**Default:** `9.5` · `low_mem` 7.0, `laptop_safe` 8.0
 
-Controls the sensitivity of MMseqs2 prefilter and alignment stages, directly trading speed for detection power. MMseqs2 uses a k-mer-based prefilter to identify candidate target sequences before running full alignment; higher sensitivity values use more k-mers and longer seed matching, finding more distant homologs at the cost of slower execution. The scale runs from 1 (fastest, least sensitive — suitable for finding near-identical sequences) to 12 (slowest, most sensitive — comparable to BLAST with all optimizations). The default of 9.5 is already quite high, suitable for finding orthologs within the same class or order. For cross-phylum searches (>400 Mya), increase to 10–11. For very distant searches (>700 Mya, cross-kingdom), push to 11–12 and accept significant runtime increase. For within-genus searches, 7–8 is sufficient and much faster. This parameter has the largest single impact on runtime of any sensitivity control.
+MMseqs2's sensitivity (`-s`) in LOCATE_GENE and the genome-wide search: higher values find more
+distant hits and take longer. Values from about 7 (faster, for close species) to 9.5 are usual.
+After a search of a genome is killed for memory, it is retried with one thread, a sensitivity of
+at most 7.0 and then 6.0, and a split limit of 2G; the search log says so. The search log warns
+about any value above 9, the default included; that warning can be ignored.
 
 ### `mmseqs_split_memory_limit`
-**Type:** String | **Default:** `'8G'` (config default)
+**Default:** `8G` · `low_mem` 2G, `laptop_safe` 4G, `docker_max` 70 % of the memory it gives the
+search
 
-The memory limit for MMseqs2 database splitting. When the target database is larger than this limit, MMseqs2 splits it into chunks and processes each chunk sequentially, reducing peak memory usage at the cost of slightly increased runtime (due to repeated I/O). The default of 8 GB works well for most workstations. On memory-constrained systems (laptops with 8 GB RAM), reduce to `'3G'` or `'1G'` to prevent OOM kills — the `laptop_safe` profile already sets this to `'8G'`. On servers with ample RAM (32+ GB), you can increase to `'16G'` or higher to avoid splitting altogether, which slightly improves performance. If MMseqs2 processes crash with exit code 137 (SIGKILL from OOM killer), this is the first parameter to reduce. The value must include a unit suffix (`G` for gigabytes, `M` for megabytes).
+MMseqs2's `--split-memory-limit` in LOCATE_GENE and the search: a target database larger than this
+is searched in parts, which lowers the peak memory and costs some time. Give a unit (`G` or `M`).
+When a search is killed for memory (exit 137), lower this first. `iterative_search_memory auto`
+counts it in its request ([§ 17](#iterative_search_memory)).
 
 ### `mmseqs_verbosity`
-**Type:** Integer | **Default:** `1` | **Options:** `0`, `1`, `2`, `3`
+**Default:** `1` · `low_mem` and `laptop_safe` 0
 
-Controls the verbosity of MMseqs2 log output. Level 0 suppresses all output except errors; level 1 shows warnings and basic progress; higher levels show detailed progress information including per-sequence alignments. The default of 1 provides useful diagnostic information without flooding logs. The `laptop_safe` profile sets this to 0 to reduce log noise during single-threaded execution. For debugging failed searches, temporarily set to 2 or 3 to see which sequences are being searched and what hits are found. This parameter does not affect results, only logging. It is passed directly to MMseqs2's `--verbosity` flag. Note that even at verbosity 0, critical errors are still reported through Nextflow's process error handling.
+Passed to MMseqs2 as `-v` (0 to 3; `mmseqs -h` gives the levels). It changes the messages only.
 
 ### `deterministic_goi_search`
-**Type:** Boolean | **Default:** `true`
+**Default:** `true`
 
-Makes the iterative per-target GOI search **reproducible run-to-run**. MMseqs2 with more than one thread can give slightly different results for marginal/divergent hits between identical runs (non-deterministic prefilter/alignment tie-breaks). On its own that jitter is small, but the iterative search amplifies it: a borderline GOI call flips between confidence classes, which flips whether it seeds the expanding query database for later waves, which cascades into wholesale-different calls. With this on (default), the per-region augmented GOI search runs at `--threads 1`; because each augmented search covers only a small flanking-seeded block (not the whole genome), the speed cost is minor. (tblastn already runs single-threaded; the genome-wide flanking MMseqs2 search is unaffected.) Combined with deterministic ordering of the expanding database and of hit parsing, this yields byte-identical GOI calls and seed sets across reruns — important for publication-grade reproducibility. Set to `false` for the legacy multithreaded path if you are willing to trade reproducibility for a small speed gain on the augmented passes.
+Runs the MMseqs2 search of each window with one thread, so a rerun gives the same GOI calls.
+MMseqs2 with several threads can order marginal hits differently between runs, and a borderline
+call that flips also changes the queries of the later waves. tblastn and Smith-Waterman (parasail)
+run in one thread anyway, and a window is small, so it costs little time. `false` lets the window
+search use the task's threads.
+
+### `max_blocks_per_genome`
+**Default:** `80` (0 = no cap)
+
+The most blocks searched in one target genome for one home locus. When the cap binds, blocks seeded
+by the gene itself come first, then the blocks with the longer collinear run, then those with more
+genes. Without the home order (`--disable_synteny_collinearity`) the blocks are not sorted: those
+that pass the gene-count filter come in position order and the GOI-seeded ones after them, so the
+cap drops those first. The log says
+`Capping blocks`. With any `--modules` other than `legacy`, a genome in which the cap binds is
+first built again from the 5 best places of each flanking gene
+([`anchor_max_places`](#anchor_max_places)), and the cap applies to that. Each block costs window
+searches and gene models, so the run time grows with the number of blocks.
+
+### `min_block_genes`
+**Default:** `2`
+
+Blocks with fewer distinct flanking genes than this are not searched. A block seeded by the gene
+itself is kept whatever its size: by the gene's own home gene among the anchors, by a rescued GOI
+hit, or by a GOI hit where no flanking gene has a hit at all. When no block passes, every block is
+searched (up to `max_blocks_per_genome`). `1` is very permissive: one flanking hit on a chromosome
+is no evidence of synteny.
+
+### `anchor_max_places`
+**Default:** `auto` (or a number; 0 = every place)
+
+Each flanking gene seeds blocks only at its N best places in a target genome. A place is a run of
+hits of that gene within its own gap limit, and the best places have the largest summed bit score.
+The ortholog of a flanking gene is one place; its other places are relatives and shared domains,
+and those are what put two anchors near each other by chance, which is how most searched blocks
+arise. Hits that are left out still count inside a window (flanking support, flanking models); only
+the seeding of blocks changes.
+
+- `auto`: every place, except that with any `--modules` other than `legacy`, a genome in which
+  `max_blocks_per_genome` binds is built again from the 5 best places of each flanking gene (the
+  genome axis, [§ 1](#modules)); the cap cuts that again if it still binds.
+- A number is used for every genome.
+
+The gene's own home gene among the anchors keeps every place, and rescued GOI hits stay seeds. It
+matters where flanking genes have many places, as in plant genomes; under `--modules legacy`, use
+`--anchor_max_places 5` there and whenever the log says `Capping blocks`. Where a genome has no
+conserved neighbourhood, its two-anchor blocks are chance blocks and the limit removes them; the
+search then falls back to every block, as it does whenever no block passes `min_block_genes`.
+
+The value used for each genome, and its source (`default`, `genome_axis` or `user_set`), is in the
+search log, in the report's `target_policy` block and in the `##synvoy-genome-axis` line of the
+genome's result GFF.
+
+### `disable_anchor_resolution`
+**Default:** `false`
+
+A target gene is the anchor of at most one home gene: where hits of different flanking genes cover
+the same target DNA (overlapping by at least half of the shorter hit, as for two kinases or a
+tandem pair), only the best-scoring hit counts as an anchor. `true` counts every hit, so one target
+gene can count as two flanking genes.
+
+### `disable_synteny_collinearity`
+**Default:** `false`
+
+`true` builds blocks from gene counts alone: no bridging of gaps and no ranking by collinear run.
+Without the home order no block has a collinear run, so no block is significant: every GOI call is
+then judged in the genome place, with no slot, no gene-order-only call and no positional tie-break
+([ALGORITHM.md § 7.3](ALGORITHM.md#73-bridging-a-gap)). For comparisons.
+
+### `synteny_bridge_min_anchors`
+**Default:** `2`
+
+How many distinct flanking genes a block must hold before it may bridge a gap
+([`synteny_bridge_max_gap_genes`](#synteny_bridge_max_gap_genes--synteny_bridge_max_gap)). With 2, a
+block of two genes bridges when the first gene after the gap continues their home order within
+`synteny_bridge_max_rank_gap` ranks, so `A B … D E F` is one block; its direction then rests on
+those two genes. Under `synteny_bridge_two_sided` the same number is the shortest collinear run the
+genes on both sides of the gap must form.
+
+### `synteny_bridge_max_rank_gap`
+**Default:** `5`
+
+The largest jump in home rank that still continues the home order across a gap.
+
+### `synteny_bridge_two_sided` / `synteny_bridge_max_per_block`
+**Defaults:** `false` / `2`
+
+The default rule looks at the anchored flanking genes on one side of a gap, so the same evidence
+bridges or not depending on where the gap falls. `synteny_bridge_two_sided true` weighs both sides
+together; it is off because its effect on the calls has not been measured.
+`synteny_bridge_max_per_block` caps how many gaps one block may bridge (`0` = no limit).
+
+### `rank_wave_binning`
+**Default:** `true`
+
+How the target genomes, sorted from the closest to the farthest, are grouped into waves. `true`:
+by rank, the closest tenth one genome at a time, then pairs up to 35 % of the list, threes up to
+70 % and fives after that, so the first genes found reach the queries before the distant genomes
+are searched. `false`: by phylogenetic distance (closer than 0.05 one at a time, up to 0.15 at most
+three of similar distance, beyond that at most five), which gives few, large waves when the targets
+are all about equally distant.
+
+### `disable_wavefront`
+**Default:** `false`
+
+`true` searches every genome in one wave, so the genes found never join the queries. A control:
+run a set both ways to see what the growing query set changes.
+
+### `disable_relative_query`
+**Default:** `false`
+
+Inside a window the gene is searched with the **home protein** and also with the gene model of the
+genome searched most recently (of its models, the one that aligns best to the home protein). A
+model found only with that relative's protein is measured again against the home protein: its
+identity, coverage and confidence refer to the home protein, its id carries `_r<n>_` instead of
+`_l<n>_`, and `SearchQuery` / `SearchQueryIdentity` name the relative and the identity to it.
+`true` searches with the home protein only.
 
 ---
 
-## 9. Annotation & Gap Filling
+## 9. Search inside a window
 
-### `gff_search_window`
-**Type:** Integer (bp) | **Default:** `100000`
+Each window (a block with its neighbourhood) is searched for the gene with MMseqs2, tblastn and,
+by default, Smith-Waterman; miniprot then builds gene models from the hits
+([ALGORITHM.md § 7.6–7.7](ALGORITHM.md#76-search-inside-the-window)). A hit of MMseqs2 or tblastn
+is kept when it reaches E ≤ 0.1 counted over the window, 15 % identity and 15 aligned residues (the
+`aug_relaxed_*` values below); a Smith-Waterman hit when it reaches E ≤ 1 over the window's six
+reading frames. The module `short_query` (B1) lets reading frames and hits count from 10 residues
+and runs tblastn with word size 2 and without composition-based statistics.
 
-Used once, when the home gene model is built (`annotate_goi_exons.py`). If the GOI is not found in the home GFF by name, the proteins of the annotated genes within this distance of the query's hits are compared with the query, and the best match is taken as the home gene. It does not affect the choice of flanking genes (that is `n_flanking_genes` and `max_flanking_distance`) or anything in the target genomes. Raise it only if the query's hits lie far from the gene they belong to.
+### `enable_smith_waterman`
+**Default:** `true`
 
-### `gap_search_window`
-**Type:** Integer (bp) | **Default:** `50000`
+Adds a Smith-Waterman search of the query against the six-frame translation of each window. It
+finds hits that MMseqs2 and tblastn miss through biased composition or strong divergence. Its time
+grows with query length × window length; queries longer than 10,000 aa skip it. Keep it on.
 
-DNA added on each side of the hits of one candidate before miniprot builds its gene model. It is a floor: the margin is never smaller than the span of the gene of interest at home times the expansion of the target, so a gene of 200 kb gets room for its introns. The home gene model uses the same value when it falls back to miniprot. There is no separate gap-filling search: missing exons are found by miniprot inside this stretch, or not at all. (Until 2026-10-08 the same number also decided how far outside a block a hit may lie; that is `goi_margin` now.)
+### `sw_method`
+**Default:** `auto` (`auto`, `parasail` or `ssearch36`)
 
-### `goi_max_models_per_locus`
-**Type:** Integer | **Default:** `10` | `1` = best model only
+The Smith-Waterman backend.
 
-Gene models kept per candidate locus. miniprot reports every place where the query aligns in the stretch of DNA; until 2026-10-08 the first model was used and the rest dropped, so a tandem array gave one model, and which copy it was depended on a score difference of under one per cent. Now every model is kept whose coding sequence overlaps the coding sequence of a better model by less than half. Where hits of the window search remain on no model, the coding exons found so far are masked and miniprot runs again (with a long allowed intron it does not report a diverged neighbouring copy in the first run: of two copies 2 kb apart the one at 80 % identity is missing from 10 kb on). A further model must reach 30 % of the best score, the limit miniprot applies itself. Further models carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are classified like any other model.
+- `auto`: parasail, a SIMD library: each piece of a translated frame gets its best alignment (more
+  with `sw_max_alignments_per_piece`). Without parasail the search stops at its start, unless
+  `allow_missing_smith_waterman` is `true`.
+- `parasail`: the same, and it stops at the start without parasail.
+- `ssearch36`: another search: the best alignment over all six frames, masked, then the next,
+  round after round. With parasail installed it runs in parasail (recorded as
+  `parasail_best_hit_rounds`), otherwise in the ssearch36 program of the FASTA package; it stops at
+  the start when neither is installed. Its hits differ from those of `auto`.
 
-A settings key. The `local_family` module (A1) sets max(10, home copies + 1), at most 60, so every copy of a home array larger than ten can get its own model (beyond the cap, copies become fragments). Whether the cap stopped the copy rounds of a locus is counted in the report's `limits` block (`goi_model_cap_stopped`).
+The backend, the parasail version and the SIMD instruction set of a run are in the report's
+`run_settings.smith_waterman`.
 
-### `goi_miniprot_timeout`, `flanking_miniprot_timeout`
-**Type:** Integer (s) | **Defaults:** `3600`, `3600`
+### `allow_missing_smith_waterman`
+**Default:** `false`
 
-Guards of a miniprot run (since 2026-10-29): a run that has not finished after this many seconds stops the task, with a message that names the run and the parameter (in the search, ANNOTATE_GOI and BORROW_ANNOTATIONS the kind of model, the protein's length, the DNA's length and sequence; in the hull rescue the genome, the hull's coordinates and length), and in the hull rescue it ends the run (exit 3). `goi_miniprot_timeout` covers every run that models the gene of interest: the search's windows (one run per copy round of a locus), the home gene model of ANNOTATE_GOI when no annotated gene matches, and the hull rescue. `flanking_miniprot_timeout` covers the other runs: the flanking genes of a window and, for a home genome without a GFF, the transfer of a target's genes to the home (BORROW_ANNOTATIONS). A run without miniprot stops the same way: the search refuses to start, and a step that needs miniprot stops at its first run (until then every gene became a hit-chain model, with a warning per call). Until 2026-10-28 a run beyond 120 s (600 s in the hull rescue) gave no model: a flanking gene got a hit-chain model, the copy rounds of a GOI locus ended there, the home model came from the next chromosome with hits, a target gene was not transferred; how many runs did so depended on the machine's speed. The report's `miniprot_timeout_goi`, `miniprot_timeout_flanking` and `goi_model_rounds_ended_by_timeout` counts are 0 since then. The strong-synteny rescue has its own guard, `strong_synteny_rescue_miniprot_timeout`.
+`true` lets the search run without Smith-Waterman when parasail is missing, with a warning. The
+calls then lack the Smith-Waterman bits that the specificity check uses
+([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)), so install parasail instead where you can.
 
-### `window_tblastn_word_size`, `window_tblastn_comp_stats`
-**Type:** Integer | **Defaults:** `3`, `2` (tblastn's own)
+### `sw_min_score`
+**Default:** `20` (whole bits)
 
-`-word_size` and `-comp_based_stats` of the tblastn search inside each window (finding only). With a value other than tblastn's defaults, tblastn runs twice per window: the run with these values adds hits, and the run with the defaults still gives `EeffTblastn`, the second E source the label is compared on. The `short_query` preset module (B1) sets 2 and 0: a short query has few words of 3 and loses score to the composition adjustment. This holds for a low-complexity short query too. Keeping the composition statistics at 2 there (constraint C8, tried in stage 3 of the profile handoff, 22-23 Oct 2026) cost real tblastn window hits on curated SPIN copies of the family pilot (33 -> 19 hits in one *Harpegnathos* window) and shortened a counted call there, while decoys stayed at 0 MEDIUM or better with and without it; it was taken out again. The label's own E-value (blastp, `Eeff`) is not affected. Settings keys: a value you set yourself is kept.
+A floor on the raw Smith-Waterman score (BLOSUM62, gap costs 11/1) of a window hit. Every
+Smith-Waterman hit must also reach E ≤ 1 over the six frames of its window, and that is the
+stricter test up to about 30: the lowest score with E ≤ 1 is 31 for a 20-aa query in a 2-kb window,
+54 for a 70-aa query in 300 kb and 60 for a 300-aa query in 300 kb. Only a value above those has an
+effect. One of the 32 settings that no module changes.
+
+### `sw_min_identity`
+**Default:** `10.0` (%)
+
+A floor on the identity of a Smith-Waterman hit, applied with `sw_min_score` and before the E ≤ 1
+filter. At the default it does not bind; a higher value, such as 25, makes the Smith-Waterman
+search stricter. One of the 32 settings that no module changes.
+
+### `sw_timeout_seconds`
+**Default:** `3600` (whole seconds, 1 or more)
+
+A guard, not a limit on the result. When the Smith-Waterman search of one window has not finished
+after this many seconds, the genome's search stops, and the task with it; the message names the
+genome and block (`<genome>_b<N>`), the window's length, its queries and its cells. A failure of any
+of the three window searches stops it the same way. A search killed for memory ends the task with
+exit 137 (when that is the only kind of failure among the genomes searched at the same time), and
+Nextflow retries it with more memory ([`iterative_search_memory`](#iterative_search_memory)).
+
+The work of a window is fixed by its inputs: every query against the window's six frames,
+2 × window bp × query aa cells, which the search log prints for each window with its time
+(`Smith-Waterman: N cells in S s, K hits kept.`). Raise the guard on a very slow or busy machine.
+
+### `sw_max_alignments_per_piece`
+**Default:** `1` · modules A1 and C1 set `3` when the home gene has two or more copies or two or
+more exons
+
+How many Smith-Waterman alignments are returned per piece of a translated frame (a frame is one
+piece unless query length × frame length exceeds 200 million cells). Above 1, the residues of each
+alignment are masked and the piece is aligned again; further alignments are returned while their
+E-value is at most 1, up to this number. Otherwise two copies of the gene, or two exons, in one
+frame of a window come out as one: the second is hidden behind the best alignment. Under the
+default `--modules auto` most genes with several exons therefore run with 3. It works with
+`sw_method` `auto` or `parasail`; `ssearch36` ignores it with a warning.
+
+### The thresholds of the window hits (`aug_relaxed_*`)
+
+MMseqs2 and tblastn search a window with a wide E-value, and of what they return a hit is kept when
+it passes three bounds. Startup checks none of these values except that `aug_relaxed_length_div` is
+above 0.
+
+| Parameter | Default | What it sets |
+|---|---|---|
+| `aug_relaxed_parse_evalue_mult` | `10` | A window hit is kept at E ≤ `search_evalue` × this (0.1, counted over the window, not the genome). This is the one that decides which window hits exist: 0.1 in a window of a few hundred kb asks for fewer bits than 0.01 in a genome, the intended relaxation where anchors support the place. |
+| `aug_relaxed_evalue_mult` / `aug_relaxed_evalue_cap` | `1000` / `10.0` | The E-value MMseqs2 searches the window with: min(cap, `search_evalue` × mult) = 10. Hits between it and the kept bound are computed and discarded, so neither changes the result while it stays above 0.1. tblastn always reports to E 1000 and is filtered at the kept bound too. |
+| `aug_relaxed_identity_min` / `aug_relaxed_identity_factor` | `15.0` / `0.6` | Identity floor: max(min, `min_hit_identity` × factor) = 15 %. The factor matters only when `min_hit_identity` is above 25. |
+| `aug_relaxed_length_min` / `aug_relaxed_length_div` | `15` / `2` · module B1 sets `aug_relaxed_length_min` 10 | Length floor: max(min, `min_hit_length` / div) = 15 aa. An exon of fewer residues gives no MMseqs2 or tblastn hit; Smith-Waterman has no such floor beyond 10 aa. |
+
+### `window_tblastn_word_size` / `window_tblastn_comp_stats`
+**Defaults:** `3` / `2` (tblastn's own) · module B1 sets `2` / `0`
+
+tblastn's `-word_size` and `-comp_based_stats` in the windows. With values other than tblastn's
+defaults, tblastn runs twice per window: the hits come from the run with these values, and
+`EeffTblastn`, the label's second E-value, from the run with the defaults. A short query has few
+words of 3 and loses score to the composition adjustment, so B1 sets 2 and 0, also for a short
+query of low complexity: with the composition statistics on, short queries lost real window hits
+in tests. The label's own E-value (blastp, `Eeff`) is not affected.
 
 ### `window_mmseqs_min_length`
-**Type:** Integer (codons) | **Default:** `30` (MMseqs2's own)
+**Default:** `30` (codons, MMseqs2's own) · module B1 sets `10`
 
-MMseqs2 `--min-length` of the window search: open reading frames of the target shorter than this many codons are not searched. The `short_query` module (B1) sets 10, so an exon of a short peptide between two stop codons can be found. The genome-wide search for the anchors is not affected. Settings key.
-
-### `miniprot_short_orf_max_len`
-**Type:** Integer (aa) | **Default:** `60`
-
-Queries shorter than this are aligned by miniprot with `-L 10` (open reading frames from 10 aa; miniprot's default is 30) when the gene models of a window are built. The `short_query` module (B1) sets 100. The home gene model is built before the modules are resolved and always uses 60; the rescue passes use `-L 10` for every query. Settings key.
+MMseqs2's `--min-length` in the windows: open reading frames shorter than this are not searched.
+B1's 10 lets an exon of a short peptide between two stop codons be found. The genome-wide search is
+not affected.
 
 ### `goi_candidate_regions_per_query`
-**Type:** Integer | **Default:** `2` | **Range:** 1–40 (modules cap it at 40)
+**Default:** `2` (1 or more) · module A1 sets max(2, home copies + 1), at most 40
 
-GOI loci kept per query in a search window. The hits of a query in a window are split into loci (hits less than 40 kb apart, more for a home gene with long introns), ranked by the share of the query they cover, then the best bit score, then the number of hits, and this many are modelled; the rest are dropped. Until 2026-10-15 the 2 was fixed in the code. The `local_family` preset module (A1) sets it to the home copies + 1 (the larger of the query's coverage at its home locus, rounded half up, and 1 + the family members among the neighbours of the home gene), between 2 and 40 (10 until 2026-10-22: an array in four sub-clusters lost 15 of 31 copies at 10), so a tandem array with more copies than two gets each copy modelled. A settings key: a value you set yourself is kept.
+GOI loci kept per query in a window. The hits of a query in a window are split into loci (hits
+closer than max(5 kb, min(100 kb, 2 × `max_intron`), the gene's intron bound): 40 kb at the
+defaults), ranked by the share of the query they cover, then the best bit score, then the number of
+hits, and this many are modelled; the rest are dropped. A1's value lets a tandem array with more
+than two copies get each copy modelled.
 
-### `report_copies_in_slot`
-**Type:** Boolean | **Default:** `false`
+### `max_intron`
+**Default:** `20000` (bp)
 
-Writes `CopiesInSlot=` and `SlotRank=` on the GOI models and, in the report, `copies_in_slot`: per genome the home copies against the copies in the slot of the best call (`2:3`). A copy is a GOI model between the nearest found home neighbours of the gene (`Place=slot`) with a label of AMBIGUOUS or better; the rank is counted from the home neighbour on the left. Advisory only. The `local_family` module (A1) turns it on.
+The floor of the largest gap between two hits of one flanking gene that still count as one
+occurrence of that gene: the limit is max(`max_intron`, 1.5 × the gene's span at home × the
+expansion), so a gene with long introns is not split into several copies. It also sets the gap at
+which the hits of the gene of interest are split into loci (see `goi_candidate_regions_per_query`),
+the gap between flanking loci, and the gene's own intron bound when its home gene structure is
+unknown (otherwise [`goi_fallback_intron_margin` and `goi_fallback_intron_floor`](#goi_fallback_intron_margin--goi_fallback_intron_floor)).
+miniprot is not bound by it: it gets the whole stretch of DNA of a candidate and may place an
+intron anywhere in it.
 
-### `gap_min_identity`
-**Type:** Float (%) | **Default:** `15.0`
+### `gap_search_window`
+**Default:** `50000` (bp)
 
-Despite the name, this is only a lower bound of the identity required for a `raw_hit` GOI row, the last-resort output when neither miniprot nor a hit chain gives a model. The bound is `max(gap_min_identity, 90)`, so the default has no effect and only a value above 90 changes anything. A `raw_hit` is always LOW confidence.
+DNA added on each side of the hits of one candidate before miniprot builds its gene model. It is a
+floor: for the gene of interest the margin is at least its span at home × the expansion, for a
+flanking gene 1.5 × that gene's span at home × the expansion, so a long gene gets room for its
+introns. The home gene model uses the same value when it falls back to miniprot. Missing exons are
+found by miniprot inside this stretch, or not at all.
 
-### `gap_max_hits`
-**Type:** Integer | **Default:** `5`
+### `goi_max_models_per_locus`
+**Default:** `10` (1 = the best model only) · module A1 sets max(10, home copies + 1), at most 60
 
-The number of candidate hits looked at for the `raw_hit` GOI row of a candidate locus (the last-resort output described under `gap_min_identity`): the hits are sorted by identity, the first one that passes is written, and the search stops there, so a locus gets one such row at most. Must be at least 1.
+Gene models kept per GOI locus. miniprot reports every place where the query aligns in the DNA;
+every model is kept whose coding sequence overlaps that of a better model by less than half. Where
+hits of the window search remain on no model, the exons found so far are masked and miniprot runs
+again, because with a long allowed intron it does not report a diverged neighbouring copy in the
+first run. A further model must reach 30 % of the best score, miniprot's own limit. Further models
+carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are labelled like any other. When the cap
+ends the copy rounds of a locus, the report's `limits` block counts it (`goi_model_cap_stopped`).
 
-### `min_exon_alnlen`
-**Type:** Integer (aa) | **Default:** `30`
+### `miniprot_short_orf_max_len`
+**Default:** `60` (aa) · module B1 sets `100`
 
-Despite the name, this no longer filters exon hits (that filter was switched off in March 2026, because it removed the short exon hits the gene model needs). It is one of the three bounds of the last-resort `raw_hit` row (see `gap_min_identity`): the hit must align at least `max(min_exon_alnlen, 60 % of the query length)` residues. With the default it therefore only matters for queries shorter than 50 aa. None of the 7,470 result files of earlier runs contains a `raw_hit` row. With miniprot installed the row also needs two hits, 75 % query coverage and 60 bits.
+Queries shorter than this are aligned by miniprot with `-L 10` (reading frames from 10 aa;
+miniprot's default is 30) when the gene models of a window are built. Queries under 30 aa are also
+aligned without splicing (`-S`, `-G 2000`). The home gene model is built before the modules and
+always uses 60; the rescue passes use `-L 10` for every query.
+
+### `goi_miniprot_timeout` / `flanking_miniprot_timeout`
+**Defaults:** `3600` / `3600` (s)
+
+Guards of a miniprot run: a run that has not finished after this many seconds stops the task, with
+a message that names the run and the parameter (in the hull rescue the run ends with exit 3).
+`goi_miniprot_timeout` covers every run that models the gene of interest: the copy rounds of a
+window, the home gene model of ANNOTATE_GOI when no annotated gene matches, and the hull rescue.
+`flanking_miniprot_timeout` covers the flanking genes of a window and, for a home genome without a
+GFF, the transfer of a target's genes to the home (BORROW_ANNOTATIONS). The search does not start
+without miniprot. The strong-synteny rescue has its own guard
+([`strong_synteny_rescue_miniprot_timeout`](#strong_synteny_rescue_miniprot_timeout)).
+
+### `tandem_query_restart`
+**Default:** `false`
+
+How tandem copies of the gene are found among its hits in a window. Off: hits within 5 kb of each
+other are one candidate copy, two or more copies that each cover at least 35 % of the query make a
+tandem, and each copy is the span of its hits; two exons of one gene that each cover 35 % of the
+query count as two copies. On: copies are built per strand from hits that continue the query (a hit
+starts at most 10 residues before the previous one ends, and ends after it); a copy counts at a
+union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits
+(both for a query under 150 aa); copies that share genome are one; and a tandem needs two counted
+copies that overlap in the query by more than half. Each copy is written as one mRNA with one CDS
+per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or
+two programs' hits of one exon, then no longer make a tandem. Works with both
+[`tandem_copy_parent`](#tandem_copy_parent) settings.
+
+### `goi_first_exon_guard`
+**Default:** `false`
+
+A GOI model from miniprot is extended to its own start and stop codon. The window hits cannot see
+an exon below about 10 to 15 aa, and miniprot rarely places a first exon of 5 to 16 aa, so a model
+often begins at the second exon, and the walk upstream then reaches an ATG in the intron. With this
+switch the walk is skipped when the home gene has two or more exons, its first exon is at most
+30 aa, and the query residues missing before the model's first CDS are within 5 aa of that exon's
+length; the model then carries `FirstExon=missing` and `MissingQueryStart=1-<n>`. The same holds at
+the stop end (`LastExon=missing`, `MissingQueryEnd`). Labels do not read these attributes. Applies to
+the home query and its decoys only.
+
+### `goi_join_leftover_hits`
+**Default:** `false`
+
+A GOI hit that no gene model of its locus covers is written as a `rescued_exon` call, even when it
+is an exon that miniprot left out of a model next to it. With this switch such a hit is first
+offered to a gene model of its own query that the window's judge labels HIGH or MEDIUM. It must lie
+outside the model on its strand; continue the model's query from its first or last CDS (it starts
+at most 10 residues before the other ends and ends after it, the residues it skips fit into the
+genomic gap, and a gap under 40 bp joins only two pieces of one exon in one reading frame); lie
+within the gene's intron bound (see [`max_intron`](#max_intron)); and no CDS of another model or
+tandem copy may lie in between. miniprot then models both again (± 1 kb), and the new model
+replaces the old one only when it covers the hit and the label's order ranks it strictly first. It
+keeps the old model's id and lists the joined hits in `JoinedHits=`. Models found with the
+relative's query are not joined.
+
+### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
+**Defaults:** `150` (aa) / `15` (aa) / `30` (bits) · module B1 sets `fallback_short_min_aln_aa` 10
+
+When miniprot builds no model at a GOI locus, the hits are chained into a model of their own (a
+hit chain, `fallback_hit_span`, [ALGORITHM.md § 7.7](ALGORITHM.md#77-from-hits-to-gene-models)).
+For a query shorter than `fallback_short_query_len`, the chain is accepted on its aligned length
+(`fallback_short_min_aln_aa`) and its best bit score (`fallback_short_min_bits`), not on query
+coverage: the conserved part of a short precursor is a small share of it (the 26-aa mature melittin
+is 37 % of its 70-aa precursor), so a perfect hit still covers little. A longer query is refused
+with one hit below 25 % query coverage or below 25 aligned residues, and with several hits only
+when all three are low (coverage below 25 %, fewer than 35 aligned residues, below 60 bits).
+`fallback_short_query_len 0` applies the rule of long queries to every query.
+
+### `gap_min_identity` / `gap_max_hits` / `min_exon_alnlen`
+**Defaults:** `15.0` (%) / `5` / `30` (aa)
+
+Despite their names, these set only the last-resort `raw_hit` row: a locus that got no model and no
+tandem copy can give one, from a single hit with identity ≥ max(`gap_min_identity`, 90), an
+alignment of at least max(`min_exon_alnlen`, 0.6 × the query length, 15) residues and a hit
+coverage of at least 0.6, at a locus with at least 2 hits, a union coverage of at least 0.75 and a
+best hit of at least 60 bits. At most `gap_max_hits` hits are tried, sorted by bit score (then
+identity, then aligned length), and the first that passes is written. So `gap_min_identity` changes
+anything only above 90, and `min_exon_alnlen` only for queries under 50 aa. A `raw_hit` is always
+`ModelStatus=fragment`; its label comes from the judge, like any call's.
 
 ---
 
-## 10. Gene Prediction
+## 10. Gene models and labels
 
-### `gene_predictor`
-**Type:** String | **Default:** `'auto'` | **Options:** `'auto'`, `'augustus'`, `'prodigal'`
+Every GOI call carries a **label** (`Confidence`: HIGH, MEDIUM, AMBIGUOUS or LOW, with the reason
+in `Basis`). The label has no parameters: one judge sets it from the E-value of the match in the
+place where the gene is expected, its specificity against the home proteome and a completeness bar
+of 0.7 query coverage, at fixed significance levels
+([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)). The identity thresholds of earlier versions are
+gone ([§ 20](#20-removed-parameters)). The parameters below set the **model status**
+(`ModelStatus`), what a model reports beside its label, and the checks of the report.
 
-Selects the ab initio gene prediction tool. It predicts the genes of a home genome without a GFF (PREPARE_HOME_PROTEOME, and the flank walk when no annotation could be borrowed) and, in the optional PLM, structural and discovery steps, the genes of target windows; the default search models target genes with miniprot. **`auto`** (recommended) takes Augustus when it is installed, else Prodigal with a warning. With any `--modules` other than `legacy` (since 2026-10-27), a home without a GFF whose species is a eukaryote in the NCBI taxonomy stops the run before the search when Augustus is missing, instead of falling back to Prodigal. **`augustus`** is a eukaryotic gene predictor that models intron-exon structure using species-specific hidden Markov models — it can predict multi-exon genes with realistic splice sites. **`prodigal`** is a prokaryotic gene finder optimized for compact genomes without introns — it is fast and accurate for bacteria and archaea but cannot predict spliced genes. Using Prodigal for eukaryotes will miss all multi-exon genes, which is most eukaryotic genes. Using Augustus for prokaryotes works but is unnecessarily slow. The `auto` setting handles this correctly in virtually all cases.
+### `classify_fragment_max_qcov` / `classify_complete_min_qcov`
+**Defaults:** `0.4` / `0.7` (0 to 1) · module B1 sets `0.3` / `0.5`
 
-Since 2026-10-29 an Augustus run that fails stops the gene prediction with the cause (Augustus's exit code and the end of its messages); it no longer falls back to Prodigal, which cannot predict genes with introns and which the run's record (`effective_params.json`) did not name. No archived run of the test sets shows that fallback. A missing Augustus: with `--gene_predictor augustus` the prediction stops ("Augustus is not installed here"); under `auto` the predictor is Prodigal from the start, with a warning, as before (and with any `--modules` other than `legacy` a eukaryotic home stops the run, see above). The structural discovery, which predicts with Augustus only, now stops the search at its start when Augustus is not installed (until 2026-10-28 it predicted with Prodigal there, with a debug line only).
+How complete a gene model is, written as `ModelStatus`: `fragment` below the first bound,
+`complete` from the second when the model has two or more exons or is a tandem copy, otherwise
+`partial`. A single-exon model other than a tandem copy is therefore at most `partial`, and a
+`raw_hit` or `rescued_exon` row is always `fragment`. Models of the hull and strong-synteny rescues
+carry `ModelStatus=rescue` instead. Coverage is the share of the home protein
+that the model's alignment covers; with [`core_completeness`](#core_completeness), the larger of
+that and the coverage of the protein's core.
 
-### `gene_prediction_timeout`
-**Type:** Integer (s) | **Default:** `3600`
+The status does not set the label: HIGH needs 0.7 query coverage whatever these bounds are, and a
+fragment can be MEDIUM when its match in the expected place is significant. The figures hide
+fragment models and draw them in the `*_with_fragments` files ([OUTPUT.md](OUTPUT.md#the-figures)).
+The fragment bound must lie below the complete bound; the search warns when it does not.
+`-c conf/tp53_strict.config` sets 0.35 and 0.75 (see [`goi_family_tokens`](#goi_family_tokens)).
 
-Guard of one Augustus or Prodigal run of the gene prediction (PREPARE_HOME_PROTEOME and the flank walk of a home genome without a GFF, and the structural discovery's Augustus runs on target windows): a run that has not finished after this many seconds stops the task (since 2026-10-29). Launch accepts a whole number of seconds only, as for every guard (`sw_timeout_seconds`, `goi_miniprot_timeout`, `flanking_miniprot_timeout`, `strong_synteny_rescue_miniprot_timeout`). Until then Augustus had 600 s and then fell back to Prodigal, and Prodigal had 300 s, after which PREPARE_HOME_PROTEOME failed and the flank walk skipped the region. The list of installed Augustus models (`augustus --species=help`) has no time limit since then, and an installed Augustus whose list fails stops the run (a list slower than 30 s gave the model `fly` with the reason "not installed here").
+### `core_completeness`
+**Default:** `false` · module B3 turns it on
 
-### `augustus_species`
-**Type:** String | **Default:** `'auto'`
-
-`auto`: under `--modules legacy` the fruit-fly model `fly`, as for every home before 2026-10-27. With any other `--modules` (the default `auto` included, since 2026-11-10) and a home genome without a GFF, the installed Augustus model nearest the home species in the NCBI taxonomy on disk (`~/.etetoolkit/taxa.sqlite`, as the species tree reads it; never downloaded): the model whose species shares the deepest taxon with the home species, so the species' own model first (*Candida albicans* → `candida_albicans`, *Apis mellifera* → `honeybee1`, *Homo sapiens* → `human`, an ant → `camponotus_floridanus`, a firefly → `tribolium2012`). The choice is in `intermediate/locate_gene/effective_params.json` (`settings.augustus_species`, `source` `home_lineage`, and a `derivation` entry with the shared taxon and its rank) and in the console (`home genome without a GFF, gene prediction: ...`). Without the taxonomy database, or for a species it does not know, the model stays `fly` with a warning. A model name you give is used as given; a common name of the short list in `bin/gene_predictor.py` (`AUGUSTUS_SPECIES_MAP`: `honeybee`, `bombus`, `beetle`, ...) is taken as its model.
-
-A model Augustus cannot load (neither `species/<name>/<name>_parameters.cfg` nor `<name>_parameters.cfg` in its config folder, which is `$AUGUSTUS_CONFIG_PATH` when that is set) stops the gene prediction with a message that names the value, the model it maps to and the nearest installed models when any are near (by taxon, when the name is one in the taxonomy on disk, and by spelling; none for `mouse`): PREPARE_HOME_PROTEOME and the flank walk of a home without a GFF, and the search when its structural discovery runs (`--enable_structural_discovery` with the PLM or the structural search on; neither search runs Augustus without it). Since 2026-10-28; before, Augustus exited with an error and the prediction went on with Prodigal, which cannot predict genes with introns, with one warning (one per region in the flank walk, only a debug line in the structural discovery). Aliases (`saccharomyces`, `maize5`) and a model you installed yourself under any name pass. The Augustus 3.5 of `synvoy_env` has no silkworm (`bombyx_mori`) or mouse model, so those two names stop; `bombus` now gives `bombus_terrestris2`, the installed *Bombus terrestris* model (it named `bombus_terrestris1`, which is not installed).
-
-The species model used by Augustus for gene prediction. Augustus uses pre-trained statistical models that capture species-specific gene structure patterns (splice site signals, intron length distributions, codon usage, etc.). The model must match the target organism as closely as possible for accurate predictions. The default `'fly'` (Drosophila melanogaster) is a reasonable general-purpose model for insects and other arthropods. For vertebrate genomes, use `'human'` or `'chicken'`. For nematodes, use `'caenorhabditis'`. For fungi, use `'aspergillus_nidulans'` or another fungal model. Run `augustus --species=help` to see the available models; the `Genus_species` folders in Augustus's `config/species` are models too, which that list leaves out. Using an inappropriate model (e.g., `'fly'` for a mammalian genome) causes Augustus to predict incorrect exon-intron boundaries, which can fragment gene models or merge adjacent genes. Under `--modules legacy`, choose the model by hand from your organisms.
-
-### `pred_flank_window`
-**Type:** Integer (bp) | **Default:** `50000`
-
-The window size around each candidate locus for gene prediction. When Augustus or Prodigal is run on a candidate syntenic region, this parameter defines how much flanking sequence is included around the region for gene prediction context. Gene prediction tools perform better with surrounding context because they can detect gene boundaries more accurately when they see the transitions from intergenic to genic regions. The default of 50,000 bp provides ample context for most eukaryotic genes. For bacteria, this could be reduced to 10,000–20,000 bp. For very large eukaryotic genes that span hundreds of kilobases, increasing this ensures the entire gene plus some context is captured. Note: this parameter is defined in nextflow.config but its wiring to the gene prediction processes may be incomplete in the current pipeline version.
-
-### `borrow_target_flank`
-**Type:** Integer (bp) | **Default:** `100000`
-
-Only for a home genome without an annotation (`borrow_annotations.py`, since 2026-10-16): the home gene predictions near the query's locus are searched against the closest annotated target, and the annotated genes of the hit cluster that holds most of them, plus this many base pairs on each side, are transferred to the home genome as gene models (miniprot, identity ≥ 30 %, query coverage ≥ 50 %, reciprocal best match). Those models become anchors like annotated genes. A larger flank transfers more neighbours; the walk then still takes `n_flanking_genes` per side.
-
-### `pred_keep_pct`
-**Type:** Float | **Default:** `0.10` | **Range:** 0–1
-
-The fraction of gene predictions to retain from Augustus/Prodigal output. Gene prediction tools often produce many candidate gene models, including low-confidence predictions, alternative transcripts, and fragments. This parameter filters to keep only the top percentage by prediction score. The default of 0.10 (10%) keeps only the highest-confidence predictions, reducing noise in downstream analysis. For organisms where gene prediction is less reliable (non-model species with limited training data), increasing this to 0.20–0.30 ensures more candidate gene models are available for GOI matching. Setting this too high floods the analysis with low-quality predictions; too low may discard the gene model that actually contains the GOI in a divergent form. Note: this parameter is defined in nextflow.config but its full implementation may be pending.
-
-### `prodigal_full_genome_fallback`
-**Type:** Boolean | **Default:** `false`
-
-When enabled, Prodigal runs on the entire target genome if the windowed prediction around the candidate region fails to produce any gene models. The windowed approach (default) extracts just the candidate syntenic region and runs Prodigal on that fragment, which is fast but can fail if the extracted region is too small for Prodigal to train its self-calibrating model (Prodigal requires a minimum of ~20 kb of sequence for reliable self-training). Full-genome fallback re-runs Prodigal on the complete genome and then filters to predictions overlapping the candidate region. This is more reliable but much slower (processing an entire bacterial genome takes seconds, but a large eukaryotic genome could take minutes). The fallback is primarily useful for very small candidate regions in draft-quality genomes. For most analyses, the default of `false` is appropriate.
-
----
-
-## 11. Gene Model Classification
-
-The **label** of a GOI call (`Confidence` HIGH / MEDIUM / AMBIGUOUS / LOW, with `Basis`) has no parameters: one judge sets it from the E-value in the expected place, specificity against the home proteome and a completeness bar of 0.7 query coverage, all fixed significance levels ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)). The identity thresholds of the earlier label and its switches were removed on 2026-10-15 ([§ 20](#20-removed-parameters)). The parameters below set the **model status** (`ModelStatus`: fragment / partial / complete), the family-name annotation, and the report's coverage rule.
-
-### `goi_family_tokens`
-**Type:** Comma-separated string | **Default:** `''` (empty)
-
-Family names. With them, every GOI row records whether the target genome's own annotation of the gene (`TargetGene` / `TargetProduct`) carries one of them: `GoiFamilyConsistent=true/false` and `GoiFamilyReason` (`matched_gene:<name>`, `matched_product:<name>`, `no_family_match`, `no_target_annotation`). Annotation only: it changes no label (the strict gate that demoted hit-chain calls without a matching name, `strict_goi_family`, was removed on 2026-10-15). Without names the check is off. Matching is case-insensitive substring after normalization (strip non-alphanumeric): `P53` matches `Trp53` (mouse ortholog) because `P53` is a substring of `TRP53` once normalized. For TP53: `--goi_family_tokens TP53,TP63,TP73,TRP53,TRP63,TRP73,P53,P63,P73` (or `-c conf/tp53_strict.config`). No preset supplies names: `preset_paralog_discrimination` used to ship the TP53 names and, being auto-applied to any large gene family, made the strict gate demote calls of unrelated queries (fixed 2026-10-05). (Until 2026-10-09 the code also tried to derive names from the first record of the search database. That record is a flanking exon written by the pipeline, so nothing was ever derived.)
-
-### `classify_fragment_max_qcov`
-**Type:** Float | **Default:** `0.4` | **Range:** 0–1
-
-The maximum query coverage fraction below which a gene model is labeled as a `fragment` in the ModelStatus annotation field. Query coverage measures what fraction of the query protein length is covered by the aligned portion of the predicted gene. A model covering less than 40% of the query is considered a fragment — it likely represents an incomplete gene prediction (truncated by scaffold boundaries, missing exons, or pseudogenization). Fragment status is independent of the label (HIGH/MEDIUM/AMBIGUOUS/LOW): the label's completeness test is the judge's own fixed bar (0.7 query coverage for HIGH), and a fragment can be MEDIUM when its E-value in the expected place is significant. This distinction is valuable for downstream analysis: fragments may represent pseudogenes, assembly artifacts, or genes at scaffold edges where the rest of the sequence is missing. Setting this higher (e.g., 0.5) classifies more models as fragments; lower (e.g., 0.3) is more lenient.
-
-### `classify_complete_min_qcov`
-**Type:** Float | **Default:** `0.7` | **Range:** 0–1
-
-The minimum query coverage fraction for a gene model to be labeled as `complete` in the ModelStatus field. Models must cover at least 70% of the query protein and have multi-exon evidence (or be identified as tandem copies) to earn the `complete` status. Models between the fragment threshold (40%) and the complete threshold (70%) are labeled `partial` — they have significant alignment to the query but likely miss one or more exons or terminal regions. The `complete` status indicates a gene model that is likely to represent a full-length or near-full-length ortholog suitable for functional annotation and phylogenetic analysis without qualification. These thresholds are intentionally conservative: 70% coverage allows for some divergence at the N- or C-terminus (signal peptides, disordered tails) while ensuring the core protein is well-represented in the gene model. This parameter sets the model status only: the judge's completeness bar for HIGH is a fixed 0.7 that `preset_short_peptide` (0.5 here) does not move.
+HIGH needs a call that covers at least 0.7 of the home protein. In a secreted or GPI-anchored
+protein the signal peptide and the GPI tail are often the parts a model misses or that are least
+conserved, so a model of the whole mature protein can fall below 0.7 of the precursor. With this
+switch a gene model also carries `CoreCoverage` (the share of the protein without its signal
+peptide and GPI tail that the model's exons cover), and every completeness test of a gene model
+reads the larger of `QueryCoverage` and `CoreCoverage`: the label, the model status, the hull
+rescue's cost filter and the label of its models, and the report's coverage check. MEDIUM needs no
+completeness and is unaffected. A hit chain and a tandem copy have no `CoreCoverage` and are
+measured on the whole protein, as are the search's bars on single hits. In conotoxins,
+three-finger toxins and phospholipases A2 the signal peptide is the most conserved part of the
+precursor.
 
 ### `identity_decoupled_min_identity` / `identity_decoupled_max_qcov`
-**Type:** Float | **Defaults:** `50.0` (%) / `0.35`
+**Defaults:** `50.0` (%) / `0.35`
 
-A call at or above the identity bound whose *recorded* query coverage is below the coverage bound is a short local window, not an ortholog (ten residues at 100 %). The report relabels it `identity_coverage_decoupled` and leaves it out of the HIGH/MEDIUM headline counts. A call with no recorded coverage is never demoted by this rule.
+The report's coverage check. A HIGH or MEDIUM call with at least this identity whose recorded query
+coverage lies below the second value is a short local match, not an ortholog: ten residues at
+100 % identity say little about a 70-residue protein. The report sets its `goi_class` to
+`identity_coverage_decoupled` (with `coverage_demoted`) and leaves it out of the HIGH and MEDIUM
+counts; the record stays. A call without a recorded coverage is not demoted. The same test, as an
+advisory flag, is listed under `self_consistency` for every call.
 
 ### `disable_coverage_demotion`
-**Type:** Boolean | **Default:** `false`
+**Default:** `false`
 
-`true` keeps the rule above advisory: the flag still appears in `self_consistency`, the call keeps its confidence.
+`true` keeps the coverage check advisory: the calls keep their class and are counted, and
+`self_consistency` still lists them.
+
+### `goi_family_tokens`
+**Default:** none · one of the 32 settings that no module changes
+
+Family names, separated by commas. With them, every GOI model records whether the target genome's
+own annotation of the gene (`TargetGene`, `TargetProduct`) carries one of them:
+`GoiFamilyConsistent=true` or `false`, and `GoiFamilyReason` (`matched_gene:<name>`,
+`matched_product:<name>`, `no_family_match` or `no_target_annotation`). It changes no label. A name
+matches as part of the annotation, ignoring case and every character that is not a letter or a
+digit, so `P53` matches `Trp53`. For TP53:
+`--goi_family_tokens TP53,TP63,TP73,TRP53,TRP63,TRP73,P53,P63,P73`. `-c conf/tp53_strict.config`
+sets these names and also the model-status bounds 0.35 and 0.75 and the region settings of the
+`dispersed_family` module (`adaptive_score_floor_frac 0.45`, `adaptive_score_floor_abs 0.08`,
+`adaptive_max_regions 4`).
+
+### `report_copies_in_slot`
+**Default:** `false` · module A1 turns it on
+
+Counts the copies of the gene in the slot of a block, the stretch between the nearest home
+neighbours of the gene ([ALGORITHM.md § 7.13](ALGORITHM.md#713-e-values-in-the-expected-place)).
+Every GOI model of a block with a slot gets `CopiesInSlot` (the GOI models in that slot labelled
+AMBIGUOUS or better), and each of those copies gets `SlotRank`, counted from the copy nearest the
+home neighbour on the left. The report's records carry both, and its `copies_in_slot` block gives,
+per genome, the copies at home and in the slot of the genome's best call (`unit`, for example
+`2:3`). Advisory: an equal rank is not evidence of positional orthology.
+
+### `report_low_complexity`
+**Default:** `false` · module B2 turns it on
+
+Writes `LowComplexity` on the GOI models: the share of the model's protein that lies in
+low-complexity windows, the measure the B2 trigger reads (close to SEG). No label reads it.
+
+### `tandem_copy_parent`
+**Default:** `seed` (`seed` or `home`)
+
+Whose model a tandem copy is once it seeds the next wave. A tandem copy here is a single-segment
+hit at a place where no gene model lies (`EvidenceType=tandem_copy`).
+
+- `seed`: the copy is recorded as `GOI_copy_<n>|<genome>_b<block>_l<locus>_by_<parent>`, where the
+  parent is the query it was found with. Once it seeds, `GOI_copy_<n>` is a gene of interest of its
+  own in the later waves: the models it finds are judged against the copy, not against the home
+  protein.
+- `home`: the copy is recorded under the home gene (`<parent>|<genome>_b<block>_l<locus>_tc<n>`),
+  so it can become that gene's relative query, and every model it finds is reported and judged
+  against the home protein.
+
+No module changes this switch.
 
 ---
 
-## 12. Synteny Scoring Weights
+## 11. Gene prediction for a home genome without a GFF
 
-### `synteny_weight_base`
-**Type:** Float | **Default:** `0.4`
+Without `--home_gff`, SynVoy predicts the home genes near the query's locus (PREPARE_HOME_PROTEOME),
+transfers the gene models of the closest annotated target genome where it can
+(BORROW_ANNOTATIONS; only a target whose genome file name ends in `.fna`, not gzipped, is used),
+and takes the flanking genes from these. The same happens when a home GFF
+yields no protein, except that its genes are then predicted with Augustus's `fly` model (for
+`augustus_species auto`) and without the stop for a eukaryote home without Augustus. With a usable home GFF, only `gene_predictor`, `gene_prediction_timeout` and
+`augustus_species` still matter, and only for the optional structural discovery, which predicts the
+genes of target windows with Augustus ([§ 15](#15-optional-steps-language-model-structure-discovery)).
 
-The weight assigned to the base synteny component in the composite synteny score. The composite score combines three components: base synteny (fraction of flanking genes found), gene-order consistency (whether the relative order of flanking genes is preserved), and strand conservation (whether flanking genes maintain their orientation). With a weight of 0.4, the base synteny fraction accounts for 40% of the final score. This is the largest single component because the mere presence of flanking gene orthologs in a target region is the strongest indicator of conserved synteny. This parameter is defined in nextflow.config but its implementation in the scoring pipeline may be incomplete in the current version. The three weights should ideally sum to 1.0 (0.4 + 0.3 + 0.3 = 1.0).
+### `gene_predictor`
+**Default:** `auto` (`auto`, `augustus` or `prodigal`)
 
-### `synteny_weight_consistency`
-**Type:** Float | **Default:** `0.3`
+The gene finder. `auto` takes Augustus when it is installed, else Prodigal with a warning. With
+any `--modules` other than `legacy`, a run whose home species is a eukaryote (in the NCBI taxonomy
+on disk) stops before the search instead, because Prodigal cannot predict genes with introns; the
+message says how to go on: install Augustus, give the home GFF, or set `--gene_predictor prodigal`
+to accept Prodigal's predictions. `augustus` stops the prediction when Augustus is missing, and an
+Augustus run that fails stops it with Augustus's exit code and the end of its messages.
+`prodigal` is meant for bacteria and archaea: it finds no gene with an intron, so in a eukaryote
+it misses most genes. The structural discovery always predicts with Augustus and stops the search
+at its start when Augustus is missing.
 
-The weight assigned to gene-order consistency in the composite synteny score. Gene-order consistency measures whether the flanking genes found in the target region maintain the same relative order as in the home genome (upstream gene A before upstream gene B, etc.). Conserved gene order provides stronger synteny evidence than mere gene presence, because gene order is more likely to be disrupted by chromosomal rearrangements over time. With a weight of 0.3, this component contributes 30% of the final score. Regions where all flanking genes are found but in scrambled order (indicating micro-inversions or rearrangements) receive a lower composite score than regions with fully conserved order. This helps distinguish true orthologous syntenic blocks from regions that happen to contain the same gene set due to convergent evolution or ancestral duplication followed by differential loss.
+### `gene_prediction_timeout`
+**Default:** `3600` (s, a whole number, at least 1)
 
-### `synteny_weight_strand`
-**Type:** Float | **Default:** `0.3`
+Guard of one Augustus or Prodigal run: of the home prediction, of the flank walk, and of the
+structural discovery's runs on target windows. A run that has not finished after this many
+seconds stops the task.
 
-The weight of strand agreement in the quality term. For each flanking gene found in the target region SynVoy compares its strand with the strand of its home gene and takes the larger of "agree" and "disagree" over all of them, so a **uniformly inverted** neighbourhood scores 1.0 — an inversion keeps relative orientation and is conserved synteny — while a neighbourhood with mixed agreement scores lower. (Before 2026-07-26 this term never looked at the home genome and rewarded scrambled neighbourhoods; `--legacy_strand_score` reproduces those numbers.)
+### `augustus_species`
+**Default:** `auto`
 
-Note what the three weights do and do not mean. The score is `synteny_score = Q × C` with `Q = w_base·C + w_consistency·K + w_strand·S`, where `C` is the fraction of flanking genes found. Coverage therefore enters twice and dominates: order (`K`) and strand (`S`) can move the score by at most `0.3·C` each. Describe the score as coverage-dominated with order and strand as modifiers, not as a 40/30/30 split.
+The Augustus model. `auto`, with any `--modules` other than `legacy`: the installed model nearest
+the home species in the NCBI taxonomy on disk (`~/.etetoolkit/taxa.sqlite`, the database the
+species tree reads; it is not downloaded for this). That is the species' own model when there is
+one, else the model of the species that shares the deepest taxon with it: *Candida albicans* →
+`candida_albicans`, *Apis mellifera* → `honeybee1`, *Homo sapiens* → `human`, an ant →
+`camponotus_floridanus`, a firefly → `tribolium2012`. Without the database, for a species it does
+not know, and under `--modules legacy`, the model is `fly` (*Drosophila melanogaster*), with a
+warning outside `legacy`. The console names the choice (`[INFO] home genome without a GFF, gene
+prediction: augustus_species …`), and `effective_params.json` records it with the shared taxon and
+its rank.
 
-### `synteny_goi_overlap_bonus`
-**Type:** Float | **Default:** `0.15`
+A name you give is used as given, and a few common names are translated (`honeybee`, `bombus`,
+`beetle` and others: `AUGUSTUS_SPECIES_MAP` in `bin/gene_predictor.py`). A name Augustus cannot
+load stops the prediction with a message that names the value, the model it maps to and the
+nearest installed models. `augustus --species=help` lists the models; the `Genus_species` folders
+in Augustus's `config/species` are models too. The Augustus of `synvoy_env` has no silkworm
+(`bombyx_mori`) and no mouse model. A model far from the organism places exon and intron borders
+wrongly, which splits gene models or merges neighbouring genes.
 
-A bonus added to the **ranking** score of a candidate region that overlaps a GOI call made by the search itself (it has nothing to do with the target genome's own annotation). It keeps the region that actually holds a GOI model ahead of an equally syntenic region that does not. The bonus is prior knowledge SynVoy injects, not evidence from the neighbourhood, so it is deliberately excluded from the permutation p-value, which tests `synteny_score` alone; both numbers are written to `regions/*.scores.tsv`.
+### `pred_flank_window`
+**Default:** `50000` (bp)
 
-### `disable_distant_synteny_rescue`
-**Type:** Boolean | **Default:** `false`
+Genes are predicted within this many bp on each side of each region of the query's home hits. The
+flank walk, when it predicts genes itself, uses the same window around the centre of each region,
+and the annotation transfer starts from it and widens it until it holds 2 × `n_flanking_genes`
+predicted genes, at most to 500 kb. Where genes lie far apart, 50 kb on each side holds fewer genes
+than `n_flanking_genes`; a larger window gives the flank walk more to choose from and takes longer
+to predict.
 
-In region ranking, a strong GOI hit (high identity, very low E-value) that is isolated from its local flanking genes but lies on a chromosome that still carries an anchor, in a genome that is visibly rearranged, is promoted to a floor score instead of being dropped — it is treated as a dispersed ortholog. A region with strong flanking support never takes this route. Set `true` to skip the rescue.
+### `borrow_target_flank`
+**Default:** `100000` (bp)
+
+The annotation transfer (BORROW_ANNOTATIONS). The home genes predicted near the query's locus are
+searched in the closest annotated target. The annotated genes of the hit cluster that holds most of
+them, plus this many bp on each side, are aligned to the home genome with miniprot, and a model is
+kept at an identity of at least 30 % and a query coverage of at least 50 % when it is the
+reciprocal best match. The transferred models are anchors like annotated genes. A larger flank
+transfers more neighbours; the flank walk still takes `n_flanking_genes` per side.
+
+### `pred_keep_pct`
+**Default:** `0.10` (above 0, at most 1; other values act as 0.10)
+
+When the flank walk predicts the home genes itself, it keeps only the longest predictions: this
+share of them, at least 2 × `n_flanking_genes` + 1, and always the genes that overlap the query's
+home region. Gene finders predict many short reading frames, Prodigal in a eukaryote above all; a
+larger share keeps more of them as possible flanking genes.
+
+### `prodigal_full_genome_fallback`
+**Default:** `false`
+
+For the home genome only: predict genes on the whole genome when no home region of the query was
+found, instead of predicting nothing. A home GFF that yields no protein turns it on. A whole
+eukaryotic genome takes long to predict.
+
+---
+
+## 12. Region scores
+
+After the search, the region scorer groups the hits of each target genome into candidate regions,
+scores the neighbourhood of each and keeps the best of them, per genome and home locus
+(`regions/locus_<N>/<genome>.scores.tsv`, [OUTPUT.md](OUTPUT.md#region-scores)). The regions are what
+the figures draw by default and what the strong-synteny rescue searches. They do not change the
+label of any call ([ALGORITHM.md § 8](ALGORITHM.md#8-region-scores)).
+
+### `synteny_weight_base` / `synteny_weight_consistency` / `synteny_weight_strand`
+**Defaults:** `0.4` / `0.3` / `0.3`
+
+The weights of the region score. With C the share of the flanking genes found in the region (the
+larger of its distinct flanking genes and the flanking support of the search block of a GOI model
+it overlaps, divided by the number of flanking genes of the home locus, both sides, normally
+2 × `n_flanking_genes`), K the longest run of its hits in home order divided
+by their number, and S the strand agreement:
+
+```
+quality       = w_base·C + w_consistency·K + w_strand·S
+synteny_score = quality · C
+```
+
+Coverage enters twice and dominates: order and strand can move the score by at most 0.3 × C each.
+Read the score as coverage, with order and strand as modifiers, not as a split of 40, 30 and 30.
+The strand term compares the strand of each flanking gene with that of its home gene and takes the
+larger of "agree" and "disagree", so a neighbourhood inverted as a whole scores 1 and a mixed one
+less.
 
 ### `legacy_strand_score`
-**Type:** Boolean | **Default:** `false`
+**Default:** `false`
 
-Compute the strand term as before 2026-07-26 (`max(#plus, #minus) / k` over the target hits, ignoring the home strand). Only for reproducing or comparing against region scores from older runs.
+`true` computes the strand term as older SynVoy versions did: max(plus, minus) / k over the
+region's hits, without looking at the home strands. Only to compare region scores with old runs.
+
+### `synteny_goi_overlap_bonus`
+**Default:** `0.15` (at most 0.15)
+
+Added to the ranking score of a region that lies within 20 kb of a GOI model of the search that is
+not LOW, or of any GOI hit of the genome-wide search, so the region that holds the gene stays ahead of an equally syntenic region without it.
+Values above 0.15 act as 0.15. The bonus is prior knowledge, not evidence from the neighbourhood,
+so the region's permutation p-value tests `synteny_score` without it; the region table gives both.
+
+### `min_synteny_score`
+**Default:** `0.6` (0 to 1)
+
+The label of a region (`confidence` in the region table, `C<label>` in the region names): HIGH from
+this score, MEDIUM from half of it, LOW below; a strong-synteny region without a GOI model
+(`goi_missing_but_strong_synteny`) and a distant-macrosynteny region (`goi_dispersed_macrosynteny`)
+are at least MEDIUM. It decides no search, no rescue and no call.
 
 ### `max_regions`
-**Type:** Integer | **Default:** `0` (adaptive)
+**Default:** `0` (the adaptive selection)
 
-The maximum number of candidate regions emitted per locus for downstream evaluation. When set to 0 (default), the pipeline uses an adaptive strategy: it emits all regions that pass the synteny score threshold, with a hard cap of 6 per locus. This adaptive approach handles both single-copy genes (typically 1–2 regions per target) and multi-copy gene families (which may have legitimate multiple loci). Setting a specific number (e.g., `--max_regions 3`) forces the pipeline to emit exactly that many top-scoring regions per locus, regardless of how many pass the threshold. This is useful when you know your GOI is single-copy and want to minimize false positive processing. Setting it higher (e.g., 10) is useful for highly duplicated gene families. Regions are ranked by composite synteny score, so only the best N are emitted.
+How many candidate regions the scorer keeps per genome and home locus. The regions are ordered with
+those near such a GOI model or GOI hit first ([`synteny_goi_overlap_bonus`](#synteny_goi_overlap_bonus)),
+then by the flanking support of the search block, then by score. With `0` they are kept from the
+top while their score reaches max(`adaptive_score_floor_abs`, the score of the first region ×
+`adaptive_score_floor_frac`) or they hold at least
+`adaptive_unique_gene_floor` distinct flanking genes, at least one and at most
+`adaptive_max_regions`. A number N keeps the first N. Either way, up to two strong-synteny regions
+without a GOI model are added beyond the cap ([`strong_synteny_min_flanking`](#strong_synteny_min_flanking)).
+
+### `adaptive_score_floor_frac` / `adaptive_score_floor_abs` / `adaptive_max_regions` / `adaptive_unique_gene_floor`
+**Defaults:** `0.30` / `0.03` / `6` / `3` · module A2 sets `0.45` / `0.08` / `4`
+
+The adaptive selection of `max_regions 0` (above). A higher floor or a lower cap keeps fewer regions
+per genome; the `dispersed_family` module and `preset_paralog_discrimination` set the values given.
+`adaptive_unique_gene_floor` is one of the 32 settings that no module changes.
+
+### `strong_synteny_min_flanking`
+**Default:** `auto` (half of `n_flanking_genes`, rounded up: 5) · `0` switches it off
+
+A region that holds at least this many HIGH flanking models, with no GOI model (not LOW) and no GOI
+hit of the genome-wide search within 20 kb of it, is written as `goi_missing_but_strong_synteny`: the neighbourhood is there, but no model of the gene was built.
+Up to two such regions are kept beyond the region cap, unless they lie inside a GOI region already
+kept, and the strong-synteny rescue searches them ([§ 13](#disable_strong_synteny_rescue)). `0`
+switches this region class off, and with it that rescue.
+
+### `strong_synteny_no_goi_min_flanking`
+**Default:** `auto` (2 × `n_flanking_genes`: 20)
+
+The report's check `strong_synteny_no_goi` under `self_consistency`: a genome, home locus and
+scaffold with at least this many HIGH flanking models and no HIGH GOI call is flagged. Advisory.
+The report gives the value a run used (`self_consistency.thresholds.strong_flanking_min`).
+
+### `disable_distant_synteny_rescue`
+**Default:** `false`
+
+A region that overlaps a GOI model but holds at most one flanking gene scores low. When its GOI hit
+is strong (identity of at least 40 % and E ≤ 1e-10), a flanking gene lies on the same scaffold, and
+the genome is visibly rearranged (rearrangement score of at least 0.5,
+[ALGORITHM.md § 8](ALGORITHM.md#8-region-scores)), the region gets a score of at least 0.45 and the
+class `goi_dispersed_macrosynteny` instead. These numbers are fixed. A region with strong flanking
+support never takes this route. `true` switches it off. It changes regions only, not calls.
 
 ---
 
-## 13. PLM (Protein Language Model) Search
+## 13. Rescue passes
 
-### `enable_plm_search`
-**Type:** Boolean | **Default:** `false`
+Three passes look for the gene where no window reached it or no model was built there: the
+dispersed-GOI rescue inside the search, and after the search the hull rescue and the strong-synteny
+rescue. A fourth, the genome-wide path, is off by default. The judge labels the models of the
+rescues like those of the search, except the strong-synteny rescue's, which stay LOW. The rules:
+[ALGORITHM.md § 7.11](ALGORITHM.md#711-goi-hits-far-from-their-anchors) and
+[§ 9](ALGORITHM.md#9-rescue-passes); the files: [OUTPUT.md](OUTPUT.md#rescue-models).
 
-Enables protein language model (PLM) embedding-based search using ProtT5-XL-UniRef50. When enabled, the pipeline computes a high-dimensional embedding vector for the query protein and for all candidate ORFs predicted within syntenic regions, then identifies ORFs whose embedding cosine similarity exceeds the threshold. PLM embeddings capture structural and functional information that goes beyond raw sequence alignment — two proteins can have completely different amino acid sequences but produce similar embeddings if they fold similarly and perform analogous functions. This makes PLM search extremely powerful for detecting remote homologs where sequence identity has dropped below 15–20%, well below the threshold of reliable sequence-based detection. The tradeoff is computational cost: computing ProtT5 embeddings requires significant CPU or GPU resources and the model itself requires ~5 GB of memory. Enable this for cross-phylum searches (>400 Mya divergence) where sequence methods alone may miss genuine orthologs.
+### `enable_dispersed_goi_rescue`
+**Default:** `true`
 
-### `plm_device`
-**Type:** String | **Default:** `'cpu'` | **Options:** `'cpu'`, `'cuda'`
+A strong GOI hit of the genome-wide search that lies farther than the GOI margin from every anchor
+(the best hit of each flanking gene in the genome) is in no window. With this pass such a hit seeds
+a block of its own, which is then searched and modelled like any other, when it reaches the
+identity, E-value and length below and lies on a sequence that holds the anchors of at least
+`dispersed_min_chrom_anchors` distinct flanking genes, inside their envelope: from the first to the
+last of them, widened on each side by
+[`dispersed_envelope_margin_genes`](#dispersed_envelope_margin_genes--dispersed_envelope_margin).
+Where the neighbourhood is conserved, the gene lies next to its anchors and the pass adds nothing. A
+hit within the GOI margin of an anchor is left to the blocks; when that anchor's block was filtered
+or capped, no path uses it, and the limit counts give it as `dead_zone`. A hit that passes the
+quality tests but not the place is listed in the report under
+`rejected_candidates` ([`report_nonsyntenic_candidates`](#report_nonsyntenic_candidates)). `false`
+switches the pass off.
 
-The device on which ProtT5 embeddings are computed. **`cpu`** works on any machine but is slow (minutes per protein for long sequences). **`cuda`** uses NVIDIA GPU acceleration and is 10–50x faster, making PLM search practical for large-scale analyses. GPU acceleration requires PyTorch with CUDA support and an NVIDIA GPU with at least 6 GB VRAM (the ProtT5-XL model requires ~5 GB). If `cuda` is specified but no GPU is available, the pipeline will fail with a CUDA error. For batch processing of many target genomes, GPU acceleration is strongly recommended when PLM search is enabled. On CPU, consider enabling PLM search only for specific high-priority distant targets rather than the entire target set.
+### `dispersed_goi_min_identity` / `dispersed_goi_max_evalue` / `dispersed_goi_min_alnlen` / `dispersed_min_chrom_anchors`
+**Defaults:** `40.0` (%) / `1e-10` / `50` (aa) / `3` · modules B1 and C1 set `dispersed_goi_min_alnlen`
+to 0.6 × the shorter of the query and its longest home exon, between 10 and 50
+
+The tests of the dispersed-GOI rescue (above). A lower identity or a weaker E-value lets relatives
+of the gene seed blocks; the sequence and envelope tests keep a paralog elsewhere in the genome
+out. A hit of a short query, or of a gene with short exons, cannot reach 50 aligned residues, hence
+the module rule.
+
+### `goi_genome_wide_path` / `goi_genome_wide_without_blocks`
+**Defaults:** `false` / `false`
+
+The genome-wide path models GOI hits that lie outside every searched window. The hits are grouped
+into places, and a place is modelled when the home protein's E-value against its hits over the
+whole genome is at most 1e-3 and no other home protein explains them as well (the label's
+specificity test); at most the size of the gene's home family + 1 places per gene and genome, the
+best E-value first. Each place is searched in a window of its own, without decoys and without
+flanking genes, and its calls are judged in the genome place: they carry `GenomeWide=1` and
+`Place=genome`. It runs only in a genome with at least one significant block (E_syn ≤ 0.1). The
+report lists every place under `genome_wide_path`, with what became of it
+([OUTPUT.md](OUTPUT.md#the-other-top-level-keys)).
+
+`goi_genome_wide_without_blocks` (only with `goi_genome_wide_path`) runs the path also in a genome
+without a significant block, and marks a call whose CDS or hit runs across an exon junction of the
+home gene, with 10 residues on each side, `RetrocopyCandidate=1`. A retrocopy looks like that, and
+so does an ortholog that lost the intron.
+
+### `disable_goi_hull_rescue`
+**Default:** `false`
+
+The hull rescue: after the search, miniprot searches the gene across the whole flanking
+neighbourhood (the hull) of a target sequence that holds at least `goi_hull_min_flanking` HIGH
+flanking models, when no HIGH GOI model already lies in the DNA it would search. It finds a gene
+that lies between two blocks, where no window reached. Its models are judged like the search's and
+can be counted (`goi_class` `synteny_hull_rescue`). `true` switches it off.
+
+### `goi_hull_min_flanking`
+**Default:** `auto` (0.4 × `n_flanking_genes`, rounded half up, at least 1: 4)
+
+The HIGH flanking models a hull must hold for the hull rescue to search it.
+
+### `goi_hull_min_identity` / `goi_hull_min_coverage`
+**Defaults:** `40.0` (%) / `0.5` · module B1 sets `goi_hull_min_coverage` `0.3`
+
+Cost filters in front of the judge: a miniprot model of the hull rescue with a lower identity, or
+whose coding sequence covers less than this share of the query, is not judged. With
+[`core_completeness`](#core_completeness) a model also passes when its alignment covers this share
+of the query's core. B1 sets the coverage filter to its own fragment bound, so a hull model of a
+short query that B1 would not call a fragment reaches the judge.
+
+### `goi_hull_cluster_max_gap` / `goi_hull_window_pad` / `goi_hull_max_window`
+**Defaults:** `auto` (bp)
+
+The sizes of the hull. `auto` takes them from the distances of the search for that genome
+([§ 7](#7-distances-in-gene-units)): the HIGH flanking models of a sequence form one cluster up to
+the bridge limit, the hull is widened by the GOI margin, and a hull longer than twice the home
+neighbourhood (times the expansion) is skipped. A number fixes a size for every genome. For a
+result GFF without distances, and under `-profile legacy_distances`, they are 3 Mb, 100 kb and
+20 Mb.
+
+### `disable_strong_synteny_rescue`
+**Default:** `false`
+
+The strong-synteny rescue: miniprot, with relaxed settings, searches each
+`goi_missing_but_strong_synteny` region ([`strong_synteny_min_flanking`](#strong_synteny_min_flanking))
+for the gene. Its models are always LOW (`GOIClass=relaxed_rescue`,
+`EvidenceType=relaxed_miniprot_rescue`): leads for a closer look, never counted calls. `true`
+switches it off.
+
+### `strong_synteny_rescue_miniprot_outc` / `strong_synteny_rescue_window_pad`
+**Defaults:** `0.05` / `2000` (bp)
+
+miniprot's `--outc` in the strong-synteny rescue: a model must cover at least this share of the
+query (`0.2` keeps only models that cover a fifth of it). The window searched is the region plus
+`strong_synteny_rescue_window_pad` on each side.
+
+### `strong_synteny_rescue_miniprot_timeout`
+**Default:** `3600` (s)
+
+Guard of the strong-synteny rescue's miniprot run on one region: a run that has not finished after
+this many seconds ends the run, and so do a missing miniprot and a third kill of the rescue task for
+memory or time. Any other failure lets the run go on: the report names the genome and the step
+under `warnings` and `failed_steps`, and a gene that only this rescue would have modelled is
+missing there.
+
+---
+
+## 14. Ownership, paralog check and placement
+
+The report checks each call against the home genome: whether it is the gene of interest or one of
+its relatives (locus ownership), and whether its divergence fits its species (phylogenetic
+placement). [ALGORITHM.md § 10](ALGORITHM.md#10-adjudication-and-the-report).
+
+### `disable_locus_ownership`
+**Default:** `false`
+
+Locus ownership. SynVoy builds a panel of home proteins: the annotated genes of each home locus and
+the home relatives of the gene (the two entries below). Every recovered GOI protein is aligned to
+the panel (Smith-Waterman). A call whose best match is a home relative that beats the gene's own
+best entry by at least `locus_ownership_tiebreak_gap` gets the `goi_class` `paralog_not_goi` and is
+not counted. A call of the gene that was found from another home locus moves to the locus it
+belongs to (`locus_reattributed`). When two entries of different home loci are nearly tied, the
+locus whose HIGH flanking genes lie on the call's scaffold wins. `true` skips the step: the calls
+keep the locus that found them, and a relative found under the gene's name is counted.
+
+### `locus_ownership_max_genes_per_locus` / `paralog_panel_max_family`
+**Defaults:** `5` / `15` · module A1 sets `locus_ownership_max_genes_per_locus` max(5, home copies
++ 1), at most 60; module A2 sets `paralog_panel_max_family` max(15, home loci of the family + 1),
+at most 50
+
+The size of the panel. `locus_ownership_max_genes_per_locus`: annotated home genes per home locus
+(those that overlap the locus most), so with A1 every copy of a home array is in the panel.
+`paralog_panel_max_family`: home proteins added for their similarity to the query (identity of at
+least `paralog_panel_min_identity`, the closest first).
+
+### `locus_ownership_pad` / `paralog_panel_min_identity` / `locus_ownership_tiebreak_gap`
+**Defaults:** `2000` (bp) / `28.0` (%) / `10.0` (score)
+
+`locus_ownership_pad`: added on each side of a home locus when its genes are collected for the
+panel. `paralog_panel_min_identity`: the identity to the query from which a home protein joins the
+panel as a relative (with a coverage guard). `locus_ownership_tiebreak_gap`: the Smith-Waterman
+score by which a relative must beat the gene to take a call; below it the call stays the gene's
+(`ownership_near_tie`).
+
+### `require_paralog_panel`
+**Default:** `true`
+
+When the panel cannot be built (without parasail, for example), the run stops. `false` lets it go
+on: the failure is recorded, and the report marks every call `ownership_not_checked`.
+
+### `disable_paralog_check` / `paralog_confusion_min_gap`
+**Defaults:** `false` / `5.0`
+
+No effect in this version, either way. The check was meant to align each call against several home
+paralogs given in the query file, but only the first record of `--query` is used, so it has one
+sequence and nothing to compare. Locus ownership does this job.
+
+### `disable_phylo_placement`
+**Default:** `false`
+
+The phylogenetic placement check, advisory. For every GOI model that the search labelled HIGH or
+MEDIUM, SynVoy compares the model's divergence from the home protein with its species' taxonomic
+distance from the home species, fits the trend over all of them (Theil-Sen), and labels a model
+`phylo_discordant` when it is much more diverged than its species predicts (see
+`phylo_placement_z_threshold`); the others are `phylo_concordant`. The idea: a paralog that arose
+before the speciation is more diverged than an ortholog in the same species. The verdict and its
+z-score are on each record whose own model has one (`phylo_verdict`, `phylo_z`), and
+`self_consistency.phylo_placement_summary` sums them up. It changes no label. Read it as a hint:
+the divergence comes from a local alignment, the species distance is a difference of taxonomic
+ranks rather than time, and a gene that evolves fast in one lineage breaks the assumption of equal
+rates. In tests on real gene families every `phylo_discordant` model was a real ortholog. `true`
+skips the step.
+
+### `phylo_placement_min_calls`
+**Default:** `4`
+
+The trend is fitted only when at least this many models have a species distance and the distances
+take at least three different values; otherwise every model is `insufficient_data`.
+
+### `phylo_placement_z_threshold`
+**Default:** `2.0`
+
+A model is `phylo_discordant` when (residual − median residual) / (1.4826 × the median absolute
+deviation) reaches this value. One-sided: only more divergence than expected counts.
+
+---
+
+## 15. Optional steps: language model, structure, discovery
+
+Experimental and off by default. These steps need the packages of `environment-ml.yml` (PyTorch,
+transformers, Foldseek; the file's header says how to install them), model weights that are
+downloaded from HuggingFace on first use (ProtT5 about 2.5 GB, ESMFold about 2.8 GB; set `HF_HOME`
+to keep them out of your home folder) and, at a useful speed, an NVIDIA GPU. After the search they
+score the GOI models of the search: with ProtT5 embeddings (cosine similarity to the home protein,
+`EmbeddingSimilarity`) and with ESMFold structures compared by Foldseek (TM-score,
+`StructuralSimilarity`). A step you switch on stops the run when its packages are missing, or the
+GPU when its device is `cuda`.
+
+The scores change the label only of a GOI row that the judge did not label: LOW becomes MEDIUM from
+the medium threshold with at least one flanking gene in its block, and MEDIUM becomes HIGH from the
+high threshold with an exon annotation and at least two. Every row of the search carries the
+judge's label, so in practice the scores are recorded and change no label. The structural
+discovery adds models of its own.
+
+### `enable_plm_search` / `plm_device`
+**Defaults:** `false` / `cpu` (`cpu` or `cuda`)
+
+Scores the GOI models with ProtT5 embeddings. `plm_device cuda` runs the model on an NVIDIA GPU;
+on a CPU it is slow. With `enable_structural_search` on, both models run on `structural_device`
+and `plm_device` is ignored.
+
+### `plm_medium_threshold` / `plm_high_threshold`
+**Defaults:** `0.7` / `0.85`
+
+The embedding similarity from which a GOI row that the judge did not label is lifted to MEDIUM or
+to HIGH (rules above).
 
 ### `plm_similarity_threshold`
-**Type:** Float | **Default:** `0.5` | **Range:** 0–1
+**Default:** `0.5`
 
-The minimum cosine similarity between the query protein embedding and a candidate ORF embedding for the ORF to be reported as a PLM hit and considered as a potential GOI ortholog. Cosine similarity of 1.0 means identical embedding vectors (essentially the same protein); 0.0 means orthogonal (completely unrelated). The default of 0.5 is a moderate threshold that captures proteins with significant structural/functional similarity while excluding clearly unrelated proteins. For highly conserved gene families, raise this to 0.6–0.7 to reduce false positives. For extremely divergent searches where you want maximum sensitivity, lower to 0.3–0.4 at the cost of more false positives. Unlike sequence identity, there is no well-established "twilight zone" for PLM similarity — the threshold should be calibrated empirically for your specific gene family and divergence level.
+Only for the structural discovery: a predicted reading frame of a window becomes a discovery
+candidate from this embedding similarity, or from a TM-score of `structural_tm_threshold`.
 
-**Short-query auto-adjustment:** when the longest GOI query is under 100 aa, the pipeline automatically raises this threshold to at least `0.75` per-genome. Mean-pooled ProtT5 embeddings are noisy for short peptides (few residues dominate the pooled vector), so the default of 0.5 lies below the noise floor and produces spurious hits for queries like melittin, defensins, and small venom peptides. The auto-raise is conservative and can be overridden by explicitly setting a higher `plm_similarity_threshold` on the command line.
+### `enable_structural_search` / `structural_device`
+**Defaults:** `false` / `cpu` (`cpu` or `cuda`)
 
-### `plm_medium_threshold`
-**Type:** Float | **Default:** `0.7` | **Range:** 0–1
+Scores the GOI models by structure: ESMFold predicts the structure of each model's protein and of
+the home protein, and Foldseek compares them. Each protein is folded in overlapping pieces of 380
+residues (300 on a GPU with less than 10 GB of memory, 150 below 6 GB). On a CPU this is very slow;
+use `structural_device cuda`. When the GPU runs out of memory:
+[USAGE.md](USAGE.md#gpu-out-of-memory-in-the-structural-search).
 
-The PLM cosine similarity threshold above which a LOW-confidence gene model can be boosted to MEDIUM confidence (in a block with at least one flanking gene). Since 2026-10-14 this acts only on a GOI row that the judge did not label (no `Basis`, which in practice no row of the main search lacks): a judged row keeps the judge's label, and the score is recorded on it (`EmbeddingSimilarity` / `StructuralSimilarity`). A gene model that has poor sequence-level evidence but strong embedding similarity (>0.7) to the query suggests that the protein is a genuine homolog whose sequence has diverged beyond reliable alignment-based detection. The boost recognizes that PLM embeddings provide orthogonal evidence to sequence alignment — high embedding similarity despite low sequence identity is a hallmark of remote homology. The default of 0.7 requires strong embedding similarity for the boost, which is appropriate because boosting a LOW model to MEDIUM has significant implications for the interpretation of results.
+### `structural_medium_threshold` / `structural_high_threshold`
+**Defaults:** `0.5` / `0.7`
 
-### `plm_high_threshold`
-**Type:** Float | **Default:** `0.85` | **Range:** 0–1
-
-The PLM cosine similarity threshold above which a MEDIUM-confidence gene model can be boosted to HIGH confidence (in a block with at least two flanking genes). Since 2026-10-14 this acts only on a GOI row that the judge did not label (no `Basis`, which in practice no row of the main search lacks): a judged row keeps the judge's label, and the score is recorded on it (`EmbeddingSimilarity` / `StructuralSimilarity`). An embedding similarity of 0.85 indicates near-structural equivalence, providing very strong evidence for homology even when sequence-based evidence is only moderate. This is the most conservative PLM boost tier — only clearly related proteins at the structural/functional level receive the HIGH designation based on PLM evidence. This threshold should rarely be lowered because HIGH confidence is used for making definitive orthology claims, and PLM embeddings, while powerful, are not infallible. The gap between the medium threshold (0.7) and the high threshold (0.85) creates a meaningful distinction between "probably homologous" (MEDIUM boost) and "almost certainly homologous" (HIGH boost) based on PLM evidence.
-
----
-
-## 14. Structural Search (ESMFold + Foldseek)
-
-### `enable_structural_search`
-**Type:** Boolean | **Default:** `false`
-
-Enables 3D structure prediction and structural comparison for GOI candidate detection. When enabled, the pipeline predicts the 3D structure of the query protein and all candidate ORFs using ESMFold (Meta's efficient protein structure predictor), then compares structures using Foldseek's 3Di structural alphabet. Structural comparison is the ultimate method for detecting remote homologs: protein 3D structure is conserved approximately 10x longer than protein sequence during evolution. Proteins that share <15% sequence identity can still have near-identical folds. The tradeoff is extreme computational cost — ESMFold structure prediction requires significant GPU memory (4–16 GB depending on protein length) and takes seconds to minutes per protein. Enable this only for very distant cross-kingdom searches (>600 Mya) where both sequence alignment and PLM embeddings may fail. Requires both PyTorch and Foldseek to be installed.
-
-**Short-query auto-skip:** when the longest GOI query is under 50 aa, structural search is automatically skipped for that genome (a one-line log message is emitted). ESMFold produces degenerate structures for tiny peptides and TM-score is not meaningful for a single short amphipathic helix (e.g. melittin, defensins). Keeping the feature enabled for a mixed run is safe — only the sub-50-aa cases are bypassed.
-
-### `structural_device`
-**Type:** String | **Default:** `'cpu'` | **Options:** `'cpu'`, `'cuda'`
-
-The device for ESMFold structure prediction. **GPU (`cuda`) is strongly recommended** for structural search — ESMFold on CPU is impractically slow (minutes to hours per protein versus seconds on GPU). The ESMFold model requires approximately 4 GB of GPU VRAM for small proteins (<200 aa) and up to 16 GB for large proteins (~700 aa, the maximum set by `structural_max_length`). If you don't have a suitable GPU, consider disabling structural search entirely and relying on PLM embeddings (which are feasible on CPU). CUDA support requires PyTorch compiled with CUDA and an NVIDIA GPU. AMD GPUs via ROCm may work with the appropriate PyTorch build but are untested. The Foldseek comparison step itself is CPU-based and runs quickly regardless of this setting.
+The TM-score from which a GOI row that the judge did not label is lifted to MEDIUM or to HIGH
+(rules above). They also label the models of the structural discovery: HIGH from the high
+threshold, MEDIUM from the medium one.
 
 ### `structural_tm_threshold`
-**Type:** Float | **Default:** `0.3` | **Range:** 0–1
+**Default:** `0.3`
 
-The minimum TM-score (Template Modeling score) from Foldseek structural comparison for a candidate ORF to be reported as a structural hit. TM-score ranges from 0 to 1, where 1.0 is an identical structure. TM-scores above 0.5 generally indicate the same fold; above 0.7 indicates the same protein family. The default of 0.3 is permissive, allowing detection of proteins that share a common structural core but may have significant structural differences in peripheral regions. At 0.3, proteins typically share the same superfold but may belong to different protein families. This low threshold is appropriate because structural search is designed for extreme divergence cases where any structural similarity is biologically meaningful. For more conservative structural matching (only proteins with clearly similar folds), raise to 0.5. The TM-score is length-independent, making it more reliable than RMSD for comparing proteins of different sizes.
-
-### `structural_medium_threshold`
-**Type:** Float | **Default:** `0.5` | **Range:** 0–1
-
-The TM-score threshold above which structural evidence can boost a LOW-confidence gene model to MEDIUM confidence (in a block with at least one flanking gene). Since 2026-10-14 this acts only on a GOI row that the judge did not label (no `Basis`, which in practice no row of the main search lacks): a judged row keeps the judge's label, and the score is recorded on it (`EmbeddingSimilarity` / `StructuralSimilarity`). A TM-score of 0.5 indicates that the candidate shares the same overall fold as the query — this is strong structural evidence for homology even when sequence-based evidence is weak. Structural homology at this level is rarely coincidental: convergent evolution to the same fold does occur but is relatively rare, and the syntenic context further reduces the chance of false positives. This boost is particularly valuable for ancient gene families where sequence has diverged beyond recognition but the 3D fold is preserved. The combination of synteny evidence plus structural similarity at TM>0.5 provides high-confidence orthology assignment even for cross-kingdom comparisons.
-
-### `structural_high_threshold`
-**Type:** Float | **Default:** `0.7` | **Range:** 0–1
-
-The TM-score threshold above which structural evidence can boost a MEDIUM-confidence gene model to HIGH confidence (in a block with at least two flanking genes). Since 2026-10-14 this acts only on a GOI row that the judge did not label (no `Basis`, which in practice no row of the main search lacks): a judged row keeps the judge's label, and the score is recorded on it (`EmbeddingSimilarity` / `StructuralSimilarity`). A TM-score of 0.7 indicates strong structural similarity — the proteins are almost certainly in the same protein family with a shared evolutionary origin. At this level, structural homology provides evidence comparable to moderate sequence identity (30–40%), justifying the HIGH confidence designation. Combined with synteny context, a TM-score >0.7 hit is a very reliable ortholog identification even in the complete absence of detectable sequence similarity. This is the state-of-the-art for detecting orthologs separated by >500 million years of evolution, where sequence methods have essentially zero sensitivity.
+Only for the structural discovery: a predicted reading frame becomes a discovery candidate from
+this TM-score.
 
 ### `structural_max_length`
-**Type:** Integer (aa) | **Default:** `700` | **Range:** 50–2000
+**Default:** `700` (at least 10)
 
-The maximum protein length in residues for ESMFold structure prediction. Proteins longer than this threshold are skipped during structural search because ESMFold's memory requirements scale quadratically with sequence length — a 700-residue protein requires approximately 8–12 GB GPU VRAM, while a 1000-residue protein would require 20+ GB. The default of 700 provides a practical ceiling that works with most consumer and workstation GPUs (RTX 3090 with 24 GB, A100 with 40/80 GB). On GPUs with limited VRAM (6–8 GB), reduce to 400–500. On high-memory GPUs (A100 80 GB), increase to 1000+. Query proteins longer than this threshold still get structure-based analysis for their individual domains if domain boundaries are detected, but the full-length structural comparison is skipped.
+No effect in this version: every protein is folded in pieces (see `enable_structural_search`), and
+none is skipped for its length.
 
-**Auto VRAM guard:** when `structural_device = cuda`, the pipeline probes the GPU at fold time. If the device has less than 20 GB total VRAM and `structural_max_length > 400`, the effective length is automatically capped to 400 aa to avoid mid-fold OOM, and a warning is logged. Explicit user settings below 400 are respected as-is; the guard only lowers values, never raises them.
+### `enable_structural_discovery`
+**Default:** `false`
+
+With `enable_structural_search` on: Augustus predicts the genes in each window, and a reading frame
+whose structure matches the home protein's (TM-score of at least `discovery_min_tm`) and that passes
+the guards below becomes a GOI model, labelled from its scores. It looks for a gene that the
+sequence search did not find at all. It needs Augustus and stops the search at its start without
+it.
+
+| Parameter | Default | The reading frame is kept when |
+|---|---|---|
+| `discovery_min_tm` | `0.7` | its TM-score against the home protein reaches this value |
+| `discovery_min_len_ratio` / `discovery_max_len_ratio` | `0.5` / `2.0` | its length lies between these multiples of the home protein's |
+| `discovery_min_goi_coverage` | `0.5` | its Smith-Waterman alignment covers at least this share of the home protein |
+| `discovery_paralog_margin` | `1.0` | its score against the home protein is this many times its best score against a home relative. No panel of relatives reaches this step in this version, so the guard does nothing |
+| `discovery_min_block_flanking` | `2` | at least this many flanking anchors lie within 100 kb of it |
+| `discovery_allow_offblock` | `false` | `false`: in a genome where the sequence search found the gene, it lies on a sequence that holds such a call |
+
+Without parasail, the coverage and relative guards are skipped.
+
+### `gpu_partition` / `gpu_cluster_options`
+**Defaults:** none / `--gres=gpu:1`
+
+Under SLURM: the queue and the extra `sbatch` options of the search task when
+`enable_plm_search` or `enable_structural_search` is on. Without a partition no GPU is requested.
+The example profiles `lrz_ai` and `lrz_ai_container` show a setup for one cluster
+([USAGE.md](USAGE.md#5-running-on-hpc--slurm)).
 
 ---
 
-## 15. Visualization
+## 16. Figures and tree
+
+For each home locus the plot step draws the anchor grid with its print version, the ribbon plot and
+the gene-position map, and the tree step builds the gene tree
+([OUTPUT.md](OUTPUT.md#the-figures)). These parameters change the drawing only, never a call. A
+finished run can be drawn again from its `plot_inputs_*` folders without searching again
+([OUTPUT.md](OUTPUT.md#drawing-the-figures-again)).
 
 ### `plot_width`
-**Type:** Integer (pixels) | **Default:** `1500`
+**Default:** `1500` (px)
 
-The width of the output SVG synteny plot in pixels. The synteny plot is the primary visual output of SynVoy, showing gene arrows along chromosomal tracks with homology links between genomes and a phylogenetic tree alongside. The default of 1500 pixels provides a good balance between detail and readability on standard monitors. For presentations or publications, increase to 2000–3000 for higher resolution. For quick previews on small screens, reduce to 800–1000. The plot is rendered as an SVG (Scalable Vector Graphics), so it can be scaled without quality loss regardless of this setting — the width primarily controls the initial rendering layout and how much genomic context fits horizontally. Wider plots can show more flanking genes and larger genomic regions without overlapping labels.
+The width of the ribbon plot (`*_synteny_plot.html`), at least 800. `0` picks a width from the
+drawn span, between 1200 and 6000 px. It sets the scale, not which genes are drawn.
 
-### `gap_threshold`
-**Type:** Integer (bp) | **Default:** `50000`
+### `gap_threshold` / `gap_visual_size`
+**Defaults:** `50000` / `20000` (bp)
 
-The minimum gap size in base pairs in the genomic sequence that triggers visual compression in the synteny plot. When the distance between adjacent genes in the plot exceeds this threshold, the gap is visually compressed to `gap_visual_size` to prevent large empty spaces from dominating the plot and making nearby genes too small to see. The default of 50,000 bp works well for most eukaryotic genomes where intergenic regions of 50+ kb are common but not the focus of the visualization. For compact genomes (bacteria), lower this to 5,000–10,000 bp. For large vertebrate genomes where 50 kb gaps are routine, increase to 100,000–200,000 bp. This parameter only affects visualization — it does not change any analytical results. The compression is indicated visually in the plot with a special gap symbol.
-
-### `gap_visual_size`
-**Type:** Integer (bp) | **Default:** `20000`
-
-The visual size in base pairs used to represent compressed gaps in the synteny plot. When a genomic gap exceeds `gap_threshold`, it is drawn as if it were `gap_visual_size` base pairs long, with a visual indicator showing that the gap has been compressed. The default of 20,000 bp provides enough visual space to indicate a gap while keeping it compact relative to the gene arrows. The ratio between `gap_threshold` and `gap_visual_size` determines the compression factor — the default ratio of 50,000:20,000 means gaps are compressed to about 40% of the threshold size. Decrease this value for more aggressive compression (smaller gaps in the plot); increase it if you want compressed gaps to remain more visible. This is purely a cosmetic parameter with no analytical impact.
+In the ribbon plot, every gap between genes that is longer than `gap_threshold` is drawn
+`gap_visual_size` long, whatever its real length, and labelled with its real length. Lower the
+threshold for a compact genome; raise it where long gaps are common and should keep their scale.
 
 ### `flank_fallback_bp`
-**Type:** Integer (bp) | **Default:** `1000000`
+**Default:** `1000000` (bp)
 
-The maximum genomic window in base pairs rendered around distal target hits when the normal flanking gene context is not available. In some cases, a GOI hit in a target genome may not have a well-defined syntenic block (e.g., only the GOI was found with minimal flanking gene support). In these cases, the plot renderer falls back to showing a fixed window of `flank_fallback_bp` around the hit, showing whatever genes are annotated in that window. The default of 1,000,000 bp (1 Mb) provides substantial genomic context. For compact genomes, this shows many genes; for large genomes, it may show only a few. This is primarily a visualization safety net — the vast majority of hits have proper syntenic block context. Reduce to 200,000–500,000 for more focused views; increase if you want maximum genomic context around poorly-anchored hits.
+When the candidate regions of a genome hold none of its GOI models, its row shows the genes within
+this many bp on each side of the GOI models on the sequence that holds most of them.
 
 ### `scale_bar_len`
-**Type:** `'auto'` or Integer (bp) | **Default:** `'auto'` (10000 until 2026-10-09)
+**Default:** `auto` (or a length in bp)
 
-The length of the scale bar in the ribbon plot. `auto` picks a round length (1, 2 or 5 × 10^k bp) whose bar is about 120 px wide at the scale of the drawing. The former fixed 10 kb was 34 px wide in a yeast plot and 3 px in a human one (measured on the STE2 and the decorin run), so it could not be read where genes are far apart. A number fixes the length. The bar refers to the uncompressed parts of a track; gaps longer than `gap_threshold` are drawn shortened.
+The scale bar of the ribbon plot. `auto` (or `0`) picks a round length (1, 2 or 5 × 10^k bp) that
+is about 120 px long at the drawing's scale; a number fixes the length. The bar refers to the
+parts of a track drawn to scale: gaps longer than `gap_threshold` are drawn shortened.
 
 ### `hide_goi_absent_tracks`
-**Type:** Boolean | **Default:** `false` (`true` until 2026-10-09)
+**Default:** `false`
 
-By default every searched genome is drawn in every figure, also one in which no GOI call was made: a searched genome without the gene is a result. In the anchor grid such a genome keeps its row with the flanking genes that were placed, its GOI cell carries a dash, and a row in which nothing was placed reads "no flanking gene placed". The figure legend (`*_anchor_grid_print.legend.txt`) names these genomes with the number of flanking genes placed in each. In the ribbon plot they are drawn below the genomes with a call and labelled "GOI not placed"; the gene-position map prints "no orthologs mapped" for an empty row. A missing model is not evidence that the gene is absent.
-
-Set it to `true` to leave these genomes out of the figures (the former default; on 26 finished loci it removed 16 of 90 searched genomes from the figures without a word in them). They stay in `synvoy_report.json` either way.
+By default every searched genome is drawn, also one without a GOI call: a searched genome without
+the gene is a result. In the anchor grid such a genome keeps its row with the flanking genes that
+were placed, its GOI cell shows a dash, and a row with nothing placed reads "no flanking gene
+placed"; the legend of the print grid (`*_anchor_grid_print.legend.txt`) names these genomes with
+the number of flanking genes placed in each. In the ribbon plot they are drawn below the genomes
+with a call and labelled "GOI not placed", and the gene-position map prints "no orthologs mapped"
+for an empty row. A missing model is not evidence that the gene is absent. `true` leaves these
+genomes out of the figures when at least one genome has a call; the report keeps them either way.
 
 ### `plot_block_selection`
-**Type:** Boolean | **Default:** `false` (since 2026-10-21)
+**Default:** `false`
 
-What a target genome's row shows. With `false` the figures show the candidate regions of the region scorer (`regions/<locus>/<genome>.scores.tsv`, at most `adaptive_max_regions`). With `true` they show the search's own blocks (`blocks/<locus>/<genome>.blocks.tsv`), chosen by the label's scoring: the block of every HIGH, MEDIUM and AMBIGUOUS GOI call, then the significant blocks (E_syn <= 0.1, the predicted places) that hold no counted call, by E_syn, up to 6 blocks in all. A LOW call draws no block of its own (its model is drawn when its block is drawn for another reason), and a block that is not significant and holds no call is not drawn. Fragment GOI models take part in the choice and stay hidden in the default figures, so the `*_with_fragments` figures show the same blocks. A genome whose rule leaves nothing to draw keeps its row, empty.
+What the row of a target genome shows. `false`: the candidate regions that the region scorer kept
+([`max_regions`](#max_regions)). `true`: the search's own blocks, chosen as the label sees them:
+the block of every HIGH, MEDIUM and AMBIGUOUS GOI call, then the significant blocks (E_syn ≤ 0.1,
+the predicted places) that hold no counted call, by E_syn, up to 6 blocks in all. A LOW call draws
+no block of its own, and a block that is neither significant nor holds a call is not drawn.
+Fragment models take part in the choice and stay hidden, so the `*_with_fragments` figures show
+the same blocks. A genome with nothing to draw keeps its row, empty. The cap of 6 and the
+threshold are fixed in the figure code.
 
-The tables are copied into `plot_inputs_<locus>/`, so `scripts/replot.sh` and `scripts/replot_run.sh` draw a re-draw of such a run by the same rule; a run without tables in that folder keeps the candidate regions, and only the console says so. The cap of 6 and the significance threshold are fixed in the figure code (presets change `adaptive_max_regions`, and no setting reaches a re-draw). A run made with `false` (or between 2026-10-19 and 2026-10-21) has its tables in `blocks/` only; to draw it by its blocks: `scripts/replot_run.sh <run> --block_tables <run>/blocks/*/*.blocks.tsv` (each locus takes its own tables).
+With `true` the block tables are copied into the `plot_inputs_*` folders, so a re-draw follows the
+same rule. A run made with `false` has its tables in `blocks/` only; to draw it by its blocks:
+`scripts/replot_run.sh <run> --block_tables <run>/blocks/*/*.blocks.tsv`.
 
 ### `max_goi_per_genome`
-**Type:** Integer | **Default:** `10`
+**Default:** `10` · module A1 sets max(10, home copies + 1), at most 60
 
-How many GOI models of a genome steer the choice of the neighbourhood its row shows: the best ones, by label (HIGH first), then the strength of the match. Every GOI model inside the chosen view is drawn regardless, so the cap hides no copy there; it keeps hundreds of weak calls elsewhere in a genome from pulling the view away (lifting it outright changed the chosen neighbourhood in 19 of 33 genomes of one benchmark family). A settings key since 2026-10-26: the `local_family` preset module (A1) sets max(10, home copies + 1), at most 60 (constraint C5), so a tandem array larger than ten steers the view with every copy. Before, it was reachable only as `--plot_extra_args '--max_goi_per_genome N'`; that still works and wins over the parameter. The figures read the value from `effective_params.json`, which the plot step also copies into each `plot_inputs_*` folder, so a re-draw with `scripts/replot.sh` uses the run's value; a folder without the file (a run from before 2026-10-26) is drawn with 10.
+How many GOI models of a genome steer the choice of the neighbourhood its row shows: the best
+ones, by label, then by the strength of the match. Every GOI model inside the chosen view is
+drawn, so the cap hides no copy there; it keeps many weak calls elsewhere in a genome from pulling
+the view away. With A1, a tandem array larger than ten steers the view with every copy. The figures
+read the value from `effective_params.json`, which the plot step copies into each `plot_inputs_*`
+folder, so a re-draw uses the run's value. `--max_goi_per_genome` given in `plot_extra_args` wins
+over it.
 
 ### `plot_extra_args`
-**Type:** String | **Default:** `''`
+**Default:** none
 
-Extra options appended verbatim to the `bin/plot_synteny.py` call. Use it for the figure controls that have no parameter of their own, quoting the whole value:
+Options added as they are to the call of `bin/plot_synteny.py`, for the figure controls that have
+no parameter of their own. Quote the whole value:
 
 ```
 --plot_extra_args '--print_grid_numbers --no_fragment_variant'
@@ -881,340 +1845,267 @@ Extra options appended verbatim to the `bin/plot_synteny.py` call. Use it for th
 
 | Option | Default | Effect |
 |---|---|---|
-| `--print_grid_numbers` | off | Write the identity into every flanking arrow of the print anchor grid (`*_anchor_grid_print.svg`). Off by default: at 183 mm the number is 5 pt, and whether it helps depends on the size the figure is printed at. The full grid (`*_anchor_grid.svg`) always has it. A query coverage below 80 % is written in brackets under the arrow, which makes that row about 1 mm taller; a figure that would pass `--print_height_mm` that way marks the identity with `*` instead (the log says so). |
+| `--print_grid_numbers` | off | Write the identity into every flanking arrow of the print grid (`*_anchor_grid_print.svg`). At 183 mm the number is 5 pt. The full grid (`*_anchor_grid.svg`) always has it. A query coverage below 80 % is written in brackets under the arrow, which makes that row about 1 mm taller; when the grid would then exceed `--print_height_mm`, the identity is marked with `*` instead, and the log says so. |
 | `--print_width_mm` | `183` | Width of the print grid in mm: 183 for two journal columns, 89 for one. When the grid does not fit, the spacing shrinks first; then the columns with the fewest orthologs are left out and named in the log and in `_print.legend.txt`. Text stays at 5 to 7 pt. |
-| `--print_height_mm` | `170` | Largest height of the print grid in mm. Rows are packed tighter before it is exceeded; a grid that still does not fit is written anyway and the log says so. |
+| `--print_height_mm` | `170` | Largest height of the print grid in mm. Rows are packed tighter first; a grid that still does not fit is written anyway, and the log says so. |
 | `--no_print_grid` | off | Do not write the print grid. |
-| `--grid_max_models` | `10` | Most GOI gene models drawn for one genome in the anchor grid. A longer tandem array shows the first ten and `+N more`; every copy keeps its small arrow and its row in `_print.source.tsv`. A drawing setting: no preset module changes it, because it drops no copy (unlike `max_goi_per_genome`, a parameter of its own). |
-| `--no_fragment_variant` | off | Skip the `*_with_fragments` figures. By default GOI models with `ModelStatus=fragment` are hidden in the main ribbon plot and grid (they are single-exon hits that otherwise stack into extra lanes) and drawn in these sibling files. |
-| `--no_orient_to_home` | off | By default a scaffold whose flanking genes run opposite to the home genome is mirrored so the ribbons run straight. This switches the mirroring off. |
+| `--grid_variants` | none | Also write try-out versions of the print grid, separated by commas, or `all`: `compact` (the flanking genes of each side as one grey stack with a count, and the exon model of every GOI copy in the GOI column), `compact_panel` (the same with the exon panel), `clades_muted` (the flanking genes in muted colours, the GOI copies in the clade colours of the gene tree). Files `*_anchor_grid_<variant>_print.svg`. |
+| `--grid_max_models` | `10` | Most GOI models drawn for one genome in the anchor grid. A longer array shows the first ten and `+N more`; every copy keeps its small arrow and its row in `_print.source.tsv`. It drops no copy, so no module changes it. |
+| `--no_fragment_variant` | off | Skip the `*_with_fragments` figures. GOI models with `ModelStatus=fragment` are hidden in the main ribbon plot and grid and drawn in these files. |
+| `--no_orient_to_home` | off | Do not mirror a scaffold whose flanking genes run opposite to the home genome. By default it is mirrored, so the ribbons run straight. |
 | `--no_anchor_grid` | off | Do not write the anchor grid. |
-| `--gene_names_tsv` | _(none)_ | Names table (`gene_id`, `label`, optional `full_name`, `source`) that sets the label of the home genes it lists; give an absolute path. Without it a home gene is labelled with its symbol in the home GFF, else its current symbol at NCBI Gene, else an abbreviation of its product name (marked `*`), else its ID. Each run writes the table it used to `<locus>_gene_names.tsv`. |
-| `--no_gene_legend` | off | Do not draw the "Gene names" table (label, full name, gene ID, source) under the figures. |
-| `--no_network` | off | Skip the plot step's NCBI lookups: species common names, and gene symbols of home genes the GFF leaves unnamed. |
-| `--goi_zoom`, `--goi_min_px`, `--max_legend_entries`, `--caption_file` | — | Controls for tandem-array figures; see `bin/plot_synteny.py --help`. |
+| `--clade_count` | `4` | Clades coloured in the tree figure and the clade grid: the midpoint-rooted gene tree is split from the top, the largest clade first, until there are this many; branch lengths are not used. |
+| `--species_tree_newick` | none | A species tree in Newick format, with species names as leaves, for the cladogram and the row order of the grid, instead of the tree built from the NCBI taxonomy. Give an absolute path. |
+| `--common_names` | `both` | Species labels: `both` (`Scientific (common)`), `common`, `scientific` or `off`. |
+| `--common_names_tsv` | none | A table of two tab-separated columns (scientific name, common name) that overrides the common names from NCBI. Absolute path. |
+| `--gene_names_tsv` | none | A names table (`gene_id`, `label`, optional `full_name`, `source`) that sets the labels of the home genes it lists. Absolute path. Without it a home gene is labelled with its symbol in the home GFF, else its current symbol at NCBI Gene, else an abbreviation of its product name (marked `*`), else its ID. Each run writes the table it used to `<locus>_gene_names.tsv`. |
+| `--no_gene_legend` | off | Do not draw the table of gene names (label, full name, gene ID, source) under the figures. |
+| `--no_network` | off | Skip the plot step's NCBI lookups: the common names of the species, and the symbols of home genes the GFF leaves unnamed. |
+| `--plot_height` | automatic | Smallest height of the ribbon plot in px. |
+| `--goi_zoom` | `1.0` | Magnify the stretch of the ribbon plot that holds the GOI models by this factor and leave the flanks at their scale, so the copies of a dense tandem array stop overlapping (about 8 to 12 for such an array). |
+| `--goi_min_px` | `0` | Smallest width of a GOI gene in the ribbon plot, in px (about 30), so its exon structure stays visible at the scale of the locus; its exon lengths then become schematic. |
+| `--caption_file` | none | A UTF-8 text file whose lines are written as a caption under the ribbon plot. Absolute path. |
 
-Do not repeat an option the pipeline already sets (`--plot_width`, `--gap_threshold`, …); use the parameter instead. `--max_goi_per_genome` became the parameter `max_goi_per_genome` on 2026-10-26; given here it still wins over the parameter (and over the value a preset module set), because an option on the command line of `plot_synteny.py` wins over the run's settings. You can also re-render any figure by hand from a finished run's `plot_inputs_*` folder.
+Do not repeat an option that the pipeline already sets (`--plot_width`, `--gap_threshold`,
+`--gap_visual_size`, `--flank_fallback_bp`, `--scale_bar_len`); use the parameter instead.
+`--max_goi_per_genome` given here wins over the parameter and over a module's value. An option
+that `plot_synteny.py` does not know ends the run at the plot step with `unrecognized arguments`:
+take it out and run again with `-resume`, which does not repeat the search. Options that were
+removed: [§ 20](#20-removed-parameters).
 
-**Removed on 2026-10-07: `--grid_goi_style` and `--grid_goi_max_models`.** They belonged to the earlier anchor grid: the first chose one of four ways to draw a GOI cell (`cds`, `cds_aligned`, `genomic`, `notched`), the second set how many models a cell drew before it showed the best one plus `×N`. The grid now has one GOI layout ([OUTPUT.md § The GOI column of the anchor grid](OUTPUT.md#the-goi-column-of-the-anchor-grid)), so neither has anything left to control. `plot_synteny.py` stops with `unrecognized arguments` when it gets one, and a pipeline run then ends at the plot step: take the option out of `--plot_extra_args` and re-run with `-resume` (the search is not repeated). `--grid_max_models` is the nearest equivalent of the second.
+### `skip_tree`
+**Default:** `false` · `low_mem` sets `true`
+
+Skips the gene tree (MAFFT and IQ-TREE over the GOI models of each locus) and writes a placeholder
+tree; the figures are drawn all the same. The launcher's default profile `auto,low_mem` sets it,
+so a run started with `run_synvoy.sh` without `-profile` has no gene tree: add `--skip_tree false`, or use another
+memory tier, to get one.
 
 ---
 
-## 16. Resource Tuning
+## 17. Resources
+
+How much CPU, memory and time each step asks for. None of them changes a result. The memory tiers
+and `docker_max` set several of them ([USAGE.md § 2](USAGE.md#memory-tiers)). A step killed for
+memory or time is retried twice, a genome download three times; most steps also retry a crash with
+exit code 104, 134 or 139, and the region scoring (CLUSTER_REGIONS) is not retried.
 
 ### `iterative_search_cpus`
-**Type:** Integer | **Default:** `2`
+**Default:** `2` · `low_mem` and `laptop_safe` 1, `docker_max` every CPU
 
-The number of CPU cores allocated to each ITERATIVE_SEARCH process. This is the most computationally intensive task in the pipeline — it runs MMseqs2, tblastn, miniprot, and Smith-Waterman alignment for each target genome. More CPUs accelerate the MMseqs2 prefiltering and alignment stages, which are the bottleneck. The default of 2 is conservative, designed for shared workstations. On dedicated machines, increase to 4–8 for significantly faster processing. The `docker_max` profile automatically detects and uses all available CPUs. On HPC clusters, this should match your SLURM job CPU allocation. Note that giving one ITERATIVE_SEARCH task all CPUs while running multiple tasks in parallel (`iterative_search_max_forks > 1`) can cause oversubscription — the product of CPUs × forks should not exceed your total core count. Memory pressure typically limits parallelism before CPU count.
+CPUs of one search task. The genomes of one wave are searched at the same time by workers, at most
+this many (a wave holds 1, 2, 3 or 5 genomes), and MMseqs2 uses the CPUs too. The memory a task
+asks for grows with the number of genomes it searches at once (`iterative_search_memory auto`).
 
 ### `iterative_search_memory`
-**Type:** `auto` or a size | **Default:** `'auto'`
+**Default:** `auto` · `low_mem` 4 GB, `laptop_safe` 8 GB, `docker_max` the machine's memory − 2 GB
 
-The memory requested for each ITERATIVE_SEARCH task (since 2026-10-27; `lib/SearchMemory.groovy`; it changes no result). One task searches every target genome of a home locus, and the genomes of one wave are searched at the same time, each by a worker that runs its own MMseqs2 (at most `mmseqs_split_memory_limit`) and holds the whole genome in memory. `auto` asks for max(10 GB, the need of the largest genomes searched at once): 1 GB plus, for each of the W largest targets, min(`mmseqs_split_memory_limit`, 12 GB per Gb of genome) + the genome + 1 GB, where W is the most genomes one wave searches at once (min(`iterative_search_cpus`, the largest wave; the waves hold 1, 2, 3 or 5 genomes by distance rank)). A size you set (or a profile sets: `laptop_safe` 8 GB, `low_mem` 4 GB) is used as it is. Attempt n of a task asks for n times that, so a retry after an out-of-memory kill (exit 137) asks for more, and under the local executor at most the memory the executor has (`executor.memory`, else the machine's or the job's limit), because Nextflow refuses a task that asks for more. The console prints each request: `ITERATIVE_SEARCH memory: 25 GB (attempt 1 x 25 GB; max(10 GB, 25 GB for 1 genome(s) at once, the largest 15 GB))`.
+The memory each search task asks for. One task searches every target genome of a home locus, and
+the genomes of a wave are searched at the same time, each by a worker that runs its own MMseqs2
+(up to `mmseqs_split_memory_limit`) and holds the whole genome in memory. `auto` asks for
+max(10 GB, the need of the largest genomes searched at once): 1 GB plus, for each of the W largest
+targets, min(`mmseqs_split_memory_limit`, 12 GB per Gb of genome) + the genome + 1 GB, where W is
+the most genomes a wave searches at once (at most `iterative_search_cpus`). A size you give is used
+as it is. Attempt n of a task asks for n times the request, so a retry after a kill for memory
+asks for more; under the local executor at most the memory the executor has (`executor.memory`,
+else the machine's), because Nextflow refuses a task that asks for more. The console prints each
+request:
 
-Measured (whole-job peaks on LRZ at a split limit of 16G; the laptop at 2G): one genome of 1.0 Gb at a time 13.9 GiB (auto asks 15.4 GB), three genomes of 1.4-2.3 Gb at a time 37-38 GiB (58 GB), the 33 ant genomes four at a time at 4G 10 GiB (22.7 GB); every laptop case stays below the 10 GB floor (at most 2.7 GiB). Until 2026-10-27 the request was a fixed 10 GB, also for a retry, so a target genome too large for it failed every attempt under a scheduler that enforces the request.
+```
+ITERATIVE_SEARCH memory: 25 GB (attempt 1 x 25 GB; max(10 GB, 25 GB for 1 genome(s) at once, the largest 15 GB))
+```
 
-MMseqs2 database indexing and search are the primary memory consumers. The `mmseqs_split_memory_limit` parameter provides a secondary control — if the database exceeds that limit, MMseqs2 splits it and processes chunks sequentially, reducing peak memory at the cost of speed. On memory-constrained systems, it is better to reduce `mmseqs_split_memory_limit` than to lower this value, because the process needs baseline memory for the main workflow beyond just MMseqs2.
+Measured peaks, at a split limit of 16G on a cluster node: one genome of 1.0 Gb at a time,
+13.9 GiB (`auto` asks for 15.4 GB); three genomes of 1.4 to 2.3 Gb at a time, 37 to 38 GiB
+(58 GB). On a laptop at 2G no test went above 2.7 GiB. When a task is killed for memory (exit code
+137), lower `mmseqs_split_memory_limit` first.
 
 ### `iterative_search_max_forks`
-**Type:** Integer | **Default:** `1`
+**Default:** `1`
 
-The maximum number of ITERATIVE_SEARCH processes that can run simultaneously. Each fork processes a different target genome. The default of 1 (sequential processing) is the safest option — it prevents memory oversubscription and is appropriate for laptops and workstations. On machines with ample RAM (64+ GB) and many CPU cores, increase to 2–4 to parallelize across target genomes. The memory requirement multiplies with fork count: if each ITERATIVE_SEARCH needs 10 GB and you set max_forks to 4, you need at least 40 GB of available RAM. The `laptop_safe` profile keeps this at 1 to prevent system freezes. On HPC clusters, this is less relevant because each target genome is typically submitted as a separate SLURM job. Setting this too high on limited hardware is the most common cause of pipeline crashes due to OOM kills.
+How many search tasks run at once. Each task searches one home locus with all its target genomes,
+so with one home locus a larger value changes nothing. With several loci and enough memory, 2 or
+more run them side by side, and their memory adds up.
 
-### `iterative_quiet_subtools`
-**Type:** Boolean | **Default:** `true`
+### `locate_gene_cpus` / `locate_gene_memory`
+**Defaults:** `1` / `3 GB` · `low_mem` and `laptop_safe` 2 GB; `docker_max` every CPU and the
+machine's memory − 1 GB
 
-When enabled, suppresses verbose output from sub-tools (MMseqs2, tblastn, miniprot) called within the ITERATIVE_SEARCH process. This reduces log file size and I/O overhead, which can be significant when processing many target genomes with high MMseqs2 verbosity. The default of `true` keeps logs clean and focused on pipeline-level progress messages. Set to `false` when debugging a specific search failure — the full tool output can help diagnose why a particular target genome produced no hits or crashed. The `laptop_safe` profile enables this to minimize disk I/O during single-threaded execution. This parameter does not affect search behavior or results, only the amount of diagnostic output captured in the `.command.log` files within the Nextflow work directory.
+CPUs and memory of LOCATE_GENE, which finds the gene in the home genome (tblastn and MMseqs2, once
+per run). A large home genome, such as a vertebrate's, needs 8 to 16 GB; a task that ends with exit
+code 137 ran out of memory.
 
-### `locate_gene_cpus`
-**Type:** Integer | **Default:** `1`
+### `compute_tree_cpus` / `compute_tree_memory`
+**Defaults:** `2` / `4 GB` · `docker_max` every CPU and the machine's memory − 1 GB
 
-The number of CPU cores allocated to the LOCATE_GENE process, which finds the GOI in the home genome during the initial localization phase. This step runs tblastn and MMseqs2 against a single genome (the home genome), so it is typically less resource-intensive than ITERATIVE_SEARCH. The default of 1 CPU is usually sufficient because the home genome is a single genome searched once. Increasing to 2–4 CPUs can speed up the MMseqs2 search for large genomes (vertebrates with 1000+ Mb). This task is not a bottleneck in most pipeline runs — it completes quickly and only runs once. The `docker_max` profile increases this to use all available CPUs for maximum speed on dedicated machines.
+CPUs and memory of the gene tree (MAFFT and IQ-TREE).
 
-### `locate_gene_memory`
-**Type:** String | **Default:** `'3 GB'`
+### `default_cpus` / `default_memory` / `default_time`
+**Defaults:** `1` / `2 GB` / `4h` · `docker_max` every CPU and the machine's memory − 1 GB
 
-The memory allocated to the LOCATE_GENE process. This should accommodate the MMseqs2 database for the home genome plus working memory for tblastn. The default of 3 GB is sufficient for most genomes up to ~500 Mb. For large vertebrate genomes (1–3 GB), increase to 8–16 GB. If this process fails with exit code 137, it is running out of memory — increase this value or reduce `mmseqs_split_memory_limit` to force MMseqs2 to split the database. The `laptop_safe` profile sets this to 2 GB, which works for smaller genomes but may need manual increase for large vertebrate genomes. As with `iterative_search_memory`, the `mmseqs_split_memory_limit` provides a secondary control mechanism.
-
----
-
-## 17. LLM Parameter Estimation (removed)
-
-The LLM parameter advisor (`auto_params`, `force_disable_advanced_search`, `llm_provider`, `llm_api_key`, `llm_api_base_url`, `llm_model`) was removed on 2026-10-22. On the Nextflow versions SynVoy runs on (25.10 and later) it could not change a parameter after launch, so it only printed suggested flags; the settings that depend on the gene come from the preset modules (`--modules`), the distances from the run itself. A run that still sets one of the six prints a warning and goes on ([§ 20](#20-removed-parameters)).
-
----
-
-## 18. Advanced & Output
-
-### `outdir`
-**Type:** Path (String) | **Default:** `'results'`
-
-The directory where all pipeline output files are written. This includes synteny plots (SVG/HTML), phylogenetic trees (Newick), BED region files, the JSON summary report, and optionally intermediate files. The directory is created automatically if it does not exist. Using descriptive directory names (e.g., `results/melittin_apis_vs_bombus`) helps organize multiple runs. When using `-resume`, Nextflow caches task results in the `work/` directory and regenerates outputs in `outdir` — so changing `outdir` and resuming will write results to the new location without re-running completed tasks. For HPC runs, consider pointing this to a permanent storage location rather than scratch space that may be automatically purged.
+CPUs, memory and time limit of every step without settings of its own. Every executor enforces the
+time limit, the local one too, and a retry after a time kill gets n times `default_time` at
+attempt n. Steps with their own limit keep it on every attempt: the search and LOCATE_GENE 48 h, the tree 4 h, the home preparation,
+the home gene model and the flank walk 3 h, the genome downloads 3 h. To change one of these, give
+a config file with `-c`, for example
+`process { withName: 'ITERATIVE_SEARCH' { time = '96h' } }`.
 
 ### `docker_container`
-**Type:** String | **Default:** `'synvoy-local:latest'`
+**Default:** `synvoy-local:latest`
 
-The Docker/Singularity container image used for running pipeline processes when a container profile is active. The default expects a locally built image tagged `synvoy-local:latest`. Build it from the project Dockerfile: `docker build -t synvoy-local:latest .`. The container bundles all dependencies (MMseqs2, tblastn, Augustus, Prodigal, miniprot, samtools, parasail, MAFFT, IQ-TREE, and the Python stack) in a reproducible environment. Override this to use a pre-built remote image (e.g., from Docker Hub or a private registry). The `beforeScript` directive ensures workspace scripts in `bin/` override any scripts packaged inside the container, so local code changes take effect immediately without rebuilding. This parameter is only used when a Docker or Singularity profile is active — Conda profiles ignore it entirely.
+The image every step runs in under the Docker and Singularity profiles; the conda profiles ignore
+it. Build the default from the repository's `Dockerfile` ([INSTALL.md](INSTALL.md#docker)) or give
+another image. The scripts in `bin/` of your SynVoy folder are used ahead of those in the image, so
+a change to them needs no new image.
 
 ---
 
-## 19. Auto-Apply Preset, Self-Consistency & Rescue
+## 18. Output and console
 
-A small group of orthogonal toggles that landed together in the 2026-05-27/29 batch. All are safe defaults — change them only if you understand what you give up.
+### `outdir`
+**Default:** `results`
 
-### `auto_apply_preset`
-**Type:** Boolean | **Default:** `true`
-
-When true (default), the module rules (`--modules auto`, the default) or, under `--modules legacy`, the preset chosen from the LOCATE_GENE hit profile are applied at runtime to every downstream process via a value channel (see §1f auto-apply in the Quick start above). When false, the recommendation is kept advisory-only and the params used by `EXTRACT_FLANKING`, `ITERATIVE_SEARCH`, and `CLUSTER_REGIONS` come straight from `params.*` — so any CLI override you pass for a preset-affected param (e.g. `--goi_relative_evalue 1e-4`) is honoured end-to-end. Disable this when you're benchmarking parameter sensitivity, or when you want the static `-profile preset_X` startup path to be the only place presets take effect. NORMALIZE_QUERY's `min_query_length` is the one preset-affected param that this toggle can't touch — it runs before LOCATE_GENE, so for short queries you still need `--min_query_length 20` or `-profile preset_short_peptide` at launch.
-
-### `preset_override`
-**Type:** String | **Default:** `''` (empty — no pinned preset; under `--modules legacy` the hit profile chooses one)
-
-Pin a specific preset and skip the hit-profile decision. Valid values: `preset_short_peptide`, `preset_tandem_family`, `preset_single_copy`, `preset_paralog_discrimination`. Any other value stops the run at its start, naming the valid ones (since 2026-11-02; before, LOCATE_GENE ignored a mistyped name without a word). With `auto_apply_preset = true`, the pinned preset's overrides are applied at runtime to the downstream steps. With `auto_apply_preset = false`, this only affects what gets written to `auto_preset.json` — the params themselves come from `-profile preset_X` (startup) or the CLI. Useful when you already know the query type and don't want SynVoy to second-guess based on a noisy hit distribution. Under `--modules auto` (or a list) a pinned preset is applied on top of the modules.
-
-### `modules`
-**Type:** String | **Default:** `'auto'` (since 2026-11-10; `'legacy'` before)
-
-Preset modules (since 2026-10-15; [ALGORITHM.md § 5.3](ALGORITHM.md#53-parameter-preset-and-preset-modules)). Instead of one preset chosen by the first matching rule, each kind of gene is a module that tests its own trigger: `local_family` (A1), `dispersed_family` (A2), `shared_domain` (A3), `short_query` (B1), `low_complexity` (B2), `signal_anchor` (B3), `cys_framework` (B4), `exon_structure` (C1), `home_context` (C2). Modules stack, and they never move the label of a call. Every parameter a module may change has exactly one rule (since 2026-10-20): the modules that switch it on, one formula of the run's design quantities, and a cap. Two modules can therefore never disagree about a value, and their order never matters.
-
-| Value | Meaning |
-|---|---|
-| `auto` | the default (since 2026-11-10): every module whose trigger fires; a value with no word in it (empty) is the default too |
-| `legacy` | the default before 2026-11-10: the chooser's preset is applied exactly as before; the triggers are evaluated and recorded only (`effective_params.json` → `modules_would_fire`, report `run_settings`) |
-| `none` | no preset and no module: the defaults |
-| `short_query,local_family` | exactly these modules, whether their trigger fires or not (names or ids, e.g. `B1,A1`) |
-| `auto,-dispersed_family,+cys_framework` | `auto` without one module and with another |
-
-LOCATE_GENE runs before the modules are resolved: when the value selects `short_query` (`auto` without `-short_query`, or a list that names it) and a query shorter than 100 aa has no home hit at E ≤ `search_evalue`, tblastn searches the home genome once more with `-seg no`; the hit profile records it (`locate_retry`, in `run_settings.features`). Put a value that contains a minus sign in quotes: `--modules 'auto,-dispersed_family'`. A value you set yourself for any of the settings keys wins over every module. Unknown names stop the run at the start. The console shows the modules after `[INFO] modules (...)`; `intermediate/locate_gene/home_context.json` holds the home neighbourhood the triggers read.
-
-Besides the settings, `intermediate/locate_gene/effective_params.json` records:
-
-- `profile`: the design quantities the rules read. These are `c` (home copies), `R` (reach of the home array in genes: the largest distance, in gene ranks, of a family member next to the home gene), `Fam` (home loci of the family), `Lq` (query length), `Lx` (longest real exon of the home gene), `Lpiece` (min(`Lq`, `Lx`)), `Lcore` (the query without signal peptide and GPI tail), `nx` (real exons of the home gene), `n` (`n_flanking_genes`) and `W` (`window_margin_genes`).
-- `derivation`: for every value that a module rule, the preset or you set, the value, the default and what set it. For a rule it also gives the formula and its inputs, for example `goi_candidate_regions_per_query 4 = max(2, c + 1), c = 3 (A1)`. The console prints these lines after `[INFO] settings from the module rules`.
-- `constraints`: the checks of how the settings relate. C1: the GOI margin lies within the window margin. C3: with A1, the GOI loci kept per query and the gene models per GOI locus reach the home copies + 1, within their caps (a cap that binds is named). C4: with A1, the ownership panel's genes per home locus reach the home copies + 1, within the cap of 60. C5: with A1, the GOI models that steer a figure reach the home copies + 1, within the cap of 60. C7: a per-hit length floor a rule sets lies between 10 and max(10, 0.6 × Lpiece). C11: a value a rule set stays within its cap (40 GOI loci per query, 60 models per GOI locus, 60 panel genes per home locus, 50 panel relatives, 60 GOI models that steer a figure). C12: the fragment bound of the model status lies below the complete bound.
-
-A constraint violation that only the module rules made is a bug: the run stops before the search. A violation that involves a value you set gives a warning, and your value is kept. The report copies `profile`, `derivation` and `constraints` into its `run_settings`.
-
-**The genome axis** (since 2026-10-27). The modules run once per query and see only the home side. A value that should differ per target genome is set in the search instead, where each genome's distances are derived, with any `--modules` other than `legacy` (so by default, since 2026-11-10); under `legacy` the search gets the arguments it had before. Today the axis holds `anchor_max_places` (`auto`: every place, and the 5 best places of each flanking gene in a genome where the block cap binds). A value you set is used for every genome. Each genome's value is logged (`genome axis: anchor_max_places N (source; ...)`), written to `hits/<genome>.target_policy.tsv` with its source and the block counts, which the report's `target_policy` block carries, and written to the genome's result GFF (`##synvoy-genome-axis`). No module rule may set an axis value.
-
-The settings map holds 32 parameters: the 25 a module rule may set, and 7 fixed ones that no rule sets but that travel with them, so the report and every step read one file (`sw_min_score`, `sw_min_identity`, `min_hit_identity`, `min_hit_length`, `expand_goi_similar`, `goi_family_tokens`, `adaptive_unique_gene_floor`; why each has no rule: `PASS_THROUGH_KEYS` in `bin/select_modules.py`). The flank walk, the search and the region scorer read the map directly. The steps after the search read it from `effective_params.json` (since 2026-10-26): the hull rescue `goi_hull_min_coverage`, the ownership panel `locus_ownership_max_genes_per_locus` and `paralog_panel_max_family`, the figures `max_goi_per_genome`.
-
-### `allow_unknown_species`
-**Type:** Boolean | **Default:** `false`
-
-By default the pipeline aborts at startup if `--home_species` is empty AND can't be inferred from the genome filename — that empty value used to cascade silently into `phylo_sort.py` and the parameter advisor (removed 2026-10-22), producing kingdom=Unknown and broken phylo distances (the §1i incident on the luciferase run). Set to true to opt out of that gate when you genuinely don't know the species (e.g. a draft assembly with a meaningless stem). The pipeline then proceeds with a loud `WARN` and degraded phylogenetic ordering. Always prefer fixing `--home_species`; this flag exists for the rare case where you can't.
-
-### `strong_synteny_min_flanking`
-**Type:** `auto` or Integer | **Default:** `auto`
-
-A cluster of the region scorer that holds at least this many HIGH-confidence flanking genes and no GOI model becomes a `goi_missing_but_strong_synteny` region (up to two beyond the region cap), which the strong-synteny rescue searches. `auto` is half of `n_flanking_genes`, rounded up: 5 at the default of 10, the fixed default until 2026-10-23. `0` switches the region class off.
-
-### `strong_synteny_no_goi_min_flanking`
-**Type:** `auto` or Integer | **Default:** `auto`
-
-The report's `self_consistency` flags a genome, home locus and scaffold with at least this many HIGH-confidence flanking models and no HIGH GOI call (`strong_synteny_no_goi`; advisory: the neighbourhood is there, but no model in it was called HIGH). `auto` is 2 × `n_flanking_genes`: 20 at the default of 10, the fixed value until 2026-10-26. The value a run used is in the report under `self_consistency.thresholds.strong_flanking_min`.
-
-### `disable_strong_synteny_rescue`
-**Type:** Boolean | **Default:** `false`
-
-§1e rescue pass: when a syntenic block has at least `strong_synteny_min_flanking` HIGH-confidence flanking genes but no GOI annotation (a "right neighbourhood, missed GOI" case), SynVoy runs a relaxed-stringency `miniprot` pass over the block window to emit a LOW-confidence rescue GOI model (`EvidenceType=relaxed_miniprot_rescue`). Set true to skip this — useful when you're already running many loci and don't want extra LOW-confidence noise in the report.
-
-### `strong_synteny_rescue_miniprot_outc`
-**Type:** Float | **Default:** `0.05` (5 % query coverage)
-
-Minimum miniprot query-coverage fraction for a rescue model to be emitted. Lower = more permissive (rescues more sketchy fragments). Raise to `0.2` if you only want rescue models that cover at least a fifth of the query.
-
-### `strong_synteny_rescue_window_pad`
-**Type:** Integer (bp) | **Default:** `2000`
-
-Bp padded each side of the syntenic block coordinates before extracting the window for the rescue miniprot run. Wider = catches GOI bodies that start just outside the strong-flanking span, at the cost of larger search windows.
-
-### `strong_synteny_rescue_miniprot_timeout`
-**Type:** Integer (seconds) | **Default:** `3600`
-
-Guard of the rescue's miniprot run of one block window (since 2026-10-29): a run that has not finished after this many seconds ends the run (the script exits 3, which the module turns into the run's end; so does a missing miniprot). The module still ignores other failures of the rescue, except a third kill for memory or time (exit 137, 140, 143), which ends the run too. Until then the default was 120 s and such a block was skipped, with a GFF comment that read like a block without a model.
-
-### `disable_paralog_check`
-**Type:** Boolean | **Default:** `false`
-
-§1j Phase B reciprocal-best paralog check: for paralog-family queries (multi-sequence home FASTA like TP53 + TP63 + TP73), each recovered GOI target protein is Smith–Waterman-aligned against every home paralog with `parasail`. The per-call best/runner-up bitscores feed `generate_report`'s `paralog_confusion` flag — when a call's best home paralog differs from the *modal* best at the same (genome, locus) with a sufficient bitscore gap, the report flags it. Single-paralog queries are automatic no-ops (the alignment step is skipped). Set true to skip even on multi-paralog runs (useful for short-peptide runs where the paralog list is irrelevant).
-
-> **`disable_paralog_check` is a no-op today, either way.** The check compares each call against *several* home query sequences, but the query that reaches it is always the single normalised GOI protein (only the first record of `--query` is used). The job it was meant to do — "is this call really my gene, or its paralog?" — is done by locus ownership (`--disable_locus_ownership`), which builds its paralog panel from the home proteome.
-
-### `paralog_confusion_min_gap`
-**Type:** Float | **Default:** `5.0`
-
-Minimum bitscore-gap (best vs second-best paralog) before a paralog-confusion flag fires. The default of 5 keeps borderline ties off the report. Raise to `15`/`20` for stricter flagging (only clear-cut paralog reassignments), lower to `2` if you want every disagreeing call surfaced.
-
-### `locus_ownership_max_genes_per_locus` / `paralog_panel_max_family`
-**Type:** Integer | **Defaults:** `5` / `15`
-
-The size of the home-paralog panel of locus ownership ([ALGORITHM.md § 10](ALGORITHM.md#10-adjudication-and-the-report)): every recovered GOI protein is aligned to the panel, and a call whose best match is a relative of the GOI that beats the GOI's best panel entry by at least `locus_ownership_tiebreak_gap` is relabelled `paralog_not_goi`. `locus_ownership_max_genes_per_locus` is the number of annotated home genes per home locus in the panel (those overlapping the locus most); `paralog_panel_max_family` the number of home proteins added by their similarity to the query (identity ≥ `paralog_panel_min_identity`, the closest first). Settings keys since 2026-10-26: the `local_family` preset module (A1) sets max(5, home copies + 1), at most 60 (constraint C4), so every copy of a home array is in the panel; the `dispersed_family` module (A2) sets max(15, home loci of the family + 1), at most 50. Both rules are inferred, not measured.
-
-### `disable_phylo_placement`
-**Type:** Boolean | **Default:** `false`
-
-Phylogenetic placement check (advisory). For every GOI model the search labelled HIGH or MEDIUM (the models the tree reads, `goi_for_tree`) SynVoy compares the model's sequence divergence from the query with its species' taxonomic distance from the home species, fits the trend across species, and labels a model that sits anomalously far for its species `phylo_discordant` (others `phylo_concordant`, or `insufficient_data` when too few species have models). The idea: a paralog that arose before the speciation is more diverged than an ortholog in the same species. The verdict and its z-score are written on each record of `synvoy_report.json` whose own model has one (`goi_dedup.records[].phylo_verdict`, `phylo_z`; an AMBIGUOUS or LOW record has none) and summarised under `self_consistency.phylo_placement_summary`.
-
-It changes no confidence, and it should be read as a hint: divergence comes from a local alignment, species distance is a taxonomic rank difference rather than time, and the test assumes comparable rates across lineages — which fast-evolving genes violate. On the 10-family benchmark every `phylo_discordant` record was a real ortholog. Set `true` to skip the step.
-
-### `phylo_placement_min_calls`
-**Type:** Integer | **Default:** `4`
-
-Number of species with a call needed before the trend is fitted. Below it every call is `insufficient_data`.
-
-### `phylo_placement_z_threshold`
-**Type:** Float | **Default:** `2.0`
-
-Residual z-score at or above which a call is `phylo_discordant`.
-
-### `disable_wavefront`
-**Type:** Boolean | **Default:** `false`
-
-A measurement control, not a performance option. Normally targets are searched closest-first in waves, and each wave's recovered orthologs are added to the query database for the next. `true` puts every genome in one parallel wave so the database never grows. Run a set both ways to see whether the wavefront changes the result. On the melittin benchmark it did not; it has not yet been tested on a set where the farthest target is out of reach of the original query.
-
-### `disable_relative_query`
-**Type:** Boolean | **Default:** `false`
-
-Inside a window the gene of interest is searched with the **home protein**, and in addition with the gene model of the genome searched most recently (the closest relative in search order; of its models the one that aligns best to the home protein). A model found only with the relative is measured again against the home protein: identity, coverage and confidence refer to the home protein, the id carries `_r<n>_` instead of `_l<n>_`, and `SearchQuery` / `SearchQueryIdentity` name the relative and the identity to it. `true` searches with the home protein only.
-
-Until 2026-10-08 a window was searched with ONE sequence per gene, the longest of the home protein and all earlier models. A model three residues longer than the home protein then replaced it for the rest of the run, and identity and coverage of every later call referred to that model. Calls of later genomes can therefore show a lower identity than in older runs.
-
-### `anchor_max_places`
-**Type:** `auto` or Integer | **Default:** `auto`
-
-`auto` is every place (the old default 0), except on the genome axis (any `--modules` other than `legacy`, since 2026-10-27, and so by default since 2026-11-10; see [`modules`](#modules)): a target genome in which the block cap `max_blocks_per_genome` binds is built again once from the 5 best places of each flanking gene, and the cap cuts that rebuild as before if it still binds. The GOI's own home gene among the anchors keeps every place there, and rescued GOI hits stay seeds. A number (0 included) is used for every genome; the GOI's own home gene among the anchors keeps every place under it too (since 2026-10-28; before, a copy of the GOI at its (N+1)-th place seeded no block). With the genome axis on, each genome's value and its source (`default`, `genome_axis` or `user_set`) are in the search log, in `hits/<genome>.target_policy.tsv` and in the header line `##synvoy-genome-axis` of the genome's result GFF; under `legacy` a number shows only in the search log's 'Anchor places' line.
-
-Each flanking gene seeds blocks only at its N best places in a target genome. A place is a run of hits of that gene within its own gap limit; the best places are those with the largest summed bit score. The ortholog of a flanking gene is one place; its further places are relatives and shared domains, and they are what puts two anchors near each other by chance, which is how most searched blocks arise. The hits that are left out still count inside a window (flanking support, flanking gene models); only the seeding of blocks changes.
-
-Measured by replaying the saved genome-wide hits of 31 genome searches (yeasts, flies, bees, ants, plants): with N = 5 the windows searched fall from 512 to 121 and the DNA searched from 130 to 25 Mb, and of the 29 HIGH, MEDIUM or ambiguous calls that lie in a searched block only one is no longer covered, a relative of the gene that the report labels `paralog_not_goi` (N = 10: 166 windows; N = 3: 106). Five test cases were run with N = 5 and gave the same ortholog calls as without it:
-
-| Case | Windows without / with N = 5 | Run time |
-|---|---|---|
-| yeast STE2 in three yeasts | 101 / 18 | 4.0 / 1.2 min |
-| *Arabidopsis* FT in three Brassicaceae and papaya | 238 / 9 | 12.5 / 4.4 min |
-| firefly luciferase in fruit fly and mosquito | 295 / 67 | 23 / 9 min |
-| fly Adh in three *Drosophila* and a mosquito | 45 / 23 | 4.6 / 3.8 min |
-| apyrase in seven ants and a hornet | 35 / 35 | unchanged |
-
-The limit matters where flanking genes have many places: about 2 per gene in an ant genome (nothing changes), 7 to 9 in a yeast, and 92 hits per flanking gene in *Arabidopsis lyrata*, where the default search reaches the cap of 80 blocks per genome and cuts out a fifth of the genome for one home locus. **For plant genomes, and whenever the log says `Capping blocks`, use `--anchor_max_places 5`** under `--modules legacy`; with any other `--modules` the genome axis does it for each genome where the cap binds.
-
-One side effect. Where a target genome has no conserved neighbourhood, its blocks with two anchors are chance blocks, and the limit removes them all. The search then falls back to every block with one anchor, as it always does when no block passes `min_block_genes` (up to `max_blocks_per_genome`). Fruit fly against mosquito: 3 windows without the limit, 19 with it.
-
-A fixed N is not the default because it has not been run on the large families of the benchmark; the genome axis uses 5 only where the cap would otherwise cut blocks without regard to their places.
-
-### `disable_anchor_resolution`
-**Type:** Boolean | **Default:** `false`
-
-A target gene is the ortholog of at most one home gene. Where hits of different flanking genes cover the same target DNA (overlap of at least half of the shorter hit: two kinases, a tandem pair), only the best-scoring one counts as an anchor. Before, one target gene could count as two flanking genes, which let a place with a single gene pass the "at least two flanking genes" test of a block and raised the flanking support of calls. `true` counts every hit, as before 2026-10-08.
-
-### `goi_hull_min_flanking`
-**Type:** `auto` or Integer | **Default:** `auto`
-
-The hull rescue runs on a sequence only when its hull holds at least this many HIGH-confidence flanking genes. `auto` is round(0.4 × `n_flanking_genes`): 4 at the default of 10, the fixed default until 2026-10-23.
-
-### `goi_hull_min_coverage`
-**Type:** Float | **Default:** `0.5`
-
-A cost filter of the hull rescue in front of the judge (as `goi_hull_min_identity`, 40 %): a miniprot model whose coding sequence covers less than this share of the query is not judged. A settings key since 2026-10-26: the `short_query` preset module (B1) sets 0.3, its own fragment bound (`classify_fragment_max_qcov`), so a hull model that B1 would not call a fragment reaches the judge. With `core_completeness` on, a model also passes when its alignment covers this share of the query's core.
-
-### `goi_hull_cluster_max_gap` / `goi_hull_window_pad` / `goi_hull_max_window`
-**Type:** `auto` or Integer (bp) | **Default:** `auto`
-
-Sizes of the hull rescue (a miniprot search of the gene across the whole flanking neighbourhood of a sequence, run when no HIGH model lies there). `auto` takes them from the distances of the search for that genome: flanking genes form one cluster up to the bridge limit, the hull is widened by the GOI margin, and a hull longer than twice the home neighbourhood (times the expansion) is skipped. The former fixed values (3 Mb, 100 kb, 20 Mb) were set on a mammalian chromosome and are used when a result GFF carries no distances. The rescue is skipped when a HIGH model already lies in the DNA it would search (before: in the hull without its margin, which modelled a gene just outside the outermost flanking gene a second time).
-
-### `synteny_bridge_two_sided` / `synteny_bridge_max_per_block`
-**Type:** Boolean / Integer | **Defaults:** `false` / `2`
-
-The default gap-bridging rule counts the anchored flanking genes on the left of a gap only, so the same evidence bridges or not depending on where the gap falls. `synteny_bridge_two_sided true` weighs both sides together. It is **off pending measurement**: larger blocks raise the flanking support that some confidence rules read, so it can promote more calls. `synteny_bridge_max_per_block` caps how many gaps one block may chain (`0` = unlimited).
-
-### `decoy_mode`
-**Type:** Boolean | **Default:** `false`
-
-Calibration of the labels without a truth set. In every search window the reversed home protein and two shuffles of it (seeded by the query id, so a rerun repeats them), and those of the relative's query where the window has one (filed under the home decoy of the same kind, since 2026-10-15), are searched like the home protein, modelled, labelled and given the same E-values and specificity terms. They are chosen among themselves only (never against real candidates), never seed the next wave and never reach the result GFFs or the figures; they go to `<outdir>/decoys/<locus>/`. Every decoy call is false, so the share of decoy cases that reach a label or an E-value threshold is that rule's false-call rate on this data; the report gives it as `decoy_rate`: the decoy cases that were searched (home gene × target genome with a search window × decoy kind; the home genome is never searched) and, per label, the calls and the upper end of the exact (Clopper–Pearson) 95 % interval. Costs about four times the window search. A run-level option: no preset module sets it (the `low_complexity` module, for one, fires on 47 % of the Candida development genes).
-
-### `core_completeness`
-**Type:** Boolean | **Default:** `false`
-
-HIGH needs a call that covers at least 0.7 of the home protein (a constant of the label). For a secreted or GPI-anchored protein, the signal peptide and the GPI tail are often the parts a model misses or that are least conserved, so a model of the whole mature protein can fall below 0.7 of the precursor. With this switch a gene model also carries `CoreCoverage=` (the share of the protein without its signal peptide and GPI tail covered by the model's exons) and the label reads the larger of `QueryCoverage` and `CoreCoverage`. MEDIUM needs no completeness and is unaffected. So do the other tests of a model's completeness (constraint C6, one coverage basis): the model status (`ModelStatus`), the hull rescue (its cost filter `goi_hull_min_coverage` and the coverage its label reads) and the report's coverage demotion (`identity_decoupled_max_qcov`). A hit chain or a tandem copy has no `CoreCoverage` and reads the whole protein; so do the search's bars on single hits and the report's choice between a wide model and a compact one inside it, where a real signal-peptide exon behind a long intron has to count. The `signal_anchor` preset module (B3) turns it on. Note: in conotoxins, three-finger toxins and PLA2s the signal peptide is the most conserved part. Settings key.
-
-### `report_low_complexity`
-**Type:** Boolean | **Default:** `false`
-
-Writes `LowComplexity=` on the GOI models: the share of the model protein inside low-complexity windows (the measure of the query feature `seg_frac`, an approximation of SEG). Advisory. The `low_complexity` module (B2) turns it on.
-
-### `tandem_copy_parent`
-**Type:** String (`seed` / `home`) | **Default:** `seed`
-
-Whose model a single-segment tandem copy (a hit where no gene model lies, `EvidenceType=tandem_copy`) is once it seeds the next wave. `seed` (as until 2026-10-15): it is recorded as `GOI_copy_<n>|<genome>_b<block>_l<locus>_by_<parent>`, and in the following waves `GOI_copy_<n>` is a gene of interest of its own, so the models it finds are judged against the seed instead of the home protein (finding 6 of the label rework). The parent, the query the copy was found with (the home gene, a seeded copy, a home tandem copy or, in decoy mode, a decoy), ends the id since 2026-10-23: `n` is counted per parent, block and locus, so before that copies of different parents could share one id, and the search gave each of them the E-values and the label of the one judged last. `home`: it is recorded under the home gene of interest (`<parent>|<genome>_b<block>_l<locus>_tc<n>`), so it can become that gene's relative query and every model it finds is reported and judged against the home protein. `seed` stays the default until the measured switch of the preset plan.
-
-### `report_nonsyntenic_candidates`
-**Type:** Boolean | **Default:** `true`
-
-Record GOI hits that clear the identity / E-value / length bar but are refused by a synteny gate, with the gate that refused them and the distance to the nearest flanking anchor. They are listed in `synvoy_report.json` under `rejected_candidates`. They are not orthology calls; they exist so that a genome holding a strong unplaceable hit is not read as a genome with no hit.
+The folder all results are written to; it is created when missing. What it holds:
+[OUTPUT.md](OUTPUT.md). Nextflow's work folder (`work/`) is separate, and `-resume` reuses it
+([USAGE.md § 7](USAGE.md#7-resuming-and-caching)).
 
 ### `quiet`
-**Type:** Boolean | **Default:** `true`
+**Default:** `true`
 
-Compact console output: the per-step RUN/SKIP lines are dropped. `false` prints them.
+Compact console output: the RUN and SKIP lines of each step and the phase banners are left out, so
+they do not interrupt Nextflow's progress table. The banner, the `[OK]` result lines, warnings,
+errors and the final summary are always printed. `false` prints everything.
+
+### `iterative_quiet_subtools`
+**Default:** `true`
+
+Hides the messages printed while the search builds gene models with miniprot. `false` shows them
+in the task's log (`.command.log` in the work folder), for debugging.
+
+### `report_nonsyntenic_candidates`
+**Default:** `true`
+
+Keeps the GOI hits that pass the identity, E-value and length tests of the dispersed-GOI rescue
+([§ 13](#enable_dispersed_goi_rescue)) but fail its tests of place, with the test that refused each
+and the nearest flanking gene. The report lists them under `rejected_candidates`, and a genome with
+such a hit and no call reads `goi_found_but_not_syntenic` instead of looking like a genome without
+a hit. They are not calls.
+
+---
+
+## 19. Calibration and comparison switches
+
+These measure SynVoy rather than improve a result. Leave them at their defaults for a normal run.
+
+### `decoy_mode`
+**Default:** `false`
+
+Calibrates the labels without a truth set. In every search window the reversed home protein and two
+shuffles of it (seeded by the query id, so a rerun repeats them), and those of the relative's query
+where the window has one, are searched like the home protein: modelled, labelled, and given the
+same E-values and specificity terms. They compete only with each other, never seed the next wave,
+and never reach the result GFFs or the figures; they are written to `decoys/locus_<N>/`. Every
+decoy call is false, so the share of decoy cases that reach a label is that label's false-call rate
+on your data. The report gives it as `decoy_rate`, with the upper end of the exact (Clopper-Pearson)
+95 % interval ([OUTPUT.md](OUTPUT.md#decoy-calls---decoy_mode)). It makes the window search about
+four times as long. No module sets it.
+
+### The comparison switches
+
+Each of these turns off a part of SynVoy, or sets it as an older version did, so that its effect
+on a set of genomes can be measured. Run the set both ways and compare.
+
+| Switch | Entry | What the run then does |
+|---|---|---|
+| `--modules legacy`, `--modules none` | [§ 1](#modules) | the preset chooser instead of the modules, or neither |
+| `--auto_apply_preset false` | [§ 1](#auto_apply_preset) | the plain defaults |
+| `-profile <execution>,legacy_distances` | [§ 7](#7-distances-in-gene-units) | fixed distances in bp instead of gene pitches |
+| `--anchor_max_places N` | [§ 8](#anchor_max_places) | a fixed number of places per flanking gene in every genome |
+| `--disable_anchor_resolution` | [§ 8](#disable_anchor_resolution) | every hit counts as an anchor |
+| `--disable_synteny_collinearity` | [§ 8](#disable_synteny_collinearity) | blocks without home order, so no block is significant |
+| `--synteny_bridge_two_sided` | [§ 8](#synteny_bridge_two_sided--synteny_bridge_max_per_block) | gaps bridged on the evidence of both sides |
+| `--rank_wave_binning false` | [§ 8](#rank_wave_binning) | waves by phylogenetic distance instead of rank |
+| `--disable_wavefront` | [§ 8](#disable_wavefront) | one wave, so the genes found never join the queries |
+| `--disable_relative_query` | [§ 8](#disable_relative_query) | windows searched with the home protein only |
+| `--tandem_query_restart`, `--goi_first_exon_guard`, `--goi_join_leftover_hits` | [§ 9](#9-search-inside-a-window) | other rules for tandem copies, first exons and leftover hits |
+| `--tandem_copy_parent home` | [§ 10](#tandem_copy_parent) | tandem copies judged against the home protein |
+| `--disable_coverage_demotion` | [§ 10](#disable_coverage_demotion) | the report's coverage check advisory only |
+| `--legacy_strand_score` | [§ 12](#legacy_strand_score) | the strand term of older versions in the region score |
+| `--goi_genome_wide_path` | [§ 13](#goi_genome_wide_path--goi_genome_wide_without_blocks) | the gene also modelled outside the windows |
+
+Write a switch with its value (`--disable_wavefront true`).
 
 ---
 
 ## 20. Removed parameters
 
-Removed on 2026-10-09 (the two figure switches on 2026-10-13, the seed and context-promotion options on 2026-10-14, the parameters of the identity-based GOI label on 2026-10-15, the LLM parameter advisor on 2026-10-22, `phylo_placement_promote` and `goi_chain_query_aware` on 2026-11-10). Passing one of the first group stops the run at start with the replacement named; one of the next two groups prints a warning and is ignored; the last group is told apart by its value.
+These parameters were removed before version 1.0.0. What a run does when you still give one:
+
+- **Replaced**: the run stops at its start and names what to use instead.
+- **Had no effect**, and **the LLM parameter advisor**: a warning, and the value is ignored.
+- **`goi_chain_query_aware`**: `true` stops the run at its start, `false` gives a warning.
 
 **Replaced**
 
 | Parameter | Use instead |
 |---|---|
 | `max_flanking_goi_similarity` | `goi_relative_evalue` (an E-value, not a percentage) |
-| `enable_name_locus`, `name_locus_min_identity`, `name_locus_pad` | `home_locus_mode` (`auto` already makes the annotated home gene the primary locus; `gene_only` = that locus alone). `--home_goi_gene SYMBOL` still names the gene |
-| `pub_svg` | Nothing: the publication SVG of the ribbon plot was removed. The figure for print is `*_anchor_grid_print.svg`; `*_synteny_plot_view.svg` is the ribbon plot as a picture |
-| `enable_matrix_plot` | Nothing: the matrix figure was removed. The anchor grid (`*_anchor_grid.svg`) shows the same and more |
-| `seed_on_flanking_support` | Nothing (2026-10-14): seeds follow one rule, the HIGH calls of a query in a genome, else its MEDIUM calls, each when no other home protein competes for it (ALGORITHM.md §7.12) |
-| `classify_context_min_collinear` | Nothing (2026-10-14): the context promotion was removed. A weak match in the slot of a block with significant gene order is labelled AMBIGUOUS with `Basis=gene_order_only` ("needs curation", never counted), always on. The promotion was on by default for one day; reversed and shuffled home proteins met its rule in 30 of 181 Candida decoy cases |
-| `classify_high_min_identity`, `classify_medium_min_identity`, `classify_tandem_min_identity`, `classify_tandem_min_qcov` | Nothing (2026-10-15): one judge labels every GOI call, tandem copies included, from the E-value in the expected place, specificity against the home proteome and completeness ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)); identity does not decide a label. Since step 4 of the label rework (2026-10-14) these thresholds shaped only a provisional label that the judge overwrote |
-| `classify_high_min_collinear` | Nothing (2026-10-15): the order of the anchors enters the label through the block's E_syn (a block is significant at E_syn ≤ 0.1, and only a significant block gives a call its slot or core as the place of its E-value) |
+| `enable_name_locus`, `name_locus_min_identity`, `name_locus_pad` | `home_locus_mode` (`auto` already makes the annotated home gene the primary locus; `gene_only` searches that locus alone). `--home_goi_gene SYMBOL` still names the gene |
+| `pub_svg` | Nothing: the publication SVG of the ribbon plot is gone. The figure for print is `*_anchor_grid_print.svg`; `*_synteny_plot_view.svg` is the ribbon plot as a picture |
+| `enable_matrix_plot` | Nothing: the matrix figure is gone. The anchor grid (`*_anchor_grid.svg`) shows the same and more |
+| `seed_on_flanking_support` | Nothing: the genes that join the queries follow one rule, the HIGH calls of a query in a genome, else its MEDIUM calls, each when no other home protein competes for it ([ALGORITHM.md § 7.12](ALGORITHM.md#712-what-is-added-to-the-query-set)) |
+| `classify_context_min_collinear` | Nothing: the context promotion is gone. A weak match in the slot of a block with significant gene order is labelled AMBIGUOUS with `Basis=gene_order_only` ("needs curation", never counted), always. Reversed and shuffled home proteins met the promotion's rule in 30 of 181 decoy cases of a test set |
+| `classify_high_min_identity`, `classify_medium_min_identity`, `classify_tandem_min_identity`, `classify_tandem_min_qcov` | Nothing: one judge labels every GOI call, tandem copies included, from the E-value in the expected place, specificity against the home proteome and completeness ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)); identity decides no label |
+| `classify_high_min_collinear` | Nothing: the order of the anchors enters the label through the block's E_syn (a block is significant at E_syn ≤ 0.1, and only a significant block gives a call its slot or core as the place of its E-value) |
 
-**Had no effect** (declared and accepted, read by nothing)
+**Had no effect** (accepted, but read by nothing)
 
 | Parameter | What it was meant for |
 |---|---|
 | `prefer_large_genes` | prefer long genes as anchors |
-| `min_gene_identity` | identity floor for flanking hits (the floor in use is `min_hit_identity`) |
+| `min_gene_identity` | an identity floor for flanking hits (the floor in use is `min_hit_identity`) |
 | `aug_dedup_bin_bp` | de-duplication of window hits |
-| `max_consecutive_empty_blocks` | early stop of the search in a genome |
-| `gap_min_size`, `gap_evalue`, `gap_min_alnlen` | a gap-filling search that was replaced by one miniprot run per candidate |
+| `max_consecutive_empty_blocks` | an early stop of the search in a genome |
+| `gap_min_size`, `gap_evalue`, `gap_min_alnlen` | a gap-filling search, replaced by one miniprot run per candidate |
 | `keep_intermediate` | `intermediate/` is always written |
 | `max_retries` | retries are set in the `process {}` block of `nextflow.config` |
-| `multi_profile`, `multi_profile_max_jobs` | a run with several parameter sets, never wired |
+| `multi_profile`, `multi_profile_max_jobs` | a run with several parameter sets, never built |
 | `locus_ownership_synteny_window` | read by nothing |
-| `min_exon_query_cov` | a coverage floor for exon hits; the line that applied it was commented out in March 2026 |
-| `pub_width_mm`, `pub_palette` | read by nothing (the print figure has a fixed size, see OUTPUT.md) |
-| `seed_flanking_min_count`, `seed_flanking_min_qcov` | floors of `seed_on_flanking_support` (2026-10-14); they acted only when that was switched on |
-| `classify_context_min_identity`, `classify_context_min_qcov` | floors of the context promotion (2026-10-14), removed with it |
-| `classify_fallback_strong_min_identity_floor` | identity floor of the strong-flanking route by which a hit chain reached MEDIUM (2026-10-15; that route went with the identity-based label) |
-| `strict_goi_family` | demotion of hit-chain calls whose target annotation lacks a family name (2026-10-15). The family-name check is annotation only now: `--goi_family_tokens` writes `GoiFamilyConsistent` / `GoiFamilyReason` and changes no label |
-| `distance_autotune_close_pct`, `distance_autotune_far_pct`, `distance_autotune_max_relax`, `distance_autotune_min_flanking`, `distance_autotune_high_floor`, `distance_autotune_medium_floor` | settings of the per-genome relaxation of the identity thresholds (2026-10-15), removed with it |
-| `disable_ambiguous_tier` | the switch that took AMBIGUOUS out of the label (2026-10-15). AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
-| `disable_distance_autotune` | the switch of the per-genome relaxation of the identity thresholds (§1g; 2026-10-15), which went with the thresholds. The judge computes each call's E-value in the expected place of its own genome |
-| `phylo_placement_promote` | raising an AMBIGUOUS call whose phylogenetic placement (F9) is concordant to MEDIUM (2026-11-10). Since 2026-11-09 it could not act: the placement check judges only the models the search labelled HIGH or MEDIUM, and each record takes its own model's verdict, so no AMBIGUOUS call has one. The verdicts stay advisory (`phylo_verdict` on each record, `phylo_discordant` flags) |
+| `min_exon_query_cov` | a coverage floor for exon hits that no code applied |
+| `pub_width_mm`, `pub_palette` | read by nothing (the print figure has a fixed size) |
+| `seed_flanking_min_count`, `seed_flanking_min_qcov` | floors of `seed_on_flanking_support`, removed with it |
+| `classify_context_min_identity`, `classify_context_min_qcov` | floors of the context promotion, removed with it |
+| `classify_fallback_strong_min_identity_floor` | the identity floor of a route by which a hit chain reached MEDIUM; it went with the identity-based label |
+| `strict_goi_family` | demoted hit-chain calls whose target annotation lacked a family name. The family-name check is annotation only: `--goi_family_tokens` writes `GoiFamilyConsistent` and `GoiFamilyReason` and changes no label |
+| `distance_autotune_close_pct`, `distance_autotune_far_pct`, `distance_autotune_max_relax`, `distance_autotune_min_flanking`, `distance_autotune_high_floor`, `distance_autotune_medium_floor` | settings of the relaxation of the identity thresholds for distant genomes, removed with those thresholds |
+| `disable_distance_autotune` | the switch of that relaxation. The judge computes the E-value of each call in the expected place of its own genome |
+| `disable_ambiguous_tier` | took AMBIGUOUS out of the label. AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
+| `phylo_placement_promote` | raised an AMBIGUOUS call with a concordant phylogenetic placement to MEDIUM. It could no longer act, because the placement check reads only models labelled HIGH or MEDIUM. The verdicts stay advisory (`phylo_verdict` on each record) |
 
-**Stops when on, warns when off** (2026-11-10; the run keeps what the switch did when it was off)
+**Stops when on, warns when off**
 
 | Parameter | Why it went |
 |---|---|
-| `goi_chain_query_aware` | batch G1's hit chain that follows the query (off by default). Switched on, it refused a continuation of the query in the same reading frame 24 bp on and so undid a gain on the curated truth (two hits of one stop-free frame read as one piece, 2026-11-02). Set to `true`, the run stops at its start; set to `false`, it goes on with a warning. Its link rule stays in the leftover join (`goi_join_leftover_hits`) |
+| `goi_chain_query_aware` | a hit chain that follows the query (off by default). Switched on, it refused a continuation of the query in the same reading frame 24 bp on, and so lost true calls in a test. Its link rule lives on in the leftover join (`goi_join_leftover_hits`) |
 
-**The LLM parameter advisor** (2026-10-22; read only by the advisor, which was removed with them)
+**The LLM parameter advisor** (read only by the advisor, which was removed with them)
 
 | Parameter | What it did |
 |---|---|
-| `auto_params` | ran the advisor (ESTIMATE_PARAMS): suggested values for up to 10 search parameters from the kingdom of the home species and the distance to the targets, with a cloud LLM or built-in rules. On Nextflow 25.10 and later none could be applied after launch, so it printed the flags to re-run with and wrote `intermediate/estimate_params/estimated_params.json` |
-| `force_disable_advanced_search` | kept the advisor from suggesting the PLM or structural search |
+| `auto_params` | ran the advisor, which suggested values for up to 10 search parameters from the kingdom of the home species and the distance to the targets, with a cloud LLM or built-in rules. On the Nextflow versions SynVoy runs on, none could be applied after launch, so it only printed flags to run again with. The settings that depend on the gene now come from the preset modules ([§ 1](#1-presets-and-preset-modules)), the distances from the run itself ([§ 7](#7-distances-in-gene-units)) |
+| `force_disable_advanced_search` | kept the advisor from suggesting the language-model or structural search |
 | `llm_provider`, `llm_api_key`, `llm_api_base_url`, `llm_model` | provider, key, endpoint and model of the LLM. The containers no longer receive `LLM_API_KEY`, `GOOGLE_API_KEY` or `OPENAI_API_KEY` |
 
-`plot_synteny.py` no longer accepts `--target_names`, `--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette` (all were parsed and never read) and, since 2026-10-13, `--pub_svg` (its figure was removed). A run that passes one of them in `--plot_extra_args` ends at PLOT_SYNTENY with `unrecognized arguments`; drop the option and `-resume`. `plot_synteny_matrix.py` no longer exists.
+**Options of the figure script.** `plot_synteny.py` no longer accepts `--target_names`,
+`--max_legend_entries`, `--ribbon_alpha_dense`, `--pub_width`, `--pub_palette`, `--pub_svg`,
+`--grid_goi_style` and `--grid_goi_max_models`. A run that passes one of them in
+`--plot_extra_args` ends at the plot step with `unrecognized arguments`: take the option out and
+run again with `-resume`. `--grid_goi_style` chose one of four ways to draw a GOI cell; the anchor
+grid now has one GOI layout ([OUTPUT.md](OUTPUT.md#the-goi-column-of-the-anchor-grid)). The
+nearest to `--grid_goi_max_models` is `--grid_max_models`. `plot_synteny_matrix.py` no longer
+exists.
 
-Figures removed on 2026-10-13: the anchor-positions figure (`*_anchor_positions.html` / `.svg`; it repeated the anchor grid and the gene-position map), the publication SVG of the ribbon plot (`*_synteny_plot.svg`) and the matrix (`*_synteny_matrix.svg`). The figures of a run are now the anchor grid with its print version, the ribbon plot, the gene-position map and the tree.
+**Figures.** The anchor-positions figure (`*_anchor_positions.html` and `.svg`; it repeated the
+anchor grid and the gene-position map), the publication SVG of the ribbon plot
+(`*_synteny_plot.svg`) and the matrix (`*_synteny_matrix.svg`) are no longer drawn. A run draws the
+anchor grid with its print version, the ribbon plot, the gene-position map and the tree.

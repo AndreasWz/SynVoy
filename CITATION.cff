@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If SynVoy contributes to your research, please cite it as below."
+title: "SynVoy: Synteny-guided orthology discovery"
+type: software
+authors:
+  - family-names: Weitz
+    given-names: Frank Andreas
+  - family-names: Koludarov
+    given-names: Ivan
+version: 1.0.1
+date-released: 2026-11-11
+repository-code: "https://github.com/AndreasWz/SynVoy"
+license: AGPL-3.0-only
+abstract: >-
+  SynVoy finds the orthologs of a gene that is too divergent or too short for a
+  genome-wide sequence search. It locates the gene's neighbouring genes in each
+  target genome, where their order is conserved, and searches for the gene only
+  inside that region. The target genomes need no annotation.
+keywords:
+  - synteny
+  - orthology
+  - comparative genomics
+  - gene finding
+  - Nextflow
