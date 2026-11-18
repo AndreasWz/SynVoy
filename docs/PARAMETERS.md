@@ -1503,11 +1503,14 @@ regions of MEDIUM or better that hold no counted call (`regions.goi_regions_with
 
 How many candidate regions the scorer keeps per genome and home locus. The regions are ordered with
 those near such a GOI model or GOI hit first ([`synteny_goi_overlap_bonus`](#synteny_goi_overlap_bonus)),
-then by the flanking support of the search block, then by score. With `0` a region whose GOI model
-the search counted (HIGH or MEDIUM, not an answer of the genome-wide path; the model its
-`goi_model_confidence` names) and every region put in for a GOI model that no cluster touches
-(`goi_anchor`) are kept whatever their score and the cap, so the region of a counted call is never
-left out. Then every region in this order whose score reaches max(`adaptive_score_floor_abs`, the
+then by the flanking support of the search block, then by score. With `0` a region that holds a
+counted GOI model of the search within 20 kb (HIGH or MEDIUM, not an answer of the genome-wide path;
+the model its `goi_model_confidence` names) and every region put in for a GOI model that no cluster
+touches (`goi_anchor`, made only when no cluster lies near any GOI model) are kept whatever their
+score and the cap. A counted model more than 20 kb from every cluster gets no region of its own
+when a cluster lies near another GOI model, and the calls of the rescue passes are not read here
+(they run after the search). Then every region in this order whose score reaches
+max(`adaptive_score_floor_abs`, the
 best score of all regions × `adaptive_score_floor_frac`), or that holds at least
 `adaptive_unique_gene_floor` distinct flanking genes, is added until `adaptive_max_regions` regions
 are kept (the regions kept for their model count toward it); when nothing is kept, the first region
@@ -1622,7 +1625,9 @@ the GOI zones and at the earlier tries' windows, without flanking genes, and jud
 is the answer when the judge labels it HIGH there, no exon of its gene model runs across an exon
 junction of the annotated home gene (≥ 2 exons) with 10 residues on each side (`RetrocopyCandidate=1`:
 the target would encode both exons without an intron, as a retrocopy does; the model's exons are
-tested, not the hits, whose ends can run into an intron), it is not frame-broken without an intron (a frameshifted copy split into
+tested, not the hits, whose ends can run into an intron; an exon that is at least 30 nt per
+junction longer than 3 × its aligned query span holds a short in-frame intron that miniprot read as
+coding, and does not count), it is not frame-broken without an intron (a frameshifted copy split into
 two pieces a few bp apart), and it overlaps no model the search wrote before.
 
 An answer is written as MEDIUM, `GOIClass=genome_wide_strong_hit`, with `GenomeWide=1`,
@@ -1632,7 +1637,8 @@ for the curator and never a test) and, when its place lies inside the searched w
 wave and is not in the gene tree. The report counts no answer: it keeps one per genome, only in a
 genome without a counted call and where no other record lies at its place, and names the kept ones
 in the headline as "(not counted)", those near a block apart
-([OUTPUT.md](OUTPUT.md#the-headline)). With [`decoy_mode`](#decoy_mode) the reversed and shuffled
+([OUTPUT.md](OUTPUT.md#the-headline)); the figures draw a kept answer outlined and count it
+nowhere ([OUTPUT.md](OUTPUT.md#the-goi-column-of-the-anchor-grid)). With [`decoy_mode`](#decoy_mode) the reversed and shuffled
 home proteins are searched in the genome as well and take the same steps, so the report gives the
 decoy rate of the genome place (`decoy_rate.genome_wide`). Every place is listed under
 `genome_wide_path`, with what became of it ([OUTPUT.md](OUTPUT.md#the-other-top-level-keys)). An
@@ -2198,7 +2204,7 @@ These parameters were removed before version 1.0.0, or after version 1.0.1 where
 | `disable_distance_autotune` | the switch of that relaxation. The judge computes the E-value of each call in the expected place of its own genome |
 | `disable_ambiguous_tier` | took AMBIGUOUS out of the label. AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
 | `phylo_placement_promote` | raised an AMBIGUOUS call with a concordant phylogenetic placement to MEDIUM. It could no longer act, because the placement check reads only models labelled HIGH or MEDIUM. The verdicts stay advisory (`phylo_verdict` on each record) |
-| `discovery_paralog_margin` (after 1.0.1) | the margin of the structural discovery's guard against a home relative. The guard acts only with a panel of home relatives, and no step gives the search one |
+| `discovery_paralog_margin` (after 1.0.1) | the margin of the structural discovery's guard against a home relative. The guard acts only with a panel of home relatives, and no step gives the search one. The search script keeps `--discovery_paralog_margin` and `--home_paralog_panel` for a run of it by hand, where the two act together |
 | `structural_max_length` (after 1.0.1) | a length above which ESMFold would skip a protein. The structural search folds every protein in overlapping pieces ([`enable_structural_search`](#enable_structural_search--structural_device)) |
 | `disable_paralog_check`, `paralog_confusion_min_gap` (after 1.0.1) | the switch and the flag margin of the reciprocal-best paralog check, which went with them: it was to compare each call with several home paralogs from the query file, but the query is one sequence, so it could flag nothing. Locus ownership compares each call with the home genes ([§ 14](#disable_locus_ownership)) |
 

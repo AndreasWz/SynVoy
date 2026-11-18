@@ -357,6 +357,8 @@ def split_calls(tmap, span_bp, outside=()):
     keep their mark ``outside_view``), placed by the same test as the calls in view: a copy
     capped next to a drawn tandem array is at the locus, one on another scaffold after '//'.
     `best`, the call the copy rule names, is the best call of the genome, `outside` included.
+    An answer of the genome-wide path (plot_synteny._is_genome_wide_answer) is listed by the
+    same test, but is never `best`, no copy, and does not place the locus.
     """
     ps = _PS
     genes = (tmap.get(GOI_KEY) or {}).get("genes", [])
@@ -364,13 +366,13 @@ def split_calls(tmap, span_bp, outside=()):
     if not genes and not outside:
         return None, []
 
-    def best_of(pool):
-        return ps._goi_best([g for g in pool if not ps._is_fragment_goi(g)] or pool)
+    best_of = ps._goi_best_call
     best = best_of(genes + outside)
     placed = [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
-              for e in tmap.values()]
-    if genes:
-        here = best_of(genes)
+              for e in tmap.values() if not ps._is_genome_wide_answer(e["best"])]
+    calls_in_view = [g for g in genes if not ps._is_genome_wide_answer(g)]
+    if calls_in_view:
+        here = best_of(calls_in_view)
         _, lo, hi, _ = ps._dominant_chrom_span(placed, here.get("chrom", ""))
     else:                   # no call in view: the locus is the stretch of the flanking genes
         chrom, lo, hi, _ = ps._dominant_chrom_span(placed)
@@ -417,7 +419,8 @@ def wrap_items(items, full_weight=0.0):
     A gene model counts ``full_weight``: nothing where the column holds one model per
     genome, a share of the line where the compact version draws every copy inline.
     """
-    weight = {"mini": 1.0, "mark": 0.5, "break": 0.5, "full": full_weight, "count": 1.0}
+    weight = {"mini": 1.0, "mark": 0.5, "break": 0.5, "full": full_weight, "count": 1.0,
+              "strong": 1.0}
     lines, used = [[]], 0.0
     for it in items:
         w = weight[it[0]]
@@ -706,11 +709,15 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
     calls = [[(g, False, True) for g in home_goi]]      # per row: (gene, elsewhere, is_copy)
     bests = [None]
     for ri in range(1, n_rows):
-        # The row's counted calls outside the neighbourhood the figures draw are listed too.
-        best, row_calls = split_calls(tmaps[ri], span_bp, rows[ri].get("goi_outside_view"))
+        # The row's counted calls outside the neighbourhood the figures draw are listed too, and
+        # so are its answers of the genome-wide path there (drawn outlined, not counted).
+        best, row_calls = split_calls(tmaps[ri], span_bp,
+                                      list(rows[ri].get("goi_outside_view") or [])
+                                      + list(rows[ri].get("goi_strong_outside_view") or []))
         bests.append(best)
         calls.append(row_calls)
-    n_outside_view = sum(1 for rc in calls[1:] for g, _, _ in rc if g.get("outside_view"))
+    n_outside_view = sum(1 for rc in calls[1:] for g, _, _ in rc
+                         if g.get("outside_view") and not ps._is_genome_wide_answer(g))
     n_copies = [sum(1 for _, _, c in rc if c) for rc in calls]
     in_column = max(n_copies + [0]) <= 1     # no genome has two: the model goes in the column
     clade_of, clade_info = goi_clades(args, calls) if st.clade else ({}, None)
@@ -733,7 +740,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         shown_ids = {id(g) for g in shown}
         n = n_marks = 0
         for g, away, copy in calls[ri]:
-            if not copy:
+            strong = ps._is_genome_wide_answer(g)     # neither a copy nor a weak call
+            if not copy and not strong:
                 n_marks += 1
                 if n_marks > st.max_marks:
                     continue
@@ -744,6 +752,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 n += 1
                 index[id(g)] = n
                 items.append(("full" if in_column else "mini", g, away))
+            elif strong:
+                items.append(("strong", g, away))
             else:
                 items.append(("mark", g, away))
         if n_marks > st.max_marks:      # a family with many chance hits: the rest as a number
@@ -782,7 +792,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
             return w + ((2.0 + tw(num, st.fs_num, bold=True)) if num else 0.0)
         if it[0] == "count":
             return tw(f"+{it[1]}", st.fs_small)
-        return {"mini": mini_w, "mark": MARK_W, "break": break_w}[it[0]]
+        return {"mini": mini_w, "mark": MARK_W, "break": break_w, "strong": mini_w}[it[0]]
 
     def line_w(line, bp_pt, caret, ri):
         return sum(item_w(it, bp_pt, caret, ri) for it in line) + ITEM_GAP * (len(line) - 1)
@@ -930,7 +940,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
     kinds = {it[0] for c in cells for ln in c["grid"] for it in ln}
     if no_goi and has_goi_col:
         kinds.add("none")
-    tiers = {(g.get("confidence") or "").upper() for rc in calls[1:] for g, _, _ in rc}
+    tiers = {(g.get("confidence") or "").upper() for rc in calls[1:] for g, _, _ in rc
+             if not ps._is_genome_wide_answer(g)}
     tiers |= {(tmaps[ri][a["key"]]["best"].get("confidence") or "").upper()
               for ri in range(1, n_rows) for a in cols if not a["is_goi"] and a["key"] in tmaps[ri]}
 
@@ -1124,6 +1135,14 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                                     text_svg(px, y + st.fs_small * 0.35, st.fs_small, f"+{g}", MUTED),
                                     tips))
                     continue
+                if kind == "strong":    # an answer of the genome-wide path: outlined, not counted
+                    d = ps._svg_arrow_path(px, px + pw, y - MINI_H / 2, MINI_H, g.get("strand", "+"),
+                                           rx=0.5)
+                    body = f'<path d="{d}" fill="#ffffff" stroke="{goi_border}" stroke-width="0.5"/>'
+                    note = ps.STRONG_HIT_NOTE + (", " + OUTSIDE_VIEW_NOTE if g.get("outside_view")
+                                                 else ", elsewhere in the genome" if away else "")
+                    P.append(titled(goi_tooltip(g, labels[ri], is_home, note), body, tips))
+                    continue
                 fill, dash = goi_fill(g.get("identity"), g.get("confidence"), is_home, goi_colour)
                 if st.clade:        # the clade is the fill; confidence stays in the outline
                     fill = copy_colour(g)
@@ -1239,11 +1258,15 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 in_panel = {id(g) for g, _ in cells[ri]["panel"]}
                 marked = {id(it[1]) for ln in cells[ri]["grid"] for it in ln if it[0] == "mark"}
                 for g, away, copy in calls[ri]:
+                    strong = ps._is_genome_wide_answer(g)
                     drawn = (("model" if (in_column or id(g) in in_panel) else "arrow") if copy
+                             else "outline" if strong
                              else "mark" if id(g) in marked else "counted")
                     row = source_row(ri, track, plain_labels[ri], a, g, n_copies[ri], is_home, True,
                                      drawn, "elsewhere" if away else "locus",
                                      cells[ri]["index"].get(id(g), ""))
+                    if strong:      # its own status: an answer of the genome-wide path
+                        row["state"] = ps.STRONG_HIT_NOTE
                     if st.clade:
                         cid = clade_of.get(id(g))
                         row["clade"] = "not in the tree" if cid is None else cid + 1
@@ -1381,6 +1404,10 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         # counted GOI calls outside the stretch the other figures draw for their genome (listed
         # at the locus or after //, by where they lie)
         "goi_calls_outside_view": n_outside_view,
+        # answers of the genome-wide path listed (outlined): strong hits without synteny, not
+        # counted, no copies
+        "goi_strong_hits": sum(1 for rc in calls[1:] for g, _, _ in rc
+                               if ps._is_genome_wide_answer(g)),
         # GOI models drawn with a number that is the identity to a seeded tandem copy
         "copy_lineage_models": n_copy_lineage,
         # rows whose assembly failed the quality check (marked with a dagger)
@@ -1633,7 +1660,7 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
                  (None, "home row: all flanking genes of that side")]
     groups.append(("Flanking genes", flank))
 
-    if full_drawn or "mini" in kinds or "mark" in kinds or "none" in kinds:
+    if full_drawn or "mini" in kinds or "mark" in kinds or "none" in kinds or "strong" in kinds:
         key = {"start": 1, "end": 1400, "strand": "+", "evidence_type": "exon_annotation",
                "exon_coords": [(1, 180), (420, 520), (900, 1400)]}
         goi, clade_notes = [], []
@@ -1687,6 +1714,9 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
         goi.extend(clade_notes)
         if "mark" in kinds and not st.clade:
             goi.append((mark(), "weak call (needs curation, or no significant match)"))
+        if "strong" in kinds:
+            goi.append((arrow("#ffffff", goi_border, aw=MINI_W, h=MINI_H),
+                        ps.STRONG_HIT_NOTE + " (genome-wide path)"))
         if "break" in kinds:
             goi.append(("//", "what follows is elsewhere in the genome"))
         if "count" in kinds:
@@ -1839,6 +1869,13 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                          f"{'its numbers are' if n_cl == 1 else 'their numbers are'} the identity "
                          "and coverage to that copy, not to the query (source data, column "
                          "identity_to).")
+    n_strong = info.get("goi_strong_hits", 0)
+    if n_strong:
+        s.append(f"An outlined arrow in the {goi} column is a strong hit without synteny "
+                 "(--goi_genome_wide_path): a match that meets the terms of a high-confidence call "
+                 "where no block of the neighbouring genes placed the gene. It is not counted and "
+                 f"is no copy ({n_strong} in this figure; synvoy_report.json, "
+                 "genome_wide_strong_hits).")
     missing = info.get("rows_without_goi") or []
     if missing:
         total = info.get("home_flanking_genes", 0)

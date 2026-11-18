@@ -1443,12 +1443,15 @@ def main():
                 selected_indices = list(range(min(args.max_regions, len(ordered_clusters))))
                 score_floor = max(args.adaptive_score_floor_abs, 0.0)
             else:
-                # Kept whatever the floors and the cap: a region whose GOI model the search
-                # counted (region_holds_counted_goi_model) and an injected GOI-anchor region,
-                # so the region of a counted call is never left out. Then every cluster that
-                # passes a floor, in the order above (GOI regions first), until the cap is
-                # reached; the floor is relative to the best score of all clusters. Only the
-                # first cluster is written when nothing is kept (adaptive_backstop).
+                # Kept whatever the floors and the cap: a region that holds a counted GOI model
+                # of the search within goi_padding (region_holds_counted_goi_model) and an
+                # injected GOI-anchor region (made only when no cluster overlaps any GOI
+                # interval). A counted model farther than goi_padding from every cluster has no
+                # region when a cluster lies near another GOI model, and the rescue passes' calls
+                # are not read here. Then every cluster that passes a floor, in the order above
+                # (GOI regions first), until the cap is reached; the floor is relative to the best
+                # score of all clusters. Only the first cluster is written when nothing is kept
+                # (adaptive_backstop).
                 score_floor = max(args.adaptive_score_floor_abs,
                                   best_score * args.adaptive_score_floor_frac)
                 guaranteed = {idx for idx, cl in enumerate(ordered_clusters)

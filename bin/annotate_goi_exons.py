@@ -1982,8 +1982,10 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0, home_s
     carries ``missing_query_start`` / ``missing_query_end``.
 
     ``exons`` are dicts with id, seq, exon_num, qstart, qend, gstart, gend, strand, chrom,
-    pident, has_start_codon, has_stop_codon, splice_donor, splice_acceptor; coordinates
-    are those of ``chrom_seq`` plus ``region_offset``. A model without CDS gives ([], '').
+    pident, has_start_codon, has_stop_codon, splice_donor, splice_acceptor, and on a terminal
+    CDS that refine_model_termini widened terminal_walk_nt (the nt it added, outside the CDS's
+    qstart-qend); coordinates are those of ``chrom_seq`` plus ``region_offset``. A model
+    without CDS gives ([], '').
     """
     if not best['cds_list']:
         return [], ''
@@ -2001,6 +2003,9 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0, home_s
     # BEFORE the walk is what miniprot's own translation covers.
     cds_codons_before = sum(int(c['gend']) - int(c['gstart'])
                             for c in cds_ordered) // 3
+    # Each CDS's length before the walk: the nt the walk adds lie outside the CDS's query span
+    # (exon['terminal_walk_nt'], read by the genome-wide path's retrocopy test).
+    cds_nt_before = [int(c['gend']) - int(c['gstart']) for c in cds_ordered]
     missing = missing_terminal_exons(cds_ordered, len(query_seq), home_structure)
     term_prefix, term_suffix = refine_model_termini(
         cds_ordered, chrom_seq, model_strand,
@@ -2075,6 +2080,8 @@ def _build_model(best, query_seq, chrom_seq, chrom_name, region_offset=0, home_s
             'splice_acceptor': splice_acceptor,
             'method': 'miniprot'
         })
+        if ge - gs != cds_nt_before[i - 1]:
+            exons[-1]['terminal_walk_nt'] = (ge - gs) - cds_nt_before[i - 1]
 
     # Model protein: miniprot's own translation (--trans, the ##STA record). It is
     # the only construction that stays in frame across a frameshift miniprot has

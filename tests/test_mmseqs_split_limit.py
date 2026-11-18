@@ -111,7 +111,7 @@ def test_a_failed_attempts_folder_goes_before_the_next_attempt(tmp_path, monkeyp
 
 
 def test_the_searches_print_mmseqs2s_errors(tmp_path, monkeypatch):
-    """-v 0 (the laptop_safe and low_mem profiles) becomes 1 for the searches: errors only."""
+    """-v 0 (accepted with a start warning) becomes 1 for the searches: errors only."""
     for level, expect in ((0, "1"), (1, "1"), (3, "3")):
         cmds = []
         monkeypatch.setattr(isr.subprocess, "run", _fake_mmseqs(KILLED_ERR, 0, cmds))
@@ -241,11 +241,41 @@ def test_both_streams_reach_the_details_and_the_kind():
     "Can not allocate entries memory in IndexTable",
     "Allocation error : not enough memory",
     "Failed to mmap memory dataSize=1234 File=x",
+    "mem_align could not allocate memory.",
+    "Write buffer could not be allocated (bufferSize=1234)",
     "Killed",
 ])
 def test_mmseqs2s_memory_messages_are_resource_failures(message):
     details, resource = isr._mmseqs_search_failure(_proc(1, message + "\n", STEP_DIED))
     assert resource and not isr._is_split_limit_failure(details)
+
+
+# MMseqs2 18-8cc5c under an address-space limit (measured at 400M, 600M and 1300M): its message on
+# stderr ends in a NUL byte.
+MEM_ALIGN_ERR = "mem_align could not allocate memory.\n\x00"
+
+
+def test_a_memory_message_with_a_nul_byte_records_the_genome_without_it(tmp_path, monkeypatch):
+    """Review round 3: "mem_align could not allocate memory." stopped the run after one attempt
+    (no listed message, stderr not empty). It takes the three rungs now and the genome is recorded
+    as not searched, and the NUL byte that ends the message is not written to the record: Python
+    3.10's csv reader refuses a line that holds one, and the report would then leave the genome out
+    of genomes_not_searched."""
+    genome = _write_fasta(tmp_path / "Target.fna", [("contig1", "ACGT" * 50)])
+    db = _write_fasta(tmp_path / "db.faa", [("gene-a|exon_1", "MKV"), ("GOI_x", "MKT")])
+    cmds = []
+    monkeypatch.setattr(isr.subprocess, "run", _fake_mmseqs(MEM_ALIGN_ERR, 9, cmds))
+    args = _search_args(tmp_path)
+    for k, v in dict(mmseqs_sens=7.5, mmseqs_verbosity=1).items():
+        setattr(args, k, v)
+    assert isr.process_single_genome(genome, db, args, None, "locus_1_", 1) == ("Target.fna", [], [], None)
+    assert len(cmds) == 3
+    path = tmp_path / "hits" / "locus_1_Target.fna.not_searched.tsv"
+    text = path.read_text()
+    assert "\x00" not in text and "mem_align could not allocate memory." in text
+    assert text.splitlines()[1].split("\t")[1] == "mmseqs_resource_failure"
+    assert gr.collect_not_searched([str(path)]) == {"Target": ["mmseqs_resource_failure"]}
+    assert "\x00" not in isr._tail_lines("a\x00\nb\n\x00")
 
 
 def test_a_step_that_died_without_a_message_is_a_resource_failure():

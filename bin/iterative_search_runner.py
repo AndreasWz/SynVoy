@@ -65,9 +65,12 @@ def parasail_requirement_error(parasail_available: bool, virtualenv: Optional[st
 
 
 def _tail_lines(text: str, n: int = 20) -> str:
+    """The last ``n`` lines of a tool's output, without NUL bytes: MMseqs2 ends some messages
+    with one ("mem_align could not allocate memory.", measured with 18-8cc5c), and a NUL that
+    reaches not_searched.tsv makes Python 3.10's csv reader refuse the file."""
     if not text:
         return ""
-    return "\n".join(text.strip().splitlines()[-n:])
+    return "\n".join(text.replace("\x00", "").strip().splitlines()[-n:])
 
 
 def _format_mmseqs_failure(proc: subprocess.CompletedProcess) -> str:
@@ -84,13 +87,17 @@ def _format_mmseqs_failure(proc: subprocess.CompletedProcess) -> str:
 
 # MMseqs2's messages for a lack of memory (strings of the 18-8cc5c binary: "Cannot fit databases
 # into ...", "Not enough memory to keep dbreader/write in memory!", "Can not allocate entries
-# memory in IndexTable", "Allocation error : not enough memory", "Failed to mmap memory"), the C++
-# and C library ones, and the shell's line for a process the kernel killed ("Killed").
+# memory in IndexTable", "Allocation error : not enough memory", "Failed to mmap memory",
+# "mem_align could not allocate memory.", "Write buffer could not be allocated (bufferSize=...)"),
+# the C++ and C library ones, and the shell's line for a process the kernel killed ("Killed").
+# Which one a search prints depends on the allocation that fails first.
 _MMSEQS_MEMORY_MESSAGES = (
     "cannot fit databases",
     "not enough memory",
     "can not allocate",
     "cannot allocate",
+    "could not allocate",
+    "could not be allocated",
     "allocation error",
     "failed to mmap",
     "out of memory",
@@ -7900,7 +7907,8 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
 #     pass and judged in the genome place (no multiplier);
 #   - a candidate of such a window is an answer (genome_wide_keep) when the judge labels it HIGH,
 #     no exon of its own gene model runs across an exon junction of an annotated multi-exon home
-#     gene (RetrocopyCandidate; RETROCOPY_JUNCTION_FLANK_AA residues on each side), it is not
+#     gene (RetrocopyCandidate; RETROCOPY_JUNCTION_FLANK_AA residues on each side) without holding
+#     an intron there that miniprot read as coding (READTHROUGH_INTRON_MIN_NT), it is not
 #     frame-broken without an intron, and it overlaps no row written before; the best one per window
 #     is kept and labelled MEDIUM, GOIClass=genome_wide_strong_hit (synvoy_label.
 #     genome_wide_answer). It never seeds the next wave and never reaches the tree; the report
@@ -8056,6 +8064,18 @@ def _hit_pieces(genome_seqs, h) -> List[str]:
 # A genome-wide gene model with one exon that encodes two home exons contiguously across their
 # junction, this far on each side, is a retrocopy candidate (RetrocopyCandidate=1; no answer).
 RETROCOPY_JUNCTION_FLANK_AA = 10
+# ... unless the exon holds an intron there that miniprot read as coding. A short intron whose
+# length is a multiple of 3 and that has no stop in its frame can be aligned as an insertion:
+# with miniprot 0.18 on synthetic genes (2026-11-17) every 45- and 60-bp such intron gave one
+# exon across the junction, and some of 90 bp. The exon's CDS then exceeds 3 x its aligned
+# query span (qend - qstart + 1) by the intron's length (readthrough_nt). An exon whose excess
+# reaches this many nt for each junction it spans is taken to hold an intron at each and is not
+# counted as spanning them. 30 nt lies below the shortest introns of most
+# eukaryotes (some protists, ciliates such as Paramecium among them, have shorter ones: there a
+# read-through intron still reads as a retrocopy) and well above what split codons and a stop
+# codon add (-2 to +3 nt measured on the same models). An insertion of 10 or more residues in
+# the target's exon reads the same, so a retrocopy with one is not flagged.
+READTHROUGH_INTRON_MIN_NT = 30
 
 
 def home_exon_junctions(lengths) -> List[int]:
@@ -8068,31 +8088,60 @@ def home_exon_junctions(lengths) -> List[int]:
     return out
 
 
+def junctions_spanned(piece, junctions, flank: int = RETROCOPY_JUNCTION_FLANK_AA) -> int:
+    """How many home junctions one piece (query start, end) spans, ``flank`` residues aligned on
+    each side."""
+    qs, qe = piece
+    return sum(1 for j in junctions if qs <= j - flank + 1 and qe >= j + flank)
+
+
 def spans_a_junction(pieces, junctions, flank: int = RETROCOPY_JUNCTION_FLANK_AA) -> bool:
     """A piece (query start, end) of one exon of a gene model that aligns ``flank`` residues on
     both sides of a home junction: the target encodes both exons there without an intron."""
-    return any(qs <= j - flank + 1 and qe >= j + flank for qs, qe in pieces for j in junctions)
+    return any(junctions_spanned(p, junctions, flank) for p in pieces)
 
 
-def retrocopy_test_pieces(cand) -> Optional[List[Tuple[int, int]]]:
+def readthrough_nt(exon) -> int:
+    """nt of a gene model exon's CDS beyond 3 x its aligned query span (qend - qstart + 1),
+    without the nt the terminal walk added (``terminal_walk_nt``, annotate_goi_exons.
+    refine_model_termini): what miniprot aligned as an insertion inside the exon, a read-through
+    intron among it. 0 for an exon without a genomic span."""
+    if 'gstart' not in exon or 'gend' not in exon:
+        return 0
+    cds_nt = int(exon['gend']) - int(exon['gstart']) - int(exon.get('terminal_walk_nt', 0) or 0)
+    return cds_nt - 3 * (int(exon['qend']) - int(exon['qstart']) + 1)
+
+
+def retrocopy_test_pieces(cand, junctions=()) -> Optional[List[Tuple[int, int]]]:
     """The query spans (start, end) of the exons of a candidate's own gene model: a miniprot
     model (``model_exons``) built with the protein it is named after, so its query coordinates
-    are that protein's. None for a candidate the test cannot read: a hit chain or a tandem copy
-    (its pieces are local alignments, whose ends can run past an exon end into the intron) and a
-    model of a relative's query rebased onto the home protein (its exons are in the relative's
-    coordinates). The window's hits are never read: an ortholog with its introns would be
-    flagged whenever one of them ran on into an intron."""
+    are that protein's. With ``junctions``, an exon whose CDS exceeds its query span by
+    READTHROUGH_INTRON_MIN_NT or more for each junction it spans (readthrough_nt) is left out:
+    the target has an intron at each, which miniprot read as coding. None for a candidate the
+    test cannot read: a hit chain or a tandem copy (its pieces are local alignments, whose ends
+    can run past an exon end into the intron) and a model of a relative's query rebased onto the
+    home protein (its exons are in the relative's coordinates). The window's hits are never
+    read: an ortholog with its introns would be flagged whenever one of them ran on into an
+    intron."""
     exons = cand.get('model_exons') or []
     if not exons or cand.get('model_parent') != _candidate_parent(cand):
         return None
-    return [(int(e['qstart']), int(e['qend'])) for e in exons]
+    pieces = []
+    for e in exons:
+        piece = (int(e['qstart']), int(e['qend']))
+        n = junctions_spanned(piece, junctions) if junctions else 0
+        if n and readthrough_nt(e) >= n * READTHROUGH_INTRON_MIN_NT:
+            continue
+        pieces.append(piece)
+    return pieces
 
 
 def mark_genome_wide_candidates(candidates, junctions, place_attrs) -> None:
     """The attributes of a candidate of a genome-wide window, on its feature row: GenomeWide=1;
     with ``junctions`` (an annotated home gene of >= 2 exons) and a gene model of its own
     (retrocopy_test_pieces) RetrocopyCandidate=1 when one exon of the model spans a junction
-    (spans_a_junction), else 0, and no RetrocopyCandidate when the test cannot be read;
+    (spans_a_junction) without holding a read-through intron for it (readthrough_nt), else 0,
+    and no RetrocopyCandidate when the test cannot be read;
     GenomeWideCoverage (the place's union coverage), and when known NeighbourMedianIdentity (the
     genome's median flanking identity, recorded only) and NearBlock (``place_attrs``: coverage,
     neighbour_median, near_block)."""
@@ -8103,7 +8152,7 @@ def mark_genome_wide_candidates(candidates, junctions, place_attrs) -> None:
         if not c.get('gff'):
             continue
         attrs = ";GenomeWide=1"
-        pieces = retrocopy_test_pieces(c) if junctions else None
+        pieces = retrocopy_test_pieces(c, junctions) if junctions else None
         if pieces is not None:
             attrs += f";RetrocopyCandidate={1 if spans_a_junction(pieces, junctions) else 0}"
         if cov not in (None, ''):
@@ -10119,7 +10168,9 @@ def main():
                              "(separates a diverged ortholog from a shared-domain fold analogue)")
     parser.add_argument("--discovery_paralog_margin", type=float, default=1.0,
                         help="Guard 3: GOI SW score must beat the best home-paralog score by "
-                             "this factor (needs --home_paralog_panel; else no-op)")
+                             "this factor (needs --home_paralog_panel; else no-op). For a run "
+                             "of this script by hand: the pipeline passes neither option (its "
+                             "parameter discovery_paralog_margin was removed on 2026-11-16)")
     parser.add_argument("--discovery_min_block_flanking", type=int, default=2,
                         help="Guard 4a: require >= this many flanking anchors near the ORF's window")
     parser.add_argument("--discovery_allow_offblock", type=str2bool, default=False,
@@ -10127,7 +10178,9 @@ def main():
                              "sequence-found GOI even when the genome has one elsewhere (default off)")
     parser.add_argument("--home_paralog_panel", default=None,
                         help="Optional home-paralog panel FASTA for discovery guard 3 (RBH). "
-                             "When absent, guard 3 is skipped and guards 1/2/4 still apply.")
+                             "When absent, guard 3 is skipped and guards 1/2/4 still apply. "
+                             "For a run of this script by hand, with --discovery_paralog_margin: "
+                             "no pipeline step passes a panel.")
     # §1o — dispersed-GOI rescue (select_dispersed_goi_seeds): a strong GOI hit outside every
     # GOI zone of the blocks seeds a block of its own inside the envelope of the anchors on its
     # sequence, or beside a lone anchor; there is no rearrangement test.

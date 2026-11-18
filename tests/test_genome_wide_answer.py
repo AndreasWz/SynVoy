@@ -488,6 +488,130 @@ def test_the_window_flags_a_retrocopy_on_its_model_not_on_its_hits(tmp_path, mon
         assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
 
 
+def test_the_read_through_of_an_exon_leaves_out_the_terminal_walk():
+    """readthrough_nt: the nt of an exon's CDS beyond 3 x its query span, without the nt the
+    terminal walk (refine_model_termini) added beyond the aligned span."""
+    exon = {"qstart": 1, "qend": 300, "gstart": 1_000, "gend": 1_945}
+    assert isr.readthrough_nt(exon) == 45
+    assert isr.readthrough_nt(dict(exon, terminal_walk_nt=9)) == 36
+    assert isr.readthrough_nt({"qstart": 1, "qend": 300, "gstart": 1_000, "gend": 1_903}) == 3   # stop
+    assert isr.readthrough_nt({"qstart": 1, "qend": 300}) == 0
+
+
+def _span_model(*exons):
+    """A model candidate from (qstart, qend, cds_nt[, terminal_walk_nt]) per exon."""
+    out, g = [], 1_000
+    for qs, qe, nt, *walk in exons:
+        e = {"qstart": qs, "qend": qe, "gstart": g, "gend": g + nt}
+        if walk:
+            e["terminal_walk_nt"] = walk[0]
+        out.append(e)
+        g += nt + 500
+    return {"start": 1001, "end": g, "model_parent": "GOI_q", "model_exons": out,
+            "gff": ["c1\tx\tmRNA\t1001\t5000\t.\t+\t.\tID=m;SynVoy_Parent=GOI_q"]}
+
+
+def _retrocopy_flag(cand, junctions):
+    isr.mark_genome_wide_candidates([cand], junctions, {})
+    return isr._parse_gff_attr_string(cand["gff"][0].split("\t")[8]).get("RetrocopyCandidate")
+
+
+def test_an_exon_that_holds_a_read_through_intron_spans_no_junction():
+    """Review round 3 (2026-11-17): miniprot reads a short intron that is a multiple of 3 and
+    free of stops as coding, so the ortholog's model has one exon across the home junction and
+    was flagged as a retrocopy. Such an exon is READTHROUGH_INTRON_MIN_NT or more longer than 3 x
+    its query span for each junction it spans, and then spans none."""
+    two = isr.home_exon_junctions([150, 150])                   # at 150
+    three = isr.home_exon_junctions([120, 100, 80])             # at 120 and 220
+    assert isr.READTHROUGH_INTRON_MIN_NT == 30
+    assert _retrocopy_flag(_span_model((1, 300, 945)), two) == "0"            # a 45-bp intron read
+    assert _retrocopy_flag(_span_model((1, 300, 930)), two) == "0"            # 30 nt: still an intron
+    assert _retrocopy_flag(_span_model((1, 300, 927)), two) == "1"            # 27 nt: no intron
+    assert _retrocopy_flag(_span_model((1, 300, 903)), two) == "1"            # a retrocopy, its stop
+    # the terminal walk's nt are no intron: 48 nt beyond the span, 24 of them walked
+    assert _retrocopy_flag(_span_model((1, 300, 948, 24)), two) == "1"
+    # one exon across two junctions needs an intron at each: 45 nt hold one, 90 nt two
+    assert _retrocopy_flag(_span_model((1, 300, 945)), three) == "1"
+    assert _retrocopy_flag(_span_model((1, 300, 990)), three) == "0"
+    # a read-through at the first junction, a spliced intron at the second
+    assert _retrocopy_flag(_span_model((1, 220, 705), (221, 300, 240)), three) == "0"
+    # an exon that spans no junction is no retrocopy sign whatever its length
+    assert _retrocopy_flag(_span_model((1, 150, 600), (151, 300, 450)), two) == "0"
+    # without junctions nothing is left out (the pieces as before)
+    assert isr.retrocopy_test_pieces(_span_model((1, 300, 945))) == [(1, 300)]
+    assert isr.retrocopy_test_pieces(_span_model((1, 300, 945)), two) == []
+
+
+_REAL_MODELS = isr.annotate_models_from_hit_list         # the real miniprot models, before any stub
+
+
+def _short_intron_gene(seed, exon_lengths, intron_nt, rate=0.15):
+    """A synthetic home protein and a diverged target gene with an in-frame, stop-free intron of
+    ``intron_nt`` bp at each home junction (no intron: ``intron_nt`` 0, a retrocopy)."""
+    import itertools
+    from sequence_utils import translate
+    rng = random.Random(seed)
+    aa = "ACDEFGHIKLMNPQRSTVWY"
+    codons = {}
+    for c in ("".join(p) for p in itertools.product("ACGT", repeat=3)):
+        a = translate(c)
+        if a != "*":
+            codons.setdefault(a, []).append(c)
+
+    def back(p):
+        return "".join(rng.choice(codons[a]) for a in p)
+
+    def dna(n):
+        return "".join(rng.choice("ACGT") for _ in range(n))
+
+    def intron():
+        while True:
+            body = ("GTAAGT" + dna(intron_nt - 10) + "CAG")[:intron_nt - 2] + "AG"
+            if "*" not in translate(body):
+                return body
+    home = "M" + "".join(rng.choice(aa) for _ in range(sum(exon_lengths) - 1))
+    target = "".join(rng.choice(aa) if rng.random() < rate else a for a in home)
+    pieces, pos = [], 0
+    for i, n in enumerate(exon_lengths):
+        pieces.append(back(target[pos:pos + n]))
+        pos += n
+        if intron_nt and i < len(exon_lengths) - 1:
+            pieces.append(intron())
+    gene = "".join(pieces)
+    return home, dna(2_000) + gene + dna(2_000), len(gene)
+
+
+@pytest.mark.skipif(shutil.which("miniprot") is None or not age.MINIPROT_AVAILABLE,
+                    reason="miniprot not on PATH")
+@pytest.mark.parametrize("intron_nt, flagged", [(45, False), (60, False), (0, True)])
+def test_a_short_in_frame_intron_read_as_coding_is_no_retrocopy(tmp_path, monkeypatch, intron_nt, flagged):
+    """Review round 3 (2026-11-17), with the real miniprot: an ortholog of a two-exon home gene
+    whose intron is 45 or 60 bp, a multiple of 3 and free of stops gets a one-exon model across
+    the junction (the intron read as coding). It is no retrocopy candidate and is the window's
+    answer. The same coding sequence without the intron stays a retrocopy candidate."""
+    home, chrom, gene_len = _short_intron_gene(1000 + intron_nt, [150, 150], intron_nt)
+    _stub_window(monkeypatch, [{"query": "GOI_x", "chrom": "region_seq", "start": 2_000,
+                                "end": 2_000 + gene_len, "strand": "+", "qstart": 1, "qend": 300,
+                                "evalue": 1e-60, "pident": 85.0, "alnlen": gene_len, "bits": 400.0}])
+    monkeypatch.setattr(isr, "annotate_models_from_hit_list", _REAL_MODELS)
+    args = _window_args(tmp_path, home_goi_junctions=isr.home_exon_junctions([150, 150]))
+    db = {"GOI_x": {"id": "GOI_x", "seq": home, "header": "GOI_x"}}
+    block = _gw_block(start=2_000, end=2_000 + gene_len, window=(0, len(chrom)))
+    _genes, gff = isr.process_region_block(5000, block, [], {"c1": chrom}, db, "G.fna", args, "u", 1)
+    if flagged:         # RetrocopyCandidate=1: the window keeps no answer
+        assert gff == [] and args.genome_ctx["genome_wide_outcome"] == {5000: "retrocopy_cds"}
+        assert args.genome_ctx["genome_wide_dropped"] == {"retrocopy_cds": 1}
+        return
+    rows = [ln.split("\t") for ln in gff]
+    mrna = [r for r in rows if r[2] == "mRNA" and "SynVoyRole=goi" in r[8]]
+    cds = [r for r in rows if r[2] == "CDS"]
+    # the scenario: one CDS across the junction, holding the intron
+    assert len(mrna) == 1 and len(cds) == 1
+    assert int(cds[0][4]) - int(cds[0][3]) + 1 >= 900 + intron_nt
+    assert ";RetrocopyCandidate=0" in mrna[0][8]
+    assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
+
+
 def test_a_genome_wide_window_without_an_answer_writes_nothing(tmp_path, monkeypatch):
     _stub_window(monkeypatch, [_hit(1, 280)], label="MEDIUM")
     args = _window_args(tmp_path)

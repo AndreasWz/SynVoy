@@ -47,6 +47,7 @@ from sequence_utils import parse_bed, parse_gff_attributes as _parse_gff_attrs  
 from sequence_utils import strip_species_qualifier  # noqa: E402
 from sequence_utils import block_index_of  # noqa: E402
 from synvoy_evalue import SIGNIFICANT_BLOCK_ESYN  # noqa: E402
+from synvoy_label import GENOME_WIDE_CLASS  # noqa: E402
 import synvoy_gene_names as _gnames  # noqa: E402
 import synvoy_grid as _grid  # noqa: E402
 import synvoy_legend as _legend  # noqa: E402
@@ -338,19 +339,36 @@ def _is_fragment_goi(gene):
             and (gene.get("model_status") or "").strip().lower() == "fragment")
 
 
+# What an answer of the genome-wide path is, in the legends, tooltips and source tables.
+STRONG_HIT_NOTE = "strong hit without synteny, not counted"
+
+
+def _is_genome_wide_answer(gene):
+    """An answer of the genome-wide path (GOIClass=genome_wide_strong_hit, written MEDIUM): a
+    strong hit without synteny, which the report never counts. The figures count it as no call
+    and no copy, never take it as a genome's best call, and draw it outlined, as a kind of its
+    own ("strong hit without synteny, not counted")."""
+    return _is_goi_target_gene(gene) and (gene.get("goi_class") or "") == GENOME_WIDE_CLASS
+
+
 def _is_resolved_goi_target_gene(gene):
     """A GOI call drawn as resolved: label HIGH or MEDIUM, whatever its class (review fix
-    RF-3). The class decided before: a HIGH tandem copy (tandem_goi_copy) was drawn as
+    RF-3), except an answer of the genome-wide path (_is_genome_wide_answer), which is not
+    counted. The class decided before: a HIGH tandem copy (tandem_goi_copy) was drawn as
     unresolved, and an AMBIGUOUS call (syntenic_candidate_unconfirmed), which needs
     curation, as a confident one."""
-    if not _is_goi_target_gene(gene):
+    if not _is_goi_target_gene(gene) or _is_genome_wide_answer(gene):
         return False
     return (gene.get("confidence") or "").strip().upper() in GOI_COPY_TIERS
 
 
 def _track_goi_status(track):
+    """resolved (a counted call), strong_hit (no counted call, an answer of the genome-wide
+    path), ambiguous (only other GOI calls) or absent."""
     if any(_is_resolved_goi_target_gene(g) for g in track.get("genes", [])):
         return "resolved"
+    if any(_is_genome_wide_answer(g) for g in track.get("genes", [])):
+        return "strong_hit"
     if any(_is_goi_target_gene(g) for g in track.get("genes", [])):
         return "ambiguous"
     return "absent"
@@ -1722,7 +1740,8 @@ def _reverse_complement_segment(track, chrom):
         _mirror_gene_in_place(g)
     # The row's counted calls outside the view (_counted_calls_outside_view) on this scaffold
     # have no plot position, but the anchor grid draws them: they point as the scaffold is drawn.
-    for g in track.get("goi_outside_view") or []:
+    # So do its answers of the genome-wide path outside the view (_strong_hits_outside_view).
+    for g in (track.get("goi_outside_view") or []) + (track.get("goi_strong_outside_view") or []):
         if g.get("chrom") == chrom:
             _mirror_gene_in_place(g)
     for brk in track.get("breaks", []):
@@ -2223,6 +2242,8 @@ def _build_tooltip_json(gene, track, home_products):
 
     if resolved:
         data["goiTag"] = "GOI"
+    elif ambiguous and _is_genome_wide_answer(gene):
+        data["goiTag"] = STRONG_HIT_NOTE
     elif ambiguous:
         data["goiTag"] = ("GOI call, needs curation"
                           if (gene.get("confidence") or "").upper() == "AMBIGUOUS"
@@ -2281,14 +2302,15 @@ def _track_label_jobs(track, home_products):
     _model_strength), and nothing when it has a single copy: one rotated name per
     track repeated the same word down the figure, and one per copy of a tandem
     family stacked into an unreadable pile. Every copy stays drawn, with its
-    details in the hover tooltip and the click-to-pin layer.
+    details in the hover tooltip and the click-to-pin layer. An answer of the
+    genome-wide path is in none of the counts (it is drawn outlined).
     """
     is_home = track["is_home"]
     goi_genes = []
     for gene in track["genes"]:
         name = gene["name"]
         home_id = gene.get("home_gene_id", name)
-        goi_f = (_is_goi_target_gene(gene) if not is_home
+        goi_f = (_is_goi_target_gene(gene) and not _is_genome_wide_answer(gene) if not is_home
                  else (is_goi(name) or is_goi(home_id)))
         if goi_f:
             resolved = (_is_resolved_goi_target_gene(gene) if not is_home
@@ -2505,9 +2527,10 @@ def _gene_names_table(rows, x, y, avail_w, args):
                                    lookup_note=_GENE_NAMES_NOTE[0], goi_stroke=GOI_BORDER)
 
 
-def _ribbon_legend_groups(goi_label, low_quality=False, elsewhere=False):
+def _ribbon_legend_groups(goi_label, low_quality=False, elsewhere=False, strong_hit=False):
     """Legend of the ribbon plot (interactive HTML and its static SVG). `elsewhere`: a track
-    has counted GOI calls outside the neighbourhood drawn ("+N elsewhere")."""
+    has counted GOI calls outside the neighbourhood drawn ("+N elsewhere"). `strong_hit`: a
+    track draws an answer of the genome-wide path."""
     base = GENE_PALETTE[0]
     stroke = _darken_hex(base, 0.65)
 
@@ -2548,10 +2571,12 @@ def _ribbon_legend_groups(goi_label, low_quality=False, elsewhere=False):
         (f"GOI: {goi_label}", [
             (_lg_arrow(GOI_COLOUR, GOI_BORDER), "GOI call"),
             (_lg_arrow("url(#ambiguousGoi)", GOI_BORDER, "6,3"),
-             "call that needs curation, or no significant match"),
-            ("★", "GOI name, on the home row"),
-            ("×N", "N copies (the best call and every call of at least medium confidence)"),
-            ("+N weak", "further weak calls; all calls are drawn")]
+             "call that needs curation, or no significant match")]
+            + ([(_lg_arrow("#ffffff", GOI_BORDER, stroke_w=1.5),
+                 STRONG_HIT_NOTE + " (genome-wide path); no ribbon")] if strong_hit else [])
+            + [("★", "GOI name, on the home row"),
+               ("×N", "N copies (the best call and every call of at least medium confidence)"),
+               ("+N weak", "further weak calls; all calls are drawn")]
             + ([("+N elsewhere", "counted calls outside the stretch drawn; listed in the "
                                  "anchor grid")] if elsewhere else [])),
     ]
@@ -2705,7 +2730,9 @@ def render_synteny_html(all_tracks, gene_colours,
     _legend_svg, _legend_h = _legend_block(
         _ribbon_legend_groups(_goi_display_label(all_tracks),
                               low_quality=any(_is_low_quality(tr) for tr in all_tracks),
-                              elsewhere=any(tr.get("goi_outside_view") for tr in all_tracks)),
+                              elsewhere=any(tr.get("goi_outside_view") for tr in all_tracks),
+                              strong_hit=any(_is_genome_wide_answer(g) for tr in all_tracks
+                                             if not tr.get("is_home") for g in tr.get("genes", []))),
         24, total_h + 6, plot_w - 48)
     total_h += (_legend_h + 22) if _legend_h else 0
     _caption_y0 = total_h
@@ -2853,7 +2880,9 @@ def render_synteny_html(all_tracks, gene_colours,
         return _is_goi_target_gene(g)
 
     def _best_goi_in(track):
-        gois = [g for g in track["genes"] if _gene_is_goi_in(track, g)]
+        # An answer of the genome-wide path gets no GOI ribbon: no synteny places it.
+        gois = [g for g in track["genes"]
+                if _gene_is_goi_in(track, g) and not _is_genome_wide_answer(g)]
         if not gois:
             return None
         def _key(g):
@@ -2924,7 +2953,8 @@ def render_synteny_html(all_tracks, gene_colours,
         # resolve, a single faint ribbon to the best copy is kept as a fallback.
         ug_goi = _best_goi_in(upper)
         if ug_goi is not None:
-            lower_gois = [g for g in lower["genes"] if _gene_is_goi_in(lower, g)]
+            lower_gois = [g for g in lower["genes"]
+                          if _gene_is_goi_in(lower, g) and not _is_genome_wide_answer(g)]
             resolved_lower = [g for g in lower_gois
                               if lower["is_home"] or _is_resolved_goi_target_gene(g)]
             # (gene, per-ribbon opacity); full opacity for resolved copies because the
@@ -2980,6 +3010,12 @@ def render_synteny_html(all_tracks, gene_colours,
                 colour = GOI_COLOUR
                 bclr = GOI_BORDER
                 bw = 2.2 if confidence == "HIGH" or track["is_home"] else 1.8
+                dash = ""
+            elif ambiguous_goi and _is_genome_wide_answer(gene):
+                # An answer of the genome-wide path, not counted: outlined, no fill.
+                colour = "#ffffff"
+                bclr = GOI_BORDER
+                bw = 1.5
                 dash = ""
             elif ambiguous_goi:
                 # Ambiguous GOI: diagonal-stripe pattern fill + dashed border
@@ -3336,6 +3372,12 @@ def render_synteny_html(all_tracks, gene_colours,
                 svg_parts.append(
                     f'<text x="{TEXT_RIGHT_X}" y="{yb + 28:.1f}" data-track-idx="{ti}" '
                     f'text-anchor="end" class="goi-status ambiguous track-item">⚠ Ambiguous orthology</text>'
+                )
+            elif status == "strong_hit":
+                svg_parts.append(
+                    f'<text x="{TEXT_RIGHT_X}" y="{yb + 28:.1f}" data-track-idx="{ti}" '
+                    f'text-anchor="end" class="goi-status ambiguous track-item">'
+                    f'Strong hit without synteny, not counted</text>'
                 )
     svg_parts.append('</g>')
 
@@ -4770,8 +4812,10 @@ def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
             buckets[hid].append(g)
     out = {}
     for key, genes in buckets.items():
-        genes.sort(key=lambda g: (_confidence_rank(g.get("confidence")),
-                                   _model_strength(g)), reverse=True)
+        # an answer of the genome-wide path is the best GOI gene only when it is the only one
+        genes.sort(key=lambda g: (not _is_genome_wide_answer(g),
+                                  _confidence_rank(g.get("confidence")),
+                                  _model_strength(g)), reverse=True)
         # `genes` (all copies, genomic order) lets the GOI column enrol every
         # tandem toxin copy as its own notched arrow instead of collapsing to ×N.
         out[key] = {"best": genes[0], "n": len(genes),
@@ -5114,12 +5158,22 @@ GOI_COPY_TIERS = ("HIGH", "MEDIUM")
 
 def _goi_is_copy(gene, best):
     """A GOI call counts as a gene copy: the best call of its genome, or one of at
-    least medium confidence. Every other call is a weak call (drawn as a small mark)."""
+    least medium confidence. Every other call is a weak call (drawn as a small mark),
+    except an answer of the genome-wide path, which is neither (_is_genome_wide_answer)."""
+    if _is_genome_wide_answer(gene):
+        return False
     if gene is best:
         return True
     if _is_fragment_goi(gene):
         return False
     return (gene.get("confidence") or "").upper() in GOI_COPY_TIERS
+
+
+def _goi_best_call(genes):
+    """The best call of a genome for the copy rule: no fragment and no answer of the
+    genome-wide path while another call is there."""
+    return _goi_best([g for g in genes if not _is_fragment_goi(g) and not _is_genome_wide_answer(g)]
+                     or [g for g in genes if not _is_fragment_goi(g)] or genes)
 
 
 def _goi_copies_and_weak(genes, is_home=False):
@@ -5128,7 +5182,7 @@ def _goi_copies_and_weak(genes, is_home=False):
         return []
     if is_home:
         return [(g, True) for g in genes]
-    best = _goi_best([g for g in genes if not _is_fragment_goi(g)] or genes)
+    best = _goi_best_call(genes)
     return [(g, _goi_is_copy(g, best)) for g in genes]
 
 
@@ -5273,20 +5327,23 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             g = entry["best"]
             gs, ge = _get_coords(g)
             is_g = (key == goi_key)
-            n_here, n_weak, n_out = entry["n"], 0, 0
+            n_here, n_weak, n_out, n_strong = entry["n"], 0, 0, 0
             if is_g:      # copies, not every call: most extra GOI calls are weak hits
                 # counted calls outside the neighbourhood drawn take part in the copy rule
-                # and are named in the tooltip only
+                # and are named in the tooltip only; an answer of the genome-wide path is
+                # neither a copy nor a weak call
                 outside = list(row_tracks[ri].get("goi_outside_view") or [])
-                flags = [c for _, c in _goi_copies_and_weak(entry["genes"] + outside)][
-                    :len(entry["genes"])]
+                calls = [c for c in entry["genes"] if not _is_genome_wide_answer(c)]
+                flags = [c for _, c in _goi_copies_and_weak(calls + outside)][:len(calls)]
                 n_here, n_weak, n_out = sum(flags), len(flags) - sum(flags), len(outside)
+                n_strong = len(entry["genes"]) - len(calls)
             pts.append({"x": (gs + ge) / 2.0, "gx": (g["start"] + g["end"]) / 2.0, "key": key,
                         "colour": GOI_COLOUR if is_g else anchor_colour.get(key, UNMATCHED_CLR),
                         "is_goi": is_g, "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
                         "strand": g.get("strand", "+"), "n": n_here, "weak": n_weak,
-                        "elsewhere": n_out,
+                        "elsewhere": n_out, "strong": n_strong,
+                        "answer": is_g and _is_genome_wide_answer(g),
                         "label": anchor_label.get(key, key) if not is_g else goi_label,
                         "chrom": g.get("chrom", "")})
         return pts
@@ -5352,7 +5409,10 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             ("×N", "N copies at the locus")]),
         (f"GOI: {goi_label}", [
             (_lg_diamond(_shade_by_identity(GOI_COLOUR, 95), GOI_BORDER), "best GOI call"),
-            ("×N", "N GOI copies in the neighbourhood")]),
+            ("×N", "N GOI copies in the neighbourhood")]
+            + ([(_lg_diamond("#ffffff", GOI_BORDER),
+                 STRONG_HIT_NOTE + " (genome-wide path), drawn where no other GOI call is")]
+               if any(p.get("answer") for pts in row_pts for p in pts) else [])),
     ]
     content_w = max(PLOT_W + SPAN_W, 640)
     width = LEFT + content_w + RIGHT
@@ -5429,6 +5489,8 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                         p["strand"] != anchor_strand.get(p["key"]))
             if is_home:
                 fill = p["colour"]
+            elif p.get("answer"):       # an answer of the genome-wide path: outlined
+                fill = "#ffffff"
             elif conf == "AMBIGUOUS":
                 # Palest, as everywhere else: it used to fall through to the HIGH branch
                 # and was drawn as a confident call (label rework 2026-10-14).
@@ -5447,7 +5509,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                       + (f', {p["n"]} copies' if p["n"] > 1 else '')
                       + (f', {p["weak"]} weak call(s)' if p.get("weak") else '')
                       + (f', {p["elsewhere"]} counted call(s) outside this neighbourhood '
-                         f'(anchor grid)' if p.get("elsewhere") else '')))
+                         f'(anchor grid)' if p.get("elsewhere") else '')
+                      + (f' ({STRONG_HIT_NOTE})' if p.get("answer") else
+                         f', {p["strong"]} {STRONG_HIT_NOTE}' if p.get("strong") else '')))
             g = [f'<title>{_svg_esc(tip)}</title>']
             if p["is_goi"]:
                 r = GOI_R
@@ -5991,7 +6055,7 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
     and its block `table` (read_block_table; None: none, so only step 1, with E_syn from the
     models' BlockEsyn):
     1. the block of every GOI model whose label is in call_labels, best call first
-       (_goi_priority_key);
+       (_goi_priority_key), an answer of the genome-wide path left out;
     2. the other blocks of the table that hold a model, by E_syn ascending, while fewer than
        max_blocks are drawn: those the search calls significant (its `significant` column),
        or with context_max_esyn those with E_syn <= context_max_esyn.
@@ -6000,8 +6064,11 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
     by_block = defaultdict(list)
     for g in genes:
         by_block[block_of[g["gff_id"]]].append(g)
+    # An answer of the genome-wide path is no call here: its window is no block of the
+    # neighbourhood, and the anchor grid lists it (_strong_hits_outside_view).
     counted = {b for b, gs in by_block.items()
-               if any(_is_goi_target_gene(g) and g["confidence"] in COUNTED_LABELS for g in gs)}
+               if any(_is_goi_target_gene(g) and not _is_genome_wide_answer(g)
+                      and g["confidence"] in COUNTED_LABELS for g in gs)}
     blocks = set(table or ()) | {b for b in by_block if b is not None}
     esyn = {}
     for b in blocks:
@@ -6018,7 +6085,8 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
 
     predicted = {b for b in blocks if significant(b) and b not in counted}
     drawn = {}
-    calls = sorted((g for g in genes if _is_goi_target_gene(g) and g["confidence"] in call_labels),
+    calls = sorted((g for g in genes if _is_goi_target_gene(g) and not _is_genome_wide_answer(g)
+                    and g["confidence"] in call_labels),
                    key=_goi_priority_key, reverse=True)
     for g in calls:                                                     # step 1
         b = block_of[g["gff_id"]]
@@ -6118,6 +6186,24 @@ def _counted_calls_outside_view(gff_file, genes):
     drawn = {(g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) for g in genes}
     return [dict(g, outside_view=True) for g in parsed
             if _is_resolved_goi_target_gene(g)
+            and (g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) not in drawn]
+
+
+def _strong_hits_outside_view(gff_file, genes):
+    """The row's answers of the genome-wide path (_is_genome_wide_answer) that the chosen view
+    `genes` leaves out, each marked ``outside_view``, from the GFF parsed as for
+    _counted_calls_outside_view. Such an answer lies outside every searched GOI zone, so mostly
+    outside the view. The anchor grid lists it outlined, at the locus or after '//' by where it
+    lies (synvoy_grid.split_calls); no figure counts it."""
+    count = _HIDDEN_FRAGMENT_COUNT[0]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            parsed = parse_target_gff(gff_file, cap=False)
+    finally:
+        _HIDDEN_FRAGMENT_COUNT[0] = count
+    drawn = {(g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) for g in genes}
+    return [dict(g, outside_view=True) for g in parsed
+            if _is_genome_wide_answer(g)
             and (g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) not in drawn]
 
 
@@ -6301,6 +6387,10 @@ def _run_figures(args, show_fragments=False, suffix=""):
         if outside_view:
             print(f"[plot] {genome_id}: {len(outside_view)} counted GOI call(s) outside the "
                   f"neighbourhood drawn: listed in the anchor grid")
+        strong_outside = _strong_hits_outside_view(gff_file, genes)
+        if strong_outside:
+            print(f"[plot] {genome_id}: {len(strong_outside)} strong hit(s) without synteny outside "
+                  f"the neighbourhood drawn: listed in the anchor grid, not counted")
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
@@ -6327,6 +6417,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "genes":        genes,
             "chrom":        target_chrom,
             "goi_outside_view": outside_view,
+            "goi_strong_outside_view": strong_outside,
         })
 
     # Order targets by phylogenetic distance (if tree available), else alphabetically by species name
@@ -6342,9 +6433,11 @@ def _run_figures(args, show_fragments=False, suffix=""):
         target_tracks.sort(key=lambda t: t["display_name"])
 
     for tt in target_tracks:
-        # A counted call outside the drawn neighbourhood counts too: such a genome has the gene.
+        # A counted call outside the drawn neighbourhood counts too: such a genome has the gene;
+        # an answer of the genome-wide path there gives the row its own status (strong_hit).
         tt["goi_status"] = _track_goi_status(
-            {"genes": tt.get("genes", []) + tt.get("goi_outside_view", [])})
+            {"genes": tt.get("genes", []) + tt.get("goi_outside_view", [])
+             + tt.get("goi_strong_outside_view", [])})
     target_tracks = _absent_tracks_last(target_tracks)
 
     hidden_absent_tracks = 0
@@ -6356,6 +6449,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
 
     ambiguous_track_count = sum(1 for t in target_tracks if t.get("goi_status") == "ambiguous")
     resolved_track_count = sum(1 for t in target_tracks if t.get("goi_status") == "resolved")
+    strong_hit_track_count = sum(1 for t in target_tracks if t.get("goi_status") == "strong_hit")
 
     # -- 3. Colour map ---------------------------------------------------
 
@@ -6393,6 +6487,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "genome_id":    tt["genome_id"],
             "goi_status":   tt.get("goi_status", _track_goi_status({"genes": genes})),
             "goi_outside_view": tt.get("goi_outside_view", []),
+            "goi_strong_outside_view": tt.get("goi_strong_outside_view", []),
         })
 
     all_tracks = []
@@ -6458,6 +6553,9 @@ def _run_figures(args, show_fragments=False, suffix=""):
         subtitle_bits.append(f"{hidden_absent_tracks} GOI-absent track(s) hidden")
     if ambiguous_track_count:
         subtitle_bits.append(f"{ambiguous_track_count} ambiguous track(s)")
+    if strong_hit_track_count:
+        subtitle_bits.append(f"{strong_hit_track_count} track(s) with a strong hit without "
+                             f"synteny and no counted call")
 
     # -- 7. Render SVG ---------------------------------------------------
 
@@ -6491,7 +6589,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
         print(f"  (could not export static-view SVG: {exc})", file=sys.stderr)
 
     print(f"  Tracks: {n_tracks} ({n_tracks - 1} target genomes)")
-    print(f"  GOI tracks: {resolved_track_count} resolved, {ambiguous_track_count} ambiguous")
+    print(f"  GOI tracks: {resolved_track_count} resolved, {ambiguous_track_count} ambiguous"
+          + (f", {strong_hit_track_count} strong hit without synteny" if strong_hit_track_count else ""))
     if hidden_absent_tracks:
         print(f"  Hidden absent tracks: {hidden_absent_tracks}")
     print(f"  Gap compression: active (>{args.gap_threshold} bp -> {args.gap_visual_size} bp visual)")

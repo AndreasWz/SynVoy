@@ -1261,7 +1261,7 @@ genome that has the home proteome, with or without a block, after its windows:
   position, until one gives an answer, at most `max_blocks_per_genome` windows per genome
   (`genome_wide_tries_cap`; the decoy pass below has a bound of its own): a window of the
   place ± the model margin, cut at the GOI zones and at the step's earlier windows (a place that
-  an earlier window covers gets none; these windows are kept apart from the blocks' GOI zones, so
+  an earlier window overlaps gets none; these windows are kept apart from the blocks' GOI zones, so
   the dead-zone count and `rejected_candidates.dropped` are as without the step), searched
   without the flanking pass, its
   candidates judged in the genome place (no multiplier);
@@ -1273,7 +1273,16 @@ genome that has the home proteome, with or without a block, after its windows:
   without an intron (`FrameBroken=1` with every gap between its CDS rows shorter than 40 bp:
   miniprot can split a frameshifted copy into two pieces a few bp apart), and it overlaps no
   model written before. A window keeps its best answer and writes nothing else, so the step
-  adds no LOW row and no call that needs curation.
+  adds no LOW row and no call that needs curation;
+- an exon across junctions whose CDS is at least 30 nt per junction longer than 3 × its aligned
+  query span holds an intron at each, read as coding, and does not count as crossing them:
+  miniprot aligns a short intron that is a multiple of 3 and free of stops as an insertion (on
+  synthetic genes every 45- and 60-bp such intron, and some of 90 bp, gave one exon across the
+  junction). The nt that the walk to the start and stop codon adds beyond the aligned span
+  (§7.7, `refine_model_termini`) are not counted, and split codons and a stop codon add at most
+  3 nt. Introns shorter than 30 nt are known from a few protists, ciliates such as *Paramecium*
+  among them; there a read-through intron still reads as a retrocopy. A target exon with an
+  insertion of 10 or more residues reads the same, so a retrocopy with one is not flagged.
 
 An answer is written as MEDIUM (no synteny supports it), `GOIClass=genome_wide_strong_hit`,
 `Basis=significant_specific`, with `GenomeWide=1`, `GenomeWideCoverage` (the place's union
@@ -1435,9 +1444,10 @@ sets it.
 `cluster_grs.py` scores candidate regions per genome. They are used for the figures
 and for the strong-synteny rescue ([§9](#9-rescue-passes)). They do not change the
 confidence of a gene model. With `--plot_block_selection true` (off by default) a figure row
-shows the search's blocks instead: the blocks of the HIGH, MEDIUM and AMBIGUOUS GOI calls,
-then the significant blocks without a counted call by E_syn, up to 6 (fragment calls take
-part, hidden from view); a genome without its block table keeps the regions.
+shows the search's blocks instead: the blocks of the HIGH, MEDIUM and AMBIGUOUS GOI calls
+(an answer of the genome-wide path draws none), then the significant blocks without a counted
+call by E_syn, up to 6 (fragment calls take part, hidden from view); a genome without its block
+table keeps the regions.
 
 **Clusters.** The genome-wide hits are put into one fixed order and clustered: a hit
 joins the cluster when it starts less than the block gap of the search for this
@@ -1676,6 +1686,14 @@ from those copies.
   that the view leaves out is listed in the anchor grid, placed by the rule of the other
   calls (at the locus when it lies within reach of the best call in view, else after `//`),
   and counted in the ribbon plot's label (`+N elsewhere`).
+- **A strong hit without synteny.** An answer of the genome-wide path that the report kept
+  (`GOIClass=genome_wide_strong_hit`, MEDIUM, [§7.11](#711-goi-hits-far-from-their-anchors))
+  is no counted call in the figures: it is no copy, never a row's best call, in none of the
+  counts of a row's label (`×N`, `+N weak`, `+N elsewhere`), places no locus, and draws no
+  block of the block choice. It is drawn outlined
+  where it lies, with no GOI ribbon; the anchor grid lists it also outside the stretch drawn
+  (at the locus or after `//`), its source table gives it its own state, and the ribbon plot
+  marks a row that holds one and no counted call ("Strong hit without synteny, not counted").
 - **GOI name.** The GOI column, the titles, the legends, the home row's label and the GOI's
   row of the Gene names table name the GOI after the annotated home gene on whose CDS the
   query hits fall. Without such a gene the name is the GOI's own, as its target models carry
