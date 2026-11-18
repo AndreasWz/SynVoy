@@ -133,7 +133,7 @@ Every gene model of your gene gets one of four labels:
 | `AMBIGUOUS` | Needs curation: a significant match that another home gene explains as well, or a weak match in the slot where the gene should be. | no |
 | `LOW` | No significant match: a fragment, a weak hit or a chance alignment. | no |
 
-\* Except a record whose `goi_class` is `paralog_not_goi` (it belongs to another gene of the home genome) or `identity_coverage_decoupled` (a high identity over only a short part of the query). Such a record keeps its label but is not counted. The headline counts only the orthologs.
+\* Except a record whose `goi_class` is `paralog_not_goi` (it belongs to another gene of the home genome) or `identity_coverage_decoupled` (a high identity over only a short part of the query), and an answer of the genome-wide path (`goi_class` `genome_wide_strong_hit`, MEDIUM: a strong hit without synteny). Such a record keeps its label but is not counted. The headline counts only the orthologs.
 
 What every file contains, and how to read the report: [docs/OUTPUT.md](docs/OUTPUT.md).
 
@@ -144,7 +144,7 @@ What every file contains, and how to read the report: [docs/OUTPUT.md](docs/OUTP
 SynVoy is for **divergent genes with few copies**, found through conserved gene order. Know its limits:
 
 - It is **not** a general ortholog finder for large paralog families or tandem arrays. There, treat `MEDIUM` and `AMBIGUOUS` calls as leads that need manual curation, not as findings. For genome-wide ortholog inference, use OrthoFinder or TOGA instead.
-- It finds a gene **where the home genome's neighbourhood is conserved**. A gene that moved, or a locus the home genome does not have, is out of reach, with one exception: a well-conserved copy that moved only within the span of its old neighbours on the same chromosome is still found. A strong match anywhere else is listed in the report as found but not syntenic (`rejected_candidates`), and is not counted.
+- It finds a gene **where the home genome's neighbourhood is conserved**. A gene that moved, or a locus the home genome does not have, is out of reach, with one exception: a well-conserved copy that moved only within the span of its old neighbours on the same chromosome is still found. A strong match anywhere else is listed in the report as found but not syntenic (`rejected_candidates`); the strongest one that meets the terms of a high-confidence call gets an answer of its own, named in the headline as a strong hit without synteny and drawn outlined, and it is not counted either (`--goi_genome_wide_path false` switches the answer off).
 
 ---
 

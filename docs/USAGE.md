@@ -407,10 +407,10 @@ SynVoy stops on names that would otherwise lose results without a word. Each mes
 
 An empty cell in the anchor grid means that no ortholog was placed there, not that the gene is absent. Check:
 
-1. **The report's `rejected_candidates`:** a strong match outside the conserved neighbourhood is listed there as found but not syntenic ([README → Scope](../README.md#scope)).
+1. **The report's `rejected_candidates` and `strong_hit_without_synteny`:** a strong match outside the conserved neighbourhood is listed as found but not syntenic, and the strongest one that meets the terms of a high-confidence call gets an answer that is not counted ([README → Scope](../README.md#scope)).
 2. **The genome's regions:** `regions/<locus>/<genome>.regions.bed`. When it is empty, the neighbouring genes were not found together in that genome. More neighbouring genes (`--n_flanking_genes 15`; the default is 10 per side) or a larger allowed gap between them (`--block_gap_genes`, default 7 gene spacings) can help where the region is broken up.
 3. **The genome's quality:** a fragmented assembly can split the region or miss the gene. The report lists the low-quality genomes that were searched (`low_quality_genomes_searched`).
-4. **The calls that are not counted:** an `AMBIGUOUS` call, a call the paralog check gave to another home gene (`paralog_not_goi`) and one with a high identity over a short part of the query (`identity_coverage_decoupled`) are in `goi_dedup.records` but not counted as orthologs. `LOW` models are not in the records: the headline counts them as "no significant match", and the search's LOW models are listed in `plot_inputs_synteny_block_locus_<N>/<genome>.homology.tsv` ([OUTPUT.md](OUTPUT.md#the-per-genome-table)).
+4. **The calls that are not counted:** an `AMBIGUOUS` call, a call the paralog check gave to another home gene (`paralog_not_goi`) one with a high identity over a short part of the query (`identity_coverage_decoupled`) and an answer of the genome-wide path (`genome_wide_strong_hit`, a strong hit without synteny) are in `goi_dedup.records` but not counted as orthologs. `LOW` models are not in the records: the headline counts them as "no significant match", and the search's LOW models are listed in `plot_inputs_synteny_block_locus_<N>/<genome>.homology.tsv` ([OUTPUT.md](OUTPUT.md#the-per-genome-table)).
 
 ### The report step stops: "zero annotation and zero region files"
 

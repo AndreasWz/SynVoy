@@ -1238,7 +1238,7 @@ hit in the genome only. As a measure, each refused row also gives the flanking g
 hit on its sequence (`genes_on_sequence`), and `dispersed_refused_per_piece_pass` counts the
 refused hits that counting each gene on every sequence where it has a hit would have seeded.
 
-With `goi_genome_wide_path` (off by default), a GOI hit that lies outside every searched GOI
+With `goi_genome_wide_path` (on by default; `false` switches it off), a GOI hit that lies outside every searched GOI
 zone and outside every model the search wrote, where no block predicted the gene, gets an answer
 of its own when it is strong: the strong hit without synteny. The step runs in every searched
 genome that has the home proteome, with or without a block, after its windows:
@@ -1438,7 +1438,7 @@ labels without a truth set. Each window is searched with three decoy queries bes
 each real query, so the window search takes several times as long. The report sums the
 decoy cases that were searched (home gene × target genome with a search window ×
 decoy kind; the home genome itself is never searched) into `decoy_rate`: per label the
-calls and the upper end of the exact 95 % interval. With `goi_genome_wide_path` the decoys of
+calls and the upper end of the exact 95 % interval. Unless `goi_genome_wide_path` is false, the decoys of
 the home protein are also searched in the whole genome and take the genome-wide path's steps
 (§7.11); their calls carry `GenomeWide=1`, are left out of these counts and are counted apart
 (`decoy_gw_cases`, `decoy_gw_answers`: a case with a decoy answer and no window decoy call of

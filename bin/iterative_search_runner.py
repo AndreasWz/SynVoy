@@ -9931,7 +9931,7 @@ def main():
                              "the missing query residues within 5 aa of it), do not walk to an ATG "
                              "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
                              "instead. Home GOI and decoys only (off by default)")
-    parser.add_argument("--goi_genome_wide_path", type=str2bool, default=False,
+    parser.add_argument("--goi_genome_wide_path", type=str2bool, default=True,
                         help="The strong hit without synteny (docs/ALGORITHM.md 7.11), in every searched genome: "
                              "a GOI hit outside every searched GOI zone gets one answer per home GOI "
                              "when the judge's HIGH terms hold in the genome place (E <= 1e-6 over the "
@@ -10056,10 +10056,11 @@ def main():
 
     parser.add_argument("--decoy_mode", type=str2bool, default=False,
                         help="Also search the reversed home protein and two shuffles of it in "
-                             "every window (with --goi_genome_wide_path also in the whole genome, "
-                             "for the path's decoy pass), model and label them like the real query, "
-                             "and write their calls to decoys/ (never seeded, never counted). Every "
-                             "decoy call is false: their rate per label and place calibrates the labels.")
+                             "every window (and, unless --goi_genome_wide_path false, in the whole "
+                             "genome, for the path's decoy pass), model and label them like the "
+                             "real query, and write their calls to decoys/ (never seeded, never "
+                             "counted). Every decoy call is false: their rate per label and place "
+                             "calibrates the labels.")
     parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
                         help="Record GOI hits that clear the quality bar but are "
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "

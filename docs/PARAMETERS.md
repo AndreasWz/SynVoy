@@ -1608,11 +1608,11 @@ The region step uses the same identity and E-value for its distant-macrosynteny 
 ([`disable_distant_synteny_rescue`](#disable_distant_synteny_rescue)).
 
 ### `goi_genome_wide_path`
-**Default:** `false`
+**Default:** `true`
 
 The strong hit without synteny: a GOI hit of the genome-wide search that lies outside every
 searched GOI zone (block ± the GOI margin) and outside every model the search wrote lies where no
-block predicted the gene. With this switch, every searched genome that has the home proteome, with
+block predicted the gene. By default (`--goi_genome_wide_path false` switches it off), every searched genome that has the home proteome, with
 or without a block, gets one more step after its windows. The hits are grouped into places (per home
 gene and sequence, hits within the larger of the model margin and the gene's intron bound of each
 other, never across a GOI zone), and a place is tried when the terms of the judge's HIGH hold for
@@ -2133,8 +2133,8 @@ same E-values and specificity terms. They compete only with each other, never se
 and never reach the result GFFs or the figures; they are written to `decoys/locus_<N>/`. Every
 decoy call is false, so the share of decoy cases that reach a label is that label's false-call rate
 on your data. The report gives it as `decoy_rate`, with the upper end of the exact (Clopper-Pearson)
-95 % interval ([OUTPUT.md](OUTPUT.md#decoy-calls---decoy_mode)). With
-[`goi_genome_wide_path`](#goi_genome_wide_path) the same decoys are also searched in the whole
+95 % interval ([OUTPUT.md](OUTPUT.md#decoy-calls---decoy_mode)). Unless
+[`goi_genome_wide_path`](#goi_genome_wide_path) is false, the same decoys are also searched in the whole
 genome, in the same MMseqs2 run as the query set, and take the genome-wide path's steps
 (`decoy_rate.genome_wide`). It makes the window search about four times as long. No module sets
 it.
@@ -2160,7 +2160,7 @@ on a set of genomes can be measured. Run the set both ways and compare.
 | `--tandem_copy_parent home` | [§ 10](#tandem_copy_parent) | tandem copies judged against the home protein |
 | `--disable_coverage_demotion` | [§ 10](#disable_coverage_demotion) | the report's coverage check advisory only |
 | `--legacy_strand_score` | [§ 12](#legacy_strand_score) | the strand term of older versions in the region score |
-| `--goi_genome_wide_path` | [§ 13](#goi_genome_wide_path) | a strong hit outside every searched GOI zone gets an answer of its own (never counted) |
+| `--goi_genome_wide_path false` | [§ 13](#goi_genome_wide_path) | no answer for a strong hit outside every searched GOI zone (the default up to 1.0.1) |
 
 Write a switch with its value (`--disable_wavefront true`).
 
