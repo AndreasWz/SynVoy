@@ -1353,9 +1353,10 @@ No module changes this switch.
 Without `--home_gff`, SynVoy predicts the home genes near the query's locus (PREPARE_HOME_PROTEOME),
 transfers the gene models of the closest annotated target genome where it can
 (BORROW_ANNOTATIONS), and takes the flanking genes from these. The home genome then holds
-annotation only around the query's home hits and in the window the gene models were
-transferred to; the flank walk stays inside the stretch around the locus and does not step
-to genes predicted around another hit. The same happens when a home GFF
+annotation only around the query's home hits and in the stretch the transferred gene models
+cover, from the locus to the outermost of them; the flank walk stays inside the stretch around
+the locus and does not step over unannotated DNA to genes predicted around another hit (it goes
+on into another hit's prediction window only where that window overlaps or touches the stretch). The same happens when a home GFF
 yields no protein, except that its genes are then predicted with Augustus's `fly` model (for
 `augustus_species auto`) and without the stop for a eukaryote home without Augustus. With a usable home GFF, only `gene_predictor`, `gene_prediction_timeout` and
 `augustus_species` still matter, and only for the optional structural discovery, which predicts the
@@ -1408,10 +1409,12 @@ wrongly, which splits gene models or merges neighbouring genes.
 
 Genes are predicted within this many bp on each side of each region of the query's home hits. The
 flank walk, when it predicts genes itself, uses the same window around the centre of each region,
-and the annotation transfer starts from it and doubles it until it holds 2 × `n_flanking_genes`
-predicted genes or spans 500 kb (the doubling that reaches 500 kb is kept, so the window stays
-below 1 Mb). The flank walk takes its anchors only from the stretch these windows annotate around
-the locus. Where genes lie far apart, 50 kb on each side holds fewer genes than `n_flanking_genes`,
+and the annotation transfer starts from it and doubles it until the window holds
+2 × `n_flanking_genes` predicted genes or spans 500 kb. The doubling that first reaches 500 kb is
+kept, so a window that had to grow ends below 1 Mb (about 800 kb at the default 50 kb for a short
+locus); with 250 kb or more the first window already spans 500 kb and is kept, the locus plus twice
+this value (1.2 Mb at 600 kb). The flank walk takes its anchors only from the stretch the
+predictions and the transferred models annotate around the locus. Where genes lie far apart, 50 kb on each side holds fewer genes than `n_flanking_genes`,
 and a side of the walk can end at the stretch's edge with fewer anchors (a warning says so); a
 larger window gives the flank walk more to choose from and takes longer to predict.
 
@@ -1921,8 +1924,8 @@ How many GOI models of a genome steer the choice of the neighbourhood its row sh
 ones, by label, then by the strength of the match. Every GOI model inside the chosen view is
 drawn, so the cap hides no copy there; it keeps many weak calls elsewhere in a genome from pulling
 the view away. A counted call (HIGH or MEDIUM) outside the chosen view, for example in a second
-neighbourhood whose models fell below the cap, is listed in the anchor grid after `//` and counted
-in the ribbon plot's label (`+N elsewhere`). With A1, a tandem array larger than ten steers the
+neighbourhood whose models fell below the cap, is listed in the anchor grid (at the locus when it
+lies there, else after `//`) and counted in the ribbon plot's label (`+N elsewhere`). With A1, a tandem array larger than ten steers the
 view with every copy. The figures read the value from `effective_params.json`, which the plot step
 copies into each `plot_inputs_*` folder, so a re-draw uses the run's value. `--max_goi_per_genome`
 given in `plot_extra_args` wins over it.

@@ -342,15 +342,21 @@ def copy_lineage(gene):
     return parent if parent.startswith("GOI_copy_") else ""
 
 
+# Tooltip note of a counted call the ribbon plot and the gene-position map do not draw.
+OUTSIDE_VIEW_NOTE = "outside the stretch the ribbon plot draws for this genome"
+
+
 def split_calls(tmap, span_bp, outside=()):
     """The GOI calls of one target row: (best, [(gene, elsewhere, is_copy)] in genomic order).
 
     Calls at the locus come first, in the order of the oriented chromosome; calls
-    on another scaffold, or farther away than the neighbourhood is long, follow, together
-    with `outside`: the row's counted calls that lie outside the neighbourhood the figures
-    draw (plot_synteny._counted_calls_outside_view), which are always elsewhere. The locus
-    is that of the best call in the neighbourhood drawn; `best`, the call the copy rule
-    names, is the best call of the genome, `outside` included.
+    on another scaffold, or farther away than the neighbourhood is long, follow. The locus
+    is that of the best call in the neighbourhood drawn; without one, the stretch of the
+    flanking genes placed on their main scaffold. `outside`: the row's counted calls that lie
+    outside the stretch the other figures draw (plot_synteny._counted_calls_outside_view; they
+    keep their mark ``outside_view``), placed by the same test as the calls in view: a copy
+    capped next to a drawn tandem array is at the locus, one on another scaffold after '//'.
+    `best`, the call the copy rule names, is the best call of the genome, `outside` included.
     """
     ps = _PS
     genes = (tmap.get(GOI_KEY) or {}).get("genes", [])
@@ -360,18 +366,49 @@ def split_calls(tmap, span_bp, outside=()):
 
     def best_of(pool):
         return ps._goi_best([g for g in pool if not ps._is_fragment_goi(g)] or pool)
-    here = best_of(genes or outside)
-    best = best_of(genes + outside) if outside else here
-    _, lo, hi, _ = ps._dominant_chrom_span(
-        [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
-         for e in tmap.values()], here.get("chrom", ""))
+    best = best_of(genes + outside)
+    placed = [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
+              for e in tmap.values()]
+    if genes:
+        here = best_of(genes)
+        _, lo, hi, _ = ps._dominant_chrom_span(placed, here.get("chrom", ""))
+    else:                   # no call in view: the locus is the stretch of the flanking genes
+        chrom, lo, hi, _ = ps._dominant_chrom_span(placed)
+        here = {"chrom": chrom, "start": lo, "end": hi} if placed else None
     reach = max(float(span_bp or 0), hi - lo)
-    local = sorted((g for g in genes if ps._is_local_copy(g, here, reach)),
-                   key=lambda g: g.get("start_plot", g["start"]))
-    away = sorted([g for g in genes if not ps._is_local_copy(g, here, reach)] + outside,
+
+    def at_locus(g):
+        return here is not None and ps._is_local_copy(g, here, reach)
+    local = sorted((g for g in genes if at_locus(g)), key=lambda g: g.get("start_plot", g["start"]))
+    if outside and here is not None:
+        local = _merge_in_genomic_order(local, [g for g in outside if at_locus(g)], tmap,
+                                        here.get("chrom", ""))
+    away = sorted([g for g in genes if not at_locus(g)] + [g for g in outside if not at_locus(g)],
                   key=lambda g: (g.get("chrom", ""), g["start"]))
     return best, ([(g, False, is_copy(g, best)) for g in local]
                   + [(g, True, is_copy(g, best)) for g in away])
+
+
+def _merge_in_genomic_order(drawn, extra, tmap, chrom):
+    """``drawn`` (the calls at the locus in view, in the order of the oriented chromosome) with
+    the off-view calls ``extra`` inserted where they lie: by genomic position, read backwards
+    on a scaffold the figures draw reversed (its genes carry ``genomic_strand``). The calls in
+    view keep their order."""
+    if not extra:
+        return drawn
+    on_chrom = [g for e in tmap.values() for g in e.get("genes", [e["best"]])
+                if g.get("chrom", "") == chrom]
+    sign = -1.0 if any("genomic_strand" in g for g in on_chrom + list(extra)) else 1.0
+
+    def pos(g):
+        return sign * (g["start"] + g["end"]) / 2.0
+    pending = sorted(extra, key=lambda g: (pos(g), g.get("gff_id", "")))
+    out = []
+    for g in drawn:
+        while pending and pos(pending[0]) < pos(g):
+            out.append(pending.pop(0))
+        out.append(g)
+    return out + pending
 
 
 def wrap_items(items, full_weight=0.0):
@@ -1092,7 +1129,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                     fill = copy_colour(g)
                     dash = DASH.get((g.get("confidence") or "").upper(), "") if not is_home else ""
                 dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
-                where = ("outside the neighbourhood drawn for this genome" if g.get("outside_view")
+                where = (OUTSIDE_VIEW_NOTE if g.get("outside_view")
                          else "elsewhere in the genome" if away else "")
                 if st.clade and kind == "mark":
                     kind = "clade_mark"
@@ -1160,8 +1197,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 body += text_svg(x + mw + 2.0, y + st.fs_num * 0.35, st.fs_num, num, INK,
                                  bold=(g.get("confidence") or "").upper() == "HIGH")
             P.append(titled(goi_tooltip(g, labels[ri], is_home,
-                                        "outside the neighbourhood drawn for this genome"
-                                        if g.get("outside_view") else
+                                        OUTSIDE_VIEW_NOTE if g.get("outside_view") else
                                         "elsewhere in the genome" if away else ""), body, tips))
         if cell["more"]:
             P.append(text_svg(x0, ys[-1] + st.fs_small * 0.35, st.fs_small,
@@ -1342,7 +1378,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         "home_copies": n_copies[0], "most_copies_in_a_target": max(n_copies[1:] + [0]),
         "genomes_with_several_copies": sum(1 for n in n_copies if n > 1),
         "copies_not_drawn": sum(c["more"] for c in cells),
-        # counted GOI calls outside the neighbourhood drawn for their genome, listed after //
+        # counted GOI calls outside the stretch the other figures draw for their genome (listed
+        # at the locus or after //, by where they lie)
         "goi_calls_outside_view": n_outside_view,
         # GOI models drawn with a number that is the identity to a seeded tandem copy
         "copy_lineage_models": n_copy_lineage,
@@ -1719,8 +1756,11 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
             s.append("Colour: the home gene the ortholog belongs to, in muted tones so that the "
                      f"{goi} clades stand out; " + shade)
         elif st.numbers:
-            s.append("Colour: the home gene the ortholog belongs to, paler the lower the "
-                     "confidence. Number: protein identity to the home gene in %" + (
+            # cell_style's numbers branch: HIGH 0.5 of the way to white, MEDIUM 0.66, LOW 0.8,
+            # AMBIGUOUS 0.86 (palest, though it ranks above LOW).
+            s.append("Colour: the home gene the ortholog belongs to; the fill follows the label, "
+                     "high confidence darkest, then medium and low, ambiguous palest. Number: "
+                     "protein identity to the home gene in %" + (
                          "; a number in brackets under an arrow is the query coverage in %, given "
                          "when it is below 80 %." if low_cov == "line" else
                          ", with * when the query coverage is below 80 %." if low_cov == "star"
@@ -1776,13 +1816,16 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                      + (f" At most {st.max_marks} are drawn in a cell; +N counts the rest."
                         if "count" in kinds else ""))
         if "break" in kinds:
-            n_out = info.get("goi_calls_outside_view", 0)
             s.append("Calls after // lie on another scaffold or farther from the locus than the "
-                     "neighbourhood is long"
-                     + (f"; {n_out} of them {'is a counted call' if n_out == 1 else 'are counted calls'}"
-                        " (high or medium confidence) outside the stretch of "
-                        f"{'its' if n_out == 1 else 'their'} genome that the ribbon plot and the "
-                        "gene-position map draw." if n_out else "."))
+                     "neighbourhood is long.")
+        n_out = info.get("goi_calls_outside_view", 0)
+        if n_out:
+            # Placed like every other call: at the locus or after //, by where they lie.
+            s.append(f"{n_out} counted {'call' if n_out == 1 else 'calls'} (high or medium "
+                     f"confidence) {'is' if n_out == 1 else 'are'} listed that the ribbon plot and "
+                     "the gene-position map do not draw: "
+                     f"{'it lies' if n_out == 1 else 'they lie'} outside the stretch of "
+                     f"{'its' if n_out == 1 else 'their'} genome those figures show.")
         if full_drawn:
             s.append("Coding exons are to scale (bar), ∧ = intron (not to scale); thin boxes are "
                      "aligned hit segments without a gene model (drawn no longer than the longest "

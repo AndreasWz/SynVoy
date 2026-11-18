@@ -481,8 +481,8 @@ def get_feature_id(feature: Dict[str, Any], fallback_counter: Optional[int] = No
 
 # A home genome without a GFF is annotated by SynVoy itself, and only in stretches: the
 # windows around the query's home hits in which genes are predicted (prodigal_on_regions.py)
-# and the window into which an annotated target's gene models are transferred
-# (borrow_annotations.py). Beyond them the genome holds genes that no file lists, so the flank
+# and the stretch that the gene models transferred from an annotated target cover, from the
+# locus to the outermost of them (borrow_annotations.py). Beyond them the genome holds genes that no file lists, so the flank
 # walk (extract_flanking_genes.py) must not step from one stretch into the next. Each stretch is
 # a directive in the GFF's header: ``##synvoy-annotated-window <chrom> <start> <end> <kind>``,
 # 1-based and closed like the feature rows, ``kind`` 'predicted' or 'borrowed'.

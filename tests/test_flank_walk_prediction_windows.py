@@ -112,6 +112,31 @@ def test_a_borrowed_window_extends_the_stretch(tmp_path):
     assert "c:0-30000" in out
 
 
+def test_a_prediction_window_inside_the_transfer_window_is_not_walked_into(tmp_path):
+    """Review of item 45: borrow_annotations.py wrote the whole home window miniprot searched
+    (it grows to about 800 kb) as 'borrowed', so the prediction window of another home hit
+    inside it (B, 40-56 kb) joined the locus's stretch and the walk took B's genes past the
+    unannotated DNA between. The merged GFF now names the stretch the transferred models
+    cover, from the locus to the outermost model (20 kb), and the walk stops there."""
+    import borrow_annotations as ba
+    ids = _build(tmp_path, A_AND_B, borrowed=[20001])
+    gff = tmp_path / "home.gff"
+    pred = tmp_path / "pred.gff"
+    pred.write_text("\n".join(ln for ln in gff.read_text().splitlines() if "borrowed_" not in ln) + "\n")
+    model = {"source": "t", "name": "T", "chrom": "c", "strand": "+", "identity": 0.8, "coverage": 0.9,
+             "protein": "M", "exons": [(20000, 20303, 0)]}
+    locus = ("c", GOI_AT - 1, GOI_AT + 302)              # the best interval of the locus BED
+    ba.write_merged_gff(str(gff), str(pred), set(), [model], "T", locus)
+    assert read_annotated_windows(str(gff))["c"] == [
+        (0, 12000, "predicted"), (GOI_AT - 1, 20303, "borrowed"), (40000, 56000, "predicted")]
+    out, err, anchors = _walk(tmp_path)
+    downstream = [gid for gid, start in anchors if start > GOI_AT]
+    assert downstream == [ids[s] for s in (7501, 9001, 10501)] + ["borrowed_t"]
+    assert not any(start >= 40000 for _gid, start in anchors)
+    assert "c:0-20303" in out and "ended: end of the annotated window" in out
+    assert "WARNING: the downstream walk reached the end of the stretch SynVoy annotated" in err
+
+
 def test_touching_windows_are_one_stretch(tmp_path):
     ids = _build(tmp_path, [(0, 12000, "predicted"), (12000, 24000, "predicted"),
                             (40000, 56000, "predicted")], extra=[15001, 18001])

@@ -36,7 +36,11 @@ SOURCE_GFF = "gff_symbol"
 SOURCE_NCBI = "ncbi_gene"
 SOURCE_PRODUCT = "product_name"
 SOURCE_ID = "id_only"
-SOURCES = (SOURCE_USER, SOURCE_GFF, SOURCE_NCBI, SOURCE_PRODUCT, SOURCE_ID)
+# The GOI's own name, as its models carry it (GOI_<name>): the name of a GOI whose home hits lie
+# on no annotated CDS, so that no home gene names it (plot_synteny._goi_display_label). Its row in
+# the names table is keyed GOI_<name>.
+SOURCE_QUERY = "query_name"
+SOURCES = (SOURCE_USER, SOURCE_GFF, SOURCE_NCBI, SOURCE_PRODUCT, SOURCE_ID, SOURCE_QUERY)
 
 SOURCE_TEXT = {
     SOURCE_USER: "names table",
@@ -44,6 +48,7 @@ SOURCE_TEXT = {
     SOURCE_NCBI: "NCBI Gene",
     SOURCE_PRODUCT: "product name",
     SOURCE_ID: "no name annotated",
+    SOURCE_QUERY: "query name",
 }
 
 # Appended to a label that SynVoy derived from the product name.

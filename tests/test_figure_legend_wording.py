@@ -79,8 +79,12 @@ def test_the_paleness_legend_names_the_tier_it_applies_to(style):
 def test_with_numbers_the_fill_says_the_confidence():
     res = sg.render(ps, *_tracks(), {}, SimpleNamespace(), sg.style_for(numbers=True))
     assert not any("paler" in t for _, rows in res["legend_groups"] for _, t in rows)
-    assert ("Colour: the home gene the ortholog belongs to, paler the lower the confidence. "
-            "Number: protein identity to the home gene in %") in res["legend_text"]
+    # Review of item 37: AMBIGUOUS is drawn paler than LOW though it ranks above it, so the text
+    # says what cell_style draws, not "paler the lower the confidence".
+    assert ("Colour: the home gene the ortholog belongs to; the fill follows the label, high "
+            "confidence darkest, then medium and low, ambiguous palest. Number: protein identity "
+            "to the home gene in %") in res["legend_text"]
+    assert "paler the lower the confidence" not in res["legend_text"]
 
 
 def test_the_fill_the_legend_describes(monkeypatch):
@@ -92,3 +96,7 @@ def test_the_fill_the_legend_describes(monkeypatch):
         assert fill(95, conf) == fill(40, conf)
     assert fill(95, "HIGH", True) == fill(40, "HIGH", True)           # numbers: by confidence only
     assert len({fill(80, c, True) for c in ("HIGH", "MEDIUM", "LOW", "AMBIGUOUS")}) == 4
+    # the order the legend text states: HIGH darkest, then MEDIUM, LOW, AMBIGUOUS palest
+    lightness = [sum(int(fill(80, c, True)[i:i + 2], 16) for i in (1, 3, 5))
+                 for c in ("HIGH", "MEDIUM", "LOW", "AMBIGUOUS")]
+    assert lightness == sorted(lightness) and len(set(lightness)) == 4

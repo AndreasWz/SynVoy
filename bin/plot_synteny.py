@@ -979,6 +979,7 @@ _GOI_NAMES = set()
 # per run by _load_gene_names(); every figure labels its genes from it.
 _GENE_NAMES = {}
 _GENE_NAMES_NOTE = [""]   # what the NCBI Gene lookup did, for the legend footnote
+_GENE_NAMES_ORDER = []    # the home genes of the names table, in home order (_write_gene_names_tsv)
 
 
 # The GOI's own name, as its target models carry it (SynVoy_Parent GOI_<name>; _goi_query_name), and
@@ -986,6 +987,10 @@ _GENE_NAMES_NOTE = [""]   # what the NCBI Gene lookup did, for the legend footno
 # rather than identify_goi_names' span overlap. Set in main() before the figures are drawn.
 _GOI_QUERY_NAME = [None]
 _GOI_FROM_CDS = [False]
+# Rows of the names table given with --gene_names_tsv that are keyed GOI_<name>: the label of a GOI
+# that no home gene names (_goi_own_name_row). The run's own table writes that row (source
+# query_name), so a re-draw from it keeps the label, and an edited label renames the GOI.
+_GOI_NAME_ROWS = {}
 
 
 def _named(gene_id):
@@ -1010,6 +1015,19 @@ def _named(gene_id):
         if len(homes) == 1:
             return _GENE_NAMES[homes[0]]
     return None
+
+
+def _goi_own_name_row(name):
+    """Names-table row of the GOI's own name (``name``: GOI_<name> as its models carry it, without
+    the prefix), for a GOI whose home hits lie on no annotated CDS: the row a names table given
+    with --gene_names_tsv holds for GOI_<name>, else the row of a home gene of that name, else the
+    name itself (source query_name). None without a name."""
+    if not name:
+        return None
+    row = _GOI_NAME_ROWS.get("GOI_" + name) or _named(name)
+    if row:
+        return row
+    return {"label": name, "full_name": "", "source": _gnames.SOURCE_QUERY, "ncbi_gene_id": ""}
 
 
 def _home_gene_label(gene_id, fallback=None):
@@ -1677,6 +1695,17 @@ def _is_spliced_model(gene):
         "exon_annotation", "flanking_miniprot", "rearranged_flanking"}
 
 
+def _mirror_gene_in_place(g):
+    """Flip a gene's strand and mirror its exon model within the gene (a scaffold drawn
+    reversed); the genomic strand is kept as `genomic_strand`."""
+    g.setdefault("genomic_strand", g.get("strand", "+"))
+    g["strand"] = "-" if g.get("strand", "+") == "+" else "+"
+    ex = g.get("exon_coords") or []
+    if ex:
+        gs, ge = g["start"], g["end"]
+        g["exon_coords"] = [(gs + (ge - ee), gs + (ge - es)) for (es, ee) in reversed(ex)]
+
+
 def _reverse_complement_segment(track, chrom):
     """Reflect one scaffold's genes in place within that scaffold's plot extent:
     mirror positions, flip strands, and mirror each exon model within its gene.
@@ -1690,12 +1719,12 @@ def _reverse_complement_segment(track, chrom):
         s_plot, e_plot = g["start_plot"], g["end_plot"]
         g["start_plot"] = lo + hi - e_plot
         g["end_plot"] = lo + hi - s_plot
-        g.setdefault("genomic_strand", g.get("strand", "+"))
-        g["strand"] = "-" if g.get("strand", "+") == "+" else "+"
-        ex = g.get("exon_coords") or []
-        if ex:
-            gs, ge = g["start"], g["end"]
-            g["exon_coords"] = [(gs + (ge - ee), gs + (ge - es)) for (es, ee) in reversed(ex)]
+        _mirror_gene_in_place(g)
+    # The row's counted calls outside the view (_counted_calls_outside_view) on this scaffold
+    # have no plot position, but the anchor grid draws them: they point as the scaffold is drawn.
+    for g in track.get("goi_outside_view") or []:
+        if g.get("chrom") == chrom:
+            _mirror_gene_in_place(g)
     for brk in track.get("breaks", []):
         if not brk.get("is_chrom_break") and lo < brk["x"] < hi:
             brk["x"] = lo + hi - brk["x"]
@@ -2337,7 +2366,8 @@ def _top_margin_for_labels(track, home_products, lane_pitch):
 # ======================================================================
 
 def _load_gene_names(args, home_genes):
-    """Fill _GENE_NAMES for this run's home genes and save the table.
+    """Fill _GENE_NAMES for this run's home genes; _write_gene_names_tsv saves the table once
+    the figures know the GOI's name.
 
     Sources, in order: the names table given with --gene_names_tsv, the home
     GFF, NCBI Gene (current symbol by GeneID, unless --no_network), and the
@@ -2357,6 +2387,8 @@ def _load_gene_names(args, home_genes):
                                "ncbi_gene_id": ""}
 
     given = _gnames.read_names_tsv(getattr(args, "gene_names_tsv", "") or "")
+    _GOI_NAME_ROWS.clear()
+    _GOI_NAME_ROWS.update({k: row for k, row in given.items() if k.startswith("GOI_")})
     overrides = {}
     for gid in ids:
         bare = clean_gene_label(gid)
@@ -2381,33 +2413,85 @@ def _load_gene_names(args, home_genes):
               "in the home GFF keep an abbreviation or their ID. Re-draw with network "
               "access, or pass a names table with --gene_names_tsv.", file=sys.stderr)
 
+    _GENE_NAMES_ORDER[:] = ids
+
+
+def _write_gene_names_tsv(args):
+    """Save the names table (<locus>_gene_names.tsv, or --gene_names_out): a row per home gene
+    in home order and, when the query hits lie on no annotated CDS (not _GOI_FROM_CDS) and the
+    GOI has a name of its own, the GOI's row (GOI_<name>, _goi_own_name_row), named as the GOI
+    column names the GOI. Called once the figures know the GOI's name (_GOI_DISPLAY_LABEL)."""
+    table, ids = dict(_GENE_NAMES), list(_GENE_NAMES_ORDER)
+    own = _GOI_QUERY_NAME[0]
+    if not _GOI_FROM_CDS[0] and own and _named(own) is None:
+        table["GOI_" + own] = _goi_own_name_row(own)
+        ids.append("GOI_" + own)
     out_path = getattr(args, "gene_names_out", "") or ""
     if not out_path:
         out_path = re.sub(r"(_synteny_plot)?\.html$", "", args.output) + "_gene_names.tsv"
     try:
-        _gnames.write_names_tsv(out_path, table, ids, lookup_note=note)
+        _gnames.write_names_tsv(out_path, table, ids, lookup_note=_GENE_NAMES_NOTE[0])
         print(f"Gene-names table saved to {out_path}")
     except OSError as exc:
         print(f"  (could not write the gene-names table: {exc})", file=sys.stderr)
+
+
+# The full name of the GOI's row in the names table when no annotated CDS lies under its home hits.
+GOI_OWN_NAME_FULL = "query hits on no annotated CDS"
+
+
+def _goi_own_table_row(home_goi, colour):
+    """The one GOI row of the names table when the GOI's home hits lie on no annotated CDS
+    (not _GOI_FROM_CDS): the GOI's display label, as in the GOI column and the titles, not the
+    name of a home gene that only overlaps the hits (an lncRNA over a curated seed's hit, a
+    gene with the GOI in an intron; review of freeze item 42). Such a gene is named as the one
+    the home row draws in the GOI's place. Without a GOI name (no model carries one) and without
+    such a gene, the row of a bare query hit, as before."""
+    over = [clean_gene_label(g["name"]) if _named(g["name"]) is None else _home_gene_label(g["name"])
+            for g in home_goi if not (g.get("name") or "").startswith("GOI")]
+    own = _goi_own_name_row(_GOI_QUERY_NAME[0])
+    label = _GOI_DISPLAY_LABEL[0] or (_gnames.display_label(own) if own else "")
+    if not over and (not label or label == "GOI"):
+        return _gnames.table_row(None, "", colour, is_goi=True)
+    full = (own or {}).get("full_name") or GOI_OWN_NAME_FULL
+    if over:
+        full += f" (home row: {', '.join(over)})"
+    source = (own or {}).get("source", "")
+    return {"label": label or "GOI", "full": full, "id": "",
+            "source": _gnames.SOURCE_TEXT.get(source, "") if label and label != "GOI" else "",
+            "derived": source == _gnames.SOURCE_PRODUCT, "named": True, "is_goi": True,
+            "colour": colour}
 
 
 def _gene_name_rows(home_genes, gene_colours, only=None, goi_colour=None):
     """Rows of the gene-names table for the home genes a figure shows, in home order.
 
     `only` limits the rows to those gene names (a grid that dropped columns);
-    GOI genes are always listed.
+    GOI genes are always listed. When the query hits lie on no annotated CDS (not
+    _GOI_FROM_CDS), the GOI genes give one row, named as the GOI column names the GOI
+    (_goi_own_table_row), at the place of the first of them.
     """
+    sorted_genes = sorted(home_genes, key=lambda g: g.get("start", 0))
+
+    def is_goi_gene(g):
+        return is_goi(g.get("name", "") or "") or is_goi(g.get("home_gene_id", "") or "")
+    own_row = not _GOI_FROM_CDS[0]
+    home_goi = [g for g in sorted_genes if g.get("name") and is_goi_gene(g)] if own_row else []
     rows, seen = [], set()
-    for g in sorted(home_genes, key=lambda g: g.get("start", 0)):
+    for g in sorted_genes:
         nm = g.get("name", "")
-        goi = is_goi(nm) or is_goi(g.get("home_gene_id", "") or "")
+        goi = is_goi_gene(g)
         if not nm or nm in seen or (only is not None and not goi and nm not in only):
             continue
         seen.add(nm)
+        colour = (goi_colour or GOI_COLOUR) if goi else gene_colours.get(nm, UNMATCHED_CLR)
+        if goi and own_row:
+            if g is home_goi[0]:
+                rows.append(_goi_own_table_row(home_goi, colour))
+            continue
         named = _named(nm)
         if named is None and not goi:
             continue
-        colour = (goi_colour or GOI_COLOUR) if goi else gene_colours.get(nm, UNMATCHED_CLR)
         rows.append(_gnames.table_row(named, clean_gene_label(nm), colour, is_goi=goi))
     return rows
 
@@ -2468,8 +2552,8 @@ def _ribbon_legend_groups(goi_label, low_quality=False, elsewhere=False):
             ("★", "GOI name, on the home row"),
             ("×N", "N copies (the best call and every call of at least medium confidence)"),
             ("+N weak", "further weak calls; all calls are drawn")]
-            + ([("+N elsewhere", "counted calls outside the neighbourhood drawn; listed in the "
-                                 "anchor grid after //")] if elsewhere else [])),
+            + ([("+N elsewhere", "counted calls outside the stretch drawn; listed in the "
+                                 "anchor grid")] if elsewhere else [])),
     ]
 
 
@@ -3543,7 +3627,12 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
         # Clean label (see _clean_species_for_leaf above).
         sp_label = _clean_species_for_leaf(leaf.name)
         if sp_label is None:
-            label = f"{_home_gene_label(leaf.name, clean_gene_label(leaf.name))} (home)"
+            base = _home_gene_label(leaf.name, clean_gene_label(leaf.name))
+            own = _GOI_QUERY_NAME[0]
+            if not _GOI_FROM_CDS[0] and own and _GOI_DISPLAY_LABEL[0] \
+                    and leaf.name in (own, "GOI_" + own):
+                base = _GOI_DISPLAY_LABEL[0]      # the GOI's name, as the other figures give it
+            label = f"{base} (home)"
             named = _named(leaf.name)
             if named and not any(r["label"] == _gnames.display_label(named) for r in name_rows):
                 name_rows.append(_gnames.table_row(named, "", colour, is_goi=True))
@@ -4636,7 +4725,7 @@ def _goi_display_label(all_tracks):
     if not cand:
         return "GOI"
     top = cand.most_common(1)[0][0]
-    return _home_gene_label(top, top)
+    return _gnames.display_label(_goi_own_name_row(top), top)
 
 
 def _is_local_copy(gene, best, reach_bp):
@@ -5696,9 +5785,15 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
             keep = [r for r in candidate_regions if r in goi_candidate_regions or r in strong]
             genes = (filter_genes_to_candidate_regions(genes_all, keep) if strong
                      else goi_only_genes)
-            # The regions left out that hold a model (with the GOI models below the cap)
-            left_out = [(r, len(filter_genes_to_candidate_regions(genes_all, [r])),
-                         len(filter_genes_to_candidate_regions(capped_goi, [r])))
+            # The regions left out that hold a model the kept regions do not hold (with the GOI
+            # models below the cap): a region inside a kept one (cluster_grs widens a GOI region
+            # to its search block) is drawn through it, and a model drawn is not left out.
+            in_kept = {id(g) for g in genes}
+            in_kept |= {id(g) for g in filter_genes_to_candidate_regions(capped_goi, keep)}
+            left_out = [(r, sum(1 for g in filter_genes_to_candidate_regions(genes_all, [r])
+                                if id(g) not in in_kept),
+                         sum(1 for g in filter_genes_to_candidate_regions(capped_goi, [r])
+                             if id(g) not in in_kept))
                         for r in candidate_regions if r not in keep]
             left_out = [(r, n, k) for r, n, k in left_out if n + k]
             candidate_regions = keep
@@ -6008,8 +6103,9 @@ def _counted_calls_outside_view(gff_file, genes):
     The view of a row is chosen for its neighbourhood: the GOI cap steers it
     (_cap_goi_genes), a region whose GOI models fell below the cap is narrowed away, and a
     GOI on a sequence without flanking genes is dropped when another GOI sequence has them
-    (select_target_genes). The anchor grid lists these calls after '//' and the ribbon plot
-    counts them ('+N elsewhere'), so no counted call is missing from the figures. The row's
+    (select_target_genes). The anchor grid lists these calls, at the locus or after '//' by
+    where they lie (synvoy_grid.split_calls), and the ribbon plot counts them ('+N elsewhere'),
+    so no counted call is missing from the figures. The row's
     GFF is parsed as for the view (fragments hidden in the default figures, overlap dedup,
     no cap); its console lines and fragment count are not repeated.
     """
@@ -6204,7 +6300,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
         outside_view = _counted_calls_outside_view(gff_file, genes)
         if outside_view:
             print(f"[plot] {genome_id}: {len(outside_view)} counted GOI call(s) outside the "
-                  f"neighbourhood drawn: listed in the anchor grid after //")
+                  f"neighbourhood drawn: listed in the anchor grid")
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
@@ -6367,6 +6463,8 @@ def _run_figures(args, show_fragments=False, suffix=""):
 
     _GOI_QUERY_NAME[0] = _goi_query_name(all_tracks)
     _GOI_DISPLAY_LABEL[0] = _goi_display_label(all_tracks)
+    if not is_variant:
+        _write_gene_names_tsv(args)
     html = render_synteny_html(
         all_tracks, gene_colours,
         home_products, args,

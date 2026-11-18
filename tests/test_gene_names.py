@@ -379,6 +379,7 @@ def names(monkeypatch):
     monkeypatch.setattr(ps, "_GENE_NAMES", dict(NAMES))
     monkeypatch.setattr(ps, "_GENE_NAMES_NOTE", ["ok"])
     monkeypatch.setattr(ps, "_GOI_NAMES", {"gene-Melt"})
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])     # the query hits fall on gene-Melt's CDS
     return NAMES
 
 
@@ -513,6 +514,8 @@ def test_interactive_ribbon_plot_has_no_table(names):
 def test_load_gene_names_end_to_end(tmp_path, gff, monkeypatch, capsys):
     monkeypatch.setattr(ps, "_GENE_NAMES", {})
     monkeypatch.setattr(ps, "_GENE_NAMES_NOTE", [""])
+    monkeypatch.setattr(ps, "_GENE_NAMES_ORDER", [])
+    monkeypatch.setattr(ps, "_GOI_NAME_ROWS", {})
     home_genes = [
         {"name": "gene-Melt", "start": 100, "end": 900, "display_name": "Melt"},
         # the BED's display column holds a transcript accession for this gene
@@ -526,6 +529,7 @@ def test_load_gene_names_end_to_end(tmp_path, gff, monkeypatch, capsys):
     args = SimpleNamespace(home_gff=gff, gene_names_tsv="", gene_names_out="",
                            no_network=True, gene_name_lookup=False, output=str(out))
     ps._load_gene_names(args, home_genes)
+    ps._write_gene_names_tsv(args)                             # once the GOI's name is known
     assert ps._home_gene_label("gene-LOC726817") == "PTL*"      # not XM_006567126.3
     assert ps._home_gene_label("gene-LOC100578368") == "LOC100578368"
     assert ps._home_gene_label("g42") == "ARGK*"
@@ -540,6 +544,7 @@ def test_load_gene_names_end_to_end(tmp_path, gff, monkeypatch, capsys):
     args.gene_names_tsv = str(edited)
     args.gene_names_out = str(tmp_path / "second.tsv")
     ps._load_gene_names(args, home_genes)
+    ps._write_gene_names_tsv(args)
     assert ps._home_gene_label("gene-LOC726817") == "Ptl"
     assert (tmp_path / "second.tsv").exists()
 

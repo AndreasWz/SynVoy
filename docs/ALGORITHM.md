@@ -554,9 +554,12 @@ PLM and structural searches on their own run no Augustus.
 The borrowing (`borrow_annotations.py`):
 
 1. the home locus is the best interval of the primary home locus (§5.4), with a window of
-   `pred_flank_window` (50 kb) around it, doubled until it holds 2 × `n_flanking_genes`
-   predicted genes or spans 500 kb (the doubling that reaches 500 kb is kept, so the
-   window stays below 1 Mb);
+   `pred_flank_window` (50 kb) on each side, the flank doubled until the window holds
+   2 × `n_flanking_genes` predicted genes or spans 500 kb. The doubling that first reaches
+   500 kb is kept, so a window that had to grow ends below 1 Mb (about 800 kb at the
+   default for a short locus); the first window, the locus ± `pred_flank_window`, is kept
+   as it is when it already spans 500 kb (a `pred_flank_window` of 250 kb or more gives a
+   window of the locus plus twice that);
 2. the target is the closest annotated target (at least 10 CDS rows) by the run's
    phylogenetic distances (PHYLO_SORT runs before this step). A target is any genome file
    the search reads (`.fna`, `.fa` or `.fasta`, plain or gzipped) with its annotation beside
@@ -578,12 +581,15 @@ The predictions and the borrowed models form one merged GFF. The home proteome o
 run is built from it (the longest coding model per gene), without the genes over the
 query's own home model, and the report flags it as partial (`home_annotation`).
 The home genome holds annotation only in stretches: the prediction windows around the
-query's home hits and, when gene models were transferred, the window of step 1. Their
-header lines (`##synvoy-annotated-window <scaffold> <start> <end> predicted|borrowed`)
-travel in the merged GFF, and the flank walk stays inside the stretch that holds the locus
-(windows that overlap or touch are one stretch): beyond it the next gene the file lists was
-predicted around another hit, possibly megabases away, and the genes in between are not
-annotated. A side that ends at the stretch's edge with fewer than `n_flanking_genes`
+query's home hits and, when gene models were transferred, the stretch they cover, from
+the locus to the outermost transferred model on each side (not the whole window of step 1,
+which can hold the prediction windows of other home hits). Their header lines
+(`##synvoy-annotated-window <scaffold> <start> <end> predicted|borrowed`) travel in the
+merged GFF, and the flank walk stays inside the stretch that holds the locus (windows that
+overlap or touch are one stretch): beyond it the next gene the file lists was predicted
+around another hit, possibly megabases away, and the genes in between are not annotated.
+A prediction window that overlaps or touches the locus's stretch is part of it, so the walk
+goes on into it there, over DNA that is annotated without a gap. A side that ends at the stretch's edge with fewer than `n_flanking_genes`
 anchors is logged with a warning (raise `pred_flank_window`, or give the home GFF).
 Predictions are written as gene, mRNA and CDS rows, and a CDS that belongs to no feature
 of the merged file still counts as a gene; AUGUSTUS proteins carry their region and
@@ -1660,13 +1666,16 @@ from those copies.
   the match (E in its place, the block's E_syn, bits). The GOI cap (`max_goi_per_genome`,
   10; the `local_family` module max(10, `c` + 1)) only steers which neighbourhood a row
   shows: every GOI model inside the chosen view is drawn. A counted call (HIGH or MEDIUM)
-  that the view leaves out is listed in the anchor grid after `//` and counted in the
-  ribbon plot's label (`+N elsewhere`).
-- **GOI name.** The GOI column, the titles, the legends and the home row's label name the
-  GOI after the annotated home gene on whose CDS the query hits fall. Without such a gene the
-  name is the GOI's own, as its target models carry it: a home gene that only overlaps the
-  hits (an lncRNA, a gene with the GOI in an intron) is still drawn in the GOI's place on the
-  home row, but it does not name the GOI.
+  that the view leaves out is listed in the anchor grid, placed by the rule of the other
+  calls (at the locus when it lies within reach of the best call in view, else after `//`),
+  and counted in the ribbon plot's label (`+N elsewhere`).
+- **GOI name.** The GOI column, the titles, the legends, the home row's label and the GOI's
+  row of the Gene names table name the GOI after the annotated home gene on whose CDS the
+  query hits fall. Without such a gene the name is the GOI's own, as its target models carry
+  it, and `_gene_names.tsv` holds it as a row `GOI_<name>` (source `query_name`): a home gene
+  that only overlaps the hits (an lncRNA, a gene with the GOI in an intron) is still drawn in
+  the GOI's place on the home row, and the table names it there (`home row: …`), but it does
+  not name the GOI.
 
 - **Home row.** The GOI is drawn from the home annotation: the transcript whose CDS
   covers the hits best. Only coding exons are drawn.
@@ -1676,17 +1685,18 @@ from those copies.
   them and to the regions the scorer wrote as `goi_missing_but_strong_synteny`
   (`Reg<k>_FLANKonly<N>_…`): a neighbourhood without a GOI model, such as a homeolog that
   lost the gene, stays in the row. The plot log names every region left out that holds a
-  model. When the regions hold no GOI model, the row shows the models within
-  `flank_fallback_bp` of the GOI models on the scaffold that holds most of them. When the
-  models lie on 20 sequences or fewer, a GOI scaffold without flanking genes is left out
-  when another GOI scaffold has them, and the row keeps the GOI scaffolds, every scaffold
-  with at least 3 flanking genes, and every scaffold that holds a flanking gene placed on
-  none of those (most flanking genes first); when that would keep fewer than 30 % of the
-  models on more than 3 scaffolds, it keeps them all.
+  model the kept regions do not also hold. When the regions hold no GOI model, the row
+  shows the models within `flank_fallback_bp` of the GOI models on the scaffold that holds
+  most of them. When the models lie on 20 sequences or fewer, a GOI scaffold without
+  flanking genes is left out when another GOI scaffold has them, and the row keeps the GOI
+  scaffolds, every scaffold with at least 3 flanking genes, and every scaffold that holds a
+  flanking gene placed on none of those (most flanking genes first); when that would keep
+  fewer than 30 % of the models on more than 3 scaffolds, it keeps them all.
 - **Target rows.** A scaffold with at least 3 flanking genes is mirrored when at least
   70 % of them are on the opposite strand to home and their order does not contradict it,
   or when their order is clearly reversed and at least half of them are on the opposite
-  strand.
+  strand. The counted calls on it that the view leaves out are mirrored with it, so the
+  anchor grid draws every call of the scaffold in the same orientation.
 - **Synteny plot.** Genes are stacked in at most 3 lanes; fragment models are hidden
   in the default figure and shown in a `_with_fragments` variant.
 - **Anchor grid.** One row per species, one column per home gene. A flanking gene with

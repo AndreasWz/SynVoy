@@ -16,7 +16,10 @@ should show:
 
 Now the strong neighbourhoods are drawn, every region left out is named on the console, a
 sequence that holds a neighbour placed nowhere else is kept, and the counted calls outside the
-view are listed in the anchor grid after '//' and counted in the ribbon plot ('+N elsewhere').
+view are listed in the anchor grid and counted in the ribbon plot ('+N elsewhere'). In the grid
+they are placed as the calls in view are: at the locus when they lie within reach of it (a copy of
+a tandem array beyond the cap), after '//' on another scaffold or farther away (review of item 55),
+and a scaffold drawn reversed mirrors them with it.
 """
 import contextlib
 import csv
@@ -236,11 +239,13 @@ def test_the_anchor_grid_lists_counted_calls_outside_the_view_after_the_break():
         ("locus", "chr1", "model"), ("elsewhere", "chr3", "model"), ("elsewhere", "chr3", "model")]
     assert info["goi_calls_outside_view"] == 2 and info["goi_copies"] == 3
     assert ">//</text>" in svg
-    assert ("2 of them are counted calls (high or medium confidence) outside the stretch of their "
-            "genome that the ribbon plot and the gene-position map draw.") in legend
+    assert "Calls after // lie on another scaffold or farther from the locus than the neighbourhood is long." in legend
+    assert ("2 counted calls (high or medium confidence) are listed that the ribbon plot and the "
+            "gene-position map do not draw: they lie outside the stretch of their genome those "
+            "figures show.") in legend
     # the full grid's tooltip says where the call lies
     full = ps.render_anchor_grid(*_grid_tracks([50_000]), {}, {}, SimpleNamespace())
-    assert "outside the neighbourhood drawn for this genome" in full
+    assert "outside the stretch the ribbon plot draws for this genome" in full
     # without such calls the grid is drawn as before
     plain_svg, plain_legend, plain_source, plain_info = ps.render_anchor_grid_print(
         *_grid_tracks([]), {}, SimpleNamespace())
@@ -255,8 +260,8 @@ def test_the_ribbon_plot_counts_them_and_the_genome_has_the_gene():
                                    end_plot=9300, confidence="LOW", identity=30.0))
     assert ps._track_label_jobs(tracks[1], {})[0][1] == "+1 weak +2 elsewhere"
     texts = [t for _, rows in ps._ribbon_legend_groups("T", elsewhere=True) for _, t in rows]
-    assert any(t.startswith("counted calls outside the neighbourhood drawn") for t in texts)
-    assert not any("outside the neighbourhood" in t for _, rows in ps._ribbon_legend_groups("T")
+    assert "counted calls outside the stretch drawn; listed in the anchor grid" in texts
+    assert not any("outside the stretch" in t for _, rows in ps._ribbon_legend_groups("T")
                    for _, t in rows)
     # a genome whose only counted calls lie outside the view is no "GOI not placed" genome
     weak = {"genes": [dict(tracks[1]["genes"][-1])]}
@@ -322,12 +327,183 @@ def test_a_counted_call_outside_the_view_reaches_the_figures(tmp_path):
         env=dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1"))
     assert proc.returncode == 0, proc.stderr
     assert ("[plot] GCA_000000009.1: 1 counted GOI call(s) outside the neighbourhood drawn: "
-            "listed in the anchor grid after //") in proc.stdout
+            "listed in the anchor grid\n") in proc.stdout
     with open(tmp_path / "synteny_block_locus_1_anchor_grid_print.source.tsv", newline="") as fh:
         goi = [r for r in csv.DictReader(fh, delimiter="\t")
                if r["genome_id"] == "GCA_000000009.1" and r["column"] == "QRY1"]
     assert [(r["position"], r["scaffold"], r["confidence"]) for r in goi] == [
         ("locus", "tchr5", "HIGH"), ("elsewhere", "tchr9", "HIGH")]
     assert "+1 elsewhere" in out.read_text()
-    assert re.search(r"1 of them is a counted call", (tmp_path / (
-        "synteny_block_locus_1_anchor_grid_print.legend.txt")).read_text())
+    assert re.search(r"1 counted call \(high or medium confidence\) is listed that the ribbon plot", (
+        tmp_path / "synteny_block_locus_1_anchor_grid_print.legend.txt").read_text())
+
+
+# ---------------------------------------------- review of items 48 and 55 (round 1) ----
+
+def test_a_region_drawn_through_a_kept_one_is_not_named_left_out(tmp_path, monkeypatch):
+    """cluster_grs widens a GOI region to its search block, so a weaker region can lie inside
+    it: its models are drawn, and the log named it left out with them (review of item 48)."""
+    rows = [_goi("chr1", 50_000, 52_000)] + [_flank("chr1", 10_000 * k, 10_000 * k + 900, f"gene-F{k}")
+                                             for k in range(1, 9)]
+    regions = [("chr1", 0, 100_000, "Reg1_G9_CHIGH_S0.9"), ("chr1", 65_000, 95_000, "Reg2_G3_CLOW_S0.2")]
+    drawn, log, _, _ = _select(tmp_path, rows, regions, monkeypatch=monkeypatch)
+    assert drawn == {"chr1": 9} and "left out" not in log
+    # a region reaching beyond the kept one is named with the models it alone holds
+    rows.append(_flank("chr1", 130_000, 130_900, "gene-F9"))
+    regions[1] = ("chr1", 65_000, 140_000, "Reg2_G4_CLOW_S0.2")
+    drawn, log, _, _ = _select(tmp_path, rows, regions, monkeypatch=monkeypatch)
+    assert drawn == {"chr1": 9}
+    assert "left out Reg2_G4_CLOW_S0.2 chr1:65001-140000 (1 model)" in log
+
+
+def test_a_capped_copy_beside_the_drawn_array_is_listed_at_the_locus(tmp_path, monkeypatch):
+    """Twelve copies at the end of a neighbourhood with the GOI cap at 10: the two weakest lie
+    3 kb past the last copy drawn. They were drawn after '//', listed as 'elsewhere', and the
+    legend said they lie on another scaffold or farther away (review of item 55)."""
+    rows = [_flank("chr1", 10_000 * k, 10_000 * k + 900, f"gene-F{k}") for k in range(0, 3)]
+    rows += [_goi("chr1", 40_000 + 3000 * k, 41_000 + 3000 * k, ident=90.0 - k,
+                  conf="HIGH" if k < 10 else "MEDIUM") for k in range(12)]
+    regions = [("chr1", 0, 100_000, "Reg1_G3_CHIGH_S0.9")]
+    _drawn, _log, gff, genes = _select(tmp_path, rows, regions, cap=10, monkeypatch=monkeypatch)
+    outside = ps._counted_calls_outside_view(gff, genes)
+    assert [(g["start"], g["confidence"]) for g in outside] == [(70_000, "MEDIUM"), (73_000, "MEDIUM")]
+    names = [f"gene-F{k}" for k in range(3)]
+    home = [{"chrom": "h", "start": 10_000 * k, "end": 10_000 * k + 900, "start_plot": 10_000 * k,
+             "end_plot": 10_000 * k + 900, "name": n, "strand": "+", "exon_coords": []} for k, n in enumerate(names)]
+    home.append({"chrom": "h", "start": 40_000, "end": 41_000, "start_plot": 40_000, "end_plot": 41_000,
+                 "name": "GOI_X", "strand": "+", "exon_coords": []})
+    for g in genes:
+        g.setdefault("start_plot", g["start"])
+        g.setdefault("end_plot", g["end"])
+    tracks = [{"label": "Home", "species": "Apis mellifera", "is_home": True, "genome_id": "home",
+               "offset": 0, "breaks": [], "genes": home},
+              {"label": "T0", "species": "Bombus x", "is_home": False, "genome_id": "G", "offset": 0,
+               "breaks": [], "genes": genes, "goi_outside_view": outside}]
+    svg, legend, source, info = ps.render_anchor_grid_print(
+        tracks, {n: ps.GENE_PALETTE[k] for k, n in enumerate(names)}, {}, SimpleNamespace())
+    goi = [(r["position"], int(r["start"]), r["confidence"]) for r in source
+           if r["row"] == 2 and r["column"] == "X"]
+    assert goi == [("locus", 40_000 + 3000 * k, "HIGH" if k < 10 else "MEDIUM") for k in range(12)]
+    assert ">//</text>" not in svg and "Calls after //" not in legend
+    assert info["goi_calls_outside_view"] == 2
+    assert "2 counted calls (high or medium confidence) are listed that the ribbon plot" in legend
+    # the ribbon plot, which does not draw them, still counts them
+    assert ps._track_label_jobs(tracks[1], {})[0][1] == "×10 +2 elsewhere"
+
+
+def _flipped_calls():
+    """Three copies in view on a scaffold drawn reversed (plot positions mirrored), and an
+    off-view copy beyond the highest genomic position (no plot position)."""
+    def g(start, **kw):
+        d = {"chrom": "c", "start": start, "end": start + 300, "strand": "-", "genomic_strand": "+",
+             "name": f"GOI_X|m{start}", "gff_id": f"GOI_X|m{start}", "home_gene_id": "GOI_X",
+             "role": "goi", "confidence": "HIGH", "identity": 80.0, "evidence_type": "exon_annotation"}
+        d.update(kw)
+        return d
+    drawn = [g(s, start_plot=100_000 - s - 300, end_plot=100_000 - s) for s in (10_000, 12_000, 14_000)]
+    off = g(16_000, confidence="MEDIUM", outside_view=True)
+    return drawn, off
+
+
+def test_off_view_calls_on_a_reversed_scaffold_take_its_order(monkeypatch):
+    monkeypatch.setattr(sg, "_PS", ps)
+    drawn, off = _flipped_calls()
+    tmap = {sg.GOI_KEY: {"best": drawn[0], "genes": drawn, "n": 3}}
+    _best, calls = sg.split_calls(tmap, 50_000, [off])
+    # drawn right to left in genomic terms: 14 kb, 12 kb, 10 kb; the off-view copy at 16 kb comes first
+    assert [(g["start"], away) for g, away, _c in calls] == [
+        (16_000, False), (14_000, False), (12_000, False), (10_000, False)]
+    # on a scaffold drawn forwards it follows the copies
+    for d in drawn + [off]:
+        d.pop("genomic_strand")
+        d["strand"] = "+"
+    for d in drawn:
+        d["start_plot"], d["end_plot"] = d["start"], d["end"]
+    _best, calls = sg.split_calls(tmap, 50_000, [off])
+    assert [g["start"] for g, _a, _c in calls] == [10_000, 12_000, 14_000, 16_000]
+    # far away on the same scaffold: after //
+    far = dict(off, start=900_000, end=900_300)
+    _best, calls = sg.split_calls(tmap, 5_000, [far])
+    assert [(g["start"], away) for g, away, _c in calls][-1] == (900_000, True)
+
+
+def test_off_view_calls_with_no_call_in_view_are_placed_by_the_flanking_genes(monkeypatch):
+    monkeypatch.setattr(sg, "_PS", ps)
+    near = {"chrom": "c", "start": 25_000, "end": 25_300, "strand": "+", "gff_id": "GOI_X|a",
+            "home_gene_id": "GOI_X", "role": "goi", "confidence": "HIGH", "identity": 80.0,
+            "evidence_type": "exon_annotation", "outside_view": True}
+    other = dict(near, chrom="d", start=5_000, end=5_300, gff_id="GOI_X|b", confidence="MEDIUM")
+    flank = [{"chrom": "c", "start": s, "end": s + 900, "start_plot": s, "end_plot": s + 900}
+             for s in (10_000, 20_000)]
+    tmap = {f"gene-F{k}": {"best": f, "genes": [f], "n": 1} for k, f in enumerate(flank)}
+    best, calls = sg.split_calls(tmap, 20_000, [other, near])
+    assert best is near
+    assert [(g["gff_id"], away) for g, away, _c in calls] == [("GOI_X|a", False), ("GOI_X|b", True)]
+    assert sg.split_calls({}, 20_000, [near])[1] == [(near, True, True)]   # nothing drawn: no locus
+
+
+def test_off_view_calls_are_mirrored_with_their_scaffold():
+    """_orient_tracks_to_home flipped only the genes in view, so an off-view copy on a scaffold
+    drawn reversed kept its genomic strand and pointed against the copies beside it."""
+    home = [{"chrom": "h", "start": 1000 * k, "end": 1000 * k + 500, "start_plot": 1000 * k,
+             "end_plot": 1000 * k + 500, "name": f"gene-F{k}", "strand": "+"} for k in range(4)]
+    target = [{"chrom": "t", "start": 10_000 - 1000 * k, "end": 10_500 - 1000 * k,
+               "start_plot": 10_000 - 1000 * k, "end_plot": 10_500 - 1000 * k, "name": f"t{k}",
+               "home_gene_id": f"gene-F{k}", "strand": "-"} for k in range(4)]
+    off = {"chrom": "t", "start": 50_000, "end": 51_000, "strand": "-", "name": "GOI_X|m",
+           "home_gene_id": "GOI_X", "role": "goi", "exon_coords": [(50_000, 50_200), (50_700, 51_000)],
+           "outside_view": True}
+    elsewhere = dict(off, chrom="u", exon_coords=[(50_000, 50_200)])
+    tracks = [{"is_home": True, "genes": home},
+              {"is_home": False, "genes": target, "breaks": [], "goi_outside_view": [off, elsewhere]}]
+    assert ps._orient_tracks_to_home(tracks) == 1
+    assert tracks[1]["flipped_chroms"] == ["t"]
+    assert (off["strand"], off["genomic_strand"]) == ("+", "-")
+    assert off["exon_coords"] == [(50_000, 50_300), (50_800, 51_000)]
+    assert elsewhere["strand"] == "-" and "genomic_strand" not in elsewhere   # another scaffold
+
+
+def test_an_off_view_call_on_a_reversed_scaffold_points_as_it_is_drawn(tmp_path):
+    """plot_synteny.py end to end: the neighbourhood reversed on tchr5 and a second HIGH call
+    2 Mb away on the same scaffold, both on '-'."""
+    loci = [("FLA", 1000, 2000), ("FLB", 4000, 5000), ("QRY1", 7000, 8200), ("FLC", 10000, 11000),
+            ("FLD", 13000, 14000)]
+    (tmp_path / "synteny_block_locus_1.bed").write_text("".join(
+        f"hchr1\t{s - 1}\t{e}\tgene-{g}\t.\t+\t{g}\n" for g, s, e in loci if g != "QRY1"))
+    (tmp_path / "locus_1.bed").write_text("hchr1\t7100\t8100\tgene_loc\t1e-40\t+\n")
+    home = ["##gff-version 3"]
+    for g, s, e in loci:
+        home += [f"hchr1\tRefSeq\tgene\t{s}\t{e}\t.\t+\t.\tID=gene-{g};Name={g}",
+                 f"hchr1\tRefSeq\tmRNA\t{s}\t{e}\t.\t+\t.\tID=rna-{g};Parent=gene-{g}",
+                 f"hchr1\tRefSeq\tCDS\t{s}\t{e}\t.\t+\t0\tID=cds-{g};Parent=rna-{g}"]
+    (tmp_path / "home.gff").write_text("\n".join(home) + "\n")
+    rows = []
+    for g, s, e in loci:
+        ts, te = 520_000 - e, 520_000 - s
+        row = (_goi("tchr5", ts, te).replace("GOI_X", "GOI_QRY1") if g == "QRY1"
+               else _flank("tchr5", ts, te, f"gene-{g}"))
+        rows.append(row.replace("\t+\t.\t", "\t-\t.\t"))
+    rows.append(_goi("tchr5", 2_500_000, 2_501_200, ident=91.0).replace("GOI_X", "GOI_QRY1")
+                .replace("\t+\t.\t", "\t-\t.\t"))
+    gff = _gff(tmp_path, rows, "GCA_000000009.1.fna.gff")
+    (tmp_path / "GCA_000000009.1.fna.regions.bed").write_text(
+        "tchr5\t500000\t520000\tReg1_G5_CHIGH_S0.90\t0.90\t-\n")
+    out = tmp_path / "synteny_block_locus_1_synteny_plot.html"
+    proc = subprocess.run(
+        [sys.executable, os.path.join(REPO, "bin", "plot_synteny.py"),
+         "--home_bed", str(tmp_path / "synteny_block_locus_1.bed"),
+         "--query_bed", str(tmp_path / "locus_1.bed"), "--home_gff", str(tmp_path / "home.gff"),
+         "--target_gffs", gff, "--candidate_beds", str(tmp_path / "GCA_000000009.1.fna.regions.bed"),
+         "--output", str(out), "--no_network", "--common_names", "off", "--no_fragment_variant"],
+        capture_output=True, text=True, cwd=tmp_path,
+        env=dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1"))
+    assert proc.returncode == 0, proc.stderr
+    assert "Oriented 1 scaffold(s) to home" in proc.stdout
+    with open(tmp_path / "synteny_block_locus_1_anchor_grid_print.source.tsv", newline="") as fh:
+        goi = [r for r in csv.DictReader(fh, delimiter="\t")
+               if r["genome_id"] == "GCA_000000009.1" and r["column"] == "QRY1"]
+    assert [(r["position"], r["start"], r["strand_drawn"]) for r in goi] == [
+        ("locus", "511800", "+"), ("elsewhere", "2500000", "+")]
+    html = (tmp_path / "synteny_block_locus_1_anchor_grid.html").read_text()
+    tips = [t for t in re.findall(r"<title>([^<]*)</title>", html) if "2,500,0" in t or "2500000" in t]
+    assert tips and all("scaffold drawn reversed" in t for t in tips)

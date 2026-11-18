@@ -119,22 +119,53 @@ def test_region_products_and_the_borrowed_row(tmp_path):
 
 def test_the_merged_gff_names_the_annotated_windows(tmp_path):
     """The prediction windows (prodigal_on_regions.py) stay in the merged GFF's header, and the
-    home window is added as 'borrowed' only when gene models were transferred into it: the flank
-    walk does not step beyond them (extract_flanking_genes.walk_extent)."""
+    stretch the transferred models cover, from the locus to the outermost model, is added as
+    'borrowed' only when gene models were transferred: the flank walk does not step beyond them
+    (extract_flanking_genes.walk_extent). Not the whole window miniprot searched (review of item
+    45): window B, around another home hit at 40-56 kb, lay inside that window and joined the
+    locus's stretch."""
     from sequence_utils import annotated_window_line, read_annotated_windows
     pred = tmp_path / "pred.gff"
     pred.write_text("\n".join(["##gff-version 3", annotated_window_line("h", 0, 12000, "predicted"),
                                annotated_window_line("h", 40000, 56000, "predicted")]
                               + _gff_gene("p1", "h", 1001, 1900)) + "\n")
     out = tmp_path / "merged.gff"
-    ba.write_merged_gff(str(out), str(pred), set(), [], "T", ("h", 0, 30000))
+    locus = ("h", 6000, 6300)
+    ba.write_merged_gff(str(out), str(pred), set(), [], "T", locus)
     assert read_annotated_windows(str(out)) == {"h": [(0, 12000, "predicted"), (40000, 56000, "predicted")]}
-    ba.write_merged_gff(str(out), str(pred), set(), [_model("gene-T7", 19000, 21000, 0.8)], "T", ("h", 0, 30000))
+    ba.write_merged_gff(str(out), str(pred), set(), [_model("gene-T7", 19000, 21000, 0.8)], "T", locus)
     assert read_annotated_windows(str(out)) == {
-        "h": [(0, 12000, "predicted"), (0, 30000, "borrowed"), (40000, 56000, "predicted")]}
+        "h": [(0, 12000, "predicted"), (6000, 21000, "borrowed"), (40000, 56000, "predicted")]}
     lines = out.read_text().splitlines()
     assert lines[0] == "##gff-version 3" and all(ln.startswith("#") for ln in lines[:4])
     assert "ID=p1" in out.read_text() and "ID=borrowed_gene-T7" in out.read_text()
+
+
+def test_the_borrowed_stretch_runs_from_the_locus_to_the_outermost_model():
+    locus = ("h", 50000, 51000)
+    models = [_model("t1", 20000, 23000, 0.8), _model("t2", 70000, 74000, 0.7),
+              _model("t3", 900000, 905000, 0.9, chrom="other")]         # another scaffold: not counted
+    assert ba.borrowed_stretch(locus, models) == ("h", 20000, 74000)
+    assert ba.borrowed_stretch(locus, models[1:]) == ("h", 50000, 74000)  # one side only: from the locus
+    assert ba.borrowed_stretch(locus, [_model("t4", 50200, 50800, 0.8)]) == ("h", 50000, 51000)
+    assert ba.borrowed_stretch(locus, []) is None
+    assert ba.borrowed_stretch(locus, models[2:]) is None
+    assert ba.borrowed_stretch(None, models) is None
+
+
+def test_the_window_bound_the_docs_state():
+    """The window doubles its flank until it spans 500 kb (or holds 2 x n predictions); the
+    doubling that first reaches 500 kb is kept, so a window that had to grow is shorter than
+    1 Mb less the locus, while a first window that already spans 500 kb is kept as it is."""
+    goi = ("h", 5_000_000, 5_001_000)
+    for flank, width in ((50_000, 801_000), (100_000, 801_000), (200_000, 801_000), (300_000, 601_000)):
+        lo, hi = ba.home_window(goi, {}, 20_000_000, flank, 10)
+        assert hi - lo == width
+    lo, hi = ba.home_window(goi, {}, 20_000_000, 600_000, 10)
+    assert hi - lo == 1_201_000                                          # the first window, kept
+    long_locus = ("h", 5_000_000, 5_350_000)                            # 350 kb: one doubling
+    lo, hi = ba.home_window(long_locus, {}, 20_000_000, 50_000, 10)
+    assert hi - lo == 550_000 < 2 * ba.WINDOW_MAX_BP - 350_000
 
 
 def _hit(q, chrom, start, end):

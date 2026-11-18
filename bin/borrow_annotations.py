@@ -9,8 +9,11 @@ annotated target as real gene models, so they can be anchors:
 
   1. The home locus: the primary locus BED of split_loci (its best_interval row, else the row
      with the best bit score; never just the first row), and a window around it of
-     --pred_flank_window bp, doubled until it holds 2 x n_flanking predicted genes or spans
-     500 kb (the doubling that reaches 500 kb is kept, so the window stays below 1 Mb).
+     --pred_flank_window bp on each side, the flank doubled until the window holds
+     2 x n_flanking predicted genes or spans 500 kb. The doubling that first reaches 500 kb
+     is kept: a window that had to grow ends below 1 Mb (about 800 kb at the default 50 kb
+     for a short locus), and the window is never smaller than the locus +- pred_flank_window,
+     which is kept as it is when it already spans 500 kb (a flank of 250 kb or more).
   2. The target: the closest annotated target (>= 10 CDS rows) by the distances of
      --sorted_genomes; between several at that distance, or without distances, the one whose
      hits of the window's predicted proteins have the highest median identity. A target is a
@@ -34,8 +37,10 @@ annotated target as real gene models, so they can be anchors:
      does), without the genes over the query's own home model (goi_annotation.bed), with
      home_genes.tsv and home_annotation.json (source, counts, partial: true). Its header names
      the stretches SynVoy annotated (sequence_utils.ANNOTATED_WINDOW): the prediction windows,
-     and the home window when gene models were transferred into it. The flank walk does not
-     step beyond them.
+     and, when gene models were transferred, the stretch they cover: from the locus to the
+     outermost kept model on each side (borrowed_stretch), not the whole window of step 1, in
+     which the prediction windows of other home hits can lie. The flank walk does not step
+     beyond them.
 
 Before 2026-10-16 the borrowed rows were gene rows without CDS (the walk read them as
 non-coding: drawn, never anchors), placed by the first row of the hit BED (the alphabetically
@@ -115,9 +120,13 @@ def model_span(info):
 
 
 def home_window(goi, models, chrom_len, flank, n_flanking):
-    """The window around the home locus: +- ``flank`` bp, doubled until it holds 2 x n_flanking
-    predicted genes or spans WINDOW_MAX_BP; the doubling that reaches WINDOW_MAX_BP is kept, so
-    the window stays below 2 x WINDOW_MAX_BP. Returns (start, end)."""
+    """The window around the home locus: +- ``flank`` bp, the flank doubled until the window
+    holds 2 x n_flanking predicted genes or spans WINDOW_MAX_BP (or the whole scaffold).
+    The doubling that first reaches WINDOW_MAX_BP is kept: a window that had to grow is
+    shorter than 2 x WINDOW_MAX_BP less the locus's length (801 kb for a 1 kb locus at a
+    flank of 50 kb). The first window, locus +- ``flank``, is returned as it is when it
+    already spans WINDOW_MAX_BP, however long: a flank of WINDOW_MAX_BP / 2 or more gives
+    the locus + 2 x ``flank``. Returns (start, end)."""
     chrom, start, end = goi
     on_chrom = [model_span(m) for m in models.values() if m['chrom'] == chrom]
     pad = max(1, int(flank))
@@ -377,10 +386,31 @@ def borrowed_gff_rows(m, target_name):
     return rows
 
 
-def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name, home_window=None):
+def borrowed_stretch(locus, borrowed):
+    """``(chrom, start, end)`` (0-based, half-open) of the home genome the transferred models
+    annotate: from the locus ``(chrom, start, end)`` to the outermost model on each side, each
+    model whole (the flank walk takes a gene only when it lies wholly inside a stretch, and
+    the stretch holds the locus, from which the walk starts). None without a model on the
+    locus's scaffold.
+
+    Not the window the models were aligned to (home_window): that window grows to about
+    800 kb when the predictions around the locus are few, and the prediction windows of
+    other home hits inside it would join the locus's stretch, so the walk would step over
+    the unannotated DNA between them (review of freeze item 45)."""
+    if not locus or not borrowed:
+        return None
+    chrom, start, end = locus
+    spans = [_span(m['exons']) for m in borrowed if m.get('chrom', chrom) == chrom and m.get('exons')]
+    if not spans:
+        return None
+    return chrom, min([int(start)] + [s for s, _e in spans]), max([int(end)] + [e for _s, e in spans])
+
+
+def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name, locus=None):
     """The predictions (without the dropped genes and their children) and the borrowed models.
     The header keeps the predictions' annotated windows and, when models were borrowed, adds
-    ``home_window`` ((chrom, start, end), 0-based, half-open), the window they were aligned to."""
+    the stretch they cover as 'borrowed' (borrowed_stretch: from ``locus``, (chrom, start,
+    end), 0-based, half-open, to the outermost model on each side)."""
     drop_ids = set(dropped)
     header, lines = ["##gff-version 3"], []
     if predicted_gff and os.path.exists(predicted_gff):
@@ -409,8 +439,9 @@ def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name, home_w
             if top(fid) in drop_ids or top(a.get('Parent', '')) in drop_ids:
                 continue
             lines.append(ln)
-    if borrowed and home_window:
-        header.append(annotated_window_line(*home_window, "borrowed"))
+    stretch = borrowed_stretch(locus, borrowed)
+    if stretch:
+        header.append(annotated_window_line(*stretch, "borrowed"))
     for m in borrowed:
         lines.extend(borrowed_gff_rows(m, target_name))
     with open(path, 'w') as fh:
@@ -496,8 +527,8 @@ def main():
     record = {'source': 'predicted', 'partial': True, 'target': None, 'borrowed': 0,
               'predicted': len(predicted), 'predictions_dropped': 0}
 
-    def finish(borrowed, dropped, target_name, proteins, window=None):
-        write_merged_gff(args.output_gff, args.predicted_gff, dropped, borrowed, target_name, window)
+    def finish(borrowed, dropped, target_name, proteins, locus=None):
+        write_merged_gff(args.output_gff, args.predicted_gff, dropped, borrowed, target_name, locus)
         check_gene_ids([gid for gid, _n, _p in proteins], args.output_gff, args.output_proteins)
         write_fasta([(f"{gid} {name}", p) for gid, name, p in proteins], args.output_proteins)
         record.update(borrowed=len(borrowed), predictions_dropped=len(dropped),
@@ -571,7 +602,11 @@ def main():
     record['target'] = target_name
     record['target_choice'] = why
     record['target_region'] = f"{chrom}:{rs}-{re_}"
-    return finish(kept, dropped, target_name, proteins, (goi[0], lo, hi))
+    stretch = borrowed_stretch(goi, kept)
+    if stretch:
+        print(f"[borrow_annotations] The transferred models cover {stretch[0]}:{stretch[1]}-{stretch[2]} "
+              f"with the locus (the stretch the flank walk may use besides the predictions).")
+    return finish(kept, dropped, target_name, proteins, goi)
 
 
 if __name__ == "__main__":
