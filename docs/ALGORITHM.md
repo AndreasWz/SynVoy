@@ -1449,9 +1449,10 @@ record there is no such limit.
 
 **GOI models and GOI hits.** A cluster is gene-bearing when it lies within 20 kb of a GOI
 model of the search that is not LOW. Raw GOI hits of the genome-wide search stand in for
-models only where the search wrote no GOI model of any label (no target GFF): beside a model,
-LOW included, they are not used, so a place whose only model is LOW does not come back
-through its hits. "GOI model or GOI hit" below means this.
+models only where the search wrote no GOI model of any label (the target GFF holds no GOI
+row, or there is none): beside a model, LOW included, they are not used, so a place whose
+only model is LOW does not come back through its hits. "GOI model or GOI hit" below means
+this.
 
 **Score.** With `N` flanking genes at home:
 
@@ -1484,16 +1485,22 @@ and `synteny_score` is recomputed each time. `p = (count(null ≥ observed) + 1)
 Clusters near a GOI model or GOI hit (as for the bonus) are placed first. When no cluster
 lies near a GOI model or hit, each GOI model (not LOW, ± 20 kb) that no cluster touches is
 put first as a region of its own (`goi_anchor`), with a score of 0.60 for a HIGH model and
-0.40 otherwise. With `max_regions = 0`, every cluster with a score at or above the floor
+0.40 otherwise. With `max_regions = 0`, a region whose GOI model the search counted (the
+best GOI model within 20 kb, as in `goi_model_confidence`, is HIGH or MEDIUM and no answer
+of the genome-wide path) and every `goi_anchor` region are written whatever the floors and
+the cap. Then every cluster with a score at or above the floor
 (`max(0.03, 0.30 × the best score of all clusters)`) or with max(U, B) at least 3
-(`adaptive_unique_gene_floor`) is written, in this order, at most 6
-(`adaptive_max_regions`; the `dispersed_family` module: floors 0.45 and 0.08, at most 4);
-when none passes, the first cluster is written.
+(`adaptive_unique_gene_floor`) is added, in this order, until 6 regions are written
+(`adaptive_max_regions`, counting the regions kept for their model; the `dispersed_family`
+module: floors 0.45 and 0.08, at most 4); when nothing is written so, the first cluster is.
+With `max_regions` N > 0 the first N clusters in this order are written.
 
 **Strong synteny without a gene.** A cluster holding at least
 `strong_synteny_min_flanking` (⌈`n_flanking_genes`/2⌉ = 5) HIGH flanking models, with no GOI
-model (not LOW) and no GOI hit of the genome-wide search within 20 kb of it, is written as
-`goi_missing_but_strong_synteny`. Up to two such regions are added beyond the cap,
+model (not LOW) within 20 kb of it and, where the search wrote no GOI model of any label, no raw
+GOI hit there either, is written as `goi_missing_but_strong_synteny`. Beside any GOI model of the
+search (a LOW one too) a raw GOI hit does not prevent this, so such a region can hold one
+(`goi_hit_best_identity`). Up to two such regions are added beyond the cap,
 unless they lie inside a selected GOI region.
 
 **Dispersed hit.** A GOI-overlapping cluster with max(U, B) ≤ 1 that is not a
@@ -1763,12 +1770,14 @@ Consequences of the rules above that a reader of the results should know.
   `goi_hull_min_flanking` (4) HIGH flanking models.
 - Every block that passes the filter and the cap of §7.4 is searched; there is no
   early stop. Most windows hold no GOI model, and each can add LOW rows.
-- A genome whose MMseqs2 search fails for lack of memory, after retries, is not searched:
-  the report lists it, with the reason, under `summary.genomes_not_searched` and says in
-  `warnings` that it is not GOI-absent. When MMseqs2 cannot fit the genome's database into
-  its split limit (`Cannot fit databases into ...`) no retry is made, since every rung keeps
-  that limit: the reason is `mmseqs_split_memory_limit_too_small`, and `warnings` names
-  `--mmseqs_split_memory_limit` and `--iterative_search_memory`.
+- A genome whose MMseqs2 search fails for lack of memory (a memory message of MMseqs2, or a
+  step that dies without a message), after retries, is not searched: the report lists it,
+  with the reason, under `summary.genomes_not_searched` and says in `warnings` that it is
+  not GOI-absent. A search that fails with another error stops the run. When MMseqs2
+  cannot fit the genome's database into its split limit (`Cannot fit databases into ...`)
+  no retry is made, since every rung keeps that limit: the reason is
+  `mmseqs_split_memory_limit_too_small`, and `warnings` names `--mmseqs_split_memory_limit`
+  and `--iterative_search_memory`.
 - MMseqs2 keeps at most `mmseqs_max_seqs` (300) targets per query; the report counts the
   queries that reached it (`limits`), a lower bound.
 - Only the first sequence of a multi-sequence query is used (with a warning).

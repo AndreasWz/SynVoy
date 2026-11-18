@@ -13,7 +13,8 @@ neither sets a status. The locus is the first counted record of the species (els
 curation record) in the report's order, best first; its coordinates are 1-based as in the record.
 The strand comes from the run's GFF row of the record's model (plot_inputs_*/ and rescue/), else
 the placeholder '-'. ``extra`` names the counts (counted, curation, the genome's LOW rows) and
-the top region of the species, for information only.
+the top region of the species, for information only. A species is the report's genome id
+(report_genome_id), for the region BEDs too, without .fa / .fna (.gz).
 
 Usage: synvoy_calls.py RESULTS_DIR CALLS_TSV
 """
@@ -30,9 +31,34 @@ COLUMNS = ["species", "accession", "called_status", "locus_chrom", "locus_start"
 REGION_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
 
+# The report's genome id (bin/generate_report.py, canonical_genome_id): the per-locus staging
+# prefix goes, a GCA_/GCF_ accession in the name is the id, else the known file suffixes are
+# stripped. Kept in step with the report by tests/test_benchmark_calls_mapping.py.
+_STAGING_PREFIX_RE = re.compile(r"^(locus_[A-Za-z0-9.]+|\d+)__")
+_KNOWN_SUFFIXES = (".homology.tsv", ".scores.tsv", ".regions.bed", ".gff3", ".gff", ".faa", ".fna",
+                   ".fasta", ".fa", ".m8", ".hull_rescue", ".rescue")
+
+
+def report_genome_id(name):
+    """The report's genome id of a file or genome name (generate_report.canonical_genome_id)."""
+    name = _STAGING_PREFIX_RE.sub("", os.path.basename(name or ""), count=1)
+    m = re.search(r"(GC[AF]_\d+\.\d+)", name)
+    if m:
+        return m.group(1)
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _KNOWN_SUFFIXES:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                changed = True
+    return re.sub(r"(_new_genes|\.regions|\.candidates)$", "", name)
+
+
 def canon_species(name):
-    """The species of a report genome: the genome name without .fa / .fna (.gz)."""
-    return re.sub(r"\.f(n)?a(\.gz)?$", "", name or "")
+    """The species of a report genome or of a run file (a region BED): its report genome id,
+    without .fa / .fna (.gz), so a BED and the report's records name a genome alike."""
+    return re.sub(r"\.f(n)?a(\.gz)?$", "", report_genome_id(name))
 
 
 def load_report(results_dir):
@@ -85,7 +111,7 @@ def top_regions(results_dir):
     first, then score, then the name."""
     best = {}
     for bed in sorted(glob.glob(os.path.join(results_dir, "regions", "**", "*.regions.bed"), recursive=True)):
-        sp = canon_species(re.sub(r"\.regions\.bed$", "", os.path.basename(bed)))
+        sp = canon_species(os.path.basename(bed))
         with open(bed) as fh:
             for line in fh:
                 f = line.rstrip("\n").split("\t")

@@ -60,7 +60,8 @@ def parse_args():
         "--max_regions",
         type=int,
         default=0,
-        help="Max regions to output (0 = adaptive: emit all above relative threshold, capped at adaptive_max_regions)",
+        help="Max regions to output (0 = adaptive: the regions of counted GOI models and the GOI-anchor "
+             "regions, then all above the relative threshold, capped at adaptive_max_regions)",
     )
     parser.add_argument(
         "--adaptive_score_floor_frac",
@@ -81,7 +82,8 @@ def parse_args():
         "--adaptive_max_regions",
         type=int,
         default=6,
-        help="Adaptive mode: hard cap on number of regions emitted",
+        help="Adaptive mode: cap on the number of regions emitted; the regions of counted GOI "
+             "models and the GOI-anchor regions are kept beyond it",
     )
     parser.add_argument(
         "--adaptive_unique_gene_floor",
@@ -458,6 +460,15 @@ def best_goi_model(models, chrom, start, end, padding_bp=0):
         return None
     return min(over, key=lambda m: (not m["counted"], -synvoy_label.LABEL_RANK.get(m["confidence"], 0),
                                     m["start"], m["end"], m["goi_class"]))
+
+
+def region_holds_counted_goi_model(cluster, models_by_chrom, padding_bp):
+    """Whether the search's best GOI model within ``padding_bp`` of the cluster (best_goi_model,
+    the model the region's goi_model_confidence names) is counted: HIGH or MEDIUM and no answer
+    of the genome-wide path."""
+    model = best_goi_model(models_by_chrom.get(cluster["chrom"], ()), cluster["chrom"],
+                           cluster["start"], cluster["end"], padding_bp)
+    return bool(model and model["counted"])
 
 
 _BLOCK_ID_RE = re.compile(r"_b(\d+)_")
@@ -1426,20 +1437,32 @@ def main():
         else:
             # Case 2: Clusters found — adaptive region selection
             best_score = max(cl['score'] for cl in ordered_clusters)
+            guaranteed = set()
             if args.max_regions > 0:
                 # User-specified hard cap
                 selected_indices = list(range(min(args.max_regions, len(ordered_clusters))))
                 score_floor = max(args.adaptive_score_floor_abs, 0.0)
             else:
-                # Every cluster that passes a floor, in the order above (GOI regions first), up
-                # to the cap; the floor is relative to the best score of all clusters. Only the
-                # first cluster is written when none passes (adaptive_backstop).
+                # Kept whatever the floors and the cap: a region whose GOI model the search
+                # counted (region_holds_counted_goi_model) and an injected GOI-anchor region,
+                # so the region of a counted call is never left out. Then every cluster that
+                # passes a floor, in the order above (GOI regions first), until the cap is
+                # reached; the floor is relative to the best score of all clusters. Only the
+                # first cluster is written when nothing is kept (adaptive_backstop).
                 score_floor = max(args.adaptive_score_floor_abs,
                                   best_score * args.adaptive_score_floor_frac)
+                guaranteed = {idx for idx, cl in enumerate(ordered_clusters)
+                              if cl.get('is_goi_anchor')
+                              or region_holds_counted_goi_model(cl, goi_models_by_chrom, args.goi_padding)}
                 passing = [idx for idx, cl in enumerate(ordered_clusters)
                            if cl['score'] >= score_floor
                            or cl.get('unique', 0) >= args.adaptive_unique_gene_floor]
-                selected_indices = passing[:args.adaptive_max_regions] or [0]
+                selected = set(guaranteed)
+                for idx in passing:
+                    if len(selected) >= args.adaptive_max_regions:
+                        break
+                    selected.add(idx)
+                selected_indices = sorted(selected) or [0]
 
             # §1e: never drop a strong-synteny neighbourhood (>=N HIGH flanking genes, no
             # GOI model) just because weak GOI-fallback regions — which get a score bonus —
@@ -1564,6 +1587,8 @@ def main():
                     selected_reason = "score_floor"
                 elif best.get('unique', 0) >= args.adaptive_unique_gene_floor:
                     selected_reason = "unique_gene_floor"
+                elif cluster_idx in guaranteed:
+                    selected_reason = "goi_anchor" if best.get("is_goi_anchor") else "counted_goi_model"
                 else:
                     selected_reason = "adaptive_backstop"
                 

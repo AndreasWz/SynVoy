@@ -72,28 +72,54 @@ def _tail_lines(text: str, n: int = 20) -> str:
 
 def _format_mmseqs_failure(proc: subprocess.CompletedProcess) -> str:
     """
-    Return compact failure details from an mmseqs subprocess result.
+    Return compact failure details from an mmseqs subprocess result: the tail of stderr, then
+    the tail of stdout. MMseqs2 (18-8cc5c, -v 1 or more) prints its own error, such as "Cannot fit
+    databases into ...", on stderr and the workflow's "Error: Prefilter died" on stdout, so the
+    two streams together name both the cause and the step.
     """
     stderr_tail = _tail_lines(proc.stderr or "", n=20)
     stdout_tail = _tail_lines(proc.stdout or "", n=20)
-    return stderr_tail or stdout_tail or "no tool output captured"
+    return "\n".join(t for t in (stderr_tail, stdout_tail) if t) or "no tool output captured"
+
+
+# MMseqs2's messages for a lack of memory (strings of the 18-8cc5c binary: "Cannot fit databases
+# into ...", "Not enough memory to keep dbreader/write in memory!", "Can not allocate entries
+# memory in IndexTable", "Allocation error : not enough memory", "Failed to mmap memory"), the C++
+# and C library ones, and the shell's line for a process the kernel killed ("Killed").
+_MMSEQS_MEMORY_MESSAGES = (
+    "cannot fit databases",
+    "not enough memory",
+    "can not allocate",
+    "cannot allocate",
+    "allocation error",
+    "failed to mmap",
+    "out of memory",
+    "std::bad_alloc",
+    "killed",
+)
+# The workflow's own lines (stdout): they name the step that died, not the cause.
+_MMSEQS_STEP_DIED = ("prefilter died", "search step died", "search died")
 
 
 def _is_mmseqs_resource_failure(details: str) -> bool:
-    """
-    Detect common low-memory / prefilter-failure signatures from MMseqs.
-    """
+    """A memory failure by its text (both streams, as _format_mmseqs_failure joins them)."""
     txt = (details or "").lower()
-    patterns = (
-        "prefilter died",
-        "search step died",
-        "search died",
-        "out of memory",
-        "cannot allocate memory",
-        "std::bad_alloc",
-        "killed",
-    )
-    return any(p in txt for p in patterns)
+    return any(p in txt for p in _MMSEQS_MEMORY_MESSAGES)
+
+
+def _mmseqs_search_failure(proc: subprocess.CompletedProcess) -> Tuple[str, bool]:
+    """(details, resource_fail) of a failed MMseqs2 search, from both of its streams.
+
+    A memory failure is one whose stderr or stdout carries a memory message, or a step that died
+    without an error message of its own (stderr empty: a process killed without a word, the only
+    case MMseqs2 gave at -v 0). A step that died after another error on stderr (a file that cannot
+    be written, a broken database) is not one: the ladder's lower rungs cannot cure it, and the
+    search stops with that error."""
+    details = _format_mmseqs_failure(proc)
+    if _is_mmseqs_resource_failure(details):
+        return details, True
+    silent = not (proc.stderr or "").strip()
+    return details, silent and any(p in (proc.stdout or "").lower() for p in _MMSEQS_STEP_DIED)
 
 
 def _is_split_limit_failure(details: str) -> bool:
@@ -3979,20 +4005,20 @@ def run_augmented_mmseqs_with_retries(
         )
 
         if proc.returncode != 0:
-            details = _format_mmseqs_failure(proc)
+            details, resource_fail = _mmseqs_search_failure(proc)
             last_details = details
-            resource_fail = _is_mmseqs_resource_failure(details)
             logger.warning(
                 f"[{genome_name}] Augmented MMseqs search attempt {i}/{len(attempts)} failed "
                 f"({attempt['label']}): {details}"
             )
             shutil.rmtree(attempt_tmp, ignore_errors=True)
-            if not resource_fail:
-                break
             if _is_split_limit_failure(details):
                 # A split limit too small for the window: only a rung with a larger limit can
                 # succeed, so the rungs with the same or a smaller one are skipped.
                 too_small = max(too_small or 0.0, _split_limit_bytes(attempt["split"]))
+                continue
+            if not resource_fail:
+                break
             continue
 
         # convertalis, then the names by the first word of the FASTA headers (fix item 29)
@@ -6443,8 +6469,7 @@ def run_mmseqs_easy_search_with_retries(
         )
 
         if search_proc.returncode != 0:
-            details = _format_mmseqs_failure(search_proc)
-            resource_fail = _is_mmseqs_resource_failure(details)
+            details, resource_fail = _mmseqs_search_failure(search_proc)
             last_details = details
             last_resource_fail = resource_fail
             logger.warning(
@@ -6455,13 +6480,13 @@ def run_mmseqs_easy_search_with_retries(
             # The failed attempt's temporary files (about 3.5 times the genome at the largest)
             # go before the next attempt.
             shutil.rmtree(attempt_tmp, ignore_errors=True)
-            if not resource_fail:
-                break
             if _is_split_limit_failure(details):
                 # Every rung keeps the split limit and lowers threads and sensitivity, which do
                 # not change what has to fit: the caller records the genome as not searched.
                 logger.warning(f"[{genome_name}] MMseqs2 cannot fit the genome's database into the "
                                f"split limit {attempt['split']}: no lower rung is tried.")
+                break
+            if not resource_fail:
                 break
             continue
 
@@ -8458,7 +8483,7 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             used=genome_rung,
         )
         if not mmseqs_ok:
-            if resource_fail and _is_split_limit_failure(mmseqs_details):
+            if _is_split_limit_failure(mmseqs_details):
                 # Not searched, as below, but with the setting that fixes it.
                 advice = (f"MMseqs2 cannot fit this genome's database into the split limit "
                           f"(--mmseqs_split_memory_limit {getattr(args, 'mmseqs_split_memory_limit', '')}): raise "
@@ -10784,7 +10809,16 @@ def main():
             for gname, msg in wave_errors:
                 logger.error(f"  • {os.path.basename(gname)}: {msg}")
             # Classify errors to give actionable advice
-            oom_errors = [m for _, m in wave_errors if 'memory' in m.lower() or 'killed' in m.lower() or 'oom' in m.lower()]
+            # A split limit too small for a database ("Cannot fit databases into ...") needs a
+            # larger limit, a memory kill a smaller one (or more memory).
+            split_errors = [m for _, m in wave_errors if _is_split_limit_failure(m)]
+            oom_errors = [m for _, m in wave_errors if not _is_split_limit_failure(m) and (
+                'memory' in m.lower() or 'killed' in m.lower() or 'oom' in m.lower())]
+            if split_errors:
+                logger.error(
+                    "  Hint: MMseqs2 could not fit a database into the split limit. Raise\n"
+                    "    --mmseqs_split_memory_limit (and --iterative_search_memory when it is set to a size)"
+                )
             if oom_errors:
                 logger.error(
                     "  Hint: some failures look like out-of-memory (OOM). Try:\n"

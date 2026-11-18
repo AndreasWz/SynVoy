@@ -549,16 +549,18 @@ REGION_NO_CALL_REASONS = (
 
 
 def goi_regions_without_call(region_rows, goi_annotations, records, refused, dropped,
-                             demoted_classes, pad=20000):
+                             demoted_classes, pad=20000, report_dropped=()):
     """The gene-bearing regions (goi_overlap: within ``pad`` of a GOI model of the search, or of a
     raw GOI hit where the search wrote no GOI model) labelled HIGH or MEDIUM, or of the class
     goi_hit_no_call, that hold no counted call: no counted record (_is_counted, after ownership,
     the coverage rule and the drops; of any home locus) of the same genome and sequence within
     ``pad`` of the region. ``pad`` is cluster_grs's default --goi_padding. Each entry names the
-    best uncounted model there (``model``: a record first, else a LOW row of
-    ``goi_annotations``), the strongest record of the hit the search kept (``refused_hit``: a
-    refused hit of ``refused``, else a dropped one of ``dropped``, overlapping the region, of the
-    same genome and, when both name one, the same home locus) and the first of
+    best uncounted model there (``model``: a record first, else a record the report dropped, of
+    ``report_dropped`` ((record, why) pairs of drop_genome_wide_strong_hits and
+    drop_gene_order_only; ``model.report_drop`` names why, '' for a record that stands), else a
+    LOW row of ``goi_annotations``), the strongest record of the hit the search kept
+    (``refused_hit``: a refused hit of ``refused``, else a dropped one of ``dropped``, overlapping
+    the region, of the same genome and, when both name one, the same home locus) and the first of
     REGION_NO_CALL_REASONS that applies. Sorted by genome, locus, sequence, start, end, name."""
     def near(rec, row):
         return int(rec["start"]) - 1 < row["end"] + pad and row["start"] - pad < int(rec["end"])
@@ -566,6 +568,11 @@ def goi_regions_without_call(region_rows, goi_annotations, records, refused, dro
     recs_by_gc = defaultdict(list)
     for r in records or ():
         recs_by_gc[(r.get("genome"), r.get("chrom"))].append(r)
+    drop_why = {}
+    report_dropped_by_gc = defaultdict(list)
+    for r, why in report_dropped or ():
+        drop_why[id(r)] = why
+        report_dropped_by_gc[(r.get("genome"), r.get("chrom"))].append(r)
     low_by_gc = defaultdict(list)
     for a in goi_annotations or ():
         if a.get("confidence") == "LOW":
@@ -587,6 +594,9 @@ def goi_regions_without_call(region_rows, goi_annotations, records, refused, dro
             continue
         order = lambda m: (_record_rank(m), int(m["start"]), m.get("mrna_id", ""))  # noqa: E731
         model = min(here, key=order) if here else None
+        if model is None:
+            gone = [r for r in report_dropped_by_gc.get(key, ()) if near(r, row)]
+            model = min(gone, key=order) if gone else None
         if model is None:
             lows = [a for a in low_by_gc.get(key, ()) if near(a, row)]
             model = min(lows, key=order) if lows else None
@@ -613,7 +623,8 @@ def goi_regions_without_call(region_rows, goi_annotations, records, refused, dro
             "goi_hit_best_identity": row["goi_hit_best_identity"],
             "goi_hit_best_evalue": row["goi_hit_best_evalue"],
             "model": ({"confidence": model.get("confidence", ""), "goi_class": model.get("goi_class", ""),
-                       "mrna_id": model.get("mrna_id", ""), "start": model["start"], "end": model["end"]}
+                       "mrna_id": model.get("mrna_id", ""), "start": model["start"], "end": model["end"],
+                       "report_drop": drop_why.get(id(model), "")}
                       if model is not None else None),
             "refused_hit": ({"outcome": hit[0], "identity": hit[1].get("identity"),
                              "evalue": hit[1].get("evalue", ""), "bits": hit[1].get("bits"),
@@ -2846,8 +2857,14 @@ def build_report(results_dir, qc_json=None, qc_policy=None,
 
     _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
     # The answers of the genome-wide path: one per genome, only where no call is counted.
-    drop_genome_wide_strong_hits(goi_dedup, _DEMOTED_CLASSES)
-    drop_gene_order_only(goi_dedup, _DEMOTED_CLASSES)
+    _dropped_answers = drop_genome_wide_strong_hits(goi_dedup, _DEMOTED_CLASSES)
+    _dropped_gene_order = drop_gene_order_only(goi_dedup, _DEMOTED_CLASSES)
+    # (record, why) of every record the two drops removed: a region they leave without a record
+    # still names its model (goi_regions_without_call).
+    _report_dropped = (
+        list(zip(_dropped_answers,
+                 (d["reason"] for d in goi_dedup.get("genome_wide_strong_hits_dropped_records", []))))
+        + [(r, "gene_order_only") for r in _dropped_gene_order])
     absence = genome_absence_categories(goi_dedup.get("records", []), target_policy,
                                         _DEMOTED_CLASSES)
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
@@ -2859,7 +2876,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None,
     # call, with what they hold and why.
     region_summary["goi_regions_without_call"] = goi_regions_without_call(
         collect_region_rows(score_files), goi_annotations, _own_recs, nonsyntenic_records,
-        nonsyntenic_dropped, _DEMOTED_CLASSES)
+        nonsyntenic_dropped, _DEMOTED_CLASSES, report_dropped=_report_dropped)
     dedup_high = sum(1 for r in _counted_recs if r.get("confidence") == "HIGH")
     dedup_medium = sum(1 for r in _counted_recs if r.get("confidence") == "MEDIUM")
     # The answers of the genome-wide path the report keeps (a reading of their own, never

@@ -225,3 +225,102 @@ def test_best_goi_model_prefers_a_counted_model():
     assert cg.best_goi_model(models, "c", 0, 250)["goi_class"] == "genome_wide_strong_hit"
     assert cg.best_goi_model(models, "c", 600, 700) is None
     assert cg.best_goi_model(models, "c", 600, 700, padding_bp=250)["goi_class"] == "probable_goi"
+
+
+# --------------------------------------------------------------------------- the GOI region guarantee
+# (review round 2): a region whose GOI model the search counted (HIGH or MEDIUM, no answer of the
+# genome-wide path) and an injected GOI-anchor region are kept whatever the floors; the cap is then
+# filled with the passing regions in order. Before, the floor came from the best score and the
+# counted region was dropped when a strong neighbourhood elsewhere raised it.
+
+def _home_bed_20(tmp):
+    bed = tmp / "home20.bed"
+    with open(bed, "w") as fh:
+        for i in range(1, 21):
+            fh.write(f"chrH\t{i * 10000}\t{i * 10000 + 2000}\tF{i}\t0\t{'+' if i % 2 else '-'}\n")
+    return bed
+
+
+def _goi_model_row(chrom, start, end, conf, goi_class="confident_goi"):
+    return "\t".join([chrom, "SynVoy", "mRNA", str(start), str(end), ".", "+", ".",
+                      f"ID=GOI_X|g_b1_l1m1;SynVoy_Parent=GOI_X;SynVoyRole=goi;Confidence={conf};"
+                      f"GOIClass={goi_class};EvidenceType=exon_annotation;BlockFlankingSupport=2"]) + "\n"
+
+
+def _chr_a_chr_b(n_chr_b=16, goi_hit=True):
+    """chrA: the GOI with two flanking genes beside it (a 2-anchor block); chrB: ``n_chr_b`` of
+    the 20 flanking genes in home order, no GOI."""
+    rows = []
+    if goi_hit:
+        rows.append(_hit_line("GOI_X", "chrA", 500000, 500600))
+        rows.append(_hit_line("F19", "chrA", 510000, 510600))
+        rows.append(_hit_line("F20", "chrA", 520000, 520600, "-"))
+    for i in range(1, n_chr_b + 1):
+        rows.append(_hit_line(f"F{i}", "chrB", 100000 + i * 10000, 100000 + i * 10000 + 600,
+                              "+" if i % 2 else "-"))
+    return rows
+
+
+def _run20(tmp, rows, gff_rows, extra=()):
+    gff = tmp / "t.gff"
+    gff.write_text("##gff-version 3\n" + "".join(gff_rows))
+    m8 = tmp / "g.m8"
+    m8.write_text("".join(rows))
+    regions, scores = tmp / "g.regions.bed", tmp / "g.scores.tsv"
+    argv = ["cluster_grs.py", "--hits", str(m8), "--synteny_bed", str(_home_bed_20(tmp)),
+            "--target_gff", str(gff), "--output", str(regions), "--scores_output", str(scores),
+            "--flanking_count", "20", "--cluster_distance", "50000", "--goi_overlap_bonus", "0.15",
+            "--min_score", "0.6", *extra]
+    old = sys.argv
+    sys.argv = argv
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            cg.main()
+    finally:
+        sys.argv = old
+    with open(scores, newline="") as fh:
+        return list(csv.DictReader(fh, delimiter="\t")), err.getvalue()
+
+
+A2 = ("--adaptive_score_floor_frac", "0.45", "--adaptive_score_floor_abs", "0.08",
+      "--adaptive_max_regions", "4")
+
+
+def test_the_region_of_a_counted_call_is_kept_below_both_floors(tmp_path):
+    """The reviewer's case: the chrA region (score 0.21, 2 genes) holds a HIGH model and passes
+    neither floor of 0.3 x 0.74; it is written, with chrB."""
+    for extra in ((), A2):
+        rows, log = _run20(tmp_path, _chr_a_chr_b(), [_goi_model_row("chrA", 500001, 500600, "HIGH")], extra)
+        assert [r["chrom"] for r in rows] == ["chrA", "chrB"], log
+        chr_a = rows[0]
+        assert chr_a["goi_model_confidence"] == "HIGH" and chr_a["region_class"] == "goi_overlap"
+        assert chr_a["selection_reason"] == "counted_goi_model"
+        assert float(chr_a["score"]) < 0.3 * float(rows[1]["score"])
+
+
+def test_a_model_that_is_not_counted_gets_no_guarantee(tmp_path):
+    """An AMBIGUOUS model and an answer of the genome-wide path are no counted call: the floors
+    decide, and the weak chrA region is left out."""
+    for conf, cls in (("AMBIGUOUS", "ambiguous_goi_family_member"), ("MEDIUM", "genome_wide_strong_hit")):
+        rows, log = _run20(tmp_path, _chr_a_chr_b(), [_goi_model_row("chrA", 500001, 500600, conf, cls)])
+        assert [r["chrom"] for r in rows] == ["chrB"], (conf, log)
+
+
+def test_the_guaranteed_regions_count_toward_the_cap(tmp_path):
+    """The cap is filled after the guaranteed regions: at a cap of 1 only the counted region."""
+    rows, _ = _run20(tmp_path, _chr_a_chr_b(), [_goi_model_row("chrA", 500001, 500600, "MEDIUM", "probable_goi")],
+                     ("--adaptive_max_regions", "1"))
+    assert [r["chrom"] for r in rows] == ["chrA"]
+
+
+def test_an_injected_goi_anchor_region_is_kept_under_the_a2_floors(tmp_path):
+    """No cluster lies near the MEDIUM model on chrA (no hit there): its anchor region (score 0.40)
+    is below 0.45 x the best score of the 20-gene chrB block and is written all the same."""
+    rows, log = _run20(tmp_path, _chr_a_chr_b(n_chr_b=20, goi_hit=False),
+                       [_goi_model_row("chrA", 500001, 500600, "MEDIUM", "probable_goi")], A2)
+    chr_b = next(r for r in rows if r["chrom"] == "chrB")
+    assert 0.45 * float(chr_b["score"]) > 0.40, log
+    anchor = [r for r in rows if r["chrom"] == "chrA"]
+    assert len(anchor) == 1 and anchor[0]["region_class"] == "goi_anchor"
+    assert anchor[0]["selection_reason"] == "goi_anchor"

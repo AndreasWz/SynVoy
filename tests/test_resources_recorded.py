@@ -25,14 +25,16 @@ import iterative_search_runner as isr  # noqa: E402
 import sequence_utils as su  # noqa: E402
 
 
-def _proc(rc, stderr=""):
-    return types.SimpleNamespace(returncode=rc, stdout="", stderr=stderr)
+def _proc(rc, stderr="", stdout=""):
+    return types.SimpleNamespace(returncode=rc, stdout=stdout, stderr=stderr)
 
 
-# A memory kill of the prefilter (the kernel's OOM killer): the ladder's lower rungs may help. A split
-# limit too small for the database ("Cannot fit databases into ...") is not this kind:
+# A memory kill of the prefilter (the kernel's OOM killer): the ladder's lower rungs may help. As
+# MMseqs2 prints it: the shell's "Killed" on stderr, the workflow's lines on stdout. A split limit
+# too small for the database ("Cannot fit databases into ...") is not this kind:
 # tests/test_mmseqs_split_limit.py.
-OOM = "/bin/sh: line 1: 4242 Killed mmseqs prefilter\nError: Prefilter died\n"
+OOM_STDERR = "Killed\n"
+OOM_STDOUT = "Error: Prefilter died\nError: Search step died\n"
 
 
 def _args(tmp_path):
@@ -50,7 +52,7 @@ def _fake_mmseqs(fail_first, record):
             calls["search"] += 1
             record.append(cmd)
             if calls["search"] <= fail_first:
-                return _proc(1, OOM)
+                return _proc(1, OOM_STDERR, OOM_STDOUT)
         if cmd[1] == "convertalis":
             open(cmd[5], "w").close()
         return _proc(0)

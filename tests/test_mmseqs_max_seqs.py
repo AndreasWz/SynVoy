@@ -96,6 +96,14 @@ def test_locate_gene_prints_mmseqs2s_errors():
     assert "-v ${mmseqs_v}" in locate
 
 
+def test_no_profile_sets_a_verbosity_that_acts_as_1():
+    """0 acts as 1 in every MMseqs2 search: no profile sets it, the start warns when a user does."""
+    config = open(os.path.join(ROOT, "nextflow.config")).read()
+    assert not re.search(r"params\.mmseqs_verbosity\s*=\s*0\b", config)
+    main = open(os.path.join(ROOT, "main.nf")).read()
+    assert "--mmseqs_verbosity 0 acts as 1" in main
+
+
 # --------------------------------------------------------------------------- the report
 
 def _report(tmp_path, extra_cols=None):
@@ -153,3 +161,4 @@ def test_the_start_checks_the_value(tmp_path):
     assert code != 0 and "Invalid --mmseqs_max_seqs (0). Must be a whole number >= 1." in text
     code, text = _preview(tmp_path / "good", "--mmseqs_max_seqs", "1000", "--mmseqs_verbosity", "0")
     assert code == 0, text[-2000:]
+    assert "--mmseqs_verbosity 0 acts as 1" in text

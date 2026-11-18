@@ -169,3 +169,44 @@ def test_the_order_is_fixed_and_the_count_matches(run):
     assert [(e["genome"], e["chrom"]) for e in listed] == [("G", "c1"), ("G", "c2"), ("H", "c1")]
     assert report["summary"]["goi_regions_without_call"] == len(listed) == 3
     assert gr.build_report(str(run))["regions"]["goi_regions_without_call"] == listed
+
+
+# ---------------------------------------------------------------- a record the report dropped (review round 2)
+
+def test_a_region_whose_only_model_the_report_dropped_names_it(run):
+    """The genome has a counted call on c9; the AMBIGUOUS gene-order-only model inside the MEDIUM
+    region on c1 is dropped by the report (drop_gene_order_only). The region still names that model,
+    and the reason is model_not_counted, not no_record."""
+    _scores(run, "locus_1__G.fna.scores.tsv",
+            [_region("Reg1_G5_CMEDIUM_S0.42", "c1", 90_000, 120_000, model="AMBIGUOUS")])
+    go_row = _goi("c1", 100_001, 101_000, "AMBIGUOUS", "syntenic_candidate_unconfirmed", 35,
+                  mid="GOI_q|G_fna_b1_l1_m1").rstrip("\n") + ";Basis=gene_order_only\n"
+    _gff(run, "locus_1__G.fna.gff", [_goi("c9", 5_001, 6_000, "HIGH", "confident_goi"), go_row])
+    report, listed = _listed(run)
+    assert [r["mrna_id"] for r in report["goi_dedup"]["gene_order_only_dropped_records"]] == ["GOI_q|G_fna_b1_l1_m1"]
+    assert len(listed) == 1
+    e = listed[0]
+    assert e["reason"] == "model_not_counted"
+    assert e["model"]["mrna_id"] == "GOI_q|G_fna_b1_l1_m1"
+    assert (e["model"]["confidence"], e["model"]["report_drop"]) == ("AMBIGUOUS", "gene_order_only")
+
+
+def test_a_region_whose_answer_the_report_dropped_is_a_call_not_counted(run):
+    """A MEDIUM answer of the genome-wide path in a genome with a counted call elsewhere is dropped
+    (genome_has_counted_call): the region near it names it, call_not_counted."""
+    _scores(run, "locus_1__G.fna.scores.tsv",
+            [_region("Reg1_G4_CMEDIUM_S0.40", "c1", 90_000, 120_000, model="MEDIUM")])
+    answer = _goi("c1", 100_001, 101_000, "MEDIUM", "genome_wide_strong_hit", 55, mid="GOI_q|G_fna_gw1")
+    _gff(run, "locus_1__G.fna.gff", [_goi("c9", 5_001, 6_000, "HIGH", "confident_goi"), answer])
+    report, listed = _listed(run)
+    assert [d["reason"] for d in report["goi_dedup"]["genome_wide_strong_hits_dropped_records"]] == \
+        ["genome_has_counted_call"]
+    assert [(e["reason"], e["model"]["mrna_id"], e["model"]["report_drop"]) for e in listed] == \
+        [("call_not_counted", "GOI_q|G_fna_gw1", "genome_has_counted_call")]
+
+
+def test_a_model_that_stands_has_no_report_drop(run):
+    _scores(run, "locus_1__G.fna.scores.tsv", [_region("Reg1", "c1", 9_000, 12_000)])
+    _gff(run, "locus_1__G.fna.gff", [_goi("c1", 10_001, 10_600, "AMBIGUOUS", "ambiguous_goi_family_member", 30)])
+    _, listed = _listed(run)
+    assert [(e["reason"], e["model"]["report_drop"]) for e in listed] == [("model_not_counted", "")]

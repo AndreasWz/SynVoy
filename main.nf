@@ -549,6 +549,8 @@ def validateNumericParams(validationErrors, validationWarnings) {
     }
     if (!(params.mmseqs_verbosity.toString() ==~ /[0-3]/)) {
         validationErrors << "Invalid --mmseqs_verbosity (${params.mmseqs_verbosity}). Must be 0, 1, 2 or 3."
+    } else if (params.mmseqs_verbosity.toString() == '0') {
+        validationWarnings << "--mmseqs_verbosity 0 acts as 1: the MMseqs2 searches print their errors, so that a failure names its cause."
     }
     // The guards of fix-phase item 18: seconds after which a tool run stops the task
     // (whole numbers: the scripts read them as int; 3600.0 would stop a rescue with exit 2, which it ignores)

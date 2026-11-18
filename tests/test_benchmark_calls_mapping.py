@@ -95,3 +95,44 @@ def test_the_runners_call_it():
         text = open(os.path.join(ROOT, "scripts", "benchmark", name)).read()
         assert "scripts/benchmark/synvoy_calls.py" in text
         assert "resolved_goi_annotations" not in text and "ambiguous_goi_annotations" not in text
+
+
+# --------------------------------------------------------------------------- genome names (review round 2)
+
+def _gr():
+    spec = importlib.util.spec_from_file_location("generate_report", os.path.join(ROOT, "bin", "generate_report.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+NAMES = ["Apis_mellifera.fasta", "Apis_mellifera.fna", "Apis_mellifera.fa", "Apis_mellifera",
+         "GCA_000001405.29_GRCh38_genomic.fna", "GCF_000002315.6", "locus_2__Sp_x.fna.gff",
+         "Sp_x.fna.hull_rescue.gff", "Sp_x.fasta.regions.bed", "Sp_x.fna.gz", "Sp_y_new_genes"]
+
+
+def test_the_genome_id_is_the_reports():
+    gr = _gr()
+    for name in NAMES:
+        assert sc.report_genome_id(name) == gr.canonical_genome_id(name), name
+
+
+def test_a_region_bed_names_the_reports_genome(tmp_path):
+    """A .fasta target and an NCBI-style long name: one row per genome, the BED's region on it
+    (the BED is named after the genome file, the report after its canonical id)."""
+    gr = _gr()
+    for genome_file in ("Apis_mellifera.fasta", "GCA_000001405.29_GRCh38_genomic.fna", "Apis_mellifera.fna",
+                        "Sp_z.fna.gz"):
+        results = tmp_path / genome_file / "run"
+        (results / "regions" / "locus_1").mkdir(parents=True)
+        g = gr.canonical_genome_id(genome_file)
+        (results / "synvoy_report.json").write_text(json.dumps(
+            _report([_rec(g, "HIGH", "confident_goi", 101, 400, mid="m1")],
+                    [{"genome": g, "goi_confidence_counts": {"HIGH": 1}}])))
+        (results / "regions" / "locus_1" / f"{genome_file}.regions.bed").write_text(
+            "c1\t0\t1000\tReg1_G4_CHIGH_S0.80\t0.80\t+\n")
+        out = tmp_path / genome_file / "calls.tsv"
+        subprocess.run([sys.executable, SCRIPT, str(results), str(out)], check=True, capture_output=True)
+        rows = [line.split("\t") for line in out.read_text().splitlines()[1:]]
+        assert len(rows) == 1, (genome_file, rows)
+        assert rows[0][2] == "PRESENT" and rows[0][-1].endswith(";region=Reg1_G4_CHIGH_S0.80"), rows

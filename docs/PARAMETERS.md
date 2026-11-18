@@ -19,7 +19,6 @@ starts with a minus sign in quotes (`--modules 'auto,-short_query'`).
   |---|---|---|---|
   | `mmseqs_sensitivity` | 9.5 | 7.0 | 8.0 |
   | `mmseqs_split_memory_limit` | 8G | 2G | 4G |
-  | `mmseqs_verbosity` | 1 | 0 | 0 |
   | `iterative_search_cpus` | 2 | 1 | 1 |
   | `iterative_search_memory` | auto | 4 GB | 8 GB |
   | `locate_gene_memory` | 3 GB | 2 GB | 2 GB |
@@ -850,11 +849,13 @@ many targets but fewer of them passed the E-value is not counted. A larger value
 hits and takes longer. A whole number of at least 1.
 
 ### `mmseqs_verbosity`
-**Default:** `1` · `low_mem` and `laptop_safe` 0
+**Default:** `1`
 
-Passed to MMseqs2 as `-v` (0 to 3; `mmseqs -h` gives the levels). It changes the messages only.
+Passed to MMseqs2 as `-v` (1 to 3; `mmseqs -h` gives the levels). It changes the messages only.
 The searches (LOCATE_GENE, the genome-wide search and the windows) run at 1 or more, so that a
-failure prints MMseqs2's reason; at 0 MMseqs2 says only `Prefilter died`.
+failure prints MMseqs2's reason (at 0 MMseqs2 says only `Prefilter died`, and the search could not
+tell a split limit that is too small from a memory kill). 0 is accepted and acts as 1; the start
+prints a warning.
 
 ### `deterministic_goi_search`
 **Default:** `true`
@@ -1502,11 +1503,17 @@ regions of MEDIUM or better that hold no counted call (`regions.goi_regions_with
 
 How many candidate regions the scorer keeps per genome and home locus. The regions are ordered with
 those near such a GOI model or GOI hit first ([`synteny_goi_overlap_bonus`](#synteny_goi_overlap_bonus)),
-then by the flanking support of the search block, then by score. With `0` every region in this order
-whose score reaches max(`adaptive_score_floor_abs`, the best score of all regions ×
-`adaptive_score_floor_frac`), or that holds at least `adaptive_unique_gene_floor` distinct flanking
-genes, is kept, at most `adaptive_max_regions`; when none does, the first is kept. A number N keeps the first N. Either way, up to two strong-synteny regions
-without a GOI model are added beyond the cap ([`strong_synteny_min_flanking`](#strong_synteny_min_flanking)).
+then by the flanking support of the search block, then by score. With `0` a region whose GOI model
+the search counted (HIGH or MEDIUM, not an answer of the genome-wide path; the model its
+`goi_model_confidence` names) and every region put in for a GOI model that no cluster touches
+(`goi_anchor`) are kept whatever their score and the cap, so the region of a counted call is never
+left out. Then every region in this order whose score reaches max(`adaptive_score_floor_abs`, the
+best score of all regions × `adaptive_score_floor_frac`), or that holds at least
+`adaptive_unique_gene_floor` distinct flanking genes, is added until `adaptive_max_regions` regions
+are kept (the regions kept for their model count toward it); when nothing is kept, the first region
+is. A number N keeps the first N in this order, nothing else. Either way, up to two strong-synteny
+regions without a GOI model are added beyond the cap
+([`strong_synteny_min_flanking`](#strong_synteny_min_flanking)).
 
 ### `adaptive_score_floor_frac` / `adaptive_score_floor_abs` / `adaptive_max_regions` / `adaptive_unique_gene_floor`
 **Defaults:** `0.30` / `0.03` / `6` / `3` · module A2 sets `0.45` / `0.08` / `4`
@@ -1518,8 +1525,9 @@ per genome; the `dispersed_family` module and `preset_paralog_discrimination` se
 ### `strong_synteny_min_flanking`
 **Default:** `auto` (half of `n_flanking_genes`, rounded up: 5) · `0` switches it off
 
-A region that holds at least this many HIGH flanking models, with no GOI model (not LOW) and no GOI
-hit of the genome-wide search within 20 kb of it, is written as `goi_missing_but_strong_synteny`: the neighbourhood is there, but no model of the gene was built.
+A region that holds at least this many HIGH flanking models, with no GOI model (not LOW) within 20 kb
+of it and, where the search wrote no GOI model of any label, no raw GOI hit there either, is written
+as `goi_missing_but_strong_synteny`: the neighbourhood is there, but no model of the gene was built.
 Up to two such regions are kept beyond the region cap, unless they lie inside a GOI region already
 kept, and the strong-synteny rescue searches them ([§ 13](#disable_strong_synteny_rescue)). `0`
 switches this region class off, and with it that rescue.
