@@ -94,6 +94,17 @@ def staging_source_label(path_or_name):
     return base
 
 
+def rescue_pass_of(path_or_name):
+    """``hull_rescue`` or ``rescue`` for a GFF of a rescue pass (``<genome>.hull_rescue.gff``,
+    ``<genome>.rescue.gff``), '' for one of the search. The figures are drawn from the search's
+    GFFs alone (figure_marks)."""
+    base = _strip_staging_prefix(os.path.basename(path_or_name or ""))
+    for tag in ("hull_rescue", "rescue"):
+        if base.endswith((f".{tag}.gff", f".{tag}.gff3")):
+            return tag
+    return ""
+
+
 def canonical_genome_id(path_or_name):
     name = _strip_staging_prefix(os.path.basename(path_or_name or ""))
     m = re.search(r"(GC[AF]_\d+\.\d+)", name)
@@ -196,6 +207,7 @@ def _process_gffs_unified(gff_files):
     for gff_path in gff_files:
         genome = canonical_genome_id(gff_path)
         source = staging_source_label(gff_path)
+        rescue_pass = rescue_pass_of(gff_path)
         ann_stats = per_genome_ann.setdefault(
             genome,
             {
@@ -303,6 +315,8 @@ def _process_gffs_unified(gff_files):
                         goi_records.append({
                             "genome": genome,
                             "source": source,
+                            # A rescue pass's row ('hull_rescue', 'rescue'), '' for the search's.
+                            "rescue_pass": rescue_pass,
                             "chrom": parts[0],
                             "start": start,
                             "end": end,
@@ -3177,6 +3191,16 @@ def build_report(results_dir, qc_json=None, qc_policy=None,
     if step_failures:
         report["failed_steps"] = step_failures
         report["summary"]["ownership_not_checked_calls"] = ownership_not_checked
+    # The figures (item 36): per home locus with a GFF of the search, the outcome of each GOI model
+    # the report merged, dropped or does not count, and the other loci that found a record drawn
+    # there. apply_report_drops.py marks the per-genome GFFs the figures are drawn from with them, so
+    # the figures draw each record once. Written for every locus, with or without a tree; empty lists
+    # mean that the report has nothing to mark there.
+    report["figures"] = {
+        locus: figure_marks(goi_annotations, goi_dedup.get("records", []), locus, _DEMOTED_CLASSES,
+                            dropped=_report_dropped)
+        for locus in sorted({staging_source_label(p) for p in gff_files
+                             if _STAGING_PREFIX_RE.match(os.path.basename(p)) and not rescue_pass_of(p)})}
     # The trees (COMPUTE_TREE's infos): the leaves the report does not count (fix item 46). Only where
     # a tree was inferred: a run with --skip_tree has no trees block.
     if tree_infos:
@@ -3281,6 +3305,28 @@ def load_download_record(path):
         return [dict(r) for r in csv.DictReader(fh, delimiter="\t")]
 
 
+def _member_overlap(m, r):
+    """The overlap of a record's member (locus, model id, start, end) with the record's span, as a
+    share of the stretch the two cover together."""
+    s, e = int(m[2]), int(m[3])
+    return (max(0, min(e, int(r["end"])) - max(s, int(r["start"])) + 1)
+            / max(1, max(e, int(r["end"])) - min(s, int(r["start"])) + 1))
+
+
+def _shown_member(r, locus, ids):
+    """The model id of home locus ``locus`` that draws the record ``r`` there, in its tree and in its
+    figures: among the record's members of that locus whose id is in ``ids``, the record's
+    representative, else the member at the record's span (the same model found from another home
+    locus), else the member that overlaps the record most, then the smallest id. None when no member
+    of the record is in ``ids``."""
+    mine = [m for m in r.get("_members") or () if m[0] == locus and m[1] in ids]
+    if not mine:
+        return None
+    rep, span = tuple(r.get("_rep") or ()), (int(r["start"]), int(r["end"]))
+    return min(mine, key=lambda m: ((m[0], m[1]) != rep, (int(m[2]), int(m[3])) != span,
+                                    -_member_overlap(m, r), m[1]))[1]
+
+
 def tree_leaves_not_counted(goi_annotations, records, locus, leaves,
                             not_counted_classes=("paralog_not_goi", "identity_coverage_decoupled")):
     """The leaves of ``locus``'s tree that the report does not count, each with its reason (fix item
@@ -3309,20 +3355,14 @@ def tree_leaves_not_counted(goi_annotations, records, locus, leaves,
     def counted(r):
         return r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in not_counted_classes
 
-    def overlap(m, r):
-        s, e = int(m[2]), int(m[3])
-        return max(0, min(e, int(r["end"])) - max(s, int(r["start"])) + 1) / max(1, max(e, int(r["end"])) - min(s, int(r["start"])) + 1)
-
     leaf_set = set(leaves)
     shown = {}
     for r in records:
         if not counted(r):
             continue
-        mine = [m for m in r.get("_members") or () if m[0] == locus and m[1] in leaf_set]
-        if mine:
-            rep, span = tuple(r.get("_rep") or ()), (int(r["start"]), int(r["end"]))
-            shown[id(r)] = min(mine, key=lambda m: ((m[0], m[1]) != rep, (int(m[2]), int(m[3])) != span,
-                                                    -overlap(m, r), m[1]))[1]
+        member = _shown_member(r, locus, leaf_set)
+        if member is not None:
+            shown[id(r)] = member
     out = []
     for leaf in leaves:
         if leaf not in rows:
@@ -3343,6 +3383,75 @@ def tree_leaves_not_counted(goi_annotations, records, locus, leaves,
         out.append({"leaf": leaf, "reason": reason,
                     "record": "" if rec is None else f"{rec['genome']} {rec['chrom']}:{rec['start']}-{rec['end']}"})
     return out
+
+
+# The GOI rows of the figures that the report's records are made of: HIGH, MEDIUM and AMBIGUOUS (a
+# LOW model is in no record).
+FIGURE_RECORD_LABELS = ("HIGH", "MEDIUM", "AMBIGUOUS")
+
+
+def figure_marks(goi_annotations, records, locus, demoted_classes, dropped=()):
+    """What the figures of home locus ``locus`` need to draw the report's records once each (item 36):
+    the outcome of each GOI model of that locus's per-genome GFFs (the search's rows labelled HIGH,
+    MEDIUM or AMBIGUOUS; the rescue passes' rows are no input of the figures) where the report has
+    one, and the other home loci that found a record drawn there.
+
+    A record is drawn by one model in each home locus whose search modelled it, its shown member
+    (_shown_member, the rule of the trees). Outcomes: 'merged' (the record's other models of this
+    locus: a second model of the same gene, a wider model that a compact one replaced, the other
+    half of one reading frame, a piece of the whole gene that holds the record), 'dropped' (a model
+    of a record the report dropped, ``dropped``: (record, why) pairs of drop_genome_wide_strong_hits
+    and drop_gene_order_only); for a shown member whose record the report does not count:
+    'overruled_piece' (the record is a whole gene and the shown member its piece), the record's
+    demoted class (``demoted_classes``: paralog_not_goi, identity_coverage_decoupled),
+    'genome_wide_strong_hit' (a kept answer of the genome-wide path); 'not_in_report' for a model no
+    record holds. The figures leave out 'merged' and 'dropped' (bin/plot_synteny.py, REPORT_LEFT_OUT)
+    and draw the others by their label. Returns {'models': [{'genome', 'model', 'outcome',
+    'record'}], 'also_found_from': [{'genome', 'model', 'loci'}]}, each sorted by genome and model
+    id; ``record`` is the span ('chrom:start-end') of the model's record, '' for not_in_report."""
+    ids = defaultdict(set)
+    for a in goi_annotations or ():
+        if (a.get("source") == locus and a.get("mrna_id") and not a.get("rescue_pass")
+                and a.get("confidence") in FIGURE_RECORD_LABELS):
+            ids[a["genome"]].add(a["mrna_id"])
+
+    def span(r):
+        return f"{r['chrom']}:{r['start']}-{r['end']}"
+    marks, also, held = {}, [], set()
+    for r, _why in dropped or ():
+        for m in r.get("_members") or ():
+            if m[0] == locus and m[1] in ids.get(r["genome"], ()):
+                marks[(r["genome"], m[1])] = ("dropped", span(r))
+                held.add((r["genome"], m[1]))
+    for r in records or ():
+        mine = ids.get(r["genome"], set())
+        held |= {(r["genome"], m[1]) for m in r.get("_members") or () if m[0] == locus and m[1] in mine}
+        shown = _shown_member(r, locus, mine)
+        if shown is None:
+            continue
+        for m in r.get("_members") or ():
+            if m[0] == locus and m[1] in mine and m[1] != shown:
+                marks[(r["genome"], m[1])] = ("merged", span(r))
+        if (locus, shown) in {tuple(p) for p in r.get("_overruled") or ()}:
+            outcome = "overruled_piece"
+        elif r.get("genome_wide_strong_hit") and r.get("goi_class") not in demoted_classes:
+            outcome = "genome_wide_strong_hit"
+        elif r.get("goi_class") in demoted_classes:
+            outcome = r["goi_class"]
+        else:
+            outcome = ""
+        if outcome:
+            marks[(r["genome"], shown)] = (outcome, span(r))
+        others = sorted(set(r.get("provenance") or ()) - {locus})
+        if others:
+            also.append({"genome": r["genome"], "model": shown, "loci": others})
+    for genome in ids:
+        for mid in ids[genome]:
+            if (genome, mid) not in held:
+                marks[(genome, mid)] = ("not_in_report", "")
+    return {"models": [{"genome": g, "model": mid, "outcome": o, "record": where}
+                       for (g, mid), (o, where) in sorted(marks.items())],
+            "also_found_from": sorted(also, key=lambda e: (e["genome"], e["model"]))}
 
 
 def load_tree_infos(folder):

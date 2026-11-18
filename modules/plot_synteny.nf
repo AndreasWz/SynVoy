@@ -55,7 +55,8 @@ process PLOT_SYNTENY {
     
     // Only include arguments if they have values
     // The figures read the per-genome GFFs from the plot-input folder, where
-    // apply_report_drops.py wrote them without the rows the report drops.
+    // apply_report_drops.py wrote them without the rows the report drops and with the
+    // report's outcome on the GOI models it merged or does not count.
     def gffs_arg = gffs_str ? "--target_gffs \$target_gffs_in" : ""
     def cands_arg = cands_str ? "--candidate_beds ${cands_str}" : ""
     def homo_arg = homo_str ? "--homology_tsvs ${homo_str}" : ""
@@ -105,7 +106,9 @@ process PLOT_SYNTENY {
     if [ -n "${gffs_str}" ]; then
         # The figures leave out what the report drops; a failure stops the task (fix-phase d5): the
         # old fallback copied the GFFs whole, so the figures showed calls the report had dropped.
-        ${projectDir}/bin/apply_report_drops.py --report $report --out_dir "\$inputs_dir" ${gffs_str}
+        # --locus: the GOI models of this locus carry the report's outcome (figures.<locus>), so the
+        # figures draw each of its records once (a model it merged into another is not drawn).
+        ${projectDir}/bin/apply_report_drops.py --report $report --locus ${home_bed.baseName} --out_dir "\$inputs_dir" ${gffs_str}
         for f in ${gffs_str}; do target_gffs_in="\$target_gffs_in \$inputs_dir/\$(basename "\$f")"; done
     fi
     if [ -n "${cands_str}" ]; then

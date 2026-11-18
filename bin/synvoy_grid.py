@@ -18,7 +18,9 @@ has several; a small pale mark per weak call; and ``//`` before what is not at
 the locus. The exon structure of every copy is drawn on a line of its own,
 5'->3', in a panel right of the grid, under the same number. When no genome
 (the home genome included) has two copies there is no panel: the model is drawn
-in the GOI column itself, in its genomic orientation.
+in the GOI column itself, in its genomic orientation. The calls are the report's
+records: a model the report merged into the call drawn for its gene, or dropped,
+is not drawn (plot_synteny.parse_target_gff) and has a row of the source data.
 
     result = render(plot_synteny_module, tracks, gene_colours, home_products, args, style_for())
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -487,11 +490,15 @@ def goi_fill(identity, conf, is_home, colour):
 # ---------------------------------------------------------------- tooltips ----
 
 def goi_tooltip(gene, label, is_home, note=""):
+    """The tooltip of a GOI glyph: the model, its identity and coverage, label and evidence,
+    ``note`` (where it lies, weak call), and what the report did with it (_PS._report_note:
+    why it does not count the call, the other home loci that found its record)."""
     blocks = model_blocks(gene)
     ident = gene.get("identity", 0.0) or 0.0
     cov = gene.get("query_coverage")
     conf = (gene.get("confidence") or "").upper()
     lineage = "" if is_home else copy_lineage(gene)
+    report = "" if is_home else _PS._report_note(gene)
     return (f'{gene.get("name", "GOI")} in {label}: '
             f'{len(blocks)} exon{"s" if len(blocks) != 1 else ""}, CDS {cds_bp(gene):,} bp, '
             f'{gene.get("chrom", "")}:{blocks[0][0]:,}-{blocks[-1][1]:,} '
@@ -503,7 +510,8 @@ def goi_tooltip(gene, label, is_home, note=""):
                if (lineage and (ident or cov is not None)) else '')
             + (f', {conf}' if conf else '')
             + (f', {gene.get("evidence_type")}' if gene.get("evidence_type") else '')
-            + (f' ({note})' if note else ''))
+            + (f' ({note})' if note else '')
+            + (f'; {report}' if report else ''))
 
 
 def titled(tooltip, body, on):
@@ -718,6 +726,14 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         calls.append(row_calls)
     n_outside_view = sum(1 for rc in calls[1:] for g, _, _ in rc
                          if g.get("outside_view") and not ps._is_genome_wide_answer(g))
+    # What the report did with the row's GOI models (plot_synteny._report_note): the models it
+    # merged into another call or dropped (not drawn), the calls drawn that it does not count, by
+    # outcome, and the calls whose record other home loci found too.
+    n_report_left_out = sum(len(rows[ri].get("goi_report_left_out") or ()) for ri in range(1, n_rows))
+    not_counted = Counter(g["report_outcome"] for rc in calls[1:] for g, _, _ in rc
+                          if g.get("report_outcome") and g["report_outcome"] not in ps.REPORT_LEFT_OUT
+                          and not ps._is_genome_wide_answer(g))   # answers: their own sentence
+    n_also_found = sum(1 for rc in calls[1:] for g, _, _ in rc if g.get("also_found_from"))
     n_copies = [sum(1 for _, _, c in rc if c) for rc in calls]
     in_column = max(n_copies + [0]) <= 1     # no genome has two: the model goes in the column
     clade_of, clade_info = goi_clades(args, calls) if st.clade else ({}, None)
@@ -1273,6 +1289,15 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                     source.append(row)
                 if not calls[ri]:
                     source.append(source_row(ri, track, plain_labels[ri], a, None, 0, False, True, "", "", ""))
+                # The models the report merged into the call drawn for their gene, or dropped: in
+                # the source data, not in the figure.
+                for g in [] if is_home else (track.get("goi_report_left_out") or ()):
+                    row = source_row(ri, track, plain_labels[ri], a, g, n_copies[ri], False, True,
+                                     "not drawn", "", "")
+                    row["strand_drawn"] = ""
+                    if st.clade:
+                        row["clade"] = ""
+                    source.append(row)
                 continue
             if a.get("group"):      # compact version: the side's flanking genes as one stack
                 n_here = n_placed(a, ri)
@@ -1410,6 +1435,12 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                                if ps._is_genome_wide_answer(g)),
         # GOI models drawn with a number that is the identity to a seeded tandem copy
         "copy_lineage_models": n_copy_lineage,
+        # the report's outcomes (ReportOutcome): models it merged into the call drawn for their
+        # gene or dropped (not drawn; rows of the source data), the calls listed that it does not
+        # count, by outcome, and the calls whose record another home locus found too
+        "goi_models_left_out_by_report": n_report_left_out,
+        "goi_calls_not_counted_by_report": dict(sorted(not_counted.items())),
+        "goi_calls_also_found_from": n_also_found,
         # rows whose assembly failed the quality check (marked with a dagger)
         "low_quality_rows": [row_label(t) for t in rows if ps._is_low_quality(t)],
         # target rows without any GOI call, with the flanking genes placed there
@@ -1876,6 +1907,26 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                  "where no block of the neighbouring genes placed the gene. It is not counted and "
                  f"is no copy ({n_strong} in this figure; synvoy_report.json, "
                  "genome_wide_strong_hits).")
+    # What the report did with the GOI models (the ReportOutcome marks of the per-genome GFFs).
+    n_left = info.get("goi_models_left_out_by_report", 0)
+    if n_left:
+        s.append(f"{n_left} further {goi} model{'s are' if n_left != 1 else ' is'} not drawn: the "
+                 f"report merged {'each' if n_left != 1 else 'it'} into the call drawn for its gene "
+                 "(a second model of the same gene, a wider model that a compact one replaced, or the "
+                 "other half of one reading frame), or dropped its record (source data, column "
+                 "report).")
+    not_counted = info.get("goi_calls_not_counted_by_report") or {}
+    n_nc = sum(not_counted.values())
+    if n_nc:
+        why = "; ".join(f"{_PS.REPORT_OUTCOME_TEXT.get(o, o)} ({o}, {n})" for o, n in not_counted.items())
+        s.append(f"{n_nc} {goi} call{'s' if n_nc != 1 else ''} in the {goi} column "
+                 f"{'are' if n_nc != 1 else 'is'} not counted by the report: {why} (source data, "
+                 "column report).")
+    n_also = info.get("goi_calls_also_found_from", 0)
+    if n_also:
+        s.append(f"{n_also} {goi} call{'s were' if n_also != 1 else ' was'} also found from another "
+                 f"home locus; the report holds {'each' if n_also != 1 else 'it'} as one record "
+                 "(source data, column also_found_from).")
     missing = info.get("rows_without_goi") or []
     if missing:
         total = info.get("home_flanking_genes", 0)
@@ -1900,10 +1951,15 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
 # identity_to: what identity_pct and query_coverage_pct are measured against: "query" for a GOI
 # call, the seeded tandem copy (GOI_copy_<n>) for a model found from one (copy_lineage), "home
 # gene" for a flanking ortholog; empty for the home row and a cell where nothing was placed.
+# model_id: the model's ID in the per-genome GFF. report, report_record, also_found_from (GOI
+# rows): the report's outcome (ReportOutcome; empty for a call it counts, for an AMBIGUOUS or LOW
+# call by its label, and in a GFF without the report's marks), the span of the model's record, and
+# the other home loci that found that record. A model the report merged into another call or
+# dropped has a row of its own, drawn_as 'not drawn'.
 SOURCE_COLUMNS = ("row", "species", "genome_id", "column", "home_gene_id", "state", "drawn_as",
                   "copy_number", "position", "identity_pct", "query_coverage_pct", "identity_to",
                   "confidence", "copies", "strand_drawn", "scaffold", "start", "end", "exons",
-                  "evidence")
+                  "evidence", "model_id", "report", "report_record", "also_found_from")
 # The clade version adds the clade of every GOI call (1-based, as in its legend).
 SOURCE_COLUMNS_CLADES = SOURCE_COLUMNS + ("clade",)
 
@@ -1930,5 +1986,10 @@ def source_row(ri, track, label, anchor, gene, n, is_home, is_goi_col, drawn_as,
                strand_drawn=gene.get("strand", ""), scaffold=gene.get("chrom", ""),
                start=gene.get("start", ""), end=gene.get("end", ""),
                exons=len(gene.get("exon_coords") or []) if is_goi_col else "",
-               evidence=gene.get("evidence_type", "") or gene.get("goi_model_source", "") or "")
+               evidence=gene.get("evidence_type", "") or gene.get("goi_model_source", "") or "",
+               model_id=gene.get("gff_id", "") or "")
+    if is_goi_col and not is_home:
+        row.update(report=gene.get("report_outcome", "") or "",
+                   report_record=gene.get("report_record", "") or "",
+                   also_found_from=",".join(gene.get("also_found_from") or ()))
     return row

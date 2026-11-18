@@ -1579,7 +1579,7 @@ this order:
    `synvoy_label.rank_key`, i.e. E-value in its place, the block's E_syn, bits, span; bits
    or identity for a record without `Eeff` (a row the judge did not label, such as a
    `structural_discovery` row)), with the list of home loci that found it. The figures
-   choose their representative GOI model by label, then the same strength. A HIGH or
+   draw these records ([§12](#12-figures)). A HIGH or
    MEDIUM model contained in a wider one replaces it when the wider model is at least
    twice as long and adds less than 0.15 query coverage (both coverages recorded). Otherwise,
    when the wider model is a gene model or a rescued hit, AMBIGUOUS with `Basis=not_specific`,
@@ -1673,9 +1673,11 @@ written.
 `plot_synteny.py` draws one set of figures per home locus from the home annotation,
 the models of [§7](#7-the-search-in-one-target-genome) and the regions of
 [§8](#8-region-scores). The figures are drawn after the report: `apply_report_drops.py`
-copies the per-genome GFFs into `plot_inputs_*` without the gene-order-only calls the
-report dropped ([§10](#10-adjudication-and-the-report), step 5), and the figures are drawn
-from those copies.
+copies the per-genome GFFs into `plot_inputs_*` without the calls the report dropped
+([§10](#10-adjudication-and-the-report), steps 5 and 6), writes on each GOI model of the
+home locus what the report did with it (the report's `figures` block: `ReportOutcome`,
+`ReportRecord`, `AlsoFoundFrom`, under the header line `##synvoy-report-marks`), and the
+figures are drawn from those copies.
 
 - **Labels.** A GOI call is drawn as resolved when its label is HIGH or MEDIUM, whatever
   its class; AMBIGUOUS calls are drawn in the needs-curation style. The best GOI
@@ -1686,6 +1688,18 @@ from those copies.
   that the view leaves out is listed in the anchor grid, placed by the rule of the other
   calls (at the locus when it lies within reach of the best call in view, else after `//`),
   and counted in the ribbon plot's label (`+N elsewhere`).
+- **Records.** The GOI calls of a row are the report's records. A record is drawn once in
+  each home locus whose search modelled it, by one model: its representative, else its
+  model at the record's span, else the one that overlaps it most (the rule of the tree
+  page; the rescue passes' models are no figure input). The record's other models
+  (`ReportOutcome=merged`) and the models of a record the report dropped (`dropped`) are
+  not drawn; the anchor grid's source table lists them. The overlap dedup does not remove a
+  HIGH, MEDIUM or AMBIGUOUS call for another one, so two records that overlap are both
+  drawn; it still removes a LOW call or a flanking model under a call. A call the report
+  does not count (`paralog_not_goi`, `identity_coverage_decoupled`, an overruled piece) is drawn by its label, with the reason in its
+  tooltip, the source table and the legend text; an answer of the genome-wide path is
+  drawn outlined (next point), with the report's outcome in its tooltip. A GFF without the header line is deduped
+  by overlap alone (reciprocal overlap of at least 0.5), as before.
 - **A strong hit without synteny.** An answer of the genome-wide path that the report kept
   (`GOIClass=genome_wide_strong_hit`, MEDIUM, [§7.11](#711-goi-hits-far-from-their-anchors))
   is no counted call in the figures: it is no copy, never a row's best call, in none of the
@@ -1852,7 +1866,9 @@ large family the extra queries fill the candidate regions.
 **Reporting**
 
 - The figures and the tree are built from the search output. They do not include
-  rescue models, and they still show calls that the report relabelled.
+  rescue models: a record made of rescue models alone is in no figure. The figures draw
+  each record once, but a call that the report relabelled or does not count is drawn by
+  its label, with the reason in its tooltip (the tree page draws such leaves hollow).
 - Locus ownership compares a call with proteins of the *home* genome. A paralog that
   exists only in the target lineage is not in that panel; the only check that can
   flag it is phylogenetic placement, which is advisory.

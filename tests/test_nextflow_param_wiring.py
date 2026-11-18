@@ -348,6 +348,7 @@ SCRIPTS_WITH_OPTIONS = {
     "query_features.py": (),
     "home_context.py": (),
     "select_modules.py": (),
+    "apply_report_drops.py": (),
 }
 
 

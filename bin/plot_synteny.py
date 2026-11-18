@@ -351,6 +351,61 @@ def _is_genome_wide_answer(gene):
     return _is_goi_target_gene(gene) and (gene.get("goi_class") or "") == GENOME_WIDE_CLASS
 
 
+# What the report did with a GOI model (ReportOutcome=, which apply_report_drops.py writes from the
+# report's figures block, with the header line REPORT_MARKS_HEADER). The figures leave out the models
+# of REPORT_LEFT_OUT: another model of the home locus draws their record, or the report dropped it,
+# so each record is drawn once. A model with another outcome is a call the report does not count; it
+# is drawn by its label, with the outcome in its tooltip and in the source data.
+REPORT_MARKS_HEADER = "##synvoy-report-marks"
+REPORT_LEFT_OUT = ("merged", "dropped")
+REPORT_RECORD_LABELS = ("HIGH", "MEDIUM", "AMBIGUOUS")     # generate_report.FIGURE_RECORD_LABELS
+# The outcomes generate_report.figure_marks writes, as the tooltips and the legend text name them.
+REPORT_OUTCOME_TEXT = {
+    "merged": "merged into the call drawn for its gene",
+    "dropped": "its record was dropped",
+    "overruled_piece": "a piece of a gene that another home gene explains as well",
+    "paralog_not_goi": "another home gene's call",
+    "identity_coverage_decoupled": "high identity over a short part of the query",
+    "genome_wide_strong_hit": "a strong hit without synteny",
+    "not_in_report": "in no record of the report",
+}
+
+
+def _report_left_out(gene):
+    """A GOI model the report merged into another call or dropped: not drawn."""
+    return _is_goi_target_gene(gene) and (gene.get("report_outcome") or "") in REPORT_LEFT_OUT
+
+
+def _report_note(gene):
+    """The report's outcome of a GOI call as tooltip text ('' without one): why the report does not
+    count it, and the other home loci that found its record."""
+    outcome = (gene or {}).get("report_outcome") or ""
+    parts = []
+    if outcome in REPORT_LEFT_OUT:
+        parts.append(f"report: {REPORT_OUTCOME_TEXT[outcome]}")
+    elif outcome:
+        parts.append(f"not counted by the report: {REPORT_OUTCOME_TEXT.get(outcome, outcome)} ({outcome})")
+    loci = (gene or {}).get("also_found_from") or []
+    if loci:
+        parts.append(f"also found from {', '.join(loci)}: one record of the report")
+    return "; ".join(parts)
+
+
+def _has_report_marks(gff_file):
+    """Whether a target GFF carries the report's marks: the header line apply_report_drops.py writes
+    when the report has a figures block for the GFF's home locus."""
+    try:
+        with open(gff_file) as fh:
+            for line in fh:
+                if not line.startswith("#"):
+                    return False
+                if line.startswith(REPORT_MARKS_HEADER):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _is_resolved_goi_target_gene(gene):
     """A GOI call drawn as resolved: label HIGH or MEDIUM, whatever its class (review fix
     RF-3), except an answer of the genome-wide path (_is_genome_wide_answer), which is not
@@ -578,15 +633,25 @@ def parse_target_gff(gff_file, cap=True, raw=False):
     Deduplicates overlapping entries (same region annotated by different queries).
     raw=True returns every row as read: no fragment hiding, dedup or GOI cap (the block
     choice reads the fragment calls from it, choice_models).
+
+    A GFF with the report's marks (REPORT_MARKS_HEADER, apply_report_drops.py): the report
+    decided which of its HIGH, MEDIUM and AMBIGUOUS GOI calls are one gene, so the overlap
+    dedup does not drop one of them for another (it still drops a LOW call or a flanking model
+    under a GOI call), and the GOI models it merged into another call or dropped
+    (_report_left_out) are left out after the dedup: each record of the report is drawn once.
+    Without the marks, the dedup of overlapping GOI calls is the figures' own.
     """
     genes = []
     cds_by_parent = defaultdict(list)  # mRNA_ID -> [(start, end), ...]
+    marks = False
     if not gff_file or not os.path.exists(gff_file):
         return genes
     # First pass: collect CDS sub-features
     with open(gff_file) as fh:
         for line in fh:
             line = line.strip()
+            if line.startswith(REPORT_MARKS_HEADER):
+                marks = True
             if not line or line.startswith("#"):
                 continue
             p = line.split("\t")
@@ -682,6 +747,11 @@ def parse_target_gff(gff_file, cap=True, raw=False):
                 "basis":        attrs.get("Basis", ""),
                 "inference_reason": attrs.get("InferenceReason", ""),
                 "gff_id":       gene_id,
+                # The report's outcome of a GOI model, its record's span and the other home loci
+                # that found that record (apply_report_drops.py; '' / [] without the marks).
+                "report_outcome": attrs.get("ReportOutcome", ""),
+                "report_record": attrs.get("ReportRecord", ""),
+                "also_found_from": [x for x in attrs.get("AlsoFoundFrom", "").split(",") if x],
             })
 
     if raw:
@@ -707,11 +777,19 @@ def parse_target_gff(gff_file, cap=True, raw=False):
             return (-goi_like, -rank) + tuple(-x for x in strength)
         genes.sort(key=_dedup_sort_key)
 
+        def _in_a_record(g):
+            """A GOI call of the report's records, in a GFF with its marks: which of these are
+            one gene is the report's decision (generate_report.dedupe_goi_annotations)."""
+            return (marks and _is_goi_target_gene(g)
+                    and (g.get("confidence") or "").upper() in REPORT_RECORD_LABELS)
+
         kept = []
         for g in genes:
             is_dup = False
             for k in kept:
                 if g["chrom"] != k["chrom"]:
+                    continue
+                if _in_a_record(g) and _in_a_record(k):
                     continue
                 ov = max(0, min(g["end"], k["end"]) - max(g["start"], k["start"]))
                 len_g = max(1, g["end"] - g["start"])
@@ -722,6 +800,16 @@ def parse_target_gff(gff_file, cap=True, raw=False):
             if not is_dup:
                 kept.append(g)
         genes = kept
+
+    # The models the report merged into the call drawn for their gene, or dropped: one drawing per
+    # record. Left out after the dedup, so that a LOW call or a flanking model they cover stays
+    # out as before.
+    if marks:
+        n_left_out = sum(1 for g in genes if _report_left_out(g))
+        if n_left_out:
+            genes = [g for g in genes if not _report_left_out(g)]
+            print(f"[plot] {os.path.basename(gff_file)}: left out {n_left_out} GOI model(s) the report "
+                  f"merged into the call drawn for their gene, or dropped")
 
     if cap:
         genes, _ = _cap_goi_genes(genes, _MAX_GOI_PER_GENOME)
@@ -2239,6 +2327,15 @@ def _build_tooltip_json(gene, track, home_products):
         qc = gene.get("query_coverage")
         if qc is not None:
             data["queryCov"] = round(qc * 100, 1)
+        # The report's outcome of a call it does not count, and the other home loci that found
+        # its record (apply_report_drops.py marks).
+        outcome = gene.get("report_outcome") or ""
+        if outcome and outcome not in REPORT_LEFT_OUT:
+            data["report"] = (f"not counted: {REPORT_OUTCOME_TEXT.get(outcome, outcome)} "
+                              f"({outcome})")
+        if gene.get("also_found_from"):
+            data["alsoFound"] = (f"{', '.join(gene['also_found_from'])} "
+                                 "(one record of the report)")
 
     if resolved:
         data["goiTag"] = "GOI"
@@ -4485,6 +4582,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.model) html += row('Model', data.model);
         if (data.synteny) html += row('Synteny', data.synteny);
         if (data.queryCov !== undefined) html += row('Query cov', data.queryCov + '%');
+        if (data.report) html += row('Report', data.report);
+        if (data.alsoFound) html += row('Also found from', data.alsoFound);
         if (data.goiTag) html += '<div class="tt-goi">' + esc(data.goiTag) + '</div>';
         tooltip.innerHTML = html;
         tooltip.style.display = 'block';
@@ -5344,6 +5443,8 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                         "strand": g.get("strand", "+"), "n": n_here, "weak": n_weak,
                         "elsewhere": n_out, "strong": n_strong,
                         "answer": is_g and _is_genome_wide_answer(g),
+                        # what the report did with the GOI call drawn (_report_note)
+                        "report": _report_note(g) if is_g else "",
                         "label": anchor_label.get(key, key) if not is_g else goi_label,
                         "chrom": g.get("chrom", "")})
         return pts
@@ -5511,7 +5612,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                       + (f', {p["elsewhere"]} counted call(s) outside this neighbourhood '
                          f'(anchor grid)' if p.get("elsewhere") else '')
                       + (f' ({STRONG_HIT_NOTE})' if p.get("answer") else
-                         f', {p["strong"]} {STRONG_HIT_NOTE}' if p.get("strong") else '')))
+                         f', {p["strong"]} {STRONG_HIT_NOTE}' if p.get("strong") else '')
+                      # the report's note; an answer's own outcome is said by the note above
+                      + (f'; {p["report"]}' if p.get("report") and not p.get("answer") else '')))
             g = [f'<title>{_svg_esc(tip)}</title>']
             if p["is_goi"]:
                 r = GOI_R
@@ -6036,8 +6139,9 @@ def genome_tag(gff_file):
 
 def choice_models(gff_file):
     """The models the block choice reads: the row's models with fragments hidden, as the
-    default figures parse them, plus every fragment GOI row as read (no dedup). The choice
-    is the same for the default figures and the '_with_fragments' ones."""
+    default figures parse them, plus every fragment GOI row as read (no dedup) but those the
+    report merged into another call or dropped (_report_left_out). The choice is the same for
+    the default figures and the '_with_fragments' ones."""
     global _SHOW_GOI_FRAGMENTS
     shown, count = _SHOW_GOI_FRAGMENTS, _HIDDEN_FRAGMENT_COUNT[0]
     _SHOW_GOI_FRAGMENTS = False
@@ -6046,7 +6150,9 @@ def choice_models(gff_file):
             genes = parse_target_gff(gff_file, cap=False)
     finally:
         _SHOW_GOI_FRAGMENTS, _HIDDEN_FRAGMENT_COUNT[0] = shown, count
-    return genes + [g for g in parse_target_gff(gff_file, raw=True) if _is_fragment_goi(g)]
+    marks = _has_report_marks(gff_file)
+    return genes + [g for g in parse_target_gff(gff_file, raw=True)
+                    if _is_fragment_goi(g) and not (marks and _report_left_out(g))]
 
 
 def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
@@ -6203,8 +6309,20 @@ def _strong_hits_outside_view(gff_file, genes):
         _HIDDEN_FRAGMENT_COUNT[0] = count
     drawn = {(g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) for g in genes}
     return [dict(g, outside_view=True) for g in parsed
-            if _is_genome_wide_answer(g)
+            if _is_genome_wide_answer(g) and not _report_left_out(g)
             and (g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) not in drawn]
+
+
+def _report_left_out_models(gff_file):
+    """The row's GOI models that the report merged into the call drawn for their gene, or dropped
+    (_report_left_out; only in a GFF with the report's marks), in genomic order. They are not drawn:
+    the anchor grid lists them in its source data (drawn_as 'not drawn', with the report's outcome).
+    Fragments only in the figures that show fragments."""
+    if not _has_report_marks(gff_file):
+        return []
+    return sorted((g for g in parse_target_gff(gff_file, raw=True)
+                   if _report_left_out(g) and (_SHOW_GOI_FRAGMENTS or not _is_fragment_goi(g))),
+                  key=lambda g: (g["chrom"], g["start"], g["end"], g.get("gff_id", "")))
 
 
 def _run_figures(args, show_fragments=False, suffix=""):
@@ -6391,6 +6509,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
         if strong_outside:
             print(f"[plot] {genome_id}: {len(strong_outside)} strong hit(s) without synteny outside "
                   f"the neighbourhood drawn: listed in the anchor grid, not counted")
+        report_left_out = _report_left_out_models(gff_file)
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
@@ -6418,7 +6537,16 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "chrom":        target_chrom,
             "goi_outside_view": outside_view,
             "goi_strong_outside_view": strong_outside,
+            "goi_report_left_out": report_left_out,
         })
+    # A GFF without the report's marks (a report without its figures block, or none): its GOI calls
+    # are deduped by the figures' own overlap rule, so two models the report merged can be drawn as
+    # two copies, and two genes it kept apart as one.
+    unmarked = [g for g in args.target_gffs if not _has_report_marks(g)]
+    if unmarked and not is_variant:
+        print(f"[plot] {len(unmarked)} of {len(args.target_gffs)} target GFF(s) carry no report marks "
+              f"({REPORT_MARKS_HEADER}): their GOI calls are deduped by the figures' own overlap "
+              f"rule, so models the report merged into one call may be drawn as separate copies")
 
     # Order targets by phylogenetic distance (if tree available), else alphabetically by species name
     if tree_target_order:
@@ -6488,6 +6616,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "goi_status":   tt.get("goi_status", _track_goi_status({"genes": genes})),
             "goi_outside_view": tt.get("goi_outside_view", []),
             "goi_strong_outside_view": tt.get("goi_strong_outside_view", []),
+            "goi_report_left_out": tt.get("goi_report_left_out", []),
         })
 
     all_tracks = []
