@@ -294,9 +294,9 @@ design quantities are computed once from the features (`design_profile`):
 | `window_tblastn_comp_stats` | tblastn composition statistics in the windows (a run with tblastn's defaults still gives `EeffTblastn`) | 2 | B1 | 0 | |
 | `window_mmseqs_min_length` | the shortest ORF, in codons, that MMseqs2 searches in the windows | 30 | B1 | 10 | |
 | `miniprot_short_orf_max_len` | queries shorter than this (aa) get miniprot `-L 10` in the windows | 60 | B1 | 100 | |
-| `aug_relaxed_length_min` | the shortest GOI hit kept in a window, aa | 15 | B1 | 10 | |
-| `fallback_short_min_aln_aa` | the shortest hit of the short-query fallback, aa | 15 | B1 | 10 | |
-| `dispersed_goi_min_alnlen` | the shortest hit of the dispersed rescue, aa (§7.11) | 50 | B1, C1 | min(50, max(10, round(0.6 × `Lpiece`))) | |
+| `aug_relaxed_length_min` | the shortest GOI hit kept in a window, in aligned query residues | 15 | B1 | 10 | |
+| `fallback_short_min_aln_aa` | the shortest hit of the short-query fallback, in aligned query residues | 15 | B1 | 10 | |
+| `dispersed_goi_min_alnlen` | the shortest hit of the dispersed rescue, in aligned query residues (§7.11) | 50 | B1, C1 | min(50, max(10, round(0.6 × `Lpiece`))) | |
 | `goi_hull_min_coverage` | the hull rescue's coverage filter (§9) | 0.5 | B1 | 0.3 | |
 | `goi_relative_statistic` | how the flank walk's relative test scores a pair (§5.7) | `sw` | B2 | `blastp_cbs` (blastp with composition-based statistics) | |
 | `report_low_complexity` | `LowComplexity=` on GOI models | false | B2 | on | |
@@ -643,8 +643,15 @@ set of the following waves.
 ### 7.1 Genome-wide search
 
 MMseqs2 `easy-search` aligns the whole query set (flanking genes, GOI, and GOI models
-from earlier waves) to the genome. Hits are kept at identity ≥ 10 %, alignment length
-≥ 10 and E ≤ 0.01.
+from earlier waves) to the genome. Hits are kept at identity ≥ 10 %, at least 10
+aligned query residues and E ≤ 0.01.
+
+Every length floor of the search counts **aligned query residues**, qend − qstart + 1:
+the query is a protein for MMseqs2, tblastn and Smith-Waterman alike, so this is the one
+length all three report in the same unit. The engines' own alignment-length column is not
+used for a floor: MMseqs2's translated search, run without a backtrace, writes the target
+span in nucleotides there, tblastn and Smith-Waterman write alignment columns (query
+residues plus gaps).
 
 **One anchor per place** (`resolve_anchor_hits`). Where hits of different flanking
 genes overlap by at least half of the shorter one, only the hit with the highest bit
@@ -881,9 +888,9 @@ dropped.
 
 | Engine | Query | Kept when |
 |---|---|---|
-| MMseqs2, one thread | the protein, its halves, thirds and quarters (pieces ≥ 15 aa) and, above 100 aa, overlapping 50-aa windows in steps of 25; a hit's query positions are read back in the whole protein | identity ≥ 15 %, length ≥ 15 (for a piece shorter than 25 aa: 60 % of its length, at least 12), E ≤ 0.1 |
-| tblastn (`-seg no`) | the protein | identity ≥ 15 %, length ≥ 15 (for a query shorter than 25 aa: 60 % of its length, at least 12), E ≤ 0.1 |
-| Smith-Waterman (parasail), six frames | the protein | score ≥ 20, identity ≥ 10 %, length ≥ 10, E ≤ 1 |
+| MMseqs2, one thread | the protein, its halves, thirds and quarters (pieces ≥ 15 aa) and, above 100 aa, overlapping 50-aa windows in steps of 25; a hit's query positions are read back in the whole protein | identity ≥ 15 %, ≥ 15 aligned query residues (for a piece shorter than 25 aa: 60 % of its length, at least 12), E ≤ 0.1 |
+| tblastn (`-seg no`) | the protein | identity ≥ 15 %, ≥ 15 aligned query residues (for a query shorter than 25 aa: 60 % of its length, at least 12), E ≤ 0.1 |
+| Smith-Waterman (parasail), six frames | the protein | score ≥ 20, identity ≥ 10 %, ≥ 10 aligned query residues, E ≤ 1 |
 
 With the `short_query` module the window ORFs and the hits count from 10 residues
 (`window_mmseqs_min_length`, `aug_relaxed_length_min` 10), and tblastn runs with word size
@@ -931,7 +938,9 @@ For each GOI query:
 1. **Loci.** Hits less than 40 kb apart form a locus (more when the home gene has
    long introns: 5 × its largest intron). The best `goi_candidate_regions_per_query`
    loci are kept (2; the `local_family` module raises it to the home copies + 1, at most
-   40), ranked by query coverage, then best bit score, then number of hits.
+   40), ranked by query coverage, then best bit score, then number of hits. When loci are
+   cut, one INFO line per window and query names them (position, strands, hits, coverage,
+   bits; the first 10, strongest first) and the weakest locus kept; decoys are not logged.
 2. **Gene models** (`annotate_models_from_hit_list` → `miniprot_gene_models`). miniprot
    aligns the query to the locus ± `gap_search_window` (50 kb; at least the home
    gene's span × expansion), with a maximum intron of that stretch (at least 20 kb)
@@ -978,21 +987,30 @@ For each GOI query:
    genomic order so that their query positions only rise (or only fall, on the minus
    strand). Two hits are not linked when they
    overlap by more than 30 bp on the genome, or when the gap between them exceeds
-   5 × the home gene's largest intron (at least 10 kb). The chain is accepted when:
-   - query below 150 aa: aligned length ≥ 15 aa and best bit score ≥ 30;
-   - longer query, one hit: coverage ≥ 0.25 and length ≥ 25 aa;
-   - longer query, several hits: coverage ≥ 0.25, or total length ≥ 35 aa, or bit
-     score ≥ 60;
+   5 × the home gene's largest intron (at least 10 kb). Lengths are aligned query
+   residues, summed over the chain's hits. The chain is accepted when:
+   - query below 150 aa: ≥ 15 aligned query residues and best bit score ≥ 30;
+   - longer query, one hit: coverage ≥ 0.25 and ≥ 25 aligned query residues;
+   - longer query, several hits: coverage ≥ 0.25, or ≥ 35 aligned query residues in all,
+     or bit score ≥ 60;
    - and its genomic span is at most the largest of 100 kb, 150 bp per query residue and
      1.5 × the GOI's own span at home × the target's expansion (the rule of an anchor's
      gap limit).
 
-   The identity of a chain is the mean over its hits, weighted by alignment length.
+   The first three tests apply only outside a block with E_syn ≤ 0.1 (§7.13). Inside such a
+   block, which predicted the gene's place, a chain that fails them is written all the same,
+   with `RefusalLifted=` naming the tests it failed (`short_aln`, `short_bits`, `long_qcov`,
+   `long_aln`, `long_bits`), and judged by its E-value in its place like every candidate
+   (§7.8): a small or hidden fragment of the gene where miniprot finds no model gets a model
+   and the label it earns. Such a call neither seeds nor goes to the tree (§7.12). The span
+   test applies everywhere.
+
+   The identity of a chain is the mean over its hits, weighted by aligned query residues.
    The mRNA row lists the query interval of each hit (`ChainQuery=1-40,41-88,...`).
 6. **Single hits.** A hit that no kept model covers (more than half) is written as
    `rescued_exon`. A locus with no model and no tandem copy can give one `raw_hit`:
-   identity ≥ 90 % (`max(gap_min_identity, 90)`), an alignment of at least
-   max(`min_exon_alnlen` 30, 0.6 × query length) and coverage ≥ 0.6; with miniprot
+   identity ≥ 90 % (`max(gap_min_identity, 90)`), at least max(`min_exon_alnlen` 30,
+   0.6 × query length) aligned query residues and coverage ≥ 0.6; with miniprot
    installed only at a locus with ≥ 2 hits, union coverage ≥ 0.75 and a best hit of
    ≥ 60 bits. Both are always fragments (`ModelStatus=fragment`), get an E-value in their
    place and are judged like every GOI candidate (§7.8); a `raw_hit` can be HIGH when it
@@ -1053,6 +1071,13 @@ home proteome (§7.12) and its query coverage:
   has no `CoreCoverage` and reads the whole protein, and so do the search's bars on single hits
   (`fallback_refusal`, the tandem detector) and the fused-model rule of the report's dedup,
   where a real signal-peptide exon behind a long intron has to count.
+- **Coverage below 0.7** rules out HIGH, not MEDIUM. A model that covers less, such as a
+  fragment (`ModelStatus=fragment`) or a hit chain written in a block with E_syn ≤ 0.1
+  although the fallback gate refused it (`RefusalLifted`, §7.7), is MEDIUM when its E-value
+  in its place is at most 1e-3 and it is specific, and is then counted unless the report's
+  coverage rule relabels it (§10: identity ≥ 50 % at a coverage below 0.35). The report
+  counts the counted fragments and lifted chains (`summary.counted_fragment_calls`,
+  `summary.refusal_lifted_calls`).
 - **Specific**: no real competitor, or a margin of at least 3.3 bits over the best other
   home protein. Within ±3.3 bits a model in the slot or core of a significant block is
   decided for the gene (positional tie-break), unless that protein lies in the gene's own
@@ -1130,8 +1155,8 @@ GOI proxy), the locus gets a full GOI search instead.
 `select_dispersed_goi_seeds` (on by default) takes a strong GOI hit that lies outside the
 GOI zone of every block (block ± the GOI margin, the core of §7.5); it does not look at the
 gene order. The blocks are built without it first (`blocks_with_rescue`), and their GOI zones
-decide. A genome-wide GOI hit with identity ≥ 40 %, E ≤ 1e-10 and an alignment of at least 50
-residues (the `short_query` and `exon_structure` modules: min(50, max(10,
+decide. A genome-wide GOI hit with identity ≥ 40 %, E ≤ 1e-10 and at least 50 aligned query
+residues (qend − qstart + 1; the `short_query` and `exon_structure` modules: min(50, max(10,
 round(0.6 × Lpiece))), Lpiece the shorter of the query and the home gene's longest exon):
 
 - inside a GOI zone, is left to that block, whose own search looks for the gene there;
@@ -1246,7 +1271,10 @@ after all blocks are labelled: the HIGH calls, or the MEDIUM calls when there is
 HIGH call; of these, the ones with no real competitor or a margin of at least 10 bits.
 They join the query set of the following waves, and the window search's relative query
 is chosen among them. Every other HIGH or MEDIUM call is passed to the tree only;
-AMBIGUOUS and LOW calls never seed. A seeded tandem copy is, by default
+AMBIGUOUS and LOW calls never seed. A hit chain written although the fallback gate refused
+it (`RefusalLifted`, §7.7) neither seeds nor goes to the tree, and is left out before the
+HIGH/MEDIUM pool is formed: a lifted HIGH call does not make the genome's MEDIUM calls
+tree-only. A seeded tandem copy is, by default
 (`tandem_copy_parent seed`), recorded as `GOI_copy_<n>` and therefore a gene of its own in
 the following waves, judged against the seed; with `--tandem_copy_parent home` it is a
 model of the home gene and can be its relative query. Its record id ends with the query it

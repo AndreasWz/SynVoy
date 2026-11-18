@@ -782,13 +782,18 @@ max(`aug_relaxed_identity_min`, `min_hit_identity` × `aug_relaxed_identity_fact
 defaults. One of the 32 settings that no module changes.
 
 ### `min_hit_length`
-**Default:** `10` (aa)
+**Default:** `10` (aligned query residues)
 
 A floor on the aligned length of a hit of the genome-wide search. Like `min_hit_identity` it is a
 guard behind the E-value: fewer than 10 residues score about 20 bits at best, and E ≤ 0.01 in a
 genome needs 35 bits or more. Inside a window the floor is max(`aug_relaxed_length_min`,
-`min_hit_length` / `aug_relaxed_length_div`), 15 aa at the defaults. One of the 32 settings that no
+`min_hit_length` / `aug_relaxed_length_div`), 15 residues at the defaults. One of the 32 settings that no
 module changes.
+
+Every length floor of the search counts aligned query residues, qend − qstart + 1, the same for
+MMseqs2, tblastn and Smith-Waterman. The engines' own alignment-length column differs: MMseqs2's
+translated search writes the target span in nucleotides there, about three times the residues,
+and tblastn and Smith-Waterman write alignment columns (residues plus gaps).
 
 ### `mmseqs_sensitivity`
 **Default:** `9.5` · `low_mem` 7.0, `laptop_safe` 8.0
@@ -796,8 +801,8 @@ module changes.
 MMseqs2's sensitivity (`-s`) in LOCATE_GENE and the genome-wide search: higher values find more
 distant hits and take longer. Values from about 7 (faster, for close species) to 9.5 are usual.
 After a search of a genome is killed for memory, it is retried with one thread, a sensitivity of
-at most 7.0 and then 6.0, and a split limit of 2G; the search log says so. The search log warns
-about any value above 9, the default included; that warning can be ignored.
+at most 7.0 and then 6.0, and a split limit of 2G; the search log says so. Below 1 or above 12,
+the start and the search log warn.
 
 ### `mmseqs_split_memory_limit`
 **Default:** `8G` · `low_mem` 2G, `laptop_safe` 4G, `docker_max` 70 % of the memory it gives the
@@ -944,7 +949,7 @@ identity, coverage and confidence refer to the home protein, its id carries `_r<
 Each window (a block with its neighbourhood) is searched for the gene with MMseqs2, tblastn and,
 by default, Smith-Waterman; miniprot then builds gene models from the hits
 ([ALGORITHM.md § 7.6–7.7](ALGORITHM.md#76-search-inside-the-window)). A hit of MMseqs2 or tblastn
-is kept when it reaches E ≤ 0.1 counted over the window, 15 % identity and 15 aligned residues (the
+is kept when it reaches E ≤ 0.1 counted over the window, 15 % identity and 15 aligned query residues (the
 `aug_relaxed_*` values below); a Smith-Waterman hit when it reaches E ≤ 1 over the window's six
 reading frames. The module `short_query` (B1) lets reading frames and hits count from 10 residues
 and runs tblastn with word size 2 and without composition-based statistics.
@@ -1033,7 +1038,7 @@ above 0.
 | `aug_relaxed_parse_evalue_mult` | `10` | A window hit is kept at E ≤ `search_evalue` × this (0.1, counted over the window, not the genome). This is the one that decides which window hits exist: 0.1 in a window of a few hundred kb asks for fewer bits than 0.01 in a genome, the intended relaxation where anchors support the place. |
 | `aug_relaxed_evalue_mult` / `aug_relaxed_evalue_cap` | `1000` / `10.0` | The E-value MMseqs2 searches the window with: min(cap, `search_evalue` × mult) = 10. Hits between it and the kept bound are computed and discarded, so neither changes the result while it stays above 0.1. tblastn always reports to E 1000 and is filtered at the kept bound too. |
 | `aug_relaxed_identity_min` / `aug_relaxed_identity_factor` | `15.0` / `0.6` | Identity floor: max(min, `min_hit_identity` × factor) = 15 %. The factor matters only when `min_hit_identity` is above 25. |
-| `aug_relaxed_length_min` / `aug_relaxed_length_div` | `15` / `2` · module B1 sets `aug_relaxed_length_min` 10 | Length floor: max(min, `min_hit_length` / div) = 15 aa. An exon of fewer residues gives no MMseqs2 or tblastn hit; Smith-Waterman has no such floor beyond 10 aa. |
+| `aug_relaxed_length_min` / `aug_relaxed_length_div` | `15` / `2` · module B1 sets `aug_relaxed_length_min` 10 | Length floor: max(min, `min_hit_length` / div) = 15 aligned query residues (qend − qstart + 1, for MMseqs2 and tblastn alike). An exon of fewer residues gives no MMseqs2 or tblastn hit; Smith-Waterman has no such floor beyond 10 residues. |
 
 ### `window_tblastn_word_size` / `window_tblastn_comp_stats`
 **Defaults:** `3` / `2` (tblastn's own) · module B1 sets `2` / `0`
@@ -1059,7 +1064,9 @@ GOI loci kept per query in a window. The hits of a query in a window are split i
 closer than max(5 kb, min(100 kb, 2 × `max_intron`), the gene's intron bound): 40 kb at the
 defaults), ranked by the share of the query they cover, then the best bit score, then the number of
 hits, and this many are modelled; the rest are dropped. A1's value lets a tandem array with more
-than two copies get each copy modelled.
+than two copies get each copy modelled. The dropped loci are counted (`limits`, `regions_cap`) and
+named in the search log, one INFO line per window and query (`kept 2 of 5 GOI loci ...; cut:
+...; weakest kept: ...`, at most 10 named; decoys are not logged).
 
 ### `max_intron`
 **Default:** `20000` (bp)
@@ -1156,27 +1163,35 @@ keeps the old model's id and lists the joined hits in `JoinedHits=`. Models foun
 relative's query are not joined.
 
 ### `fallback_short_query_len` / `fallback_short_min_aln_aa` / `fallback_short_min_bits`
-**Defaults:** `150` (aa) / `15` (aa) / `30` (bits) · module B1 sets `fallback_short_min_aln_aa` 10
+**Defaults:** `150` (aa) / `15` (aligned query residues) / `30` (bits) · module B1 sets `fallback_short_min_aln_aa` 10
 
 When miniprot builds no model at a GOI locus, the hits are chained into a model of their own (a
 hit chain, `fallback_hit_span`, [ALGORITHM.md § 7.7](ALGORITHM.md#77-from-hits-to-gene-models)).
-For a query shorter than `fallback_short_query_len`, the chain is accepted on its aligned length
-(`fallback_short_min_aln_aa`) and its best bit score (`fallback_short_min_bits`), not on query
+For a query shorter than `fallback_short_query_len`, the chain is accepted on its aligned query
+residues (`fallback_short_min_aln_aa`; qend − qstart + 1, summed over its hits) and its best bit
+score (`fallback_short_min_bits`), not on query
 coverage: the conserved part of a short precursor is a small share of it (the 26-aa mature melittin
 is 37 % of its 70-aa precursor), so a perfect hit still covers little. A longer query is refused
 with one hit below 25 % query coverage or below 25 aligned residues, and with several hits only
 when all three are low (coverage below 25 %, fewer than 35 aligned residues, below 60 bits).
 `fallback_short_query_len 0` applies the rule of long queries to every query.
 
+These tests apply only outside a block with E_syn ≤ 0.1. In such a block, which predicted the
+gene's place, a chain that fails them is written all the same, with `RefusalLifted=` naming the
+tests it failed, and its E-value in its place decides its label: a fragment can be MEDIUM, and
+never HIGH while it covers less than 0.7 of the query. Such a call never seeds and is not in the
+tree; the search counts the chains as `fallback_lifted`, the report the counted ones as
+`summary.refusal_lifted_calls`. The span limit of a chain applies everywhere.
+
 ### `gap_min_identity` / `gap_max_hits` / `min_exon_alnlen`
-**Defaults:** `15.0` (%) / `5` / `30` (aa)
+**Defaults:** `15.0` (%) / `5` / `30` (aligned query residues)
 
 Despite their names, these set only the last-resort `raw_hit` row: a locus that got no model and no
 tandem copy can give one, from a single hit with identity ≥ max(`gap_min_identity`, 90), an
-alignment of at least max(`min_exon_alnlen`, 0.6 × the query length, 15) residues and a hit
+alignment of at least max(`min_exon_alnlen`, 0.6 × the query length, 15) query residues and a hit
 coverage of at least 0.6, at a locus with at least 2 hits, a union coverage of at least 0.75 and a
 best hit of at least 60 bits. At most `gap_max_hits` hits are tried, sorted by bit score (then
-identity, then aligned length), and the first that passes is written. So `gap_min_identity` changes
+identity, then aligned query residues), and the first that passes is written. So `gap_min_identity` changes
 anything only above 90, and `min_exon_alnlen` only for queries under 50 aa. A `raw_hit` is always
 `ModelStatus=fragment`; its label comes from the judge, like any call's.
 
@@ -1507,13 +1522,14 @@ GOI zone that fails them under `rejected_candidates.dropped`
 off.
 
 ### `dispersed_goi_min_identity` / `dispersed_goi_max_evalue` / `dispersed_goi_min_alnlen` / `dispersed_min_chrom_anchors`
-**Defaults:** `40.0` (%) / `1e-10` / `50` (aa) / `3` · modules B1 and C1 set `dispersed_goi_min_alnlen`
+**Defaults:** `40.0` (%) / `1e-10` / `50` (aligned query residues) / `3` · modules B1 and C1 set `dispersed_goi_min_alnlen`
 to 0.6 × the shorter of the query and its longest home exon, between 10 and 50
 
 The tests of the dispersed-GOI rescue (above). A lower identity or a weaker E-value lets relatives
 of the gene seed blocks; the sequence and envelope tests keep a paralog elsewhere in the genome
 out. A hit of a short query, or of a gene with short exons, cannot reach 50 aligned residues, hence
-the module rule.
+the module rule. The length is the hit's aligned query residues (qend − qstart + 1); the
+`alnlen` that `rejected_candidates` lists is MMseqs2's own column, the target span in nucleotides.
 
 ### `goi_genome_wide_path` / `goi_genome_wide_without_blocks`
 **Defaults:** `false` / `false`

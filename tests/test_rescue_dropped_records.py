@@ -19,9 +19,9 @@ import generate_report as gr  # noqa: E402
 import iterative_search_runner as isr  # noqa: E402
 
 
-def _goi(chrom, start, pident=60.0, evalue=1e-20, alnlen=80, bits=100.0):
+def _goi(chrom, start, pident=60.0, evalue=1e-20, alnlen=80, bits=100.0, qend=104):
     return {"query": "GOI_q", "chrom": chrom, "start": start, "end": start + 300, "strand": "-",
-            "qstart": 5, "qend": 104, "pident": pident, "evalue": evalue, "alnlen": alnlen, "bits": bits}
+            "qstart": 5, "qend": qend, "pident": pident, "evalue": evalue, "alnlen": alnlen, "bits": bits}
 
 
 def _anchor(gene, chrom, start):
@@ -29,7 +29,10 @@ def _anchor(gene, chrom, start):
             "pident": 90.0, "evalue": 1e-50, "alnlen": 300, "bits": 500.0}
 
 
-WEAK = [_goi("c7", 9_000_000, pident=30.0), _goi("c7", 9_100_000, evalue=1e-3), _goi("c7", 9_200_000, alnlen=20)]
+# The third: 20 aligned query residues (5-24), below the rescue's 50; MMseqs2's alnlen of such a
+# hit is its target span in nucleotides (60), which the length test does not read.
+WEAK = [_goi("c7", 9_000_000, pident=30.0), _goi("c7", 9_100_000, evalue=1e-3),
+        _goi("c7", 9_200_000, alnlen=60, qend=24)]
 
 
 def test_the_branch_without_any_envelope_counts_its_drops():

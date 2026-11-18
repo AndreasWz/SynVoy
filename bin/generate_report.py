@@ -318,6 +318,9 @@ def _process_gffs_unified(gff_files):
                             "own_copy_bits": (attrs.get("OwnCopyBits", "") or "").strip(),
                             "target_gene": attrs.get("TargetGene", ""),
                             "model_status": model_status,
+                            # A hit chain that the fallback gate refused, written because its
+                            # block is significant: the tests it failed ("" otherwise).
+                            "refusal_lifted": (attrs.get("RefusalLifted", "") or "").strip(),
                             "mrna_id": model_id,
                             # The judge's terms (label rework 2026-10-14, synvoy_label):
                             # why the label (Basis), the E-value in the expected place, the
@@ -1436,6 +1439,9 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 "original_goi_class": rep["goi_class"],
                 "target_gene": rep["target_gene"],
                 "model_status": rep["model_status"],
+                # Only on a hit chain the fallback gate refused and the search wrote because its
+                # block is significant (RefusalLifted): the tests it failed.
+                **({"refusal_lifted": rep["refusal_lifted"]} if rep.get("refusal_lifted") else {}),
                 "provenance": sources,
                 "n_source_loci": len(sources),
                 "n_merged_hits": len(members),
@@ -2715,6 +2721,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # rescue made the search look there (DispersedRescue=1), and by its rule.
             "dispersed_rescue_goi": sum(dispersed_rescue_by_rule.values()),
             "dispersed_rescue_by_rule": dispersed_rescue_by_rule,
+            # Counted calls whose model is a fragment (ModelStatus=fragment), and those that
+            # are hit chains the fallback gate refused, written because their block is
+            # significant (RefusalLifted; they never seed and never reach the tree).
+            "counted_fragment_calls": sum(1 for r in _counted_recs if r.get("model_status") == "fragment"),
+            "refusal_lifted_calls": sum(1 for r in _counted_recs if r.get("refusal_lifted")),
             "genomes_without_flanking_hits": no_flanking_genomes,
             # Genomes the search skipped (e.g. MMseqs resource failure): no result at all.
             "genomes_not_searched": {g: r for g, r in sorted(not_searched.items())},

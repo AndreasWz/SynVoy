@@ -88,7 +88,7 @@ def test_the_runner_reads_the_key_where_the_fixed_two_was():
     # the cap on the loci of a flanking gene stays
     assert re.search(r"\)\[:2\]", src[j:src.index("def count_fallback_refusal")])
     block = src[src.index("def process_region_block"):]
-    assert "cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank)" in block
+    assert "cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank," in block
     assert "cap_flanking_loci(args, parent_loci)" in block
 
 

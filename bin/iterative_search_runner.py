@@ -312,6 +312,20 @@ def maybe_quiet_streams(quiet: bool):
 def normalize_coordinates(start: int, end: int) -> Tuple[int, int]:
     return min(start, end), max(start, end)
 
+
+def aligned_query_residues(h: Dict[str, Any]) -> int:
+    """The query residues inside a hit's alignment, qend - qstart + 1: the one length that
+    MMseqs2, tblastn and Smith-Waterman report in the same unit (the query is a protein for
+    all three). Every length floor of the search reads it. A hit's ``alnlen`` is the engine's
+    own column: MMseqs2's translated search, which computes no backtrace, writes the target
+    span in nucleotides there; tblastn and Smith-Waterman write alignment columns (query
+    residues plus gaps). A hit without query coordinates falls back to its ``alnlen``."""
+    qs, qe = h.get('qstart'), h.get('qend')
+    if qs in (None, '') or qe in (None, ''):
+        return int(h.get('alnlen', 0) or 0)
+    return abs(int(qe) - int(qs)) + 1
+
+
 def filter_exon_hits(hits: List[Dict[str, Any]], query_len: int) -> List[Dict[str, Any]]:
     """Hits of an exon-level query that carry query coordinates.
 
@@ -340,9 +354,15 @@ def parse_hits(
     Filters by basic quality metrics.
     Preserves qstart/qend (query protein positions) and strand for exon annotation.
 
+    The length floor (``min_length``, or for a short query ``short_query_frac`` of its length,
+    at least ``short_query_min``) counts aligned query residues, qend - qstart + 1
+    (aligned_query_residues), for every engine; a hit keeps the engine's own ``alnlen``
+    (MMseqs2: the target span in nucleotides; tblastn, Smith-Waterman: alignment columns).
+
     ``drops`` (stage 2, counts only): rows of non-decoy queries that pass the E-value and
     identity floors but not the length floor are counted as 'len_floor', and those among
-    them shorter than 15 aa on a query longer than 100 aa also as 'len_floor_lt15_long_query'.
+    them of fewer than 15 query residues on a query longer than 100 aa also as
+    'len_floor_lt15_long_query'.
     """
     hits = []
     if not os.path.exists(hits_file):
@@ -365,6 +385,9 @@ def parse_hits(
                 pident = float(parts[2])
                 alnlen = int(parts[3])
                 evalue = float(parts[10])
+                q_start = int(parts[6])
+                q_end = int(parts[7])
+                aln_aa = abs(q_end - q_start) + 1    # aligned query residues: the floors' unit
 
                 q_id = parts[0]
                 q_len = None
@@ -380,9 +403,9 @@ def parse_hits(
                     effective_min_length = min(min_length, adaptive_min)
 
                 if (drops is not None and evalue <= evalue_thresh and pident >= min_identity
-                        and alnlen < effective_min_length and limit_query_kind(q_id) != 'decoy'):
+                        and aln_aa < effective_min_length and limit_query_kind(q_id) != 'decoy'):
                     drops['len_floor'] = drops.get('len_floor', 0) + 1
-                    if alnlen < 15:
+                    if aln_aa < 15:
                         # The counter reads the whole query's length, not the piece's: a window search's
                         # queries are pieces (|frag_/|slide_ ids carry the length they were cut from,
                         # |exon_ ids take their base query's), and the filter above keeps the piece's
@@ -395,7 +418,7 @@ def parse_hits(
 
                 if (evalue <= evalue_thresh and
                     pident >= min_identity and
-                    alnlen >= effective_min_length):
+                    aln_aa >= effective_min_length):
 
                     t_start = int(parts[8])
                     t_end = int(parts[9])
@@ -404,9 +427,6 @@ def parse_hits(
                     # for Python slicing: start-1 becomes 0-based, end stays (exclusive)
                     start -= 1
                     strand = '+' if t_start <= t_end else '-'
-
-                    q_start = int(parts[6])
-                    q_end = int(parts[7])
 
                     bits = float(parts[11]) if len(parts) > 11 else 0.0
 
@@ -644,6 +664,11 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
     aligned part of the home protein. ``genome_tag``: the genome's name as the model ids carry
     it; the locus token is renamed right behind it (``|<tag>_b<N>_l<L>`` -> ``_r<L>``), so a
     genome whose name holds a block-like part keeps it (freeze fix e2).
+
+    A home hit chain written only because its block is significant (``RefusalLifted``,
+    fallback_decision) is no model of the home protein's own here: the relative's model of the
+    same DNA is kept and the window's judge chooses between the two. A rebased chain keeps its
+    ``RefusalLifted``.
     """
     real_models = {'exon_annotation', 'tandem_copy', 'fallback_hit_span'}
     token = (re.compile(r'(\|' + re.escape(genome_tag) + r'_b\d+)_l(\d+)') if genome_tag
@@ -652,8 +677,8 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
     for cand, parent in zip(raw_candidates, cand_parents):
         if parent.endswith(RELATIVE_QUERY_TAG) or not cand.get('gff'):
             continue
-        ev = _parse_gff_attr_string(cand['gff'][0].split('\t')[-1]).get('EvidenceType', '')
-        if ev in real_models:
+        attrs = _parse_gff_attr_string(cand['gff'][0].split('\t')[-1])
+        if attrs.get('EvidenceType', '') in real_models and not attrs.get('RefusalLifted'):
             home_spans[parent].append((cand['start'], cand['end']))
 
     kept = []
@@ -711,6 +736,8 @@ def rebase_relative_candidates(raw_candidates, cand_parents, by_parent, core: bo
                   'feature_id': old.get('TargetID', '')}
         cols[5] = f"{aln['identity']:.1f}"
         cols[8] = _compose_gff_attrs(attrs, native if any(native.values()) else None)
+        if old.get('RefusalLifted'):
+            cols[8] += f";RefusalLifted={old['RefusalLifted']}"
         new_gff = ['\t'.join(cols)]
         for line in cand['gff'][1:]:
             lc = line.split('\t')
@@ -1013,6 +1040,21 @@ def greedy_select(candidates) -> List[Dict[str, Any]]:
     return final
 
 
+def block_esyn(args, collinear_support, hood_len: Optional[int], w_start: int, w_end: int) -> float:
+    """E_syn of a block (synvoy_evalue.e_syn): its longest run of anchors in home order, the
+    genome-wide places of the home neighbours (``args.genome_ctx['places']``), the length of
+    the neighbourhood the run was counted in (``hood_len``; the window's when not given) and
+    the genome's. Records nothing: block_place_terms writes the value for the genome-level
+    multiplier, and process_region_block reads it early for the hit-chain gate
+    (fallback_decision)."""
+    ctx = getattr(args, 'genome_ctx', None) or {}
+    genome_len = int(ctx.get('genome_len') or 0) or (w_end - w_start)
+    neighbours = list((getattr(args, 'home_rank', None) or {}).keys())
+    places = ctx.get('places', {})
+    return synvoy_evalue.e_syn(int(collinear_support or 0), [places.get(g, 0) for g in neighbours],
+                               max(1, int(hood_len) if hood_len else w_end - w_start), genome_len)
+
+
 def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
                       collinear_support, flanking_candidates,
                       hood_len: Optional[int] = None, genome_wide: bool = False) -> Dict[str, Any]:
@@ -1034,10 +1076,7 @@ def block_place_terms(args, block_idx, w_start, w_end, core_start, core_end,
         return {'esyn': float('inf'), 'significant': False, 'slot': None, 'slot_inverted': None,
                 'core': (core_start, core_end), 'window': (w_start, w_end),
                 'genome_len': genome_len, 'window_len': max(1, w_end - w_start)}
-    neighbours = list((getattr(args, 'home_rank', None) or {}).keys())
-    places = ctx.get('places', {})
-    esyn = synvoy_evalue.e_syn(int(collinear_support or 0), [places.get(g, 0) for g in neighbours],
-                               max(1, int(hood_len) if hood_len else w_end - w_start), genome_len)
+    esyn = block_esyn(args, collinear_support, hood_len, w_start, w_end)
     ctx.setdefault('block_esyn', {})[block_idx] = esyn
     ranks = getattr(args, 'goi_ranks', None) or {}
     best: Dict[int, Tuple[float, Tuple[int, int]]] = {}
@@ -1288,7 +1327,8 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
             'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage', 'SigBlocks', 'PlaceBp',
             'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome',
             'SearchQuery',      # <parent>~<kind>~rel: found by the decoy of the relative's query
-            'DispersedRescue', 'RescueRule']    # found only through the dispersed-GOI rescue
+            'DispersedRescue', 'RescueRule',    # found only through the dispersed-GOI rescue
+            'RefusalLifted']    # a hit chain written only because its block is significant
     n = 0
     with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
         fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")
@@ -2101,14 +2141,14 @@ def _pooled_identity(hits: List[Dict[str, Any]]) -> float:
     """Percent identity of a model assembled from several local alignments.
 
     Identity is identical columns over aligned columns, so the per-hit values are
-    weighted by alignment length: a 12-aa hit at 80 % and a 100-aa hit at 30 % are one
-    35 % model, not a 55 % one (the unweighted mean this replaced let a short
-    high-identity chance window lift a model over the identity bars). Falls back to
-    the plain mean when any hit lacks an alignment length.
+    weighted by the aligned query residues (aligned_query_residues, the same unit for every
+    engine): a 12-aa hit at 80 % and a 100-aa hit at 30 % are one 35 % model, not a 55 % one
+    (the unweighted mean this replaced let a short high-identity chance window lift a model
+    over the identity bars). Falls back to the plain mean when any hit lacks a length.
     """
     if not hits:
         return 0.0
-    lens = [int(h.get("alnlen", 0) or 0) for h in hits]
+    lens = [aligned_query_residues(h) for h in hits]
     pids = [float(h.get("pident", 0) or 0.0) for h in hits]
     if all(n > 0 for n in lens):
         return sum(p * n for p, n in zip(pids, lens)) / sum(lens)
@@ -2722,7 +2762,7 @@ def _longest_monotonic_query_chain(
     stitched into a single multi-exon mRNA whose span is almost entirely empty
     intron (the "two seqs far apart called one gene" failure). If the gap bound
     leaves only single-hit chains, the single best hit (highest bitscore, then
-    aligned length) is returned so a genuine compact locus is still emitted.
+    aligned query residues) is returned so a genuine compact locus is still emitted.
     """
     n = len(ordered_hits)
     if n <= 1:
@@ -2736,7 +2776,7 @@ def _longest_monotonic_query_chain(
 
     def _quality(idx: int):
         h = ordered_hits[idx]
-        return (float(h.get("bits", 0.0)), int(h.get("alnlen", 0)))
+        return (float(h.get("bits", 0.0)), aligned_query_residues(h))
 
     dp = [1] * n
     prev = [-1] * n
@@ -4310,6 +4350,18 @@ def fallback_refusal(ordered_hit_count: int, qcov: float, single_aln: int, aln_t
     return []
 
 
+def fallback_decision(refused, block_significant: bool) -> Tuple[List[str], List[str]]:
+    """``(refused, lifted)`` for a GOI hit chain and the tests of fallback_refusal it failed.
+    In a block with E_syn <= 0.1 (``block_significant``: the block predicted the gene's
+    place) the chain is written whatever its length and coverage, and the judge's E-value in
+    its place decides its label; the failed tests come back as ``lifted`` (the model's
+    RefusalLifted=). Elsewhere the refusal stands."""
+    refused = list(refused or [])
+    if refused and block_significant:
+        return [], refused
+    return refused, []
+
+
 def define_waves(genome_entries, args):
     """Partition genomes into execution waves (the expanding-database schedule).
 
@@ -4416,16 +4468,42 @@ def outside_goi_core(args, query_id: str, global_start: int, global_end: int,
     return False
 
 
-def cap_goi_parent_loci(args, parent_id: str, parent_loci, rank):
+def describe_goi_locus(hits, chrom: str, w_start: int, rank) -> str:
+    """One GOI locus of a window for the log: its span in 1-based genome coordinates, its
+    strands, and the cap's rank terms (``rank``: union query coverage, best bits, hits)."""
+    s = w_start + min(int(h.get('gstart', 0)) for h in hits) + 1
+    e = w_start + max(int(h.get('gend', 0)) for h in hits)
+    strands = ''.join(sorted({h.get('strand', '+') for h in hits}))
+    qcov, bits, n = rank(hits)
+    return f"{chrom}:{s}-{e} ({strands}, {n} hits, qcov {float(qcov):.2f}, {float(bits):.1f} bits)"
+
+
+# Cut GOI loci named per log line of cap_goi_parent_loci; the rest are counted.
+GOI_CAP_LOG_MAX_LOCI = 10
+
+
+def cap_goi_parent_loci(args, parent_id: str, parent_loci, rank, where=None):
     """The strongest GOI loci of one query in a window, to avoid noisy paralog floods
     (goi_candidate_regions_per_query: 2; the local_family module raises it for a family with
     home copies). The loci cut are counted per query kind: regions_cap (the home GOI and
-    models of earlier genomes), regions_cap_rel (the relative's query), regions_cap_decoy."""
-    kept = sorted(parent_loci, key=rank, reverse=True)[
-        :max(1, int(getattr(args, 'goi_candidate_regions_per_query', 2) or 2))]
+    models of earlier genomes), regions_cap_rel (the relative's query), regions_cap_decoy.
+
+    ``where`` = (genome, block, chrom, window start): when loci are cut, one INFO line names
+    them (the first GOI_CAP_LOG_MAX_LOCI, strongest first, with describe_goi_locus; ``rank``
+    must then give its three terms) and the weakest locus kept; not for a decoy query."""
+    cap = max(1, int(getattr(args, 'goi_candidate_regions_per_query', 2) or 2))
+    ordered = sorted(parent_loci, key=rank, reverse=True)
+    kept, cut = ordered[:cap], ordered[cap:]
     count_limit(args, {'goi': 'regions_cap', 'rel': 'regions_cap_rel',
                        'decoy': 'regions_cap_decoy'}[limit_query_kind(parent_id)],
                 len(parent_loci) - len(kept))
+    if cut and where is not None and limit_query_kind(parent_id) != 'decoy':
+        genome_name, block_idx, chrom, w_start = where
+        shown = '; '.join(describe_goi_locus(l, chrom, w_start, rank) for l in cut[:GOI_CAP_LOG_MAX_LOCI])
+        more = (f"; and {len(cut) - GOI_CAP_LOG_MAX_LOCI} more" if len(cut) > GOI_CAP_LOG_MAX_LOCI else "")
+        logger.info(f"[{genome_name}] block {block_idx}: {parent_id}: kept {len(kept)} of "
+                    f"{len(parent_loci)} GOI loci (goi_candidate_regions_per_query {cap}); cut: "
+                    f"{shown}{more}; weakest kept: {describe_goi_locus(kept[-1], chrom, w_start, rank)}")
     return kept
 
 
@@ -4577,6 +4655,12 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         block_collinear_support, _dir = _longest_collinear_run(ordered_ranks)
     else:
         block_collinear_support = None
+    # Whether the block predicted the gene's place (E_syn <= 0.1, the value block_place_terms
+    # records below): a GOI hit chain that the fallback gate refuses is written there all the
+    # same and judged by its E-value in its place (fallback_decision, RefusalLifted=).
+    block_significant = (not genome_wide and block_esyn(
+        args, block_collinear_support, hood_end - hood_start, w_start, w_end)
+        <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN)
     # The block's row of blocks/<genome>.blocks.tsv, for every window cut out (the blocks of
     # block_context), also one whose search ends before its candidates are judged.
     if not genome_wide:
@@ -4937,7 +5021,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
 
                 # Keep only the strongest loci per parent to avoid noisy paralog floods
                 # (2; the local_family module raises it for a family with home copies).
-                parent_loci = cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank)
+                parent_loci = cap_goi_parent_loci(args, parent_id, parent_loci, _locus_rank,
+                                                  where=(genome_name, block_idx, chrom, w_start))
 
                 for locus_idx, gene_hits in enumerate(parent_loci, start=1):
                     work_hits = gene_hits
@@ -5023,23 +5108,26 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 if ordered_hits:
                                     query_len = max(1, len(parent_query_seq))
                                     qcov = _query_union_coverage(ordered_hits, query_len)
-                                    aln_total = sum(max(0, int(h.get('alnlen', 0))) for h in ordered_hits)
+                                    aln_total = sum(aligned_query_residues(h) for h in ordered_hits)
                                     best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
                                     logger.debug(f"[FALLBACK] GOI={parent_id} qcov={qcov:.2f} aln_total={aln_total} bits={best_bits:.1f} len(hits)={len(ordered_hits)}")
 
                                     # A1 "the fumble": short queries gate on aligned length +
-                                    # bitscore, not coverage (see is_valid_fallback).
-                                    _refused = fallback_refusal(
+                                    # bitscore, not coverage (see is_valid_fallback). Lengths
+                                    # are aligned query residues. In a significant block the
+                                    # refusal is lifted (fallback_decision): the chain is
+                                    # written with RefusalLifted= and the judge decides.
+                                    _refused, _lifted = fallback_decision(fallback_refusal(
                                         ordered_hit_count=len(ordered_hits),
                                         qcov=qcov,
-                                        single_aln=int(ordered_hits[0].get('alnlen', 0)),
+                                        single_aln=aligned_query_residues(ordered_hits[0]),
                                         aln_total=aln_total,
                                         best_bits=best_bits,
                                         query_len=query_len,
                                         short_query_len=args.fallback_short_query_len,
                                         short_min_aln_aa=args.fallback_short_min_aln_aa,
                                         short_min_bits=args.fallback_short_min_bits,
-                                    )
+                                    ), block_significant)
                                     valid_fallback = not _refused
                                     count_fallback_refusal(args, parent_id, _refused)
 
@@ -5095,6 +5183,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                     f"{avg_pident:.1f}\t{strand}\t.\t"
                                                     f"{_mRNA_attrs(_goi_feature_attrs({'ID': copy_id, 'Name': parent_id, 'SynVoy_Parent': parent_id, 'Type': 'fallback_hit_span'}, evidence_type='fallback_hit_span', identity=avg_pident, exon_count=len(cds_intervals), query_cov=classify_qcov, flanking_support=block_flanking_support, embedding_similarity=fb_embed_sim, structural_similarity=fb_struct_sim, collinear_support=block_collinear_support), global_start, global_end, strand)}"
                                                     f";{chain_query_attr(ordered_hits)}"
+                                                    + (f";RefusalLifted={','.join(_lifted)}" if _lifted else "")
                                                 )
                                             ]
                                             for eidx, (hs, he) in enumerate(cds_intervals, 1):
@@ -5120,6 +5209,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                                 },
                                                 'gff': cand_gff
                                             })
+                                            if _lifted and limit_query_kind(parent_id) != 'decoy':
+                                                count_limit(args, 'fallback_lifted')
 
                     if exons:
                         is_tandem_result = any(e.get('id', '').startswith('GOI_copy_') for e in exons)
@@ -5208,10 +5299,11 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                             args.min_exon_alnlen,
                             int(max(15, len(parent_query_seq) * 0.6))
                         )
-                        # Bit score first (was identity, then length, then bits).
+                        # Bit score first (was identity, then length, then bits); lengths in
+                        # aligned query residues.
                         sorted_hits = sorted(
                             work_hits,
-                            key=lambda h: (h.get('bits', 0), h.get('pident', 0), h.get('alnlen', 0)),
+                            key=lambda h: (h.get('bits', 0), h.get('pident', 0), aligned_query_residues(h)),
                             reverse=True
                         )[:max(1, args.gap_max_hits)]
 
@@ -5219,7 +5311,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                         for h_idx, hit in enumerate(sorted_hits, 1):
                             if hit.get('pident', 0) < min_fallback_identity:
                                 continue
-                            if hit.get('alnlen', 0) < min_fallback_alnlen:
+                            if aligned_query_residues(hit) < min_fallback_alnlen:
                                 continue
                             qspan = abs(hit.get('qend', 0) - hit.get('qstart', 0)) + 1
                             qcov = (qspan / len(parent_query_seq)) if len(parent_query_seq) > 0 else 0.0
@@ -5400,14 +5492,15 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     qmax = max(max(h.get('qstart', 0), h.get('qend', 0)) for h in ordered_hits)
                     query_len = max(1, len(parent_query_seq))
                     qcov = (qmax - qmin + 1) / query_len
-                    aln_total = sum(max(0, int(h.get('alnlen', 0))) for h in ordered_hits)
+                    aln_total = sum(aligned_query_residues(h) for h in ordered_hits)
                     best_bits = max(float(h.get('bits', 0)) for h in ordered_hits)
 
-                    # Single-hit fallback must look like substantial coverage.
+                    # Single-hit fallback must look like substantial coverage (lengths in
+                    # aligned query residues).
                     if len(ordered_hits) == 1:
                         min_single_qcov = 0.45
                         min_single_aln = max(30, int(0.35 * query_len))
-                        if qcov < min_single_qcov or int(ordered_hits[0].get('alnlen', 0)) < min_single_aln:
+                        if qcov < min_single_qcov or aligned_query_residues(ordered_hits[0]) < min_single_aln:
                             continue
                     else:
                         # Multi-hit chain fallback: require meaningful overall support.
@@ -6194,6 +6287,11 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
     a poor query. AMBIGUOUS and LOW calls never seed. Every HIGH/MEDIUM
     call that does not seed feeds the tree (`goi_for_tree.faa`) only.
 
+    A hit chain written only because its block is significant (``refusal_lifted``, the
+    model's RefusalLifted=; fallback_decision) neither seeds nor feeds the tree, and is left
+    out before the pool is formed: a lifted HIGH does not make the genome's MEDIUM calls
+    tree-only.
+
     Until then a call seeded when it was HIGH or MEDIUM and of class confident_goi /
     probable_goi (a tandem copy never seeded, a paralog MEDIUM next to a HIGH call did),
     with an opt-in path for flanking support (--seed_on_flanking_support, removed).
@@ -6208,6 +6306,9 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
         meta = feature_meta.get(gid, {})
         role = meta.get("role", "goi" if is_goi_query_id_fn(gid) else "flanking")
         if role != "goi":
+            continue
+        if meta.get("refusal_lifted"):
+            suppressed += 1
             continue
         confidence = meta.get("confidence", "")
         if confidence in _TREE_QUALIFYING_CONFIDENCE:
@@ -6378,12 +6479,14 @@ def _nearest_anchor(chrom, hs, he, by_chrom):
 #            the GOI zone of a block that was not searched (dead_zone). The strongest
 #            NONSYNTENIC_DROPPED_MAX_ROWS of them per genome search; how many there were is
 #            target_policy.tsv's rescue_dropped_outside_zones.
-# Coordinates 0-based, end exclusive; qstart/qend the query residues; alnlen as the search
-# engine gave it. envelope: inside / outside the envelope of the hit's sequence,
-# chromosome_without (it has none) or none_in_genome. anchors_on_sequence: the flanking genes
-# whose best hit in the genome lies on that sequence (what the rule counts);
-# genes_on_sequence: the flanking genes with any hit there. modelled_here / modelled_by: the
-# best label, and the id, of a GOI model of this search that overlaps the hit ('' when none).
+# Coordinates 0-based, end exclusive; qstart/qend the query residues, whose count
+# (qend - qstart + 1) the rescue's length test reads; alnlen as the search engine gave it
+# (MMseqs2: the target span in nucleotides). envelope: inside / outside the envelope of the
+# hit's sequence, chromosome_without (it has none) or none_in_genome. anchors_on_sequence:
+# the flanking genes whose best hit in the genome lies on that sequence (what the rule
+# counts); genes_on_sequence: the flanking genes with any hit there. modelled_here /
+# modelled_by: the best label, and the id, of a GOI model of this search that overlaps the
+# hit ('' when none).
 NONSYNTENIC_COLUMNS = [
     'genome', 'query', 'chrom', 'start', 'end', 'strand', 'qstart', 'qend', 'bits',
     'identity', 'evalue', 'alnlen', 'rejected_by', 'nearest_anchor_gene', 'nearest_anchor_bp',
@@ -6478,10 +6581,12 @@ LIMIT_KEYS = [
     'window_len_floor_mmseqs', 'window_len_floor_tblastn', 'window_len_floor_sw',
     'window_len_floor_lt15_long_query', 'mmseqs_maxseqs_window', 'mmseqs_maxseqs_genome',
     'sw_timeout', 'sw_long_query_skipped',
-    # GOI candidates of a window
+    # GOI candidates of a window; fallback_lifted counts the hit chains the fallback gate
+    # refused that were written all the same, in a block with E_syn <= 0.1 (RefusalLifted)
     'goi_core_filter', 'regions_cap', 'regions_cap_rel', 'regions_cap_decoy',
     'fallback_refused', 'fallback_short_aln', 'fallback_short_bits', 'fallback_long_qcov',
-    'fallback_long_aln', 'fallback_long_bits', 'fallback_span_cap', 'flanking_loci_cap',
+    'fallback_long_aln', 'fallback_long_bits', 'fallback_lifted', 'fallback_span_cap',
+    'flanking_loci_cap',
     # blocks and the dispersed-GOI rescue of the genome; dispersed_refused_per_piece_pass
     # measures only: refused hits that counting each flanking gene on every sequence where it
     # has a hit (not only at its best hit in the genome) would have seeded
@@ -6497,6 +6602,19 @@ REDUCED_SEARCH_HEADER = '##synvoy-reduced-search'
 # MMseqs2 search reports at most this many targets per query (its --max-seqs default; the
 # search does not set it): a query with this many result rows may have lost more.
 MMSEQS_DEFAULT_MAX_SEQS = 300
+# A sensitivity outside these bounds draws a warning, here and at the start (main.nf). MMseqs2
+# documents -s from 1.0 (faster) to 7.5 (sensitive) and sets no upper bound; the pipeline's
+# default is 9.5.
+MMSEQS_SENSITIVITY_TYPICAL = (1.0, 12.0)
+
+
+def mmseqs_sensitivity_warning(sensitivity: float) -> Optional[str]:
+    """The search log's warning for an MMseqs2 sensitivity outside MMSEQS_SENSITIVITY_TYPICAL
+    (the start's text); None inside the bounds."""
+    lo, hi = MMSEQS_SENSITIVITY_TYPICAL
+    if lo <= float(sensitivity) <= hi:
+        return None
+    return f"Unusual MMseqs sensitivity {sensitivity}. Typical range is 1-9.5."
 
 
 @contextlib.contextmanager
@@ -7218,8 +7336,8 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *, goi_zones=(), near_radius
     (_flanking_anchor_positions). Per GOI hit, in the order of ``hits``:
 
       1. the quality bar: identity >= ``min_identity`` and E <= ``max_evalue`` (counted as
-         dispersed_identity or dispersed_evalue, identity first), then alnlen >= ``min_alnlen``
-         (dispersed_alnlen);
+         dispersed_identity or dispersed_evalue, identity first), then at least ``min_alnlen``
+         aligned query residues (aligned_query_residues; dispersed_alnlen);
       2. a hit that overlaps one of ``goi_zones`` (block +- the GOI margin, goi_zones) is left
          to that block: counted as dispersed_in_goi_zone and appended to ``in_zone_out``;
       3. the neighbour rule (neighbour_rule): a seed when the hit lies inside the envelope of a
@@ -7297,7 +7415,7 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *, goi_zones=(), near_radius
         if h.get('pident', 0.0) < min_identity or h.get('evalue', 1.0) > max_evalue:
             _drop('dispersed_identity' if h.get('pident', 0.0) < min_identity else 'dispersed_evalue', h)
             continue
-        if h.get('alnlen', 0) < min_alnlen:
+        if aligned_query_residues(h) < min_alnlen:
             _drop('dispersed_alnlen', h)
             continue
         chrom, hs, he = h.get('chrom'), h.get('start', 0), h.get('end', 0)
@@ -7427,7 +7545,7 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
         logger.info(
             f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({r.get('rejected_by')}): "
             f"{r.get('chrom')}:{r.get('start')}-{r.get('end')} id={float(r.get('identity') or 0):.1f}% "
-            f"e={r.get('evalue')} aln={r.get('alnlen')} — nearest flanking anchor "
+            f"e={r.get('evalue')} aln={aligned_query_residues(r)} query residues — nearest flanking anchor "
             + (f"{r.get('nearest_anchor_gene')} at {int(bp):,} bp" if bp not in ('', None)
                else "none on this sequence"))
     rules = [s.get('rescue_rule', '') for s in rescue.seeds]
@@ -8515,6 +8633,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "target_product": attrs.get("TargetProduct", ""),
                      "embedding_similarity": attrs.get("EmbeddingSimilarity", ""),
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
+                     # a hit chain the gate refused, written in a significant block: no seed
+                     "refusal_lifted": attrs.get("RefusalLifted", ""),
                      # full precision for the seed bar (RF-1f), the GFF string otherwise
                      "spec_margin": _numbers_of(args, model_id).get("SpecMargin", attrs.get("SpecMargin", "")),
                      "real_competitor": _numbers_of(args, model_id).get("RealCompetitor",
@@ -9018,7 +9138,9 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--evalue", type=float, default=1e-5)
     parser.add_argument("--min_identity", type=float, default=40.0)
-    parser.add_argument("--min_length", type=int, default=50)
+    parser.add_argument("--min_length", type=int, default=50,
+                        help="Shortest hit of the genome-wide search, in aligned query residues "
+                             "(qend - qstart + 1; the pipeline passes min_hit_length)")
     parser.add_argument("--max_intron", type=int, default=20000)
     parser.add_argument("--tandem_copy_parent", choices=["seed", "home"], default="seed",
                         help="Whose model a single-segment tandem copy is: 'seed' (default, as "
@@ -9198,15 +9320,19 @@ def main():
     parser.add_argument("--aug_relaxed_identity_factor", type=float, default=0.6)
     parser.add_argument("--aug_relaxed_identity_min", type=float, default=25.0)
     parser.add_argument("--aug_relaxed_length_div", type=float, default=2.0)
-    parser.add_argument("--aug_relaxed_length_min", type=int, default=15)
+    parser.add_argument("--aug_relaxed_length_min", type=int, default=15,
+                        help="Shortest MMseqs2 or tblastn hit kept in a window, in aligned query "
+                             "residues (qend - qstart + 1): max(this, --min_length / "
+                             "--aug_relaxed_length_div)")
     parser.add_argument("--gap_search_window", type=int, default=50000,
                         help="DNA added around a candidate's hits before the gene model is "
                              "built; never less than the gene's own span at home (bp)")
     parser.add_argument("--gap_min_identity", type=float, default=25.0)
     parser.add_argument("--gap_max_hits", type=int, default=5)
     parser.add_argument("--min_exon_alnlen", type=int, default=30,
-                        help="Shortest alignment (aa) accepted for a last-resort raw_hit row "
-                             "of the GOI; never less than 60 %% of the query")
+                        help="Shortest alignment accepted for a last-resort raw_hit row of the "
+                             "GOI, in aligned query residues (qend - qstart + 1); never less "
+                             "than 60 %% of the query")
     parser.add_argument(
         "--max_blocks_per_genome",
         type=int,
@@ -9258,12 +9384,15 @@ def main():
         "--fallback_short_query_len", type=int, default=150,
         help="§A1: queries shorter than this (aa) gate their GOI fallback on aligned "
              "length + bitscore, NOT query coverage (the mature peptide may be a small "
-             "fraction of a precursor). 0 = legacy coverage gate for all queries."
+             "fraction of a precursor). 0 = legacy coverage gate for all queries. In a block "
+             "with E_syn <= 0.1 these length, coverage and bit-score tests refuse no chain: it "
+             "is written with RefusalLifted= and judged (the span limit still applies)."
     )
     parser.add_argument(
         "--fallback_short_min_aln_aa", type=int, default=15,
-        help="§A1: minimum aligned length (aa) for a short-query GOI fallback; rejects "
-             "micro-window overcalls while admitting short mature peptides (e.g. 26-aa melittin)."
+        help="§A1: minimum aligned length for a short-query GOI fallback, in aligned query "
+             "residues (qend - qstart + 1, summed over the chain's hits); rejects micro-window "
+             "overcalls while admitting short mature peptides (e.g. 26-aa melittin)."
     )
     parser.add_argument(
         "--fallback_short_min_bits", type=float, default=30.0,
@@ -9424,7 +9553,8 @@ def main():
     parser.add_argument("--dispersed_goi_max_evalue", type=float, default=1e-10,
                         help="§1o: maximum e-value for a dispersed GOI hit to be rescued")
     parser.add_argument("--dispersed_goi_min_alnlen", type=int, default=50,
-                        help="§1o: minimum alignment length (aa/bp) for a dispersed GOI hit")
+                        help="§1o: minimum alignment length for a dispersed GOI hit, in aligned "
+                             "query residues (qend - qstart + 1)")
     parser.add_argument("--dispersed_min_chrom_anchors", type=int, default=3,
                         help="§1o: a chromosome must carry >= this many distinct flanking "
                              "genes to define a rescue envelope (macro-synteny evidence)")
@@ -9595,8 +9725,9 @@ def main():
         logger.error(f"Invalid threads: {args.threads}. Must be >= 1")
         sys.exit(1)
     
-    if args.mmseqs_sens < 1 or args.mmseqs_sens > 9:
-        logger.warning(f"MMseqs sensitivity {args.mmseqs_sens} outside typical range (1-9)")
+    _sens_warning = mmseqs_sensitivity_warning(args.mmseqs_sens)
+    if _sens_warning:
+        logger.warning(_sens_warning)
     if args.mmseqs_verbosity < 0 or args.mmseqs_verbosity > 3:
         logger.error("mmseqs_verbosity must be between 0 and 3")
         sys.exit(1)
