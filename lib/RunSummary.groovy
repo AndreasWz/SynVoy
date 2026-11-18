@@ -17,9 +17,16 @@ class RunSummary {
     // placeholder tree has none (skip_tree, fewer than 3 GOI sequences), or one whose bootstrap
     // status is placeholder_tree (an alignment without information). An unreadable info counts as
     // a placeholder.
-    static String treeKind(File nwk) {
+    // The info must be this run's: publishDir overwrites what a run writes and leaves the rest, so
+    // a placeholder written into a reused output folder can sit next to an earlier run's info. The
+    // caller's keep (main.nf fromThisRun) refuses an info older than this run's start on a fresh
+    // run; on -resume it keeps every file, so an info that is older than its tree is refused here
+    // too. COMPUTE_TREE publishes the two files together, within SAME_TASK_MS of each other.
+    static final long SAME_TASK_MS = 2000
+
+    static String treeKind(File nwk, Closure<Boolean> keep = { File f -> true }) {
         def info = new File(nwk.parentFile, nwk.name.replaceFirst(/\.nwk$/, '.info.json'))
-        if (!info.isFile()) {
+        if (!info.isFile() || !keep.call(info) || info.lastModified() < nwk.lastModified() - SAME_TASK_MS) {
             return 'placeholder'
         }
         def status = null

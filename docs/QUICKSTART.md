@@ -61,7 +61,7 @@ Generated Outputs
 
 The first `→` line is the report's headline: how many orthologs SynVoy found, how many candidates need curation, and in how many genomes it placed any model of the gene (`LOW` ones included). The lines after it count the genomes in which SynVoy placed no model of the gene, not even a `LOW` one: first those without a strong match of it, then those with a strong match that no synteny rule accepted. The report names them (`summary.goi_absent_genomes`, `summary.goi_found_but_not_syntenic`). On the default profile the tree step is skipped, and the summary names `locus_1_tree.nwk` a placeholder.
 
-If a rescue, paralog-check or ownership step failed for a genome, the run still finishes, and the report says so: a sentence in `warnings` and a row in `failed_steps` (see [USAGE.md](USAGE.md#a-step-failed-but-the-run-finished-failed_steps-in-the-report)).
+If a rescue or ownership (paralog check) step failed for a genome, the run still finishes, and the report says so: a sentence in `warnings` and a row in `failed_steps` (see [USAGE.md](USAGE.md#a-step-failed-but-the-run-finished-failed_steps-in-the-report)).
 
 The results folder holds, among other things:
 

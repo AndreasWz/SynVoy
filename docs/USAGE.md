@@ -73,13 +73,13 @@ Then SynVoy downloads the reference genome of the home species and the genomes o
 | `--home_species` | read from the accession | The home species, e.g. `"Apis mellifera"`. Overrides the species of the accession. |
 | `--max_genomes` | `0` | How many related genomes to search. `0` takes three for each taxonomic level from genus to class, so usually 12. |
 | `--target_species` | none | The species to search, comma-separated (`"Bombus terrestris,Nomia melanderi"`), instead of species chosen by taxonomy. |
-| `--assembly_ranking` | `hybrid` | Which assembly to take when a species has several. Every rule prefers NCBI's reference or representative assembly, then a RefSeq assembly, then the higher assembly level. After that, `hybrid` prefers fewer contigs and scaffolds and a higher N50, `counts` fewer chromosomes, scaffolds and contigs, and `nstats` a higher N80 and N50. |
+| `--assembly_ranking` | `hybrid` | Which assembly to take when a species has several, and which species fill the places of a taxonomic level. Every rule prefers the higher assembly level (chromosome, complete, scaffold, contig), then NCBI's reference or representative assembly, then a RefSeq assembly over a GenBank one. After that, `hybrid` prefers fewer contigs and scaffolds and a higher N50, `counts` fewer chromosomes, scaffolds and contigs, and `nstats` a higher N80 and N50. |
 
 Downloaded assemblies of low quality are left out or flagged:
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `--bad_quality_policy` | `auto` | What happens to a low-quality assembly. `auto` leaves out one that SynVoy chose and keeps one you chose (the home assembly, or a species named in `--target_species`), with a warning in the console, the report and the figures. `drop`, `keep` and `ask` apply one rule to all. |
+| `--bad_quality_policy` | `auto` | What happens to a low-quality assembly. `auto` leaves out one that SynVoy chose (the next species of its taxonomic level takes its place) and keeps one you chose (the home assembly, or a species named in `--target_species`), with a warning in the console, the report and the figures. `drop`, `keep` and `ask` apply one rule to all. |
 | `--bad_min_n50` | `5000` | An assembly whose N50 is below this is of low quality. |
 | `--bad_max_contigs`, `--bad_max_scaffolds` | `500000` | An assembly with more contigs or scaffolds is of low quality. These apply only when NCBI's record gives the count. |
 
@@ -272,7 +272,7 @@ sbatch scripts/slurm_submit.sh
   -resume
 ```
 
-**GPU example profiles.** The search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`) are experimental, off by default, and need the extra packages of `environment-ml.yml`, which holds those of `environment.yml` too. Under every conda profile Nextflow builds the steps' environment from it when one of these steps is on. Two profiles show a setup for them on one GPU cluster; adapt them to your site.
+**GPU example profiles.** The search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`) are experimental, off by default, and need the extra packages of `environment-ml.yml`, which holds those of `environment.yml` too. Under every conda profile Nextflow builds the environment of the search (`ITERATIVE_SEARCH`, the only step that runs these layers) from it when one of these steps is on; every other step keeps the environment of `environment.yml`. Two profiles show a setup for them on one GPU cluster; adapt them to your site.
 
 - `lrz_ai_container` runs the whole run inside one container job, with the local executor. Its image must hold the packages of both `environment.yml` and `environment-ml.yml`; the repository's Dockerfile installs only the first.
 - `lrz_ai` uses SLURM with conda; give your GPU partition with `--gpu_partition`, otherwise no GPU is requested. To run the steps in an environment of your own instead, point `process.conda` (in a `-c` config) at its folder (`conda env list` shows it).
@@ -424,7 +424,7 @@ When a search with no result is what you expect, run the step's command again in
 
 ### A step failed but the run finished: `failed_steps` in the report
 
-The rescue, paralog-check and ownership steps may fail without stopping the run, because one failed rescue should not cost a whole result. Two kinds of failure still end it: a step that stops on one of SynVoy's own checks (exit code 3, for example a bad name or a failed tool), and a failed home-paralog panel (`BUILD_HOME_PARALOG_PANEL`), unless you set `--require_paralog_panel false`. Any other failure is recorded where the step's result would be, and the report names it: a sentence in `warnings` and a row in `failed_steps` (step, genome, locus, exit code, the last line the step wrote to its error output). A failed ownership check marks every call it would have checked `ownership_not_checked`: such a call was not compared with the other home genes and may belong to one of them. A failed rescue means that a gene only that rescue would have modelled is missing there. A step killed for memory or time is retried like any other, and after its retries it ends the run.
+The rescue and ownership (paralog check) steps may fail without stopping the run, because one failed rescue should not cost a whole result. Two kinds of failure still end it: a step that stops on one of SynVoy's own checks (exit code 3, for example a bad name or a failed tool), and a failed home-paralog panel (`BUILD_HOME_PARALOG_PANEL`), unless you set `--require_paralog_panel false`. Any other failure is recorded where the step's result would be, and the report names it: a sentence in `warnings` and a row in `failed_steps` (step, genome, locus, exit code, the last line the step wrote to its error output). A failed ownership check marks every call it would have checked `ownership_not_checked`: such a call was not compared with the other home genes and may belong to one of them. A failed rescue means that a gene only that rescue would have modelled is missing there. A step killed for memory or time is retried like any other, and after its retries it ends the run.
 
 ### A parameter I set seems to be ignored
 

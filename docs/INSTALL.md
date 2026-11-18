@@ -58,7 +58,7 @@ The environment pins the versions SynVoy is tested with:
 
 Entrez Direct, ete3 and numpy are not pinned. Every run records the versions of its tools in the report, under `run_settings.tool_versions`.
 
-The experimental search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`, both off by default) need more packages. `environment-ml.yml` holds the packages of `environment.yml` and these. Under the conda profiles Nextflow builds the steps' environment from it instead of `environment.yml` when one of the two steps is on (step 4), so nothing has to be installed by hand. Neither `install.sh` nor the Docker image installs them. How to run these steps on a GPU cluster: the GPU example profiles in [USAGE.md](USAGE.md#5-running-on-hpc--slurm).
+The experimental search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`, both off by default) need more packages. `environment-ml.yml` holds the packages of `environment.yml` and these. Under the conda profiles Nextflow builds the environment of the search (`ITERATIVE_SEARCH`, the pipeline step they run in) from it instead of `environment.yml` when one of the two steps is on (step 4), so nothing has to be installed by hand. Neither `install.sh` nor the Docker image installs them. How to run these steps on a GPU cluster: the GPU example profiles in [USAGE.md](USAGE.md#5-running-on-hpc--slurm).
 
 ## 3. Check the installation
 
@@ -70,7 +70,7 @@ The launcher activates `synvoy_env` and checks that conda or mamba, Nextflow and
 
 ## 4. The first run builds the tool environment
 
-The pipeline's steps do not run in `synvoy_env`. With the conda profiles, which include the launcher's default `auto,low_mem` and `standard`, Nextflow builds a second environment from the same `environment.yml` when the first step starts, and runs every step in it (from `environment-ml.yml` when a language-model or structure search step is on). This needs the network and takes from a few minutes to an hour on a slow shared file system (Nextflow waits up to 3 hours).
+The pipeline's steps do not run in `synvoy_env`. With the conda profiles, which include the launcher's default `auto,low_mem` and `standard`, Nextflow builds a second environment from the same `environment.yml` when the first step starts, and runs every step in it. This needs the network and takes from a few minutes to an hour on a slow shared file system (Nextflow waits up to 3 hours). When a language-model or structure search step is on, the search (`ITERATIVE_SEARCH`) runs in an environment built from `environment-ml.yml` instead, and every other step keeps the first one. Switching one of these steps on or off under `-resume` therefore reruns the search and the steps after it, and the steps before it stay cached.
 
 Nextflow keeps this environment in `work/conda/` and reuses it, so later runs start at once. When you delete `work/`, the environment is built again. To keep it in one place for all your runs, set `NXF_CONDA_CACHEDIR` to a folder of your choice before you start SynVoy.
 
@@ -81,7 +81,7 @@ cd SynVoy
 git pull
 ```
 
-When `environment.yml` has changed, run `./install.sh` again and let it rebuild `synvoy_env`. Nextflow notices the change by itself and builds a new tool environment on the next run. `./run_synvoy.sh` prints the version and the commit it runs and, when it can reach GitHub, warns when your copy is behind. With Docker or Singularity, build the image again after an update.
+When `environment.yml` has changed, run `./install.sh` again and let it rebuild `synvoy_env`. Nextflow notices the change by itself and builds a new tool environment on the next run; it names the environment by the file's whole text, so any change of the file (a comment too) gives a new environment, and a `-resume` across it reruns every step. `./run_synvoy.sh` prints the version and the commit it runs and, when it can reach GitHub, warns when your copy is behind. With Docker or Singularity, build the image again after an update.
 
 ## macOS
 

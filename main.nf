@@ -1573,9 +1573,10 @@ workflow {
         uiStatus('RUN ', 'GENERATE_REPORT', 'Generating comprehensive report')
         
         // Adjudication, staging and reporting live in a sub-workflow: the two rescue
-        // passes, the reciprocal-best paralog check, locus ownership, per-locus staging
-        // and GENERATE_REPORT. Moved out of this body so it stays clear of the JVM
-        // 64 kB method-size limit — new steps of that kind belong in the sub-workflow.
+        // passes, the home paralog panel and locus ownership, the placement check,
+        // per-locus staging and GENERATE_REPORT. Moved out of this body so it stays
+        // clear of the JVM 64 kB method-size limit — new steps of that kind belong in
+        // the sub-workflow.
         ADJUDICATE_AND_REPORT(
             ITERATIVE_SEARCH.out.gff,
             ITERATIVE_SEARCH.out.region_genes,
@@ -1773,7 +1774,7 @@ def printGeneratedOutputs(c, int nLogs) {
 
     // Trees: a placeholder is named as one
     ofRun.call('_tree.nwk').each { t ->
-        if (RunSummary.treeKind(t) == 'tree') {
+        if (RunSummary.treeKind(t, { f -> fromThisRun(f) }) == 'tree') {
             log.info "${c.green}  ✓${c.reset} ${t.name.padRight(28)} ${c.dim}(GOI phylogeny)${c.reset}"
             found_outputs = true
         } else {

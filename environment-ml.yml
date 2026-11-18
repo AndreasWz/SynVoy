@@ -6,9 +6,11 @@
 # GPU/driver-specific, so environment.yml does not hold them.
 #
 # Under a conda profile (standard, auto, low_mem, laptop_safe, conda, hpc_conda, lrz_ai) Nextflow
-# builds the steps' environment from this file instead of environment.yml when a run sets
+# builds the search step's (ITERATIVE_SEARCH) environment from this file instead of environment.yml
+# when a run sets
 #     --enable_plm_search true   and/or   --enable_structural_search true
-# (nextflow.config, process.conda). Nothing has to be installed by hand for that.
+# (nextflow.config, process.conda). The search is the only step that runs these layers; every other
+# step keeps the environment of environment.yml. Nothing has to be installed by hand for that.
 #
 # To have the packages in synvoy_env too (to run the scripts in bin/ yourself):
 #     mamba env update -n synvoy_env -f environment-ml.yml

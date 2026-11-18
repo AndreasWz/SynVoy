@@ -5,6 +5,9 @@ publishes regions/<locus>/, so the line never printed; every *_tree.nwk was "(GO
 the placeholder of --skip_tree (which the launcher's default low_mem sets); and the main figure,
 the anchor grid, was not named. lib/RunSummary.groovy lists the region tables per home locus and
 tells a tree from a placeholder (a tree has its <locus>_tree.info.json, not placeholder_tree).
+Review of the series (fix round 1): the info must be this run's. A placeholder tree published into a
+reused output folder sat next to an earlier run's info and was named "(GOI phylogeny)"; an info that
+the caller's fromThisRun refuses, or that is older than its tree, now counts as absent.
 
 Item 38: logs/ was filled by a recursive walk of the whole work folder, so it held the tasks of
 earlier runs (and walked into work/conda/), with __2, __3 counters in the file system's listing
@@ -69,6 +72,47 @@ def test_a_placeholder_tree_is_told_from_a_tree(tmp_path):
     assert rows == ["placeholder,placeholder,tree,placeholder"], log
 
 
+@needs_nextflow
+def test_an_earlier_runs_info_does_not_make_a_placeholder_a_tree(tmp_path):
+    """A placeholder written by this run next to the info of an earlier run's real tree (the output folder
+    reused, with or without -resume) is a placeholder; the info of this run's tree, written together with it,
+    keeps it a tree."""
+    now = time.time()
+    ultrafast = '{"bootstrap": {"status": "ultrafast"}}'
+    cases = (("locus_1", now, now - 2 * 86400),     # fresh placeholder, info two days old
+             ("locus_2", now, now - 60),            # info one minute older than its tree
+             ("locus_3", now, now - 1),             # both from one task: within the slack
+             ("locus_4", now - 5, now))             # info written after its tree
+    for locus, nwk_time, info_time in cases:
+        nwk, info = tmp_path / f"{locus}_tree.nwk", tmp_path / f"{locus}_tree.info.json"
+        nwk.write_text("(GOI_placeholder:0.0);\n")
+        info.write_text(ultrafast)
+        os.utime(nwk, (nwk_time, nwk_time))
+        os.utime(info, (info_time, info_time))
+    since = int((now - 3600) * 1000)                  # this "run" started an hour ago
+    rows, log = _groovy(tmp_path, f"""
+    println "RESULT ${{RunSummary.treeKind(new File('{tmp_path}/locus_1_tree.nwk'))}}"
+    def kinds = {{ Closure keep -> (1..4).collect {{ i -> RunSummary.treeKind(new File('{tmp_path}/locus_' + i + '_tree.nwk'), keep) }}.join(',') }}
+    println "RESULT ${{kinds.call({{ File f -> true }})}}"
+    println "RESULT ${{kinds.call({{ File f -> f.lastModified() >= {since}L }})}}"
+""")
+    assert rows[:1] == ["placeholder"], log          # was "tree": the earlier run's info was read
+    # keep everything (as fromThisRun does on -resume), or fromThisRun on a fresh run (every info but
+    # locus_1's is of this run): the age against the tree decides the same
+    assert rows[1:] == ["placeholder,placeholder,tree,tree"] * 2, log
+
+
+@needs_nextflow
+def test_the_callers_keep_refuses_an_info(tmp_path):
+    (tmp_path / "locus_1_tree.nwk").write_text("(a,b,c);\n")
+    (tmp_path / "locus_1_tree.info.json").write_text('{"bootstrap": {"status": "ultrafast"}}')
+    rows, log = _groovy(tmp_path, f"""
+    def nwk = new File('{tmp_path}/locus_1_tree.nwk')
+    println "RESULT ${{RunSummary.treeKind(nwk, {{ File f -> true }})}},${{RunSummary.treeKind(nwk, {{ File f -> !f.name.endsWith('.info.json') }})}}"
+""")
+    assert rows == ["tree,placeholder"], log
+
+
 def _task(work: Path, top: str, rest: str, name: str, output: str | None, log: str = "out\n",
           err: str = "", age_s: float = 0.0) -> Path:
     task = work / top / rest
@@ -116,7 +160,7 @@ def test_main_nf_uses_the_classes():
     main = (ROOT / "main.nf").read_text()
     assert "eachDirRecurse" not in main and "def collectTaskLogs" not in main
     assert "TaskLogs.collect(new File(workflow.workDir.toString())" in main
-    assert "RunSummary.regionBeds(outdir" in main and "RunSummary.treeKind(t)" in main
+    assert "RunSummary.regionBeds(outdir" in main and "RunSummary.treeKind(t, { f -> fromThisRun(f) })" in main
     assert "(main figure)" in main and "(placeholder, " in main
     assert not re.search(r"regions_dir\.listFiles\(\)", main)
 

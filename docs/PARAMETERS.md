@@ -306,13 +306,18 @@ scaffold) is below `bad_min_n50`, a contig or scaffold count that NCBI gives is 
 `bad_max_contigs` or `bad_max_scaffolds`, or it is a contig-level assembly without any of these
 figures. Chromosome-level and complete assemblies always pass.
 
-- `auto`: an assembly the taxonomy walk picked is dropped, and no other species takes its place,
-  so the run can have fewer targets. An assembly you asked for is kept with a warning: a species
-  named in `--target_species`, and the home assembly.
+- `auto`: an assembly the taxonomy walk picked is dropped. An assembly you asked for is kept with a
+  warning: a species named in `--target_species`, and the home assembly.
 - `drop`: every low-quality assembly is dropped. A low-quality home assembly stops the run.
 - `keep`: every one is kept at download. Without `--target_species`, a kept target can still be
   dropped by the check of its FASTA file, unless you also set `--qc_fail_policy keep`.
 - `ask`: SynVoy asks on the terminal ([`bad_quality_timeout`](#bad_quality_timeout)).
+
+The quality check runs on each candidate of the taxonomy walk as it is about to fill a place, so
+the place of a dropped pick (with `auto`, `drop`, or an answer of no) goes to the next species of
+its taxonomy level, and a place that no species of the level can fill carries over to the next
+level. The run has fewer targets only when the candidates run out. A species named in
+`--target_species` that is dropped is not replaced.
 
 A low-quality home assembly is not marked in the results: its warning appears only in the log of
 the download step. Targets are marked by the FASTA check ([`qc_fail_policy`](#qc_fail_policy)).
@@ -1759,8 +1764,9 @@ deviation) reaches this value. One-sided: only more divergence than expected cou
 ## 15. Optional steps: language model, structure, discovery
 
 Experimental and off by default. These steps need the packages of `environment-ml.yml` (PyTorch,
-transformers, Foldseek; under a conda profile Nextflow builds the steps' environment from that file
-when one of these steps is on, and it holds the packages of `environment.yml` too), model weights that are
+transformers, Foldseek; under a conda profile Nextflow builds the environment of the search
+(`ITERATIVE_SEARCH`, the pipeline step they run in) from that file when one of these steps is on, and
+it holds the packages of `environment.yml` too), model weights that are
 downloaded from HuggingFace on first use (ProtT5 about 2.5 GB, ESMFold about 2.8 GB; set `HF_HOME`
 to keep them out of your home folder) and, at a useful speed, an NVIDIA GPU. After the search they
 score the GOI models of the search: with ProtT5 embeddings (cosine similarity to the home protein,
