@@ -1311,8 +1311,10 @@ No module changes this switch.
 
 Without `--home_gff`, SynVoy predicts the home genes near the query's locus (PREPARE_HOME_PROTEOME),
 transfers the gene models of the closest annotated target genome where it can
-(BORROW_ANNOTATIONS; only a target whose genome file name ends in `.fna`, not gzipped, is used),
-and takes the flanking genes from these. The same happens when a home GFF
+(BORROW_ANNOTATIONS), and takes the flanking genes from these. The home genome then holds
+annotation only around the query's home hits and in the window the gene models were
+transferred to; the flank walk stays inside the stretch around the locus and does not step
+to genes predicted around another hit. The same happens when a home GFF
 yields no protein, except that its genes are then predicted with Augustus's `fly` model (for
 `augustus_species auto`) and without the stop for a eukaryote home without Augustus. With a usable home GFF, only `gene_predictor`, `gene_prediction_timeout` and
 `augustus_species` still matter, and only for the optional structural discovery, which predicts the
@@ -1365,10 +1367,12 @@ wrongly, which splits gene models or merges neighbouring genes.
 
 Genes are predicted within this many bp on each side of each region of the query's home hits. The
 flank walk, when it predicts genes itself, uses the same window around the centre of each region,
-and the annotation transfer starts from it and widens it until it holds 2 × `n_flanking_genes`
-predicted genes, at most to 500 kb. Where genes lie far apart, 50 kb on each side holds fewer genes
-than `n_flanking_genes`; a larger window gives the flank walk more to choose from and takes longer
-to predict.
+and the annotation transfer starts from it and doubles it until it holds 2 × `n_flanking_genes`
+predicted genes or spans 500 kb (the doubling that reaches 500 kb is kept, so the window stays
+below 1 Mb). The flank walk takes its anchors only from the stretch these windows annotate around
+the locus. Where genes lie far apart, 50 kb on each side holds fewer genes than `n_flanking_genes`,
+and a side of the walk can end at the stretch's edge with fewer anchors (a warning says so); a
+larger window gives the flank walk more to choose from and takes longer to predict.
 
 ### `borrow_target_flank`
 **Default:** `100000` (bp)

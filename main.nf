@@ -1575,6 +1575,7 @@ workflow {
             ITERATIVE_SEARCH.out.region_genes,
             ITERATIVE_SEARCH.out.homology,
             ITERATIVE_SEARCH.out.hits,
+            ITERATIVE_SEARCH.out.blocks,
             CLUSTER_REGIONS.out.scores,
             genomes_dir_ch.first(),
             normalized_gene_ch.first(),

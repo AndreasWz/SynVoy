@@ -14,21 +14,25 @@ flanking genes per target chromosome — the syntenic HULL) and runs miniprot of
 query across that whole window, so a GOI sitting in a flanking gap is still modelled.
 It only fires when the hull has strong flanking support and no HIGH-confidence GOI model
 already exists inside it (so it never duplicates a good call). Emits standard SynVoy GFF
-rows tagged ``EvidenceType=synteny_hull_rescue`` with confidence set by miniprot identity.
+rows tagged ``EvidenceType=synteny_hull_rescue``, labelled by the search's judge in the place
+the search's own rule gives the model (hull_place): the core or window of a significant
+search block that holds it, else the genome.
 
 Reuses the miniprot/parse helpers from rescue_strong_synteny.py.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 from sequence_utils import genome_window, parse_gff, parse_fasta, translate, reverse_complement, sw_bits  # noqa: E402
+from sequence_utils import stream_fasta_lengths  # noqa: E402
 from sequence_utils import genetic_code_for, parse_genetic_code_spec, set_genetic_code  # noqa: E402
 from sequence_utils import exit_step_failed  # noqa: E402
 from query_features import completeness_coverage, core_coverage  # noqa: E402
@@ -107,9 +111,9 @@ def collect_goi_rows(gff_path: str):
 def main_path_twin(chrom, start, end, strand, confidence, goi_rows, min_overlap=0.8):
     """The id of a main-path GOI model this hull model repeats: same chromosome and strand, each
     covering more than ``min_overlap`` of the other, with an equal or better label; else None. Such
-    a twin was judged in the genome place (no block), so it could read AMBIGUOUS where the main
-    path's model holds MEDIUM (fix item 41); its record repeated the main path's (the report
-    merged them, the main model first in every case seen)."""
+    a twin adds nothing: its record repeats the main path's (the report merged them, the main
+    model first in every case seen), and judged in a larger place than the main model (the genome
+    where the main model lies in a block's slot) it can read a lower label (fix item 41)."""
     rank = synvoy_label.LABEL_RANK
     for s, e, st, conf, fid in goi_rows.get(chrom, []):
         ov = min(end, e) - max(start, s) + 1
@@ -295,17 +299,91 @@ def _genome_length(genome_path: str) -> int:
     return sum(len(seq) for _h, _i, seq in parse_fasta(genome_path))
 
 
+def _sequence_lengths(genome_path: str) -> Dict[str, int]:
+    """{sequence: length} of the target genome: from its .fai when there is one, else by
+    reading the FASTA."""
+    fai = genome_path + ".fai"
+    if os.path.exists(fai):
+        with open(fai) as fh:
+            return {f[0]: int(f[1]) for f in (line.split("\t") for line in fh) if len(f) > 1}
+    return stream_fasta_lengths(genome_path)
+
+
+def read_block_rows(path: Optional[str]) -> List[Dict[str, str]]:
+    """The rows of the search's block table of this genome and home locus
+    (blocks/<locus>_<genome>.blocks.tsv, iterative_search_runner._write_block_table): each
+    searched block's span (0-based, half-open), the neighbourhood its anchors were counted in
+    (hood_start, hood_end) and whether it is significant (E_syn <= 0.1). [] without a table
+    (the module's NO_BLOCKS sentinel, a missing or empty file)."""
+    if not path or os.path.basename(path) == "NO_BLOCKS" or not os.path.isfile(path):
+        return []
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        if not reader.fieldnames or not {"chrom", "start", "end", "hood_start", "hood_end",
+                                         "significant"} <= set(reader.fieldnames):
+            return []
+        return list(reader)
+
+
+def hull_place(chrom: str, span: Tuple[int, int], rows: List[Dict[str, str]],
+               distances: Optional[Dict], genome_len: int,
+               chrom_len: Optional[int] = None) -> Tuple[str, int, int]:
+    """``(place, place_bp, sig_blocks)`` of a hull model by the main path's rule
+    (synvoy_evalue.place_of; ALGORITHM.md section 7.13): the core (block +- GOI margin) or the
+    window (the DNA the search cut out around the block) of a significant block of this genome
+    and locus that holds ``span`` (GFF start and end, as the search's candidates), the smallest
+    over all significant blocks (core before window, then the shorter); else the genome.
+    ``sig_blocks``: the number of significant blocks, by which the search multiplies a place
+    E-value (Eeff). The slot is left out (it needs the block's placed neighbours, which the
+    table does not hold): a model in a slot is judged in its core. ``distances``: what the
+    search recorded in the region GFF (##synvoy-distances); without its GOI margin (an older
+    GFF) every model is in the genome place. ``chrom_len`` bounds the core as the search does."""
+    sig = [r for r in rows if str(r.get("significant", "")).strip() == "1"]
+    goi_margin = (distances or {}).get("goi_margin")
+    if not sig or not goi_margin:
+        return "genome", max(1, int(genome_len)), len(sig)
+    margin = int(goi_margin)
+    search_margin = (distances or {}).get("search_margin")
+    best = None
+    for i, r in enumerate(sig):
+        if r.get("chrom") != chrom:
+            continue
+        try:
+            start, end = int(r["start"]), int(r["end"])
+            hood_start, hood_end = int(r["hood_start"]), int(r["hood_end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        core_end = end + margin if chrom_len is None else min(int(chrom_len), end + margin)
+        core = (max(0, start - margin), core_end)
+        # The window is the neighbourhood, or block +- the search margin where the search cut
+        # out less DNA than the neighbourhood (iterative_search_runner.genome_scale_args).
+        window = (hood_start, hood_end)
+        if search_margin:
+            window = (max(hood_start, start - int(search_margin)),
+                      min(hood_end, end + int(search_margin)))
+        place, place_bp = synvoy_evalue.place_of(span, True, None, core, window, genome_len)
+        if place == "genome":
+            continue
+        key = (synvoy_evalue.PLACES.index(place), place_bp, i)
+        if best is None or key < best[0]:
+            best = (key, place, place_bp)
+    if best is None:
+        return "genome", max(1, int(genome_len)), len(sig)
+    return best[1], best[2], len(sig)
+
+
 def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteome,
                      label_protein=None, coverage=None, neighbourhood=None, n_flanking=0,
-                     own_gene_id=None):
+                     own_gene_id=None, place="genome", place_bp=None, sig_blocks=0):
     """The label of a rescue model by the search's own judge (synvoy_label, label rework
-    2026-10-14): its E-value in the genome-wide place (the hull has no block E-value of its
-    own), computed on ``label_protein`` (hull_label_protein; default ``protein``), its
+    2026-10-14): its E-value in its place (hull_place: ``place`` with ``place_bp`` bases, the
+    genome by default), times ``sig_blocks`` outside the genome place as on the search's models
+    (Eeff), computed on ``label_protein`` (hull_label_protein; default ``protein``), its
     specificity against the home proteome (with the GOI's home ``neighbourhood`` when known),
     its completeness ``coverage`` (the query span of the alignment; default CDS aa / query
     length). ``own_gene_id``: the query's own home gene (synvoy_specificity.
     own_gene_id_from_goi_info; None = the identity rule). Returns (confidence, rank key, GFF
-    attributes)."""
+    attributes, bits)."""
     qlen = len(query_seq)
     # One protein for the three terms (review fix RF-1e): the E-value is the best over the
     # label protein's pieces between stops; Bits= and the specificity use the best piece.
@@ -315,17 +393,24 @@ def judge_hull_model(query_id, query_seq, protein, cds_rows, genome_len, proteom
     scored = [sw_bits(query_seq, s) for s in subjects]
     bits = max(scored, default=0.0)
     judged_protein = subjects[scored.index(bits)] if scored else ""
-    evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, genome_len))
+    in_genome = place == "genome"
+    space = genome_len if in_genome or not place_bp else place_bp
+    evalue, _b = synvoy_evalue.blastp_evalue(query_seq, subjects, synvoy_evalue.search_space(qlen, space))
+    e_eff = evalue if in_genome else evalue * max(1, int(sig_blocks or 0))
     spec = (synvoy_specificity.specificity(proteome, query_id, query_seq, judged_protein, bits,
                                            neighbourhood, n_flanking, own_gene_id=own_gene_id)
             if proteome is not None and judged_protein else None)
     cov = _cds_coverage(cds_rows, qlen) if coverage is None else coverage
     conf, basis = synvoy_label.judge(
-        evalue, "genome", False,
-        spec["margin"] if spec else None, spec["real_competitor"] if spec else None, None, cov)
+        e_eff, place, not in_genome,
+        spec["margin"] if spec else None, spec["real_competitor"] if spec else None,
+        spec.get("in_neighbourhood") if spec else None, cov)
     span = max(int(c[4]) for c in cds_rows) - min(int(c[3]) for c in cds_rows) if cds_rows else 0
-    key = synvoy_label.rank_key(conf, evalue, None, bits, span, min(int(c[3]) for c in cds_rows) if cds_rows else 0)
-    attrs = f"Basis={basis};Place=genome;Eeff={evalue:.3g}"
+    key = synvoy_label.rank_key(conf, e_eff, None, bits, span, min(int(c[3]) for c in cds_rows) if cds_rows else 0)
+    attrs = f"Basis={basis};Place={place}"
+    if not in_genome:
+        attrs += f";EPlace={evalue:.3g};SigBlocks={max(1, int(sig_blocks or 0))}"
+    attrs += f";Eeff={e_eff:.3g}"
     if spec:
         attrs += ";" + synvoy_specificity.gff_attrs(spec)
     return conf, key, attrs, bits
@@ -447,6 +532,12 @@ def main() -> int:
                     help="goi_info.json of ANNOTATE_GOI: the home gene the home step took as the "
                          "query's names the query's own gene in the specificity terms, as in the "
                          "main search (review fix RF-2b); without it, the identity rule")
+    ap.add_argument("--blocks_tsv",
+                    help="The search's block table of this genome and home locus "
+                         "(blocks/<locus>_<genome>.blocks.tsv): a model inside the core or window "
+                         "of a significant block is judged in that place, as on the main path; "
+                         "without it (or the NO_BLOCKS sentinel) every model is judged in the "
+                         "genome place")
     ap.add_argument("--miniprot_outc", type=float, default=0.3)
     ap.add_argument("--miniprot_timeout", type=int, default=3600,
                     help="Guard of the miniprot run of one hull window, in seconds (pipeline: "
@@ -506,6 +597,12 @@ def main() -> int:
     neighbourhood = proteome.neighbourhood(flanking_parent_ids(args.region_gff)) if proteome else None
     own_gene_id = (synvoy_specificity.own_gene_id_from_goi_info(args.goi_info)
                    if args.goi_info and os.path.exists(args.goi_info) else None)
+    # The search's blocks of this genome and its distances: a model is judged in the place the
+    # main path's rule gives it (hull_place).
+    block_rows = read_block_rows(args.blocks_tsv)
+    recorded = synvoy_scale.parse_gff_header(args.region_gff) or {}
+    significant_chroms = {r.get("chrom") for r in block_rows if str(r.get("significant", "")).strip() == "1"}
+    chrom_lengths: Optional[Dict[str, int]] = None
     genome_len = None
     with tempfile.TemporaryDirectory(prefix="synvoy_hull_") as tmp:
         query_fa = os.path.join(tmp, "query.faa")
@@ -545,6 +642,8 @@ def main() -> int:
             # highest identity, labelled by identity alone.
             if genome_len is None:
                 genome_len = _genome_length(args.target_genome)
+            if chrom_lengths is None and chrom in significant_chroms:
+                chrom_lengths = _sequence_lengths(args.target_genome)   # the core ends at the scaffold's end
             best = None
             for mrna, cds_rows in _parse_miniprot_gff(gff_text):
                 ident = _identity_pct(mrna[8])
@@ -561,12 +660,16 @@ def main() -> int:
                 # alignment, specificity with the GOI's home neighbourhood.
                 label_prot, frame_flag = hull_label_protein(window, cds_rows)
                 span_cov = _query_span_coverage(mrna, cds_rows, qlen)
+                place, place_bp, sig_blocks = hull_place(
+                    chrom, (ws + int(mrna[3]) - 1, ws + int(mrna[4]) - 1), block_rows, recorded,
+                    genome_len, (chrom_lengths or {}).get(chrom))
                 try:
                     conf, key, judged, bits = judge_hull_model(
                         query_id, query_seq, prot, cds_rows, genome_len, proteome,
                         label_protein=label_prot,
                         coverage=completeness_coverage(span_cov, core_cov, core_on), neighbourhood=neighbourhood,
-                        n_flanking=args.n_flanking_genes, own_gene_id=own_gene_id)
+                        n_flanking=args.n_flanking_genes, own_gene_id=own_gene_id,
+                        place=place, place_bp=place_bp, sig_blocks=sig_blocks)
                 except RuntimeError:
                     continue
                 if frame_flag:

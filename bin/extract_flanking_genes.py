@@ -13,6 +13,7 @@ try:
         parse_fasta, write_fasta, extract_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
         sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_step_failed,
+        read_annotated_windows,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +21,7 @@ except ImportError:
         parse_fasta, write_fasta, extract_id,
         load_genome, reverse_complement, translate, parse_gff as parse_gff_base,
         sw_pair_evalue, set_genetic_code, load_home_hits, check_gene_ids, exit_step_failed,
+        read_annotated_windows,
     )
 
 try:
@@ -278,6 +280,41 @@ def side_relatives(chrom_genes, hits, centre, at_locus):
             down += 1
     return up, down
 BEST_INTERVAL = 'best_interval'   # split_loci.py's name for the interval a locus walk starts from
+WINDOW_END = 'end of the annotated window'   # how a side ends at the edge of walk_extent's stretch
+
+
+def walk_extent(windows, chrom, start, end):
+    """``(lo, hi)``: the stretch of ``chrom`` the flank walk may use, or None for no limit.
+
+    ``windows`` are the annotated windows of the home GFF (sequence_utils.read_annotated_windows).
+    A home genome without a GFF of its own is annotated only inside them: genes predicted
+    around the query's home hits, models transferred from a target around the locus. Windows
+    that overlap or touch are one stretch, and the walk keeps to the stretch that holds the
+    walk region [start, end) (by its centre, else by the largest overlap): beyond it lies
+    DNA that no file annotates, and the next gene listed is one predicted around another hit,
+    possibly megabases away. A GFF without windows (a real annotation) sets no limit; so do
+    windows of which none overlaps the region, with a warning."""
+    spans = sorted((s, e) for s, e, _k in windows.get(chrom, []))
+    if not spans:
+        return None
+    merged = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    centre = (start + end) / 2
+    holding = [(lo, hi) for lo, hi in merged if lo <= centre < hi]
+    if not holding:
+        overlap = [(min(hi, end) - max(lo, start), lo, hi) for lo, hi in merged
+                   if lo < end and start < hi]
+        holding = [(lo, hi) for _ov, lo, hi in sorted(overlap, key=lambda t: (-t[0], t[1]))]
+    if not holding:
+        print(f"WARNING: the home GFF names the stretches SynVoy annotated, but none on {chrom} "
+              f"holds the locus {chrom}:{start}-{end}: the flank walk is not limited to one.",
+              file=sys.stderr)
+        return None
+    return holding[0]
 
 
 def is_goi_relative(protein: str, goi_seqs, max_evalue: float, statistic: str = 'sw') -> bool:
@@ -662,10 +699,25 @@ def main():
     else:
         # EXISTING LOGIC FOR GFF
         all_genes = parse_gff_for_genes(args.gff)
+        annotated_windows = read_annotated_windows(args.gff)
 
         for region in [walk_region]:
             # Filter genes on same chrom
             chrom_genes = [g for g in all_genes if g['chrom'] == region['chrom']]
+            # A home genome SynVoy annotated itself (no home GFF): only inside the stretch around
+            # the locus (walk_extent); the next gene beyond it lies around another home hit.
+            extent = walk_extent(annotated_windows, region['chrom'], region['start'], region['end'])
+            edge = {'up': 'scaffold end', 'down': 'scaffold end'}
+            if extent:
+                lo, hi = extent
+                chrom_genes = [g for g in chrom_genes if g['start'] >= lo and g['end'] <= hi]
+                if lo > 0:
+                    edge['up'] = WINDOW_END
+                if hi < len(genome_seqs.get(region['chrom'], '')):
+                    edge['down'] = WINDOW_END
+                print(f"  [flank-walk] the home annotation is SynVoy's own (gene predictions, "
+                      f"transferred gene models) and covers {region['chrom']}:{lo}-{hi} around the "
+                      f"locus: the walk stays inside it ({len(chrom_genes)} gene(s)).")
             
             # Find closest center
             center_idx = -1
@@ -746,7 +798,7 @@ def main():
                         break
                     idx = center_idx - offset
                     if idx < 0:
-                        up['end'] = 'scaffold end'
+                        up['end'] = edge['up']
                         break
                     if offset > old_bound and up['coding'] >= cap['up']:
                         up['end'] = 'limit'
@@ -794,7 +846,7 @@ def main():
                         break
                     idx = center_idx + offset
                     if idx >= len(chrom_genes):
-                        down['end'] = 'scaffold end'
+                        down['end'] = edge['down']
                         break
                     if offset > old_bound and down['coding'] >= cap['down']:
                         down['end'] = 'limit'
@@ -851,6 +903,12 @@ def main():
                               f"{args.n_flank} anchors: more relatives on this side than home "
                               f"hits show (raise --n_flank, or check the relative test).",
                               file=sys.stderr)
+                    if w['end'] == WINDOW_END and slots < args.n_flank:
+                        print(f"WARNING: the {name} walk reached the end of the stretch SynVoy "
+                              f"annotated around the locus ({region['chrom']}:{extent[0]}-{extent[1]}) "
+                              f"with {slots} of {args.n_flank} anchors: without a home GFF the home "
+                              f"genome has no annotation beyond it. Raise --pred_flank_window or "
+                              f"give --home_gff.", file=sys.stderr)
                 if goi_similar_neighbors:
                     print(f"  [goi-expand] {len(goi_similar_neighbors)} GOI-similar neighbor(s) "
                           f"will be emitted as additional GOI queries in FAA.")

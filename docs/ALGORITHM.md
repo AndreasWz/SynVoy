@@ -495,7 +495,8 @@ as a `GOI_` row without a protein.
 1. Take the annotated gene whose centre is closest to the centre of the best interval.
 2. Walk outwards on each side. Collect genes until `n_flanking_genes` (10)
    protein-coding genes are found on that side. A side ends earlier only at the end of
-   the scaffold, at `max_flanking_distance` from the centre when that is set (off by
+   the scaffold, without a home GFF at the end of the stretch SynVoy annotated around the
+   locus (below), at `max_flanking_distance` from the centre when that is set (off by
    default), or at the limit: the walk has stepped over more than 5 × `n_flanking_genes`
    genes (50; every gene counts) and has met at least `n_flanking_genes` + R
    protein-coding genes, where R is the number of protein-coding genes on that side of
@@ -553,26 +554,37 @@ PLM and structural searches on their own run no Augustus.
 The borrowing (`borrow_annotations.py`):
 
 1. the home locus is the best interval of the primary home locus (§5.4), with a window of
-   `pred_flank_window` (50 kb) around it, widened until it holds 2 × `n_flanking_genes`
-   predicted genes or reaches 500 kb;
+   `pred_flank_window` (50 kb) around it, doubled until it holds 2 × `n_flanking_genes`
+   predicted genes or spans 500 kb (the doubling that reaches 500 kb is kept, so the
+   window stays below 1 Mb);
 2. the target is the closest annotated target (at least 10 CDS rows) by the run's
-   phylogenetic distances (PHYLO_SORT runs before this step). Only a target whose genome
-   file name ends in `.fna` is considered: one given as `.fa`, `.fasta` or gzipped is never
-   borrowed from, even with an annotation. Several at that distance,
-   or no distances, are told apart by the median identity of the hits of the window's
-   predicted proteins;
+   phylogenetic distances (PHYLO_SORT runs before this step). A target is any genome file
+   the search reads (`.fna`, `.fa` or `.fasta`, plain or gzipped) with its annotation beside
+   it under the genome's file name with `.gff` for its last extension (`cow.fna` → `cow.gff`,
+   `cow.fna.gz` → `cow.fna.gff`), as easy mode and `--target_gffs` place it. Several at that
+   distance, or no distances, are told apart by the median identity of the hits of the
+   window's predicted proteins;
 3. the window's predicted proteins are searched against it (MMseqs2, E ≤ 1e-3), their
    hits clustered per scaffold with the 50 kb gap, and the cluster with the most home
    proteins, ± `borrow_target_flank` (100 kb), is the target region;
 4. each annotated protein of that region is aligned to the home window with miniprot;
    a model with identity ≥ 30 % and query coverage ≥ 50 % whose best protein in the
    target region is the one it came from becomes a gene model with CDS rows
-   (`ID=borrowed_<target gene>`, `Note=transferred from <target>`) and replaces a
-   prediction it overlaps by more than half.
+   (`ID=borrowed_<target gene>`, the target gene's `Name` and, when it has one, its
+   `product`, `transferred_from=<target>`) and replaces a prediction it overlaps by more
+   than half. The figures name it after its target gene (its symbol, else its product).
 
 The predictions and the borrowed models form one merged GFF. The home proteome of such a
 run is built from it (the longest coding model per gene), without the genes over the
 query's own home model, and the report flags it as partial (`home_annotation`).
+The home genome holds annotation only in stretches: the prediction windows around the
+query's home hits and, when gene models were transferred, the window of step 1. Their
+header lines (`##synvoy-annotated-window <scaffold> <start> <end> predicted|borrowed`)
+travel in the merged GFF, and the flank walk stays inside the stretch that holds the locus
+(windows that overlap or touch are one stretch): beyond it the next gene the file lists was
+predicted around another hit, possibly megabases away, and the genes in between are not
+annotated. A side that ends at the stretch's edge with fewer than `n_flanking_genes`
+anchors is logged with a warning (raise `pred_flank_window`, or give the home GFF).
 Predictions are written as gene, mRNA and CDS rows, and a CDS that belongs to no feature
 of the merged file still counts as a gene; AUGUSTUS proteins carry their region and
 genome coordinates like Prodigal's. In a run without target genomes nothing is predicted
@@ -1115,10 +1127,15 @@ home proteome (§7.12) and its query coverage:
   label protein through the frame guard (a broken frame is judged on the model's own
   translation in pieces between stops, since the rescue has no search hits), completeness
   as the query span of the alignment, specificity with the GOI's home neighbourhood (the
-  anchors of the locus found in the genome). It has no block E-value, so its place is the
-  whole genome. It writes no model that repeats a GOI model of the main search
-  (same strand, each covering more than 80 % of the other) with an equal or better label: judged
-  without the block, such a twin could read AMBIGUOUS where the main path's model reads MEDIUM.
+  anchors of the locus found in the genome). Its place follows the search's rule (§7.13)
+  on the search's block table of the genome (`blocks.tsv`): the core or the window of a
+  significant block that holds the model, the smallest of them; its E-value there is
+  multiplied by `SigBlocks` (`Eeff`). Elsewhere, and without a block table, its place is the
+  whole genome. The slot is not used (the table does not hold the placed neighbours), so a
+  model in a slot is judged in its core. It writes no model that repeats a GOI model of the
+  main search (same strand, each covering more than 80 % of the other) with an equal or
+  better label: judged in a larger place than the main model, such a twin could read
+  AMBIGUOUS where the main path's model reads MEDIUM.
 - A model carries a provisional LOW (`InferenceReason=awaiting_label`) from the moment it
   is built; every GOI row with an E-value is relabelled at the end of its genome. A GOI
   row the judge cannot label (no Eeff) keeps the LOW, never counts and never seeds, and
@@ -1321,7 +1338,9 @@ Every kept GOI model carries the evidence the label uses (`bin/synvoy_evalue.py`
 - **`Place`**: the smallest of slot (between the nearest found home neighbours on either
   side of the gene, widened by one gene pitch; the side of each neighbour comes from the
   home locus span, `goi=` in the anchor headers), core (block ± GOI margin) and window
-  that holds the model, in a block with E_syn ≤ 0.1; else `genome`.
+  that holds the model, in a block with E_syn ≤ 0.1; else `genome`. A hull-rescue model
+  (§9) takes the core or window of any significant block of its genome that holds it, never
+  the slot.
 - **`EPlace`**: blastp of the home protein against the model's protein and against each of
   its search-hit regions (cut at the aligned span, translated in the hit's frame, split
   at stop codons), `-comp_based_stats 2 -seg no -word_size 2 -threshold 11`, with the
@@ -1461,7 +1480,7 @@ only (30 codons upstream, 20 downstream).
 | Runs when | a region is `goi_missing_but_strong_synteny` | a scaffold has ≥ `goi_hull_min_flanking` (round(0.4 × `n_flanking_genes`) = 4) HIGH flanking models in the hull and no HIGH GOI model lies in the DNA that would be searched |
 | Window | the region ± 2 kb | the hull ± the GOI margin; skipped when the hull is longer than twice the home neighbourhood × expansion |
 | Accepts | every miniprot model covering ≥ 5 % of the query | every model with identity ≥ 40 % and CDS ≥ `goi_hull_min_coverage` (0.5; the `short_query` module 0.3) of the query length, or, with `core_completeness`, an alignment over that share of the query's core (cost filters in front of the judge); the one the judge ranks first |
-| Confidence | always LOW | the judge of the main search (§7.8): E-value in the genome-wide place, specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
+| Confidence | always LOW | the judge of the main search (§7.8): E-value in the place the search's rule gives the model (the core or window of a significant block of the genome that holds it, × `SigBlocks`; else the genome), specificity with the GOI's home neighbourhood, completeness = query span of the alignment |
 | Evidence type | `relaxed_miniprot_rescue` | `synteny_hull_rescue` |
 
 **The hull** (`compute_hull`). The HIGH flanking models of a scaffold are clustered

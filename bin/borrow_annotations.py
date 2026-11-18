@@ -9,10 +9,15 @@ annotated target as real gene models, so they can be anchors:
 
   1. The home locus: the primary locus BED of split_loci (its best_interval row, else the row
      with the best bit score; never just the first row), and a window around it of
-     --pred_flank_window bp, widened until it holds 2 x n_flanking predicted genes or 500 kb.
+     --pred_flank_window bp, doubled until it holds 2 x n_flanking predicted genes or spans
+     500 kb (the doubling that reaches 500 kb is kept, so the window stays below 1 Mb).
   2. The target: the closest annotated target (>= 10 CDS rows) by the distances of
      --sorted_genomes; between several at that distance, or without distances, the one whose
-     hits of the window's predicted proteins have the highest median identity.
+     hits of the window's predicted proteins have the highest median identity. A target is a
+     genome file the pipeline searches (.fna, .fa or .fasta, plain or gzipped) with its
+     annotation beside it under the genome's file name with '.gff' for its last extension
+     (cow.fna -> cow.gff, cow.fna.gz -> cow.fna.gff), where easy mode and
+     stage_target_gffs.py put it.
   3. The target region: the window's predicted proteins searched against the target (MMseqs2,
      E <= 1e-3); their hits clustered per scaffold with the 50 kb gap of split_loci; the
      cluster with the most distinct home proteins, +- --target_flank bp.
@@ -24,10 +29,13 @@ annotated target as real gene models, so they can be anchors:
      of the shorter one (it has a name and introns); of two borrowed models at one place the
      one with the higher identity stays.
   6. One merged GFF (predictions + borrowed models, gene/mRNA/CDS rows with phases,
-     ID=borrowed_<target gene>, Note=transferred from <target>) and the home proteome built
-     from it (the longest coding model per gene, as gff_to_faa.py does), without the genes
-     over the query's own home model (goi_annotation.bed), with home_genes.tsv and
-     home_annotation.json (source, counts, partial: true).
+     ID=borrowed_<target gene>, the target gene's Name and product, transferred_from=<target>)
+     and the home proteome built from it (the longest coding model per gene, as gff_to_faa.py
+     does), without the genes over the query's own home model (goi_annotation.bed), with
+     home_genes.tsv and home_annotation.json (source, counts, partial: true). Its header names
+     the stretches SynVoy annotated (sequence_utils.ANNOTATED_WINDOW): the prediction windows,
+     and the home window when gene models were transferred into it. The flank walk does not
+     step beyond them.
 
 Before 2026-10-16 the borrowed rows were gene rows without CDS (the walk read them as
 non-coding: drawn, never anchors), placed by the first row of the hit BED (the alphabetically
@@ -43,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from sequence_utils import (
@@ -50,6 +59,7 @@ try:
         MMSEQS_FORMAT_OUTPUT, mmseqs_first_words,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
+        ANNOTATED_WINDOW, annotated_window_line, genome_file_stem,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,10 +68,11 @@ except ImportError:
         MMSEQS_FORMAT_OUTPUT, mmseqs_first_words,
         reverse_complement, cds_models_by_gene, cds_model_protein, sw_bits,
         genetic_code_flag, genetic_code_for, parse_genetic_code_spec, set_genetic_code,
+        ANNOTATED_WINDOW, annotated_window_line, genome_file_stem,
     )
 
 MIN_TARGET_CDS = 10            # an annotated target needs at least this many CDS rows
-WINDOW_MAX_BP = 500_000        # the home window grows up to this
+WINDOW_MAX_BP = 500_000        # the home window stops growing once it spans this (it doubles)
 CLUSTER_GAP_BP = 50_000        # target hits closer than this are one cluster (split_loci's gap)
 MIN_IDENTITY = 0.30            # a borrowed model's miniprot identity ...
 MIN_QUERY_COVERAGE = 0.50      # ... and its coverage of the target protein
@@ -104,8 +115,9 @@ def model_span(info):
 
 
 def home_window(goi, models, chrom_len, flank, n_flanking):
-    """The window around the home locus: +- ``flank`` bp, widened (doubled) until it holds
-    2 x n_flanking predicted genes or reaches WINDOW_MAX_BP; returns (start, end)."""
+    """The window around the home locus: +- ``flank`` bp, doubled until it holds 2 x n_flanking
+    predicted genes or spans WINDOW_MAX_BP; the doubling that reaches WINDOW_MAX_BP is kept, so
+    the window stays below 2 x WINDOW_MAX_BP. Returns (start, end)."""
     chrom, start, end = goi
     on_chrom = [model_span(m) for m in models.values() if m['chrom'] == chrom]
     pad = max(1, int(flank))
@@ -118,11 +130,21 @@ def home_window(goi, models, chrom_len, flank, n_flanking):
 
 
 # ------------------------------------------------------------------ the target
+def target_annotation(genome):
+    """The annotation of a target genome file: its name with '.gff' for the last extension
+    (cow.fna -> cow.gff, cow.fna.gz -> cow.fna.gff), the name easy mode downloads it under and
+    stage_target_gffs.py links it to, and the first one the search looks for."""
+    return Path(genome).with_suffix('.gff')
+
+
 def annotated_targets(genomes_dir):
-    """[(genome fna, its gff, CDS rows)] of the targets with an annotation of >= 10 CDS rows."""
+    """[(genome file, its gff, CDS rows)] of the targets with an annotation of >= 10 CDS rows.
+    A target is a file the pipeline searches: .fna, .fa or .fasta, plain or gzipped."""
     out = []
-    for fna in sorted(Path(genomes_dir).glob("*.fna")):
-        gff = fna.with_suffix('.gff')
+    for fna in sorted(Path(genomes_dir).iterdir()):
+        if genome_file_stem(fna.name) is None or not fna.is_file():
+            continue
+        gff = target_annotation(fna)
         if not gff.exists():
             continue
         n = 0
@@ -253,6 +275,15 @@ def region_proteins(gff, genome_fna, chrom, start, end):
     return out
 
 
+def region_products(gff, gene_ids):
+    """``{gene id: product}`` of target genes: the gene's description, product or Note, else
+    an informative product of one of its transcripts (synvoy_gene_names.load_gff_gene_info,
+    the reader of the figures' names table); genes without one are left out."""
+    import synvoy_gene_names
+    info = synvoy_gene_names.load_gff_gene_info(gff, wanted=gene_ids)
+    return {gid: row["product"] for gid, row in sorted(info.items()) if row.get("product")}
+
+
 # ------------------------------------------------------------------ back to home
 def borrowed_models(proteins, window_seq, chrom, offset, max_intron):
     """Each target protein aligned to the home window (miniprot): the kept models as dicts
@@ -321,11 +352,21 @@ def one_model_per_place(borrowed, predicted):
 
 
 # ------------------------------------------------------------------ outputs
+# Characters written as they are in a GFF3 attribute value, besides letters, digits and '_.-~';
+# everything else, ';', '=', '&', ',' and '%' among it, is percent-encoded.
+_GFF_VALUE_SAFE = " ()[]/:'+.-_"
+
+
 def borrowed_gff_rows(m, target_name):
+    """The gene, mRNA and CDS rows of a borrowed model. The gene row carries the target gene's
+    Name and, when it has one, its product (``m['product']``), so the figures name the gene as
+    the target does, and its provenance as ``transferred_from=<target>``."""
     s, e = _span(m['exons'])
     gid = f"borrowed_{m['source']}"
-    note = f"transferred from {target_name}"
-    attrs = f"ID={gid};Name={m['name']};gene_biotype=protein_coding;Note={note}"
+    attrs = f"ID={gid};Name={quote(str(m['name']), safe=_GFF_VALUE_SAFE)};gene_biotype=protein_coding"
+    if m.get('product'):
+        attrs += f";product={quote(str(m['product']), safe=_GFF_VALUE_SAFE)}"
+    attrs += f";transferred_from={quote(str(target_name), safe=_GFF_VALUE_SAFE)}"
     rows = [f"{m['chrom']}\tborrowed_annotation\tgene\t{s + 1}\t{e}\t.\t{m['strand']}\t.\t{attrs}",
             f"{m['chrom']}\tborrowed_annotation\tmRNA\t{s + 1}\t{e}\t{m['identity'] * 100:.1f}\t"
             f"{m['strand']}\t.\tID={gid}.t1;Parent={gid};Identity={m['identity']:.3f};"
@@ -336,12 +377,17 @@ def borrowed_gff_rows(m, target_name):
     return rows
 
 
-def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name):
-    """The predictions (without the dropped genes and their children) and the borrowed models."""
+def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name, home_window=None):
+    """The predictions (without the dropped genes and their children) and the borrowed models.
+    The header keeps the predictions' annotated windows and, when models were borrowed, adds
+    ``home_window`` ((chrom, start, end), 0-based, half-open), the window they were aligned to."""
     drop_ids = set(dropped)
-    lines = ["##gff-version 3"]
+    header, lines = ["##gff-version 3"], []
     if predicted_gff and os.path.exists(predicted_gff):
-        rows = [ln.rstrip('\n') for ln in open(predicted_gff) if ln.strip() and not ln.startswith('#')]
+        with open(predicted_gff) as fh:
+            raw = [ln.rstrip('\n') for ln in fh if ln.strip()]
+        header += [ln for ln in raw if ln.split()[0] == ANNOTATED_WINDOW]
+        rows = [ln for ln in raw if not ln.startswith('#')]
         parent = {}
         for ln in rows:
             a = dict(kv.split('=', 1) for kv in ln.split('\t')[8].split(';') if '=' in kv) if ln.count('\t') >= 8 else {}
@@ -363,10 +409,12 @@ def write_merged_gff(path, predicted_gff, dropped, borrowed, target_name):
             if top(fid) in drop_ids or top(a.get('Parent', '')) in drop_ids:
                 continue
             lines.append(ln)
+    if borrowed and home_window:
+        header.append(annotated_window_line(*home_window, "borrowed"))
     for m in borrowed:
         lines.extend(borrowed_gff_rows(m, target_name))
     with open(path, 'w') as fh:
-        fh.write('\n'.join(lines) + '\n')
+        fh.write('\n'.join(header + lines) + '\n')
 
 
 def write_home_proteome(merged_gff, genome, goi_rows, out_dir, record):
@@ -448,8 +496,8 @@ def main():
     record = {'source': 'predicted', 'partial': True, 'target': None, 'borrowed': 0,
               'predicted': len(predicted), 'predictions_dropped': 0}
 
-    def finish(borrowed, dropped, target_name, proteins):
-        write_merged_gff(args.output_gff, args.predicted_gff, dropped, borrowed, target_name)
+    def finish(borrowed, dropped, target_name, proteins, window=None):
+        write_merged_gff(args.output_gff, args.predicted_gff, dropped, borrowed, target_name, window)
         check_gene_ids([gid for gid, _n, _p in proteins], args.output_gff, args.output_proteins)
         write_fasta([(f"{gid} {name}", p) for gid, name, p in proteins], args.output_proteins)
         record.update(borrowed=len(borrowed), predictions_dropped=len(dropped),
@@ -496,7 +544,7 @@ def main():
 
         choice = choose_target(targets, read_sorted_genomes(args.sorted_genomes), median_identity)
         target_fna, target_gff, why = choice
-        target_name = Path(target_fna).stem
+        target_name = genome_file_stem(target_fna)
         print(f"[borrow_annotations] Target {Path(target_fna).name}: {why}.")
         region = target_region(hits_of(target_fna), args.target_flank)
     set_genetic_code(args.genetic_code)
@@ -511,8 +559,10 @@ def main():
     # miniprot's intron bound: the window itself, at least 20 kb (as for the home gene model
     # built from hits, annotate_goi_exons.py).
     models = borrowed_models(proteins, window_seq, goi[0], lo, max(20000, hi - lo))
+    products = region_products(target_gff, [gid for gid, _n, _p in proteins])
     for m in models:
         m['chrom'] = goi[0]
+        m['product'] = products.get(m['source'], '')
     recip = reciprocal(models, proteins)
     kept, dropped = one_model_per_place(recip, predicted)
     print(f"[borrow_annotations] {len(models)} model(s) at >= {MIN_IDENTITY:.0%} identity and "
@@ -521,7 +571,7 @@ def main():
     record['target'] = target_name
     record['target_choice'] = why
     record['target_region'] = f"{chrom}:{rs}-{re_}"
-    return finish(kept, dropped, target_name, proteins)
+    return finish(kept, dropped, target_name, proteins, (goi[0], lo, hi))
 
 
 if __name__ == "__main__":

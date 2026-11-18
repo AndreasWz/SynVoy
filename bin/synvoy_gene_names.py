@@ -84,6 +84,14 @@ _GENERIC_ID_RES = (
 _UNINFORMATIVE_RE = re.compile(
     r"uncharacteri[sz]ed|hypothetical|unknown|unnamed|predicted protein|"
     r"domain of unknown function|^protein$|^gene$|\bLOC\d+\b", re.IGNORECASE)
+# CGD opens many descriptions with a note on the assemblies that hold the ORF, not with its
+# function ("ORF in Assemblies 19, 20 and 21; <description>"); the note is no product name.
+_PLACEHOLDER_RE = re.compile(
+    r"\bORF\s+in\s+Assembl(?:y|ies)\s+\d+(?:(?:\s*,\s*and\s+|\s*,\s*|\s+and\s+)\d+)*\s*[;.,:]?\s*",
+    re.IGNORECASE)
+# The provenance note borrow_annotations.py wrote on transferred genes up to v1.0.0
+# ("transferred from <target>"); it names no product. Read for figures drawn again from such a run.
+_TRANSFER_NOTE_RE = re.compile(r"^transferred from \S+$")
 
 # Words that carry no information in a product name.
 _FILLER = {"protein", "proteins", "of", "and", "the", "a", "an", "in", "to", "for",
@@ -110,15 +118,20 @@ def is_generic_id(label: str) -> bool:
     return any(rx.match(txt) for rx in _GENERIC_ID_RES)
 
 
+def _strip_placeholders(text: str) -> str:
+    """``text`` without CGD's assembly note (_PLACEHOLDER_RE)."""
+    return _PLACEHOLDER_RE.sub("", text).strip(" ,;.:")
+
+
 def is_uninformative_product(product: str) -> bool:
     """True when a product description does not name the gene."""
-    txt = (product or "").strip()
+    txt = _strip_placeholders((product or "").strip())
     return not txt or bool(_UNINFORMATIVE_RE.search(txt))
 
 
 def clean_product(product: str) -> str:
     """Strip transcript, isoform, evidence and compartment qualifiers from a product name."""
-    txt = unquote(str(product or "")).strip()
+    txt = _strip_placeholders(unquote(str(product or "")).strip())
     txt = re.sub(r"\s*\[Source:[^\]]*\]", "", txt)                 # Ensembl description tail
     txt = re.sub(r"^LOW QUALITY PROTEIN:\s*", "", txt, flags=re.IGNORECASE)
     txt = re.sub(r",?\s*transcript variant\s+\S+$", "", txt, flags=re.IGNORECASE)
@@ -233,9 +246,10 @@ def load_gff_gene_info(gff_path: Optional[str],
     """Naming attributes of the genes in a GFF: ``{gene_id: {symbol, product, ncbi_gene_id}}``.
 
     ``symbol`` is '' when the GFF only repeats an identifier (``gene=LOC726817``,
-    a locus tag). ``product`` is the gene's ``description`` or, failing that, the
-    ``product`` of one of its transcripts. ``wanted`` limits the result to those
-    gene IDs (the file is still read once).
+    a locus tag). ``product`` is the gene's ``description``, ``product`` or ``Note``
+    (not the transfer note of a gene borrow_annotations.py transferred up to v1.0.0) or,
+    when that is missing or names nothing, the ``product`` of one of its transcripts.
+    ``wanted`` limits the result to those gene IDs (the file is still read once).
     """
     info: Dict[str, dict] = {}
     if not gff_path or gff_path == "NO_GFF" or not os.path.exists(gff_path):
@@ -266,7 +280,8 @@ def load_gff_gene_info(gff_path: Optional[str],
                 m = re.search(r"GeneID:(\d+)", a.get("Dbxref", ""))
                 info[gid] = {
                     "symbol": symbol,
-                    "product": next((a[k] for k in _GFF_PRODUCT_KEYS if a.get(k)), ""),
+                    "product": next((a[k] for k in _GFF_PRODUCT_KEYS if a.get(k)
+                                     and not (k == "Note" and _TRANSFER_NOTE_RE.match(a[k]))), ""),
                     "ncbi_gene_id": m.group(1) if m else "",
                 }
             elif ftype in _TRANSCRIPT_TYPES:

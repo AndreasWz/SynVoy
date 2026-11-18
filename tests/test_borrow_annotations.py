@@ -65,6 +65,78 @@ def test_annotated_targets_need_ten_cds_rows(tmp_path):
     assert [os.path.basename(t[0]) for t in ba.annotated_targets(str(tmp_path))] == ["A.fna"]
 
 
+def test_annotated_targets_take_every_fasta_name_the_pipeline_searches(tmp_path):
+    """A target given as .fa, .fasta or gzipped was never borrowed from (only *.fna was listed),
+    even with its annotation beside it. The names are main.nf's: .fna, .fa or .fasta, plain or
+    gzipped; the annotation is the genome's name with .gff for its last extension, as easy mode
+    and stage_target_gffs.py write it (cow.fna.gz -> cow.fna.gff)."""
+    cds = "".join(f"c\tx\tCDS\t{i}\t{i + 2}\t.\t+\t0\tParent=m\n" for i in range(1, 31, 3))
+    for genome, gff in (("A.fna", "A.gff"), ("B.fa", "B.gff"), ("C.fasta", "C.gff"),
+                        ("D.fna.gz", "D.fna.gff"), ("E.fa.gz", "E.fa.gff"), ("F.txt", "F.gff"),
+                        ("G.fasta.gz", "G.gff")):
+        (tmp_path / genome).write_text(">c\nACGT\n")
+        (tmp_path / gff).write_text(cds)
+    (tmp_path / "A.fna.fai").write_text("c\t4\t3\t4\t5\n")
+    found = [(os.path.basename(t[0]), os.path.basename(t[1])) for t in ba.annotated_targets(str(tmp_path))]
+    assert found == [("A.fna", "A.gff"), ("B.fa", "B.gff"), ("C.fasta", "C.gff"),
+                     ("D.fna.gz", "D.fna.gff"), ("E.fa.gz", "E.fa.gff")]   # F: no FASTA; G: no G.fasta.gff
+    assert ba.target_annotation("/g/cow.fna.gz").name == "cow.fna.gff"
+    from sequence_utils import genome_file_stem
+    assert [genome_file_stem(n) for n in ("cow.fna", "cow.fa.gz", "cow.fasta", "cow.gff", ".fa")] == \
+        ["cow", "cow", "cow", None, None]
+
+
+def test_region_products_and_the_borrowed_row(tmp_path):
+    """The borrowed gene row carries its target gene's product, escaped for the GFF, and its
+    provenance as transferred_from= (it was Note=transferred from <target>, which the names table
+    read as the product); the names table labels a gene with a generic Name from the product."""
+    gff = tmp_path / "t.gff"
+    gff.write_text("##gff-version 3\n"
+                   "c\tx\tgene\t1\t900\t.\t+\t.\tID=gene-LOC1;Name=LOC1;gene=LOC1\n"
+                   "c\tx\tmRNA\t1\t900\t.\t+\t.\tID=rna-1;Parent=gene-LOC1;"
+                   "product=alcohol dehydrogenase%2C isoform A\n"
+                   "c\tx\tgene\t1001\t1900\t.\t+\t.\tID=gene-LOC2;Name=LOC2;description=uncharacterized protein\n"
+                   "c\tx\tgene\t2001\t2900\t.\t+\t.\tID=gene-LOC3;Name=LOC3\n")
+    products = ba.region_products(str(gff), ["gene-LOC1", "gene-LOC2", "gene-LOC3"])
+    assert products == {"gene-LOC1": "alcohol dehydrogenase, isoform A",
+                        "gene-LOC2": "uncharacterized protein"}
+    m = dict(_model("gene-LOC1", 990, 1950, 0.75), name="LOC1", product=products["gene-LOC1"])
+    row = ba.borrowed_gff_rows(m, "Drosophila_simulans")[0]
+    assert row.split("\t")[8] == ("ID=borrowed_gene-LOC1;Name=LOC1;gene_biotype=protein_coding;"
+                                   "product=alcohol dehydrogenase%2C isoform A;"
+                                   "transferred_from=Drosophila_simulans")
+    out = tmp_path / "merged.gff"
+    ba.write_merged_gff(str(out), None, set(), [m, dict(_model("gene-LOC3", 3000, 4000, 0.7), name="LOC3")],
+                        "Drosophila_simulans")
+    import synvoy_gene_names as gn
+    table, _note = gn.resolve_gene_names(["borrowed_gene-LOC1", "borrowed_gene-LOC3"],
+                                         gn.load_gff_gene_info(str(out)), allow_network=False)
+    assert table["borrowed_gene-LOC1"]["label"] == gn.abbreviate_product("alcohol dehydrogenase, isoform A")
+    assert table["borrowed_gene-LOC1"]["full_name"] == "alcohol dehydrogenase"
+    assert table["borrowed_gene-LOC3"]["source"] == gn.SOURCE_ID           # no product: its id
+    assert "Drosophila" not in out.read_text().split("transferred_from=")[0]
+
+
+def test_the_merged_gff_names_the_annotated_windows(tmp_path):
+    """The prediction windows (prodigal_on_regions.py) stay in the merged GFF's header, and the
+    home window is added as 'borrowed' only when gene models were transferred into it: the flank
+    walk does not step beyond them (extract_flanking_genes.walk_extent)."""
+    from sequence_utils import annotated_window_line, read_annotated_windows
+    pred = tmp_path / "pred.gff"
+    pred.write_text("\n".join(["##gff-version 3", annotated_window_line("h", 0, 12000, "predicted"),
+                               annotated_window_line("h", 40000, 56000, "predicted")]
+                              + _gff_gene("p1", "h", 1001, 1900)) + "\n")
+    out = tmp_path / "merged.gff"
+    ba.write_merged_gff(str(out), str(pred), set(), [], "T", ("h", 0, 30000))
+    assert read_annotated_windows(str(out)) == {"h": [(0, 12000, "predicted"), (40000, 56000, "predicted")]}
+    ba.write_merged_gff(str(out), str(pred), set(), [_model("gene-T7", 19000, 21000, 0.8)], "T", ("h", 0, 30000))
+    assert read_annotated_windows(str(out)) == {
+        "h": [(0, 12000, "predicted"), (0, 30000, "borrowed"), (40000, 56000, "predicted")]}
+    lines = out.read_text().splitlines()
+    assert lines[0] == "##gff-version 3" and all(ln.startswith("#") for ln in lines[:4])
+    assert "ID=p1" in out.read_text() and "ID=borrowed_gene-T7" in out.read_text()
+
+
 def _hit(q, chrom, start, end):
     return {"query": q, "chrom": chrom, "start": start, "end": end, "pident": 70.0,
             "evalue": 1e-20, "bits": 100.0}
@@ -123,7 +195,8 @@ def test_the_merged_gff_and_the_home_proteome(tmp_path):
     ba.write_merged_gff(str(out), str(pred), {"p1"}, [m], "Drosophila_simulans")
     text = out.read_text()
     assert "ID=p1" not in text and "ID=p2" in text and "ID=p3" in text
-    assert "ID=borrowed_gene-T7;Name=gene-T7;gene_biotype=protein_coding;Note=transferred from Drosophila_simulans" in text
+    assert "ID=borrowed_gene-T7;Name=gene-T7;gene_biotype=protein_coding;transferred_from=Drosophila_simulans" in text
+    assert "Note=transferred" not in text
     models = cds_models_by_gene(str(out))
     assert sorted(models) == ["borrowed_gene-T7", "p2", "p3"]
     assert models["borrowed_gene-T7"]["exons"] == [(991, 1200, 0), (1501, 1950, 2)]   # 1-based, phases

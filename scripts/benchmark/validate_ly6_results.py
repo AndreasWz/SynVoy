@@ -7,12 +7,12 @@ This script is intentionally lightweight (no pandas) and focuses on:
   - False positive rate (predicted GOI intervals outside any GT gene region)
   - Optional locus boundary deltas (GT anchors vs predicted locus)
 
-Example:
+Example (run_ly6_ground_truth_check.py runs this for every curated file of a run):
   python scripts/benchmark/validate_ly6_results.py \
-    --ground-truth ground_truth/ly6_3ftx/Ly6/Hosa_NC_000008.gff \
-    --pred-gff results/ly6e_definitive_pro/plot_inputs_synteny_block_locus_1/GCF_000001635.27.fna.gff \
+    --ground-truth <gt-dir>/Ly6/<file>.gff \
+    --pred-gff <run>/plot_inputs_synteny_block_locus_1/<genome>.gff \
     --gt-goi-regex 'LY6E|PSCA|LYPD2' \
-    --pred-locus-bed results/ly6e_definitive_pro/plot_inputs_synteny_block_locus_1/GCF_000001635.27.fna.regions.bed
+    --pred-locus-bed <run>/plot_inputs_synteny_block_locus_1/<genome>.regions.bed
 """
 
 from __future__ import annotations

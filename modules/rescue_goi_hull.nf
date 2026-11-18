@@ -8,8 +8,10 @@
 // the true 90 %+ decorin there. This pass runs miniprot of the GOI across the whole
 // flanking neighbourhood (hull) per target chromosome, but only when the hull has strong
 // flanking support and no HIGH GOI model already inside it. Output GFF (Confidence by
-// the search's judge since 2026-10-14, EvidenceType=synteny_hull_rescue) mixes into the per-locus region GFFs, so the
-// report machinery picks it up via canonical_genome_id() without changes.
+// the search's judge, in the place the search's rule gives the model: the core or window of a
+// significant block of the genome's block table, else the genome; EvidenceType=synteny_hull_rescue)
+// mixes into the per-locus region GFFs, so the report machinery picks it up via
+// canonical_genome_id() without changes.
 process RESCUE_GOI_HULL {
     tag "${locus_id}/${genome_name}"
     // A failed rescue does not block the pipeline: bin/run_step.py records the failure in the
@@ -30,9 +32,10 @@ process RESCUE_GOI_HULL {
                saveAs: { fn -> task.workDir.resolve(fn).toFile().readLines().any { l -> l && !l.startsWith('#') } ? fn : null }
 
     input:
-    // Same 4-tuple as paralog_inputs_ch (region_faa unused here) so main.nf needn't
-    // build an extra channel — keeps the main workflow under the JVM method-size limit.
-    tuple val(locus_id), val(genome_name), path(region_faa), path(region_gff)
+    // paralog_inputs_ch's 4-tuple (region_faa unused here) and the search's block table of this
+    // genome and locus (blocks/<locus>_<genome>.blocks.tsv; the NO_BLOCKS sentinel without one),
+    // joined in subworkflows/adjudicate_and_report.nf.
+    tuple val(locus_id), val(genome_name), path(region_faa), path(region_gff), path(blocks_tsv)
     path(genomes_dir)
     path(query_faa)
     // The home protein database folder (home_proteome.faa + home_genes.tsv): a rescue model
@@ -89,6 +92,7 @@ process RESCUE_GOI_HULL {
         --effective_params ${effective_params} \\
         --n_flanking_genes ${params.n_flanking_genes} \\
         --home_db_dir ${home_db} \\
+        --blocks_tsv ${blocks_tsv} \\
         --goi_info ${goi_info} ${GeneticCodes.targetArgs(params)}
     """
 }

@@ -479,6 +479,67 @@ def get_feature_id(feature: Dict[str, Any], fallback_counter: Optional[int] = No
     return f"{feature['type']}_{seqid}_{start}"
 
 
+# A home genome without a GFF is annotated by SynVoy itself, and only in stretches: the
+# windows around the query's home hits in which genes are predicted (prodigal_on_regions.py)
+# and the window into which an annotated target's gene models are transferred
+# (borrow_annotations.py). Beyond them the genome holds genes that no file lists, so the flank
+# walk (extract_flanking_genes.py) must not step from one stretch into the next. Each stretch is
+# a directive in the GFF's header: ``##synvoy-annotated-window <chrom> <start> <end> <kind>``,
+# 1-based and closed like the feature rows, ``kind`` 'predicted' or 'borrowed'.
+ANNOTATED_WINDOW = "##synvoy-annotated-window"
+
+
+def annotated_window_line(chrom: str, start: int, end: int, kind: str) -> str:
+    """The directive of one annotated stretch, from a 0-based, half-open ``start``/``end``."""
+    return f"{ANNOTATED_WINDOW} {chrom} {int(start) + 1} {int(end)} {kind}"
+
+
+def read_annotated_windows(gff_path: Optional[str]) -> Dict[str, List[Tuple[int, int, str]]]:
+    """``{chrom: [(start, end, kind), ...]}`` (0-based, half-open, sorted) of the annotated-window
+    directives in the header of a GFF (the lines before its first feature row). {} for a GFF
+    without any: an annotation that is not SynVoy's own, which covers the whole genome."""
+    out: Dict[str, List[Tuple[int, int, str]]] = {}
+    if not gff_path or not os.path.isfile(gff_path):
+        return out
+    _open = gzip.open if str(gff_path).endswith('.gz') else open
+    with _open(gff_path, 'rt') as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            if not line.startswith('#'):
+                break
+            parts = line.split()
+            if parts[0] != ANNOTATED_WINDOW or len(parts) < 4:
+                continue
+            try:
+                start, end = int(parts[2]) - 1, int(parts[3])
+            except ValueError:
+                continue
+            if end > start:
+                out.setdefault(parts[1], []).append((start, end, parts[4] if len(parts) > 4 else ''))
+    for spans in out.values():
+        spans.sort()
+    return out
+
+
+# The target genome files the pipeline searches (main.nf's resolveTargetGenomeFiles, phylo_sort.py):
+# .fna, .fa or .fasta, plain or gzipped.
+GENOME_FASTA_EXTENSIONS = ('.fna', '.fa', '.fasta')
+
+
+def genome_file_stem(name: str) -> Optional[str]:
+    """The genome name of a target genome file, as main.nf forms it: the file name without
+    '.gz' and then without '.fna', '.fa' or '.fasta' (``cow.fna.gz`` -> ``cow``). None for a
+    file with none of those extensions."""
+    base = os.path.basename(str(name))
+    if base.endswith('.gz'):
+        base = base[:-3]
+    for ext in GENOME_FASTA_EXTENSIONS:
+        if base.endswith(ext) and len(base) > len(ext):
+            return base[:-len(ext)]
+    return None
+
+
 # =============================================================================
 # SEQUENCE OPERATIONS
 # =============================================================================

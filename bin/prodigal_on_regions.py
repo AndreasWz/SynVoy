@@ -9,13 +9,13 @@ import tempfile
 
 try:
     from sequence_utils import (
-        load_genome, write_fasta, parse_fasta,
+        load_genome, write_fasta, parse_fasta, annotated_window_line,
         parse_bed as _parse_bed_dicts, str2bool, set_genetic_code, exit_step_failed,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sequence_utils import (
-        load_genome, write_fasta, parse_fasta,
+        load_genome, write_fasta, parse_fasta, annotated_window_line,
         parse_bed as _parse_bed_dicts, str2bool, set_genetic_code, exit_step_failed,
     )
 
@@ -115,8 +115,14 @@ def _with_parents(parts):
 
 
 def adjust_gff(in_gff, out_gff, id_map):
+    """The predictor's GFF in genome coordinates. Its header names every region genes were
+    predicted in (``##synvoy-annotated-window``, sorted): the home genome has no annotation
+    beyond them, so the flank walk stays inside the one around the locus
+    (extract_flanking_genes.py)."""
     with open(out_gff, "w") as out:
         out.write("##gff-version 3\n")
+        for chrom, start, end in sorted(id_map.values()):
+            out.write(annotated_window_line(chrom, start, end, "predicted") + "\n")
         if not os.path.exists(in_gff) or os.path.getsize(in_gff) == 0:
             return
         with open(in_gff, "r") as f:

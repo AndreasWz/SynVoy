@@ -50,7 +50,7 @@ scripts/benchmark/
 ├── run_family.sh               # one family end to end: stage -> SynVoy -> score -> callcheck
 ├── score_runs.sh               # re-score finished family runs with the current harness
 ├── validate_melettin_gt_v3.py  # a melittin run vs the pinned fixture in tests/ground_truth_test/melettin_gt_v3/
-├── run_ly6_ground_truth_check.py # LY6 ground-truth check of finished runs (calls validate_ly6_results.py)
+├── run_ly6_ground_truth_check.py # LY6 ground-truth check of a finished run (--gt-dir; calls validate_ly6_results.py)
 ├── validate_ly6_results.py     # GOI calls vs a ground-truth GFF: CDS tracked, false positives
 └── _archived_proteome_tools/   # wrappers of the proteome-based tools (OrthoFinder,
                                 #   SonicParanoid, MMseqs2-RBH, GENESPACE), kept for reference
@@ -154,6 +154,23 @@ python scripts/benchmark/score_coordinates.py \
 `run_all_sequential.sh` runs both scorers; report the two numbers together. A
 curated model on a different assembly than the run used is reported as
 `assembly_mismatch` and excluded, not counted as a miss.
+
+## LY6 ground-truth check
+
+`run_ly6_ground_truth_check.py` compares the GOI calls of a finished LY6 run with curated
+LY6/3FTx gene models. The curated models are not part of the repository; `--gt-dir` names
+the folder that holds them (`Ly6/*.gff`, or the `Ly6` folder itself):
+
+```bash
+python scripts/benchmark/run_ly6_ground_truth_check.py \
+    --gt-dir <folder with Ly6/*.gff> --outdir <SynVoy run folder>
+```
+
+Each curated file is matched to a genome's GFF in `<run>/plot_inputs_synteny_block_locus_1/`
+by its sequence name and scored by `validate_ly6_results.py` (CDS bases tracked, GOI calls
+outside every curated gene). `ly6_validation_report.json` and `.md` go to `--report-dir`
+(default: the run folder), never into the truth folder. A `--gt-dir` without curated GFFs, or
+a run folder without `plot_inputs_synteny_block_locus_1/`, stops the script with exit 2.
 
 ## Family-recovery benchmark
 

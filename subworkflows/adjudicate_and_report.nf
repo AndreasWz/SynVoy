@@ -27,6 +27,8 @@ workflow ADJUDICATE_AND_REPORT {
     iter_region_genes   // ITERATIVE_SEARCH.out.region_genes (locus_id, [faa...])
     iter_homology       // ITERATIVE_SEARCH.out.homology     (locus_id, [tsv...])
     iter_hits           // ITERATIVE_SEARCH.out.hits         (locus_id, m8)
+    iter_blocks         // ITERATIVE_SEARCH.out.blocks       (locus_id, [blocks.tsv...]) -> the place a
+                        // hull rescue model is judged in
     cluster_scores      // CLUSTER_REGIONS.out.scores        (locus_id, genome, scores.tsv)
     genomes_dir         // value channel: dir holding the target FASTAs
     query_faa           // value channel: the NORMALIZED GOI protein (see F8)
@@ -91,18 +93,36 @@ workflow ADJUDICATE_AND_REPORT {
             def stem = gff.name.replaceFirst(/\.gff3?$/, '')
             tuple("${locus_id}::${stem}", gff)
         }
-    paralog_inputs_ch = paralog_faa_ch
+    paralog_keyed_ch = paralog_faa_ch
         .map { key, locus_id, stem, faa -> tuple(key, locus_id, stem, faa) }
         .join(paralog_gff_ch)
+    paralog_inputs_ch = paralog_keyed_ch
         .map { key, locus_id, stem, faa, gff ->
             def genome_name = stem.replaceFirst(/\.(fna|fa|fasta)$/, '')
             tuple(locus_id, genome_name, faa, gff)
+        }
+    // The hull rescue's inputs: paralog_inputs_ch's and the search's block table of the same
+    // (locus, genome) (<locus>_<genome file>.blocks.tsv), so a hull model is judged in the place the
+    // search's rule gives it. A genome without a table gets the NO_BLOCKS sentinel (genome place);
+    // a table without region files is no hull task (join's remainder: [key, null, table]).
+    def no_blocks_sentinel = file("${projectDir}/assets/sentinels/NO_BLOCKS")
+    hull_blocks_ch = iter_blocks.transpose()
+        .map { locus_id, table ->
+            def name = table.name.replaceFirst(/\.blocks\.tsv$/, '')
+            def prefix = "${locus_id}_"
+            tuple("${locus_id}::${name.startsWith(prefix) ? name.substring(prefix.length()) : name}", table)
+        }
+    hull_inputs_ch = paralog_keyed_ch
+        .join(hull_blocks_ch, remainder: true)
+        .filter { rec -> rec.size() == 6 && rec[1] != null }
+        .map { key, locus_id, stem, faa, gff, blocks ->
+            tuple(locus_id, stem.replaceFirst(/\.(fna|fa|fasta)$/, ''), faa, gff, blocks ?: no_blocks_sentinel)
         }
 
     // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
     // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
     // STAGE_REGION_GFF like the strong-synteny rescue.
-    RESCUE_GOI_HULL(paralog_inputs_ch, genomes_dir, rescue_query_ch, home_db, goi_info, effective_params)
+    RESCUE_GOI_HULL(hull_inputs_ch, genomes_dir, rescue_query_ch, home_db, goi_info, effective_params)
 
     // §1m: locus ownership. Build a panel of the home GOI-paralog at each home
     // locus (>locus_<id>|<gene>), then SW-align every recovered GOI target

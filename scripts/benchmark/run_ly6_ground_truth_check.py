@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """
-Run Ly6 ground-truth checks against available SynVoy outputs.
+Run Ly6 ground-truth checks against a finished SynVoy run.
 
 Behavior:
+  - Reads the curated LY6/3FTx models from --gt-dir (the folder that holds Ly6/*.gff, or the
+    Ly6 folder itself); they are not part of the repository
   - Skips *_extraction.gff ground-truth files
   - Matches GT files to predicted GFFs by contig token in the filename
   - Uses CDS features when available for GT GOI; falls back to exons otherwise
-  - Produces JSON + Markdown summary in ground_truth/ly6_3ftx
+  - Runs validate_ly6_results.py (next to this script) with this script's Python
+  - Writes ly6_validation_report.json and .md to --report-dir (default: --outdir), never
+    into the truth folder
+
+Every path is taken as given (relative paths from the current directory).
+
+Example:
+  python scripts/benchmark/run_ly6_ground_truth_check.py \
+    --gt-dir <folder with Ly6/*.gff> --outdir <SynVoy run folder>
 """
 
 from __future__ import annotations
@@ -15,13 +25,15 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
-GT_DIR = Path("ground_truth/ly6_3ftx/Ly6")
-OUT_JSON = Path("ground_truth/ly6_3ftx/ly6_validation_report.json")
-OUT_MD = Path("ground_truth/ly6_3ftx/ly6_validation_report.md")
+REPORT_JSON = "ly6_validation_report.json"
+REPORT_MD = "ly6_validation_report.md"
+PRED_SUBDIR = "plot_inputs_synteny_block_locus_1"
+VALIDATOR = Path(__file__).resolve().with_name("validate_ly6_results.py")
 
 GOI_REGEX = r"LY6|LYPD|LYNX|SLURP|PSCA|3FTx"
 
@@ -88,10 +100,17 @@ def gt_goi_type(gt_file: Path, regex: re.Pattern) -> str:
     return "CDS" if cds_hits > 0 else "exon" if exon_hits > 0 else "CDS"
 
 
+def truth_files(gt_dir: Path) -> List[Path]:
+    """The curated GFFs: ``<gt_dir>/Ly6/*.gff``, or ``<gt_dir>/*.gff`` when ``gt_dir`` is the Ly6
+    folder itself."""
+    folder = gt_dir / "Ly6" if (gt_dir / "Ly6").is_dir() else gt_dir
+    return sorted(folder.glob("*.gff"))
+
+
 def run_validator(gt_file: Path, pred_file: Path, bed_file: Optional[Path], goi_type: str) -> dict:
     cmd = [
-        "python",
-        "scripts/benchmark/validate_ly6_results.py",
+        sys.executable,
+        str(VALIDATOR),
         "--ground-truth",
         str(gt_file),
         "--pred-gff",
@@ -111,14 +130,33 @@ def run_validator(gt_file: Path, pred_file: Path, bed_file: Optional[Path], goi_
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Ly6 ground-truth validation")
     parser.add_argument(
+        "--gt-dir",
+        required=True,
+        help="Folder with the curated LY6/3FTx models: the folder that holds Ly6/*.gff, or the "
+             "Ly6 folder itself (not part of the repository)",
+    )
+    parser.add_argument(
         "--outdir",
         default="results/ly6_gt_v3",
         help="SynVoy output directory (default: results/ly6_gt_v3)",
     )
+    parser.add_argument(
+        "--report-dir",
+        default=None,
+        help=f"Folder for {REPORT_JSON} and {REPORT_MD} (default: --outdir)",
+    )
     args = parser.parse_args()
-    pred_dir = Path(args.outdir) / "plot_inputs_synteny_block_locus_1"
+    gt_dir = Path(args.gt_dir)
+    gt_files = truth_files(gt_dir) if gt_dir.is_dir() else []
+    if not any(not f.name.endswith("_extraction.gff") for f in gt_files):
+        parser.error(f"--gt-dir {gt_dir}: no curated GFF (Ly6/*.gff other than *_extraction.gff) found")
+    pred_dir = Path(args.outdir) / PRED_SUBDIR
+    if not pred_dir.is_dir():
+        parser.error(f"--outdir {args.outdir}: no {PRED_SUBDIR}/ folder (not a finished SynVoy run?)")
+    report_dir = Path(args.report_dir) if args.report_dir else Path(args.outdir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    out_json, out_md = report_dir / REPORT_JSON, report_dir / REPORT_MD
 
-    gt_files = sorted(GT_DIR.glob("*.gff"))
     pred_files = [p for p in sorted(pred_dir.glob("*.gff")) if p.name != "home_genome.gff"]
     pred_seqids = {p: parse_pred_seqids(p) for p in pred_files}
 
@@ -150,7 +188,7 @@ def main() -> int:
         }
         results.append(report)
 
-    OUT_JSON.write_text(json.dumps({
+    out_json.write_text(json.dumps({
         "goi_regex": GOI_REGEX,
         "skipped_extractions": skipped,
         "unmatched_gt_files": unmatched,
@@ -178,10 +216,10 @@ def main() -> int:
     lines.append("")
     lines.append(f"Skipped extractions ({len(skipped)}): " + (", ".join(skipped) if skipped else "none"))
     lines.append(f"Unmatched GT files ({len(unmatched)}): " + (", ".join(unmatched) if unmatched else "none"))
-    OUT_MD.write_text("\n".join(lines) + "\n")
+    out_md.write_text("\n".join(lines) + "\n")
 
-    print(f"Wrote {OUT_JSON}")
-    print(f"Wrote {OUT_MD}")
+    print(f"Wrote {out_json}")
+    print(f"Wrote {out_md}")
     return 0
 
 

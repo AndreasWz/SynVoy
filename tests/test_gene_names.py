@@ -552,3 +552,67 @@ def test_long_column_labels_get_a_taller_header():
     short = [{"label": "alc", "is_goi": False}]
     long_ = [{"label": "lncRNA:CR44733-extra-long", "is_goi": False}]
     assert ps._rotated_header_height(long_, 17, 55) > 150 > ps._rotated_header_height(short, 17, 55)
+
+
+# ---- descriptions that are no product name (freeze item 40) --------------------------
+
+CGD_NOTE = "ORF in Assemblies 19, 20 and 21"
+
+
+def test_the_cgd_assembly_note_names_nothing():
+    """The Candida Genome Database opens many descriptions with a note on the assemblies that
+    hold the ORF; on its own it was abbreviated to ORFA192021 and numbered like a gene name."""
+    assert gn.is_uninformative_product(CGD_NOTE)
+    assert gn.abbreviate_product(CGD_NOTE) == ""
+    assert gn.is_uninformative_product("ORF in Assembly 21")
+    assert gn.clean_product("ORF%20in%20Assemblies%2019%2C%2020%20and%2021") == ""
+
+
+def test_the_description_after_the_cgd_note_is_the_product():
+    product = CGD_NOTE + "; Putative transporter of the MFS family"
+    assert "ORF in Assembl" not in gn.clean_product(product)
+    assert gn.clean_product(product) == "transporter of the MFS family"
+    assert not gn.abbreviate_product(product).startswith("ORFA")
+    assert gn.abbreviate_product(product) == gn.abbreviate_product("transporter of the MFS family")
+
+
+def test_genes_described_only_by_the_cgd_note_keep_their_ids(tmp_path):
+    note = "ORF%20in%20Assemblies%2019%2C%2020%20and%2021"
+    path = tmp_path / "home.gff"
+    path.write_text("##gff-version 3\n" + "".join(
+        f"chr1\tCGD\tgene\t{100 + 1000 * i}\t{900 + 1000 * i}\t.\t+\t.\tID=orf{i};Note={note}\n"
+        for i in range(3)))
+    ids = ["orf0", "orf1", "orf2"]
+    table, _note = gn.resolve_gene_names(ids, gn.load_gff_gene_info(str(path)), allow_network=False)
+    assert [table[g]["label"] for g in ids] == ids                    # no ORFA192021-1, -2, -3
+    assert {table[g]["source"] for g in ids} == {gn.SOURCE_ID}
+    assert all(table[g]["full_name"] == "" for g in ids)
+
+
+def test_an_informative_transcript_product_replaces_the_cgd_note(tmp_path):
+    path = tmp_path / "home.gff"
+    path.write_text("##gff-version 3\n"
+                    f"chr1\tCGD\tgene\t100\t900\t.\t+\t.\tID=orf0;Note={CGD_NOTE}\n"
+                    "chr1\tCGD\tmRNA\t100\t900\t.\t+\t.\tID=orf0.t;Parent=orf0;product=alcohol dehydrogenase\n")
+    assert gn.load_gff_gene_info(str(path))["orf0"]["product"] == "alcohol dehydrogenase"
+
+
+def test_the_transfer_note_of_a_borrowed_gene_is_no_product(tmp_path):
+    """borrow_annotations.py wrote 'Note=transferred from <target>' on every transferred gene up
+    to v1.0.0; a gene without a symbol got its label from it (Drosophila_s-1*, -2*, ...). Figures
+    drawn again from such a run read no name from it."""
+    path = tmp_path / "home.gff"
+    path.write_text(
+        "##gff-version 3\n"
+        "chr1\tborrowed_annotation\tgene\t100\t900\t.\t+\t.\tID=borrowed_gene-LOC1;Name=LOC1;"
+        "gene_biotype=protein_coding;Note=transferred from Drosophila_simulans\n"
+        "chr1\tborrowed_annotation\tgene\t1100\t1900\t.\t+\t.\tID=borrowed_gene-Adh;Name=Adh;"
+        "gene_biotype=protein_coding;Note=transferred from Drosophila_simulans\n")
+    info = gn.load_gff_gene_info(str(path))
+    assert info["borrowed_gene-LOC1"]["product"] == "" and info["borrowed_gene-Adh"]["product"] == ""
+    table, _note = gn.resolve_gene_names(["borrowed_gene-LOC1", "borrowed_gene-Adh"], info,
+                                         allow_network=False)
+    assert "Drosophila" not in table["borrowed_gene-LOC1"]["label"]
+    assert table["borrowed_gene-LOC1"]["source"] == gn.SOURCE_ID
+    assert table["borrowed_gene-LOC1"]["full_name"] == ""
+    assert table["borrowed_gene-Adh"]["label"] == "Adh" and table["borrowed_gene-Adh"]["full_name"] == ""
