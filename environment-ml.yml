@@ -1,12 +1,16 @@
-# environment-ml.yml — optional ML overlay for SynVoy's experimental search layers
-# (PLM embedding search + ESMFold/Foldseek structural search).
+# environment-ml.yml: SynVoy's environment with the packages of the experimental search steps
+# (ProtT5 embedding search, ESMFold + Foldseek structural search; both off by default).
 #
-# These deps are deliberately NOT in environment.yml: they are large (torch +
-# CUDA), GPU/driver-specific, and the features are OFF by default. Install them
-# on top of an existing synvoy_env only when you intend to run with
+# It holds every package of environment.yml, with the same versions (tests/test_conda_environments.py
+# keeps the two lists equal), and the ML packages below them. These are large (torch + CUDA) and
+# GPU/driver-specific, so environment.yml does not hold them.
+#
+# Under a conda profile (standard, auto, low_mem, laptop_safe, conda, hpc_conda, lrz_ai) Nextflow
+# builds the steps' environment from this file instead of environment.yml when a run sets
 #     --enable_plm_search true   and/or   --enable_structural_search true
+# (nextflow.config, process.conda). Nothing has to be installed by hand for that.
 #
-# Install into the existing env (recommended):
+# To have the packages in synvoy_env too (to run the scripts in bin/ yourself):
 #     mamba env update -n synvoy_env -f environment-ml.yml
 #
 # On LRZ AI Systems (GPU): conda-forge resolves a CUDA-enabled pytorch build
@@ -27,6 +31,26 @@ channels:
   - bioconda
   - nodefaults
 dependencies:
+  # The packages of environment.yml (see the comments there)
+  - python ==3.12.13
+  - openjdk >=17,<26
+  - nextflow ==26.04.3
+  - mmseqs2 ==18.8cc5c
+  - blast ==2.17.0
+  - prodigal ==2.6.3
+  - augustus ==3.5.0
+  - mafft ==7.526
+  - miniprot ==0.18
+  - samtools ==1.23
+  - iqtree ==3.1.2
+  - ncbi-datasets-cli ==18.30.1
+  - entrez-direct
+  - ete3
+  - parasail-python ==1.3.4
+  - numpy
+  - unzip
+
+  # The ML search steps
   - foldseek >=9          # structural search (3Di structural alphabet)
   - pytorch >=2.0         # ESMFold + ProtT5 inference
   - transformers >=4.30   # EsmForProteinFolding + T5EncoderModel

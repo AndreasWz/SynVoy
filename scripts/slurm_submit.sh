@@ -43,6 +43,7 @@ OUTDIR="results/${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
 
 # Choose profile: hpc_singularity (recommended) or hpc_conda
 PROFILE="hpc_singularity"
+CONTAINER=""                         # hpc_singularity: path to synvoy.sif (docs/INSTALL.md, Singularity and Apptainer)
 
 # ============================================================
 # RUN PIPELINE
@@ -54,11 +55,23 @@ echo "Query: ${QUERY_ID}"
 echo "Species: ${HOME_SPECIES}"
 echo "Output: ${OUTDIR}"
 echo "Profile: ${PROFILE}"
+echo "Container: ${CONTAINER:-none}"
 echo "Work dir: ${NXF_WORK}"
 echo "=============================================="
 
+EXTRA_ARGS=()
+if [ "${PROFILE}" = "hpc_singularity" ]; then
+    if [ -z "${CONTAINER}" ] || [ ! -f "${CONTAINER}" ]; then
+        echo "ERROR: PROFILE=hpc_singularity needs CONTAINER=/path/to/synvoy.sif (docs/INSTALL.md, Singularity and Apptainer), or set PROFILE=hpc_conda." >&2
+        exit 2
+    fi
+    EXTRA_ARGS+=(--docker_container "${CONTAINER}")
+fi
+
 nextflow run main.nf \
-    -profile ${PROFILE} \
+    -profile "${PROFILE}" \
+    --mode easy \
+    "${EXTRA_ARGS[@]}" \
     --query_id "${QUERY_ID}" \
     --home_species "${HOME_SPECIES}" \
     --max_genomes ${MAX_GENOMES} \

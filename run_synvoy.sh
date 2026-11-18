@@ -161,11 +161,10 @@ fi
 if command -v python3 >/dev/null 2>&1 && ! python3 -c "import parasail" >/dev/null 2>&1; then
     PYBIN="$(command -v python3)"
     die "parasail is NOT importable by the active python3 ($PYBIN).
-       SynVoy fails loud on this (Smith-Waterman is load-bearing for divergent genes). Fix:
+       Every search needs it (the Smith-Waterman search, and the bit score and specificity of each call's label). Fix:
          ${BOLD}deactivate${RST}                                   # if a .venv is shadowing the conda env (see above)
          ${BOLD}conda activate $ENV_NAME${RST}                     # ensure the SynVoy env is the active one
-         ${BOLD}conda install -n $ENV_NAME -c bioconda parasail-python${RST}   # if genuinely missing
-       Or launch with ${BOLD}--allow_missing_smith_waterman true${RST} to search WITHOUT SW (degraded, not advised)."
+         ${BOLD}conda install -n $ENV_NAME -c bioconda parasail-python${RST}   # if genuinely missing"
 fi
 say "parasail / Smith-Waterman backend importable"
 

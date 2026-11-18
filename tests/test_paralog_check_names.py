@@ -20,11 +20,9 @@ def _read(rel):
     return open(os.path.join(ROOT, rel)).read()
 
 
-def test_the_check_file_carries_the_locus():
-    nf = _read("modules/reciprocal_best_paralog.nf")
-    assert 'path("${locus_id}__${genome_name}.paralog_check.tsv"), emit: tsv' in nf
-    assert "--output ${locus_id}__${genome_name}.paralog_check.tsv" in nf
-    assert 'path("${genome_name}.paralog_check.tsv")' not in nf
+def test_the_ownership_file_carries_the_locus():
+    # RECIPROCAL_BEST_PARALOG, which wrote <locus>__<genome>.paralog_check.tsv, went with item 27 of
+    # the bug list of 16 Nov 2026: it always received one query sequence and could flag nothing.
     own = _read("modules/assign_locus_ownership.nf")
     assert 'path("${locus_id}__${genome_name}.locus_ownership.tsv")' in own
 
@@ -32,7 +30,7 @@ def test_the_check_file_carries_the_locus():
 def test_every_list_the_report_stages_is_sorted():
     sw = _read("subworkflows/adjudicate_and_report.nf")
     block = sw[sw.index("    STAGE_REGION_GFF("):sw.index("    GENERATE_REPORT(")]
-    assert block.count(".collect(sort: true)") == 8
+    assert block.count(".collect(sort: true)") == 7
     assert not re.search(r"\.collect\(\)", block)
 
 

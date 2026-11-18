@@ -497,6 +497,12 @@ def desc_rank(value):
 
 
 def assembly_rank_tuple(entry, ranking_mode):
+    """Sort key of an assembly, best first: the assembly level (chromosome, complete genome,
+    scaffold, contig), then NCBI's status (reference, representative, RefSeq, GenBank), then the
+    contiguity of ``ranking_mode``. The search reads a target's DNA, and its contiguity decides the
+    synteny that can be found; the status (and with RefSeq the annotation, which names the target
+    genes) breaks ties among assemblies of one level. It chooses the assembly of a species and the
+    species that fill a level's budget."""
     ref_rank = refseq_priority(entry)
     level_rank = assembly_level_priority(entry.get("assembly_status"))
     chrom = entry.get("chromosome_count")
@@ -510,8 +516,8 @@ def assembly_rank_tuple(entry, ranking_mode):
 
     if ranking_mode == "counts":
         return (
-            ref_rank,
             level_rank,
+            ref_rank,
             asc_rank(chrom),
             asc_rank(scaff),
             asc_rank(contigs),
@@ -523,8 +529,8 @@ def assembly_rank_tuple(entry, ranking_mode):
         )
     if ranking_mode == "nstats":
         return (
-            ref_rank,
             level_rank,
+            ref_rank,
             desc_rank(scaf_n80),
             desc_rank(cont_n80),
             desc_rank(scaf_n50),
@@ -534,10 +540,10 @@ def assembly_rank_tuple(entry, ranking_mode):
             asc_rank(chrom),
             acc,
         )
-    # Hybrid: prioritize reference/level, then contiguity counts, then N50/N80.
+    # Hybrid: level and status, then contiguity counts, then N50/N80.
     return (
-        ref_rank,
         level_rank,
+        ref_rank,
         asc_rank(contigs),
         asc_rank(scaff),
         desc_rank(cont_n50),
@@ -637,50 +643,67 @@ def effective_bad_quality_policy(policy, user_named):
     return "keep" if user_named else "drop"
 
 
-def apply_bad_quality_policy(assemblies, args, user_named=False):
+def passes_quality_policy(asm, args, user_named=False):
+    """Whether the quality policy keeps ``asm``: True for an assembly that passes the check, and
+    for a low-quality one that the policy keeps (keep, an answer of ask, or auto for a species the
+    user named), with what it says. Sets asm["bad_quality"] and asm["bad_quality_reasons"]."""
     policy = effective_bad_quality_policy(args.bad_quality_policy, user_named)
-    kept = []
-    dropped = []
-    for asm in assemblies:
-        bad, reasons = is_bad_quality(asm, args)
-        asm["bad_quality"] = bad
-        asm["bad_quality_reasons"] = "; ".join(reasons)
-        if not bad:
-            kept.append(asm)
-            continue
+    bad, reasons = is_bad_quality(asm, args)
+    asm["bad_quality"] = bad
+    asm["bad_quality_reasons"] = "; ".join(reasons)
+    if not bad:
+        return True
+    if policy == "keep" and user_named and args.bad_quality_policy == "auto":
+        print(
+            f"  WARNING: {asm['species']} ({asm['accession']}) is a LOW-QUALITY assembly "
+            f"({'; '.join(reasons)}). It is used because the species was named in "
+            f"--target_species. A gene that is not found in it may be missing from the "
+            f"assembly, not from the species. --bad_quality_policy drop leaves it out.",
+            file=sys.stderr,
+        )
+        return True
+    if policy == "keep":
+        print(
+            f"  [keep] Retaining low-quality assembly {asm['accession']} for {asm['species']}: "
+            + "; ".join(reasons)
+        )
+        return True
+    if policy == "drop":
+        print(
+            f"  [drop] Excluding low-quality assembly {asm['accession']} for {asm['species']}: "
+            + "; ".join(reasons)
+        )
+        return False
+    return ask_keep_bad_quality(asm, reasons, args.bad_quality_timeout)
 
-        if policy == "keep" and user_named and args.bad_quality_policy == "auto":
-            print(
-                f"  WARNING: {asm['species']} ({asm['accession']}) is a LOW-QUALITY assembly "
-                f"({'; '.join(reasons)}). It is used because the species was named in "
-                f"--target_species. A gene that is not found in it may be missing from the "
-                f"assembly, not from the species. --bad_quality_policy drop leaves it out.",
-                file=sys.stderr,
-            )
-            kept.append(asm)
-            continue
-        if policy == "keep":
-            print(
-                f"  [keep] Retaining low-quality assembly {asm['accession']} for {asm['species']}: "
-                + "; ".join(reasons)
-            )
-            kept.append(asm)
-            continue
-        if policy == "drop":
-            print(
-                f"  [drop] Excluding low-quality assembly {asm['accession']} for {asm['species']}: "
-                + "; ".join(reasons)
-            )
-            dropped.append(asm)
-            continue
 
-        if ask_keep_bad_quality(asm, reasons, args.bad_quality_timeout):
-            kept.append(asm)
+def fill_level(candidates, budget, seen_species, args):
+    """The candidates of one taxonomy level that fill its budget, in rank order: a species seen
+    before (at this level or a closer one) is skipped, and the quality policy runs on each as it is
+    about to be added, so a dropped low-quality assembly leaves its place to the next candidate.
+    Returns (the picked assemblies, how many the policy dropped); every species looked at is added
+    to ``seen_species``."""
+    picked, dropped = [], 0
+    for c in candidates:
+        if len(picked) >= budget:
+            break
+        sp_key = normalize_species(c["species"])
+        if sp_key in seen_species:
+            continue
+        seen_species.add(sp_key)
+        if passes_quality_policy(c, args):
+            picked.append(c)
         else:
-            dropped.append(asm)
+            dropped += 1
+    return picked, dropped
 
-    if dropped:
-        print(f"  Excluded {len(dropped)} low-quality assembly(ies) by policy '{policy}'.")
+
+def apply_bad_quality_policy(assemblies, args, user_named=False):
+    """The assemblies the quality policy keeps (passes_quality_policy), in their order."""
+    kept = [asm for asm in assemblies if passes_quality_policy(asm, args, user_named)]
+    if len(kept) < len(assemblies):
+        policy = effective_bad_quality_policy(args.bad_quality_policy, user_named)
+        print(f"  Excluded {len(assemblies) - len(kept)} low-quality assembly(ies) by policy '{policy}'.")
     return kept
 
 
@@ -1249,6 +1272,7 @@ def main():
     collected = []
     seen_species = {normalize_species(args.home_species), normalize_species(bare_species)}
     carry_over = 0
+    n_dropped = 0
 
     for i, (level_name, level_taxid) in enumerate(search_levels):
         budget = level_budgets[i] + carry_over
@@ -1268,15 +1292,10 @@ def main():
             metadata_cache=metadata_cache,
         )
 
-        added = 0
-        for c in candidates:
-            sp_key = normalize_species(c["species"])
-            if sp_key not in seen_species:
-                seen_species.add(sp_key)
-                collected.append(c)
-                added += 1
-                if added >= budget:
-                    break
+        picked, dropped = fill_level(candidates, budget, seen_species, args)
+        collected.extend(picked)
+        n_dropped += dropped
+        added = len(picked)
 
         if added < budget:
             carry_over = budget - added
@@ -1284,7 +1303,11 @@ def main():
         else:
             print(f"    Added {added} new species (total: {len(collected)}/{max_genomes})")
 
-    assemblies = apply_bad_quality_policy(collected, args)
+    assemblies = collected
+    if n_dropped:
+        print(f"  Excluded {n_dropped} low-quality assembly(ies) by policy "
+              f"'{effective_bad_quality_policy(args.bad_quality_policy, False)}'; their places went to the "
+              f"next candidates.")
 
     if not assemblies:
         # The TaxID resolved fine but the assembly walk produced 0 genomes

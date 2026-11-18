@@ -35,7 +35,7 @@ Genomes are searched from the closest relative outwards, and a gene found in a c
 
 ## Install
 
-You need Linux on x86-64 and conda with mamba: [Miniforge](https://github.com/conda-forge/miniforge) brings both, and with Miniconda or Anaconda you add mamba yourself ([docs/INSTALL.md](docs/INSTALL.md#troubleshooting)). Nextflow, Java and all the tools are installed for you into a conda environment. On a Mac, read [docs/INSTALL.md](docs/INSTALL.md#macos) first.
+You need Linux on x86-64 and conda, best with mamba, which builds the tool environment faster: [Miniforge](https://github.com/conda-forge/miniforge) brings both ([docs/INSTALL.md](docs/INSTALL.md)). Nextflow, Java and all the tools are installed for you into a conda environment. On a Mac, read [docs/INSTALL.md](docs/INSTALL.md#macos) first.
 
 ```bash
 git clone https://github.com/AndreasWz/SynVoy.git
@@ -96,12 +96,12 @@ To search a protein sequence of your own instead of an accession, give it as a F
 | `--home_species` | The species of the home genome, e.g. `"Apis mellifera"`. SynVoy uses it to order the target genomes by relatedness. Without it, SynVoy takes the name of the `--home_genome` file as the species (`Apis_mellifera.fna` is read as *Apis mellifera*), and stops when that name is a placeholder such as `reference.fna` or an assembly accession. |
 | `--home_genome` | The genome your gene comes from (FASTA). |
 | `--home_gff` | That genome's **gene annotation** (GFF3). *Optional but recommended:* with it, SynVoy takes the real neighbouring genes; without it, it predicts them, which is less reliable. |
-| `--target_genomes` | The genomes to search. Simplest: a **folder** of genome FASTA files; `genomes/` uses every `.fna`, `.fa` or `.fasta` file in it, plain or gzipped, and ignores other files. You can also give a quoted glob (`"genomes/*.fna"`) or a comma-separated list. |
+| `--target_genomes` | The genomes to search. Simplest: a **folder** of genome FASTA files; `genomes/` uses every `.fna`, `.fa` or `.fasta` file in it, plain or gzipped, and ignores other files. You can also give a quoted glob (`"genomes/*.fna"`) or a comma-separated list; a listed file that does not exist stops the run. |
 | `--target_gffs` | *Optional.* Annotations of the **target** genomes: a folder, glob or comma-separated list, matched to the genomes by file name or assembly accession. With them, a result also names the annotated gene it lies on. |
 
 ### Memory and the default profile
 
-Without `-profile`, the launcher uses the memory-safe profile `auto,low_mem`, made for a laptop with 8 GB of memory: it runs one task of each step at a time, gives the search 4 GB, runs MMseqs2 at sensitivity 7.0 and builds no gene tree. One step asks for 8 GB in every profile, and Nextflow refuses it on a machine that reports less, as many 8 GB laptops do: the fix is one line ([docs/USAGE.md](docs/USAGE.md#process-requirement-exceeds-available-memory)). On a workstation or server, add `-profile standard` for full sensitivity (9.5) and the gene tree:
+Without `-profile`, the launcher uses the memory-safe profile `auto,low_mem`, made for a laptop with 8 GB of memory: it runs one task of each step at a time, gives the search 4 GB, runs MMseqs2 at sensitivity 7.0 and builds no gene tree. No step of this profile asks for more than 4 GB, so it also runs on a laptop sold with 8 GB, which reports a little less. On a workstation or server, add `-profile standard` for full sensitivity (9.5) and the gene tree:
 
 ```bash
 ./run_synvoy.sh -profile standard --mode easy --query_id P01501 --max_genomes 10 --outdir results/my_run_standard

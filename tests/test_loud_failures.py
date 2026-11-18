@@ -146,7 +146,6 @@ def test_a_failed_rescue_is_named(tmp_path):
 
 @pytest.mark.parametrize("module,step", [("assign_locus_ownership.nf", "ASSIGN_LOCUS_OWNERSHIP"),
                                          ("assign_locus_ownership.nf", "BUILD_HOME_PARALOG_PANEL"),
-                                         ("reciprocal_best_paralog.nf", "RECIPROCAL_BEST_PARALOG"),
                                          ("rescue_goi_hull.nf", "RESCUE_GOI_HULL"),
                                          ("rescue_strong_synteny.nf", "RESCUE_STRONG_SYNTENY")])
 def test_the_steps_record_and_never_ignore(module, step):

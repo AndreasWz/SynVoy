@@ -1,5 +1,5 @@
 #!/bin/bash
-# Re-fetch the INSECT demo inputs into local_data/demo_insect/ (gitignored, ~600 MB).
+# Re-fetch the INSECT demo inputs into local_data/demo_insect/ (gitignored, ~1 GB).
 # Needs the NCBI `datasets` CLI and network access.
 #
 # Why Drosophila and not something smaller: the two genuinely smaller annotated
@@ -19,6 +19,7 @@ declare -A NAME=(
   [GCF_016746395.2]=Drosophila_simulans       # target,  132 Mb,  97 seqs, ~5 Mya
   [GCF_016746365.2]=Drosophila_yakuba         # target,  148 Mb,  64 seqs, ~10 Mya
   [GCF_009870125.1]=Drosophila_pseudoobscura  # target,  163 Mb,  71 seqs, ~25 Mya
+  [GCF_943734735.2]=Anopheles_gambiae         # target,  264 Mb, outside Drosophila (~250 Mya); demo/run_uniprot.sh
 )
 
 for acc in "${!NAME[@]}"; do

@@ -213,8 +213,10 @@ def test_a_redraw_uses_the_runs_settings_file(tmp_path):
 # --- 2026-10-26: what a student runs into ----------------------------------------------------
 
 def _logs(run: Path, plot=(), phylo=()) -> Path:
-    """Task logs as main.nf (collectTaskLogs) keeps them: one folder per task, a counter for a
-    repeat. A work folder shared by several runs leaves the tasks of all of them there."""
+    """Task logs as main.nf kept them up to version 1.0.1 (collectTaskLogs): one folder per task, a
+    counter for a repeat, and the tasks of every run that shared the work folder. Since then
+    lib/TaskLogs.groovy keeps this run's tasks, named with the task hash (PLOT_SYNTENY__1___<out>__<hash>),
+    which the same logs/PLOT_SYNTENY*/ and logs/PHYLO_SORT*/ patterns match."""
     for kind, values, line in (("PLOT_SYNTENY__1_____synteny_plot.html", plot, '        --home_species "{}" \\'),
                                ("PHYLO_SORT__sorting___sorted_genomes.txt", phylo, 'HOME_QUERY="{}"')):
         for i, value in enumerate(values, 1):

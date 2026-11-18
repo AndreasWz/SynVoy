@@ -183,6 +183,10 @@ it is checked before, and no module or preset changes it.
   without it, it orders them by a sequence distance. The first run also needs the network to
   build the tool environment.
 
+Easy mode with `--home_genome`, `--home_gff` or `--target_genomes` stops at its start and asks for
+`--mode pro`: easy mode would download other genomes and leave these files unused.
+`--target_gffs` in easy mode gives a warning (easy mode fetches the annotations with the genomes).
+
 Both modes check the target FASTA files before the search ([`qc_fail_policy`](#qc_fail_policy)).
 
 ### `query`
@@ -244,7 +248,9 @@ home genome's file name. The targets are then ordered without the home species' 
 ### `min_query_length`
 **Default:** `20` (aa)
 
-A shorter query stops the run before the search; `0` switches the check off. A query of 20 to
+A shorter query stops the run before the search; `0` switches the check off. A query file with
+fewer sequence characters than this stops the run at its start, before any step (a DNA query
+translates to at most a third of its length). A query of 20 to
 39 aa runs with a warning in the console: in another genome only a nearly identical ortholog of
 so short a sequence can be told from a chance match, so calls rest on the neighbourhood. If it
 is the mature part of a longer precursor, the precursor is the better query. No module or preset
@@ -279,16 +285,18 @@ is fetched: `--max_genomes` is not used. For a quick test, name two or three spe
 ### `assembly_ranking`
 **Default:** `hybrid` (`hybrid`, `counts` or `nstats`)
 
-Which assembly of a species is used. Every mode first prefers the NCBI status (reference genome,
-representative genome, other RefSeq, GenBank) and then the assembly level (chromosome, complete,
-scaffold, contig). Then:
+Which assembly of a species is used, and which species fill a taxonomy level's places. Every mode
+first prefers the assembly level (chromosome, complete, scaffold, contig), because the search reads
+the target's DNA and its contiguity decides the synteny it can find, and then the NCBI status
+(reference genome, representative genome, other RefSeq, GenBank). Then:
 
 - `hybrid`: fewer contigs, fewer scaffolds, then a larger contig N50 and scaffold N50;
 - `counts`: fewer chromosomes, scaffolds and contigs, then a larger N50;
 - `nstats`: a larger N80 and N50, then fewer contigs and scaffolds.
 
 Counts are used only where NCBI's record gives them. No mode looks at the gene annotation. For
-the home genome, the species' reference genome is taken when there is one.
+the home genome, the species' reference genome is taken when there is one, and otherwise the
+status still comes before the level, because the home genome's annotation gives the flanking genes.
 
 ### `bad_quality_policy`
 **Default:** `auto` (`auto`, `drop`, `keep` or `ask`)
@@ -371,9 +379,10 @@ name contains a `|` (SynVoy reads a gene id up to its first `|`).
 ### `home_genome`
 **Default:** none
 
-The home genome as a nucleotide FASTA file. Give it uncompressed (`.fna`, `.fa` or `.fasta`):
-the home search builds its BLAST database from the file as it is. A contiguous assembly gives
-complete sets of flanking genes. Give `--home_species` with it ([§ 2](#home_species)).
+The home genome as a nucleotide FASTA file, in pro mode (in easy mode the run stops and asks for
+`--mode pro`). Give it uncompressed (`.fna`, `.fa` or `.fasta`): the home search builds its BLAST
+database from the file as it is. A contiguous assembly gives complete sets of flanking genes. Give
+`--home_species` with it ([§ 2](#home_species)).
 
 ### `home_gff`
 **Default:** none (optional)
@@ -400,7 +409,8 @@ order in which you list them does not matter: SynVoy orders them by their distan
 species, by NCBI taxonomy (a local ETE3 database, or NCBI Datasets for files named by a `GCF_` or
 `GCA_` accession) and, where that fails, by a MinHash distance to the home genome.
 `intermediate/phylo_sort/sort_provenance.json` records the method. Without targets, SynVoy only
-analyses the home genome.
+analyses the home genome. A listed file, folder or pattern that matches nothing stops the run at
+its start, with its name.
 
 ### `target_gffs`
 **Default:** none (pro mode)
@@ -410,7 +420,8 @@ comma-separated list of `.gff`, `.gff3` or `.gtf` files, plain or gzipped. Each 
 matched to a genome by file stem (`cow.fna` and `cow.gff`), then by assembly accession, then by
 an unambiguous name prefix. A subset of the targets may be annotated. The run stops in the
 staging step, before any search, when an annotation matches no genome or several, or when a
-genome gets a second annotation; a `--target_gffs` that finds no file stops it at the start.
+genome gets a second annotation; a `--target_gffs` that finds no file, or that lists a file,
+folder or pattern that matches nothing, stops it at the start.
 Easy mode fetches the annotations with the genomes.
 
 Each gene model of the main search then takes `TargetGene`, `TargetProduct` and `TargetID` from
@@ -618,11 +629,8 @@ The gene at the GOI's own position is always tested with `sw`.
 A side of the flank walk also stops this far from the gene. With 0, a side ends when it has its
 anchors, at the end of the scaffold, or at the limit given under
 [`n_flanking_genes`](#n_flanking_genes). A limit such as 500,000 keeps the walk out of a gene
-desert next to a large tandem array, at the cost of fewer anchors on that side.
-
-Set it in a config file (`params.max_flanking_distance = 500000`, passed with `-c`). Given on the
-command line, Nextflow passes the number as text, and the flank-walk step stops with
-`Cannot compare java.lang.String …`.
+desert next to a large tandem array, at the cost of fewer anchors on that side. A fraction is
+rounded down to whole base pairs.
 
 ### `expand_goi_similar` / `expand_goi_similar_distance`
 **Defaults:** `false` / `300000` (bp)
@@ -966,24 +974,19 @@ grows with query length × window length; queries longer than 10,000 aa skip it.
 
 The Smith-Waterman backend.
 
-- `auto`: parasail, a SIMD library: each piece of a translated frame gets its best alignment (more
-  with `sw_max_alignments_per_piece`). Without parasail the search stops at its start, unless
-  `allow_missing_smith_waterman` is `true`.
-- `parasail`: the same, and it stops at the start without parasail.
+- `auto` and `parasail`: parasail, a SIMD library: each piece of a translated frame gets its best
+  alignment (more with `sw_max_alignments_per_piece`).
 - `ssearch36`: another search: the best alignment over all six frames, masked, then the next,
-  round after round. With parasail installed it runs in parasail (recorded as
-  `parasail_best_hit_rounds`), otherwise in the ssearch36 program of the FASTA package; it stops at
-  the start when neither is installed. Its hits differ from those of `auto`.
+  round after round, run in parasail (recorded as `parasail_best_hit_rounds`). Its hits differ
+  from those of `auto`.
+
+Every search needs parasail, whatever this setting and `enable_smith_waterman`: the bit score and
+the specificity terms of each call, from which its label is computed
+([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)), are parasail alignments. Without it the search
+stops at its start.
 
 The backend, the parasail version and the SIMD instruction set of a run are in the report's
 `run_settings.smith_waterman`.
-
-### `allow_missing_smith_waterman`
-**Default:** `false`
-
-`true` lets the search run without Smith-Waterman when parasail is missing, with a warning. The
-calls then lack the Smith-Waterman bits that the specificity check uses
-([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)), so install parasail instead where you can.
 
 ### `sw_min_score`
 **Default:** `20` (whole bits)
@@ -1673,15 +1676,8 @@ score by which a relative must beat the gene to take a call; below it the call s
 ### `require_paralog_panel`
 **Default:** `true`
 
-When the panel cannot be built (without parasail, for example), the run stops. `false` lets it go
-on: the failure is recorded, and the report marks every call `ownership_not_checked`.
-
-### `disable_paralog_check` / `paralog_confusion_min_gap`
-**Defaults:** `false` / `5.0`
-
-No effect in this version, either way. The check was meant to align each call against several home
-paralogs given in the query file, but only the first record of `--query` is used, so it has one
-sequence and nothing to compare. Locus ownership does this job.
+When the panel cannot be built, the run stops. `false` lets it go on: the failure is recorded, and
+the report marks every call `ownership_not_checked`.
 
 ### `disable_phylo_placement`
 **Default:** `false`
@@ -1716,7 +1712,8 @@ deviation) reaches this value. One-sided: only more divergence than expected cou
 ## 15. Optional steps: language model, structure, discovery
 
 Experimental and off by default. These steps need the packages of `environment-ml.yml` (PyTorch,
-transformers, Foldseek; the file's header says how to install them), model weights that are
+transformers, Foldseek; under a conda profile Nextflow builds the steps' environment from that file
+when one of these steps is on, and it holds the packages of `environment.yml` too), model weights that are
 downloaded from HuggingFace on first use (ProtT5 about 2.5 GB, ESMFold about 2.8 GB; set `HF_HOME`
 to keep them out of your home folder) and, at a useful speed, an NVIDIA GPU. After the search they
 score the GOI models of the search: with ProtT5 embeddings (cosine similarity to the home protein,
@@ -1741,7 +1738,8 @@ and `plm_device` is ignored.
 **Defaults:** `0.7` / `0.85`
 
 The embedding similarity from which a GOI row that the judge did not label is lifted to MEDIUM or
-to HIGH (rules above).
+to HIGH (rules above). They also label the models of the structural discovery: HIGH from the high
+threshold, MEDIUM from the medium one, as the TM-score thresholds do.
 
 ### `plm_similarity_threshold`
 **Default:** `0.5`
@@ -1771,12 +1769,6 @@ threshold, MEDIUM from the medium one.
 Only for the structural discovery: a predicted reading frame becomes a discovery candidate from
 this TM-score.
 
-### `structural_max_length`
-**Default:** `700` (at least 10)
-
-No effect in this version: every protein is folded in pieces (see `enable_structural_search`), and
-none is skipped for its length.
-
 ### `enable_structural_discovery`
 **Default:** `false`
 
@@ -1791,11 +1783,9 @@ it.
 | `discovery_min_tm` | `0.7` | its TM-score against the home protein reaches this value |
 | `discovery_min_len_ratio` / `discovery_max_len_ratio` | `0.5` / `2.0` | its length lies between these multiples of the home protein's |
 | `discovery_min_goi_coverage` | `0.5` | its Smith-Waterman alignment covers at least this share of the home protein |
-| `discovery_paralog_margin` | `1.0` | its score against the home protein is this many times its best score against a home relative. No panel of relatives reaches this step in this version, so the guard does nothing |
 | `discovery_min_block_flanking` | `2` | at least this many flanking anchors lie within 100 kb of it |
 | `discovery_allow_offblock` | `false` | `false`: in a genome where the sequence search found the gene, it lies on a sequence that holds such a call |
 
-Without parasail, the coverage and relative guards are skipped.
 
 ### `gpu_partition` / `gpu_cluster_options`
 **Defaults:** none / `--gres=gpu:1`
@@ -1983,9 +1973,12 @@ per run). A large home genome, such as a vertebrate's, needs 8 to 16 GB; a task 
 code 137 ran out of memory.
 
 ### `compute_tree_cpus` / `compute_tree_memory`
-**Defaults:** `2` / `4 GB` · `docker_max` every CPU and the machine's memory − 1 GB
+**Defaults:** `1` / `4 GB` · `docker_max` the machine's memory − 1 GB
 
-CPUs and memory of the gene tree (MAFFT and IQ-TREE).
+CPUs and memory of the gene tree (MAFFT and IQ-TREE). IQ-TREE runs with a fixed seed, and in one
+thread a rerun on the same alignment gives the same tree. With more threads the tree step is
+faster (about 1.8 times with two), but a rerun can give other branch lengths and supports: the
+tree's info (`trees` in the report) then records `reproducible: false`, and the report warns.
 
 ### `default_cpus` / `default_memory` / `default_time`
 **Defaults:** `1` / `2 GB` / `4h` · `docker_max` every CPU and the machine's memory − 1 GB
@@ -2093,12 +2086,11 @@ Write a switch with its value (`--disable_wavefront true`).
 
 ## 20. Removed parameters
 
-These parameters were removed, before version 1.0.0 unless the table says when. What a run does
-when you still give one:
+These parameters were removed before version 1.0.0, or after version 1.0.1 where the table says so. What a run does when you still give one:
 
 - **Replaced**: the run stops at its start and names what to use instead.
 - **Had no effect**, and **the LLM parameter advisor**: a warning, and the value is ignored.
-- **`goi_chain_query_aware`**: `true` stops the run at its start, `false` gives a warning.
+- **`goi_chain_query_aware`**, **`allow_missing_smith_waterman`**: `true` stops the run at its start, `false` gives a warning.
 - **`goi_genome_wide_without_blocks`**: `false` stops the run at its start, `true` gives a warning.
 
 **Replaced**
@@ -2137,12 +2129,16 @@ when you still give one:
 | `disable_distance_autotune` | the switch of that relaxation. The judge computes the E-value of each call in the expected place of its own genome |
 | `disable_ambiguous_tier` | took AMBIGUOUS out of the label. AMBIGUOUS ("needs curation", never counted) is part of the one label, with `Basis=not_specific` or `gene_order_only`, and cannot be switched off |
 | `phylo_placement_promote` | raised an AMBIGUOUS call with a concordant phylogenetic placement to MEDIUM. It could no longer act, because the placement check reads only models labelled HIGH or MEDIUM. The verdicts stay advisory (`phylo_verdict` on each record) |
+| `discovery_paralog_margin` (after 1.0.1) | the margin of the structural discovery's guard against a home relative. The guard acts only with a panel of home relatives, and no step gives the search one |
+| `structural_max_length` (after 1.0.1) | a length above which ESMFold would skip a protein. The structural search folds every protein in overlapping pieces ([`enable_structural_search`](#enable_structural_search--structural_device)) |
+| `disable_paralog_check`, `paralog_confusion_min_gap` (after 1.0.1) | the switch and the flag margin of the reciprocal-best paralog check, which went with them: it was to compare each call with several home paralogs from the query file, but the query is one sequence, so it could flag nothing. Locus ownership compares each call with the home genes ([§ 14](#disable_locus_ownership)) |
 
 **Stops when on, warns when off**
 
 | Parameter | Why it went |
 |---|---|
 | `goi_chain_query_aware` | a hit chain that follows the query (off by default). Switched on, it refused a continuation of the query in the same reading frame 24 bp on, and so lost true calls in a test. Its link rule lives on in the leftover join (`goi_join_leftover_hits`) |
+| `allow_missing_smith_waterman` (after 1.0.1) | let the search start without parasail. Every search needs parasail: the bit score and the specificity terms of each call's label, the hull rescue and the locus-ownership check are parasail alignments, and such a run stopped at the ownership check after the whole search. Install parasail instead |
 
 **Warns when on, stops when off**
 

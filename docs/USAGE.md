@@ -44,7 +44,7 @@ Two things to know:
 - **Paths are read from the `SynVoy` folder.** The launcher changes into its own folder before it starts Nextflow, so a relative path (`--query`, `--home_genome`, `--target_genomes`, `--outdir`, `-work-dir`, `-params-file`, `-c`) is read from there, not from the folder you are in. For data elsewhere, give absolute paths.
 - **A `-profile` you give replaces the default completely.** To add a preset to the default, name the whole set, for example `-profile auto,low_mem,preset_short_peptide`.
 
-You can also call `nextflow run main.nf` yourself, from the `SynVoy` folder. Then the launcher's checks do not run, and Nextflow uses the profile `standard` when you give none. You need this only in a few cases: a container setup without conda ([INSTALL.md](INSTALL.md#docker)), a SLURM controller job ([§ 5](#5-running-on-hpc--slurm)), and a run without parasail, because the launcher stops whenever parasail cannot be loaded. A run without parasail needs more than one switch: see [Smith-Waterman cannot run](#smith-waterman-cannot-run). Nextflow's own options that belong before `run`, such as `-log`, cannot be passed through the launcher either.
+You can also call `nextflow run main.nf` yourself, from the `SynVoy` folder. Then the launcher's checks do not run, and Nextflow uses the profile `standard` when you give none. You need this only in a few cases: a container setup without conda ([INSTALL.md](INSTALL.md#docker)) and a SLURM controller job ([§ 5](#5-running-on-hpc--slurm)). Nextflow's own options that belong before `run`, such as `-log`, cannot be passed through the launcher either.
 
 ---
 
@@ -131,10 +131,10 @@ A profile says where the tasks run and where their tools come from. Choose one w
 | `conda` | locally | conda | The same as `standard`. |
 | `laptop_safe`, `low_mem` | locally | conda | Laptops: memory tiers, see [below](#memory-tiers). |
 | `docker` | locally | the Docker image `synvoy-local:latest` | A machine with Docker ([INSTALL.md](INSTALL.md#docker)). |
-| `docker_max` | locally | the Docker image | A dedicated Linux machine: every task gets all CPUs and all memory but 1 GB (the search all but 2 GB), one task at a time. The memory is read from `/proc/meminfo`; without it, as on macOS, the profile assumes 8 GB. |
+| `docker_max` | locally | the Docker image | A dedicated Linux machine: every task gets all CPUs and all memory but 1 GB (the search all but 2 GB; the gene tree its `compute_tree_cpus`, 1 by default, so a rerun gives the same tree), one task at a time. The memory is read from `/proc/meminfo`; without it, as on macOS, the profile assumes 8 GB. |
 | `singularity` | locally | a Singularity image | A machine with Singularity or Apptainer. Give the image with `--docker_container /path/to/synvoy.sif` ([INSTALL.md](INSTALL.md#singularity-and-apptainer)). |
 | `slurm` | as SLURM jobs | the compute nodes' `PATH` | A cluster where the tools are installed. Set its partition and account first ([§ 5](#5-running-on-hpc--slurm)). |
-| `hpc_conda` | as SLURM jobs | conda | A cluster with conda and mamba ([§ 5](#5-running-on-hpc--slurm)). |
+| `hpc_conda` | as SLURM jobs | conda | A cluster with conda ([§ 5](#5-running-on-hpc--slurm)). |
 | `hpc_singularity` | as SLURM jobs | a Singularity image | A cluster with Singularity ([§ 5](#5-running-on-hpc--slurm)). |
 
 Two more kinds of profile are added to one of these:
@@ -142,7 +142,7 @@ Two more kinds of profile are added to one of these:
 - `legacy_distances` sets the search distances to fixed numbers of base pairs, the same for every genome, instead of following the spacing of the genes ([CHANGELOG.md](../CHANGELOG.md)). Use it only to compare with runs made that way: `-profile standard,legacy_distances`.
 - The presets `preset_short_peptide`, `preset_tandem_family`, `preset_paralog_discrimination` and `preset_single_copy` set a few values for one kind of gene ([§ 3](#3-settings-for-your-gene)).
 
-The profiles `lrz_ai` and `lrz_ai_container` are examples for one GPU cluster ([§ 5](#5-running-on-hpc--slurm)). The profiles `test`, `test_melettin` and `test_tetramorium` are developer fixtures that need data the repository does not hold.
+The profiles `lrz_ai` and `lrz_ai_container` are examples for one GPU cluster ([§ 5](#5-running-on-hpc--slurm)). For a short test run of a new setup, use the demo (`demo/fetch_data.sh`, then `demo/run_demo.sh`; [demo/README.md](../demo/README.md)).
 
 When you combine profiles, a later one overrides what an earlier one sets. So combine one profile from the table with, at most, `legacy_distances` and one preset.
 
@@ -161,7 +161,7 @@ When you combine profiles, a later one overrides what an earlier one sets. So co
 - The split limit (`--mmseqs_split_memory_limit`) bounds how much of a target database MMseqs2 holds in memory at once. It is the value to lower when MMseqs2 says `cannot fit database into ...` or `not enough memory`.
 - Under `standard`, the search task asks for at least 10 GB, and more when the genomes searched at the same time are large. A retry after a memory kill asks for twice, then three times as much, but on a local machine never more than the machine has. The console prints the request (`ITERATIVE_SEARCH memory: ...`).
 - The tiers are local conda profiles themselves: they set the local executor and conda, and switch Docker and Singularity off. Combine them only with `standard`, `auto` or `conda`. On Docker, Singularity or SLURM, set the values as parameters instead, for example `--iterative_search_memory '8 GB' --mmseqs_split_memory_limit 4G`.
-- One step that orders the genomes (`PHYLO_SORT`) asks for 8 GB in every profile, and Nextflow does not start a task that asks for more memory than the machine has. On a machine that reports less than 8 GB, see [Process requirement exceeds available memory](#process-requirement-exceeds-available-memory).
+- Under `low_mem` no step asks for more than 4 GB (the search on its first attempt, the gene tree, the genome download and the step that orders the genomes, `PHYLO_SORT`; every other step 2 GB), so it fits a laptop sold with 8 GB, which reports a little less. Nextflow does not start a task that asks for more memory than the machine has ([Process requirement exceeds available memory](#process-requirement-exceeds-available-memory)).
 
 ---
 
@@ -242,7 +242,7 @@ What a run used is recorded with its results: the values that depend on the gene
 
 On a cluster, Nextflow runs as one job, the controller, and submits every task as a job of its own. Choose how the tasks get their tools:
 
-- **`hpc_conda`**: Nextflow builds the conda environment from `environment.yml` on the first run, with mamba, and reuses it ([INSTALL.md](INSTALL.md#4-the-first-run-builds-the-tool-environment)). On a slow shared file system this can take an hour. Set `NXF_CONDA_CACHEDIR` to keep the environment in one place for all your runs.
+- **`hpc_conda`**: Nextflow builds the conda environment from `environment.yml` on the first run, with mamba when it is on the `PATH`, else with conda, and reuses it ([INSTALL.md](INSTALL.md#4-the-first-run-builds-the-tool-environment)). On a slow shared file system this can take an hour. Set `NXF_CONDA_CACHEDIR` to keep the environment in one place for all your runs.
 - **`hpc_singularity`**: every task runs in a Singularity image. Build `synvoy.sif` as in [INSTALL.md](INSTALL.md#singularity-and-apptainer) and give it with `--docker_container /path/to/synvoy.sif`.
 - **`slurm`**: the tasks use the tools on the compute nodes' `PATH`. Before you use it, edit its partition (`normal`) and its placeholder account (`--account=your_account`) in `nextflow.config`. The `hpc_*` profiles set neither and use your cluster's defaults.
 
@@ -254,7 +254,7 @@ The controller needs Nextflow 25.10 or newer and Java 17 or newer, from your clu
 sbatch scripts/slurm_submit.sh
 ```
 
-- The script uses `hpc_singularity` by default. Add `--docker_container /path/to/synvoy.sif` to its `nextflow run` line, or set `PROFILE="hpc_conda"`.
+- The script uses `hpc_singularity` by default: set `CONTAINER` to the path of `synvoy.sif` ([INSTALL.md](INSTALL.md#singularity-and-apptainer)), or set `PROFILE="hpc_conda"`. Without either it stops before it starts Nextflow.
 - The controller must run as long as the whole run. Give it a time that covers the run: one search task may take up to 48 hours.
 - The script calls `nextflow run main.nf` directly, so the launcher's checks do not run.
 - It puts Nextflow's work folder on fast scratch (`$SCRATCH/work`, or `work/` in the folder you submit from when `SCRATCH` is not set) and the Singularity images in `~/.singularity/cache`.
@@ -272,10 +272,10 @@ sbatch scripts/slurm_submit.sh
   -resume
 ```
 
-**GPU example profiles.** The search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`) are experimental, off by default, and need the extra packages of `environment-ml.yml`. Two profiles show a setup for them on one GPU cluster; adapt them to your site.
+**GPU example profiles.** The search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`) are experimental, off by default, and need the extra packages of `environment-ml.yml`, which holds those of `environment.yml` too. Under every conda profile Nextflow builds the steps' environment from it when one of these steps is on. Two profiles show a setup for them on one GPU cluster; adapt them to your site.
 
 - `lrz_ai_container` runs the whole run inside one container job, with the local executor. Its image must hold the packages of both `environment.yml` and `environment-ml.yml`; the repository's Dockerfile installs only the first.
-- `lrz_ai` uses SLURM with conda; give your GPU partition with `--gpu_partition`, otherwise no GPU is requested. As under every conda profile, the tasks run in the environment Nextflow builds from `environment.yml`, which lacks these packages, and installing `environment-ml.yml` into `synvoy_env` does not change that environment. One way around it is to point `process.conda` (in a `-c` config) at the folder of an environment that holds both, such as `synvoy_env` after that install (`conda env list` shows its folder).
+- `lrz_ai` uses SLURM with conda; give your GPU partition with `--gpu_partition`, otherwise no GPU is requested. To run the steps in an environment of your own instead, point `process.conda` (in a `-c` config) at its folder (`conda env list` shows it).
 
 ---
 
@@ -283,7 +283,7 @@ sbatch scripts/slurm_submit.sh
 
 Everything is written to the folder given with `--outdir` (default `results`). Start with `synvoy_report.json`, whose `summary.headline` is the one-line answer, and with the figure `*_anchor_grid.html`. What every file contains, and how to read the report: [OUTPUT.md](OUTPUT.md).
 
-At the end of a run, also a failed one, the task logs are collected in `<outdir>/logs/`: one folder per task that wrote any output, with `stdout.log`, `stderr.log` and `script.sh`. They are collected from the whole work folder, so the tasks of earlier runs in the same work folder are added too.
+At the end of a run, also a failed one, the task logs are collected in `<outdir>/logs/`: one folder per task of this run that wrote any output, with `stdout.log`, `stderr.log` and `script.sh`. On `-resume`, a task taken from the cache keeps the logs of the run that ran it.
 
 ---
 
@@ -311,33 +311,28 @@ Nextflow keeps every task in its work folder (`work/` in the `SynVoy` folder, un
 
 ### The launcher stops before the run starts
 
-Read its message: it names what is missing and, for most checks, the command that fixes it. The parasail message also offers `--allow_missing_smith_waterman true`; ignore that line, because the launcher stops on a missing parasail whatever you pass ([Smith-Waterman cannot run](#smith-waterman-cannot-run)).
+Read its message: it names what is missing and, for most checks, the command that fixes it.
 
 - **`conda env 'synvoy_env' not found`:** run `./install.sh`.
 - **`Java >=17 required` or `Java not found`:** Java ships in `synvoy_env`. Rebuild the environment with `./install.sh`.
 - **`parasail is NOT importable`:** usually a Python virtualenv (`.venv`) shadows the conda environment; VS Code activates one in its terminal by itself. Run `deactivate` and start again. If parasail is really missing, rebuild the environment with `./install.sh`.
 
-Problems with creating the environment, `mamba: command not found`, macOS and `No module named 'cgi'`: [INSTALL.md](INSTALL.md#troubleshooting).
+Problems with creating the environment, macOS and `No module named 'cgi'`: [INSTALL.md](INSTALL.md#troubleshooting).
 
-### Smith-Waterman cannot run
+### The search stops: parasail is not importable
 
-The search stops when it should run Smith-Waterman and cannot: with `--sw_method auto` (the default) or `parasail` when `parasail` cannot be loaded in the task, and with `--sw_method ssearch36` when neither parasail nor the `ssearch36` program is installed (`environment.yml` does not install `ssearch36`). Smith-Waterman is what finds the most divergent orthologs, so SynVoy does not go on without it. Fix the environment (previous entry).
-
-A run without parasail is a lesser run: its calls get no specificity terms, so the labels no longer test whether another home gene explains a call as well ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)), and the hull rescue and the paralog checks, which need parasail too, give no result. To run without it anyway, call `nextflow run main.nf` instead of the launcher and pass:
-
-- `--enable_smith_waterman false`, or `--allow_missing_smith_waterman true` (which acts only with `--sw_method auto`); the search then finds fewer divergent orthologs. `--sw_method ssearch36` keeps Smith-Waterman when the `ssearch36` program of the FASTA package is installed;
-- `--require_paralog_panel false`, because the step that builds the home-paralog panel (`BUILD_HOME_PARALOG_PANEL`) stops the run without parasail. Its failure is then recorded, and the report marks every call `ownership_not_checked`. `--disable_locus_ownership true` skips that check instead.
+The search (`ITERATIVE_SEARCH`) stops at its start when `parasail` cannot be loaded in its task, whatever the Smith-Waterman settings: every search needs it. The bit score and the specificity terms of each call, from which its label is computed ([ALGORITHM.md § 7.8](ALGORITHM.md#78-confidence)), are parasail alignments, and so are the Smith-Waterman search, which finds the most divergent orthologs, the hull rescue and the locus-ownership check. Fix the environment (previous entry); `environment.yml` and the Docker image have parasail.
 
 ### Process requirement exceeds available memory
 
-Nextflow does not start a task that asks for more memory than the machine has. The step that orders the genomes, `PHYLO_SORT`, asks for 8 GB in every profile, and a laptop sold with 8 GB usually reports a little less. Lower the request with a configuration file:
+Nextflow does not start a task that asks for more memory than the machine has. Under the launcher's default profile no step asks for more than 4 GB, and the search never asks for more than the machine has. The message names the step: lower its memory parameter ([PARAMETERS.md](PARAMETERS.md)), use the `low_mem` tier, or, for a step without a parameter, give its request in a configuration file:
 
 ```bash
-echo "process { withName: 'PHYLO_SORT' { memory = '6 GB' } }" > small_machine.config
+echo "process { withName: 'PHYLO_SORT' { memory = '3 GB' } }" > small_machine.config
 ./run_synvoy.sh -c small_machine.config --mode easy ...
 ```
 
-The same message for another step: lower that step's memory parameter ([PARAMETERS.md](PARAMETERS.md)), or use the `low_mem` tier.
+`PHYLO_SORT` asks for 4 GB because on a machine without ETE3's copy of the NCBI taxonomy (`~/.etetoolkit/taxa.sqlite`) its first run builds that copy, which takes about 2.6 GB; with the copy on disk it needs about 130 MB.
 
 ### Out of memory: exit code 137
 
@@ -360,9 +355,17 @@ A search task can take hours for a large genome or for a gene with many relative
 - **Many candidate blocks.** In a genome rich in gene families (plants, genomes with old whole-genome duplications), every neighbouring gene hits many places, and two chance hits close together make a block. The log then says `Capping blocks: N -> 80`, and a large part of the genome is searched. `--anchor_max_places 5` builds blocks only at the five best places of each neighbouring gene. With `--modules` other than `legacy`, SynVoy does this by itself in a genome where the cap binds; the log says `genome axis: the block cap (80) bound at N blocks; rebuilding ...`. Lowering `--max_blocks_per_genome` (default 80) or raising `--min_block_genes` (default 2) also speeds it up.
 - **Genes far apart.** The search distances follow the spacing of the genes around the home locus, so where genes lie far apart, as in many vertebrate genomes, every block and every search window is large. The log line `distances: home pitch ... -> block gap ..., window margin ... (DNA searched: ... per side)` shows the distances of each genome. If a run is too slow in such a genome, use `--anchor_max_places 5`, lower `--block_gap_genes`, or restore the fixed distances with `-profile <your profile>,legacy_distances`.
 
-### "Query FASTA not found" or "Home genome not found"
+### "Query FASTA not found", "Home genome not found" or "... match nothing"
 
-The path is wrong as seen from the `SynVoy` folder: the launcher reads relative paths from there ([Starting a run](#starting-a-run)). Give an absolute path, or one relative to the `SynVoy` folder.
+The path is wrong as seen from the `SynVoy` folder: the launcher reads relative paths from there ([Starting a run](#starting-a-run)). Give an absolute path, or one relative to the `SynVoy` folder. `--target_genomes names N file(s), folder(s) or pattern(s) that match nothing` (or the same for `--target_gffs`) names the entries of the list that point at no file while others do; the run does not start until each one does, or is removed from the list.
+
+### "... is a pro-mode input: add --mode pro"
+
+Easy Mode, the default, downloads the home and the target genomes itself. A run with `--home_genome`, `--home_gff` or `--target_genomes` but without `--mode pro` stops at its start instead of leaving these files unused.
+
+### "Query FASTA ... fewer than --min_query_length"
+
+The query file holds fewer sequence characters than `--min_query_length` (20 by default), so the step that reads it would stop the run. Search with the full-length protein (for a mature peptide, its precursor), or set `--min_query_length 0`.
 
 ### "Could not determine home species from the query"
 
@@ -449,7 +452,7 @@ Nextflow reuses a task only when its inputs are the same. Any of these starts th
 
 ### GPU out of memory in the structural search
 
-The experimental structural search (`--enable_structural_search`) predicts structures with ESMFold, whose memory grows with the square of the protein length. It folds every protein in overlapping pieces of 380 residues, and of 300 on a GPU with less than 10 GB or 150 below 6 GB. If it still runs out of memory, switch the step off (`--enable_structural_search false`, the default). `--structural_max_length` has no effect in this version.
+The experimental structural search (`--enable_structural_search`) predicts structures with ESMFold, whose memory grows with the square of the protein length. It folds every protein in overlapping pieces of 380 residues, and of 300 on a GPU with less than 10 GB or 150 below 6 GB. If it still runs out of memory, switch the step off (`--enable_structural_search false`, the default).
 
 ### Finding out why a step failed
 
@@ -462,7 +465,7 @@ cat work/a7/8f3*/.command.out    # its normal output
 cat work/a7/8f3*/.command.log    # both
 ```
 
-The same logs, of every task that wrote any, are collected in `<outdir>/logs/` at the end of the run.
+The same logs, of every task of the run that wrote any, are collected in `<outdir>/logs/` at the end of the run.
 
 ### Still stuck?
 

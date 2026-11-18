@@ -21,7 +21,6 @@ Resolution order (later wins):
   3. preset overrides from PRESET_OVERRIDES[preset]: the chooser's preset under
      --modules legacy, or --preset_override in any mode (the default is --modules auto)
   4. values the user set themselves           (detected via --shipped_config)
-  5. --user_override KEY=VAL                  (explicit, for callers that know)
 
 Under --modules legacy the module triggers are evaluated and recorded only
 (modules_would_fire); the preset is applied exactly as before the modules existed, and
@@ -190,17 +189,16 @@ def detect_user_set(defaults: dict, shipped: dict) -> dict:
 
 def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = "",
             disable_auto_apply: bool = False,
-            user_overrides: dict | None = None,
             user_set: dict | None = None,
             modules_spec: object = "auto",
             features: dict | None = None,
             design: dict | None = None,
             shipped: dict | None = None) -> dict:
-    """Apply the resolution order (defaults < modules < preset < user-set < user CLI) and
-    return a flat ``{settings: ..., preset_applied: ..., source: ...}`` result.
+    """Apply the resolution order (defaults < modules < preset < user-set) and return a flat
+    ``{settings: ..., preset_applied: ..., source: ...}`` result.
 
     ``source`` is a per-key trace: ``default`` | ``module:<ids>`` | ``preset:<name>`` |
-    ``user_set`` | ``user_cli``. ``user_set_kept`` lists the keys where a value the user
+    ``user_set``. ``user_set_kept`` lists the keys where a value the user
     set was kept although a module or the applied preset wanted a different one.
     ``modules_spec`` is the --modules value (ValueError when it is not one); ``features``
     the flat dict of select_modules.flat_features; ``design`` the profile of
@@ -283,16 +281,6 @@ def resolve(defaults: dict, *, auto_preset: dict | None, preset_override: str = 
             source[k] = "user_set"
             derivation[k] = {"value": v, "default": _typed((shipped or {}).get(k)), "rule": "user_set",
                              "line": f"{k} {v} (set by the user)"}
-            if k in wanted:
-                derivation[k]["wanted"] = wanted[k]
-
-    if user_overrides:
-        for k, v in user_overrides.items():
-            settings[k] = v
-            source[k] = "user_cli"
-            derivation[k] = {"value": v,
-                             "default": _typed(shipped[k]) if k in (shipped or {}) else defaults.get(k),
-                             "rule": "user_cli", "line": f"{k} {v} (--user_override)"}
             if k in wanted:
                 derivation[k]["wanted"] = wanted[k]
 
@@ -450,9 +438,6 @@ def main() -> None:
                     help="Pass defaults through without applying any preset")
     ap.add_argument("--defaults", required=True,
                     help="JSON string OR path to a JSON file with the default param values")
-    ap.add_argument("--user_override", action="append", default=[], metavar="KEY=VAL",
-                    help="Override a single param; repeat for multiple. CLI-style"
-                         " explicit user overrides take precedence over presets.")
     ap.add_argument("--shipped_config", default="",
                     help="Path to the shipped nextflow.config. A --defaults value that "
                          "differs from the default declared there was set by the user "
@@ -508,27 +493,6 @@ def main() -> None:
             print(f"ERROR: --defaults is neither a path nor valid JSON: {exc}", file=sys.stderr)
             sys.exit(2)
 
-    user_overrides: dict[str, object] = {}
-    for kv in args.user_override:
-        if "=" not in kv:
-            print(f"WARN: ignoring malformed --user_override '{kv}' (expected KEY=VAL)",
-                  file=sys.stderr)
-            continue
-        k, v = kv.split("=", 1)
-        # Preserve type of the defaults entry when possible (so "55.0" → float).
-        if k in defaults:
-            ref = defaults[k]
-            try:
-                if isinstance(ref, bool):
-                    v = v.strip().lower() in ("true", "1", "yes", "on")
-                elif isinstance(ref, int):
-                    v = int(v)
-                elif isinstance(ref, float):
-                    v = float(v)
-            except ValueError:
-                pass  # leave as string
-        user_overrides[k] = v
-
     auto_preset = _read_json_or_empty(args.auto_preset)
 
     user_set: dict[str, object] = {}
@@ -551,7 +515,6 @@ def main() -> None:
             auto_preset=auto_preset,
             preset_override=args.preset_override,
             disable_auto_apply=args.disable_auto_apply,
-            user_overrides=user_overrides,
             user_set=user_set,
             modules_spec=args.modules,
             features=features,

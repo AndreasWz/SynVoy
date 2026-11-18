@@ -2,7 +2,7 @@
 
 Three layers:
 
-1. ``resolve()`` unit logic — defaults < preset < user_cli, with edge cases.
+1. ``resolve()`` unit logic — defaults < preset < user-set values, with edge cases.
 2. The CLI script as a black box — sentinel handling, JSON round-trip.
 3. **Sync test** — ``PRESET_OVERRIDES`` (Python) must match
    ``conf/presets/*.config`` (Groovy). Single source of truth lives in
@@ -12,6 +12,7 @@ Three layers:
 """
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
@@ -118,13 +119,13 @@ def test_disable_auto_apply_bypasses_everything():
     assert "auto_apply_preset=false" in res["apply_reason"]
 
 
-def test_user_cli_overrides_beat_preset():
-    """Explicit user CLI values must take precedence over preset overrides."""
+def test_user_set_values_beat_preset():
+    """A value the user set takes precedence over the preset's."""
     auto = {"preset": "preset_short_peptide"}
     user = {"classify_complete_min_qcov": 0.99}
-    res = rep.resolve(DEFAULTS, auto_preset=auto, user_overrides=user, modules_spec="legacy")
+    res = rep.resolve(DEFAULTS, auto_preset=auto, user_set=user, modules_spec="legacy")
     assert res["settings"]["classify_complete_min_qcov"] == 0.99
-    assert res["source"]["classify_complete_min_qcov"] == "user_cli"
+    assert res["source"]["classify_complete_min_qcov"] == "user_set"
     # Other preset overrides still apply.
     assert res["settings"]["classify_fragment_max_qcov"] == 0.3
 
@@ -191,24 +192,17 @@ def test_cli_missing_auto_preset_is_noop(tmp_path: Path):
     assert result["preset_applied"] is None
 
 
-def test_cli_typed_user_override_via_defaults(tmp_path: Path):
-    """--user_override coerces VAL to the type of the defaults entry."""
+def test_the_user_override_option_is_gone(tmp_path: Path):
+    """--user_override (item 27 of the bug list of 16 Nov 2026) was passed by no module: a value
+    the user sets reaches the settings through --shipped_config (user_set). The script rejects it."""
     defaults_path = tmp_path / "defaults.json"
     defaults_path.write_text(json.dumps(DEFAULTS))
-    auto = tmp_path / "auto.json"
-    auto.write_text(json.dumps({"preset": "preset_single_copy"}))
-    result = _run_cli(
-        "--auto_preset", str(auto),
-        "--defaults", str(defaults_path),
-        "--user_override", "classify_complete_min_qcov=0.65",
-        "--user_override", "adaptive_max_regions=12",
-        "--user_override", "expand_goi_similar=false",
-        "--output", str(tmp_path / "out.json"),
-        cwd=tmp_path,
-    )
-    assert result["settings"]["classify_complete_min_qcov"] == 0.65  # float
-    assert result["settings"]["adaptive_max_regions"] == 12          # int
-    assert result["settings"]["expand_goi_similar"] is False         # bool
+    proc = subprocess.run([sys.executable, str(SCRIPT), "--defaults", str(defaults_path),
+                           "--user_override", "adaptive_max_regions=12",
+                           "--output", str(tmp_path / "out.json")],
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert proc.returncode == 2 and "unrecognized arguments: --user_override" in proc.stderr
+    assert "user_overrides" not in inspect.signature(rep.resolve).parameters
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -367,13 +361,6 @@ def test_user_set_equal_to_preset_value_is_not_reported_as_kept():
                       user_set={"classify_complete_min_qcov": 0.5}, modules_spec="legacy")
     assert res["settings"]["classify_complete_min_qcov"] == 0.5
     assert res["user_set_kept"] == []
-
-
-def test_explicit_user_override_still_beats_user_set():
-    res = rep.resolve(DEFAULTS, auto_preset={"preset": "preset_short_peptide"},
-                      user_set={"sw_min_score": 15}, user_overrides={"sw_min_score": 12}, modules_spec="legacy")
-    assert res["settings"]["sw_min_score"] == 12
-    assert res["source"]["sw_min_score"] == "user_cli"
 
 
 def test_cli_keeps_a_value_the_user_set(tmp_path: Path):

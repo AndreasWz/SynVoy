@@ -6,10 +6,9 @@
 // ownership check. A named sub-workflow gets its own method budget, so this is where
 // new adjudication/staging steps belong from now on. Keep main.nf's body lean.
 //
-// Everything here runs AFTER the per-locus search: the two rescue passes, the
-// reciprocal-best paralog check, locus ownership, the per-locus staging that keeps
-// same-named files from different loci from overwriting each other (§1h), and the
-// final report.
+// Everything here runs AFTER the per-locus search: the two rescue passes, locus
+// ownership, the per-locus staging that keeps same-named files from different loci
+// from overwriting each other (§1h), and the final report.
 
 include { GENERATE_REPORT } from '../modules/generate_report.nf'
 include { STAGE_REGION_FOR_REPORT as STAGE_REGION_GFF       } from '../modules/stage_for_report.nf'
@@ -18,7 +17,6 @@ include { STAGE_REGION_FOR_REPORT as STAGE_REGION_HOMOLOGY  } from '../modules/s
 include { STAGE_REGION_FOR_REPORT as STAGE_REGION_SCORES    } from '../modules/stage_for_report.nf'
 include { RESCUE_STRONG_SYNTENY } from '../modules/rescue_strong_synteny.nf'
 include { RESCUE_GOI_HULL } from '../modules/rescue_goi_hull.nf'
-include { RECIPROCAL_BEST_PARALOG } from '../modules/reciprocal_best_paralog.nf'
 include { BUILD_HOME_PARALOG_PANEL; ASSIGN_LOCUS_OWNERSHIP } from '../modules/assign_locus_ownership.nf'
 include { PHYLO_PLACEMENT_CHECK } from '../modules/phylo_placement.nf'
 
@@ -81,12 +79,8 @@ workflow ADJUDICATE_AND_REPORT {
         rescue_query_ch
     )
 
-    // §1j Phase B: reciprocal-best paralog check. Per (locus, genome), align
-    // each recovered GOI target protein against every paralog in the home
-    // query FASTA. generate_report.py uses the result to flag MEDIUM-confidence
-    // calls whose best home paralog differs from the modal best at the same
-    // locus — the TP63 ↔ TP73 bleed observed in docs/notes/TP53_PARALOG_ASSESSMENT.md.
-    // No-op when params.query has a single sequence (nothing reciprocal).
+    // Per (locus, genome): the region proteins and the region GFF of the search, the input of
+    // the hull rescue and of the locus-ownership check.
     paralog_faa_ch = iter_region_genes.transpose()
         .map { locus_id, faa ->
             def stem = faa.name.replaceFirst(/\.faa$/, '')
@@ -104,11 +98,6 @@ workflow ADJUDICATE_AND_REPORT {
             def genome_name = stem.replaceFirst(/\.(fna|fa|fasta)$/, '')
             tuple(locus_id, genome_name, faa, gff)
         }
-
-    RECIPROCAL_BEST_PARALOG(
-        paralog_inputs_ch,
-        rescue_query_ch   // same home query as the rescue pass — multi-FASTA = paralog panel
-    )
 
     // §1m fumble fix: GOI synteny-hull rescue (reuses paralog_inputs_ch's region GFF;
     // models a GOI sitting in a flanking GAP, e.g. cow decorin chr5:21 Mb). Mixes into
@@ -200,15 +189,6 @@ workflow ADJUDICATE_AND_REPORT {
         .collect(sort: true)
         .set { collected_scores }
 
-    // §1j Phase B paralog-check TSVs (one per (locus, genome) when params.query
-    // has >=2 paralogs; the script no-ops to a header-only TSV when it has 1).
-    def no_paralog_sentinel = file("${projectDir}/assets/sentinels/NO_PARALOG_CHECK")
-    RECIPROCAL_BEST_PARALOG.out.tsv
-        .map { rec -> rec[1] }
-        .ifEmpty(no_paralog_sentinel)
-        .collect(sort: true)
-        .set { collected_paralog_check }
-
     // §1m locus-ownership TSVs (one per (locus, genome)) + the panel meta sidecar.
     def no_ownership_sentinel = file("${projectDir}/assets/sentinels/NO_LOCUS_OWNERSHIP")
     ASSIGN_LOCUS_OWNERSHIP.out.tsv
@@ -240,8 +220,6 @@ workflow ADJUDICATE_AND_REPORT {
         collected_augmented,
         qc_summary,
         collected_scores,
-        collected_paralog_check,
-        params.paralog_confusion_min_gap,
         params.qc_fail_policy,
         collected_locus_ownership,
         collected_panel_meta,

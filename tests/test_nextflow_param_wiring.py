@@ -214,6 +214,33 @@ def test_boolean_params_are_never_tested_by_raw_truthiness():
         ".toString().toBoolean() elsewhere):\n  " + "\n  ".join(offenders))
 
 
+def _numeric_params() -> set[str]:
+    return {k for k, v in _declared_params().items()
+            if re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?", v)}
+
+
+def test_numeric_params_are_never_compared_raw():
+    """`params.x > 0` throws when x comes from the command line: Nextflow hands it over as a
+    String, and Groovy refuses to order a String against a Number ("Cannot compare
+    java.lang.String ..."). In a module the task script then cannot be built, so the run stops at
+    that step (`--max_flanking_distance 500000` stopped EXTRACT_FLANKING). Read the value as a
+    number first (main.nf: num.call in validateNumericParams; a module: new BigDecimal(...))."""
+    nums = _numeric_params()
+    assert len(nums) > 100
+    offenders = []
+    files = NF_FILES + [CONFIG] + sorted((ROOT / "conf").rglob("*.config"))
+    for path in files:
+        for n, line in enumerate(_code(path), 1):
+            for m in re.finditer(r"\bparams\.(\w+)", line):
+                if m.group(1) not in nums:
+                    continue
+                pre, post = line[:m.start()], line[m.end():]
+                if re.match(r"\s*(<=|>=|<(?![<=])|>(?![>=]))", post) \
+                        or re.search(r"(?<![-<>=!])(<=|>=|<|>)\s*$", pre):
+                    offenders.append(f"{path.name}:{n}: {line.strip()[:110]}")
+    assert not offenders, "numeric params compared without coercion:\n  " + "\n  ".join(offenders)
+
+
 def _preset_default_keys() -> set[str]:
     """The keys main.nf feeds the settings map (top-level presetDefaultKeys())."""
     main = (ROOT / "main.nf").read_text()
@@ -367,7 +394,7 @@ def test_the_two_options_of_2026_11_10_are_removed():
     off_only = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("offOnly:")[1].split("onOnly:")[0], re.M))
     assert "phylo_placement_promote" in no_effect
     assert "phylo_placement_promote:" in block.split("noEffectNote:")[1].split("offOnly:")[0]
-    assert off_only == {"goi_chain_query_aware"}
+    assert off_only == {"goi_chain_query_aware", "allow_missing_smith_waterman"}
     assert not {"phylo_placement_promote", "goi_chain_query_aware"} & set(_declared_params())
     for path in sorted((ROOT / "modules").glob("*.nf")) + sorted((ROOT / "subworkflows").glob("*.nf")) \
             + sorted((ROOT / "bin").glob("*.py")) + sorted((ROOT / "lib").glob("*.groovy")):
@@ -391,6 +418,61 @@ def test_the_genome_wide_switch_without_blocks_is_removed():
             + sorted((ROOT / "conf").rglob("*.config")) + [CONFIG]:
         assert "goi_genome_wide_without_blocks" not in path.read_text(), path.name
     assert "--goi_genome_wide_path ${params.goi_genome_wide_path}" in (ROOT / "modules" / "iterative_search.nf").read_text()
+
+
+DEAD_SETTINGS_OF_2026_11_16 = ("discovery_paralog_margin", "structural_max_length", "disable_paralog_check",
+                               "paralog_confusion_min_gap")
+
+
+def test_the_settings_of_2026_11_16_are_removed():
+    """Item 27 of the bug list of 16 Nov 2026: four settings changed nothing. The structural
+    discovery's paralog margin acts only with a home-relative panel, which no step gives the
+    search; structural_max_length was read only on code paths that are switched off; the
+    reciprocal-best paralog check (disable_paralog_check, paralog_confusion_min_gap) always got one
+    query sequence and could flag nothing, so its step went with them. Each warns when still set.
+    Item 21: allow_missing_smith_waterman let the search start without parasail, which every
+    search needs (offOnly: true stops, false warns). No module, config or script passes or reads
+    any of them, and resolve_effective_params.py has no --user_override (no module passed it)."""
+    main_nf = (ROOT / "main.nf").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1].split("noEffectNote:")[0]))
+    notes = block.split("noEffectNote:")[1].split("offOnly:")[0]
+    assert set(DEAD_SETTINGS_OF_2026_11_16) <= no_effect
+    assert all(f"{name}:" in notes for name in DEAD_SETTINGS_OF_2026_11_16)
+    gone = set(DEAD_SETTINGS_OF_2026_11_16) | {"allow_missing_smith_waterman"}
+    assert not gone & set(_declared_params())
+    removed_block = main_nf[main_nf.index("def removedParams()"):main_nf.index("def presetDefaultKeys()")]
+    sources = [CONFIG] + sorted((ROOT / "modules").glob("*.nf")) + sorted((ROOT / "subworkflows").glob("*.nf")) \
+        + sorted((ROOT / "lib").glob("*.groovy")) + sorted((ROOT / "conf").rglob("*.config"))
+    for path in sources:
+        text = path.read_text()
+        assert not [n for n in gone if n in text], path.name
+    assert not [n for n in gone if n in main_nf.replace(removed_block, "")]
+    assert not (ROOT / "modules" / "reciprocal_best_paralog.nf").exists()
+    assert "RECIPROCAL_BEST_PARALOG" not in (ROOT / "subworkflows" / "adjudicate_and_report.nf").read_text()
+    assert not {"--structural_max_length", "--allow_missing_smith_waterman"} & SCRIPTS["iterative_search_runner.py"]
+    assert "--user_override" not in SCRIPTS["resolve_effective_params.py"]
+    assert "--discovery_paralog_margin" in SCRIPTS["iterative_search_runner.py"]    # with --home_paralog_panel, by hand
+
+
+def test_the_plm_thresholds_label_the_discovery_models():
+    """Item 27 of the bug list of 16 Nov 2026: plm_medium_threshold and plm_high_threshold lifted
+    only rows the judge did not label, and every row of the search carries its label, so in
+    practice they did nothing. The structural discovery labels its models from the TM-score
+    thresholds and from embedding thresholds that defaulted to the same 0.7 / 0.85: the two params
+    reach those now, as the TM-score params do."""
+    import sys
+    sys.path.insert(0, str(ROOT / "bin"))
+    import discover_regions as dr
+    text = (ROOT / "bin" / "iterative_search_runner.py").read_text()
+    call = re.search(r"dr\.confidence_from_scores\((.*?)\)\n", text, re.S).group(1)
+    assert "emb_high=getattr(args, 'plm_high_threshold', 0.85)" in call
+    assert "emb_medium=getattr(args, 'plm_medium_threshold', 0.7)" in call
+    nf = (ROOT / "modules" / "iterative_search.nf").read_text()
+    assert "--plm_medium_threshold ${params.plm_medium_threshold}" in nf
+    assert "--plm_high_threshold ${params.plm_high_threshold}" in nf
+    assert dr.confidence_from_scores(None, 0.8, emb_high=0.75, emb_medium=0.5) == "HIGH"
+    assert dr.confidence_from_scores(None, 0.8) == "MEDIUM"
 
 
 def test_removed_label_parameters_are_classified_as_the_handover_asks():

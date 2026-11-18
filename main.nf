@@ -255,6 +255,7 @@ def removedParams() {
             'auto_params', 'force_disable_advanced_search',
             'llm_provider', 'llm_api_key', 'llm_api_base_url', 'llm_model',
             'phylo_placement_promote',
+            'discovery_paralog_margin', 'structural_max_length', 'disable_paralog_check', 'paralog_confusion_min_gap',
         ],
         // Said in the warning of a noEffect parameter, after "It had no effect".
         noEffectNote: [
@@ -264,10 +265,15 @@ def removedParams() {
             auto_params: advisor, force_disable_advanced_search: advisor,
             llm_provider: advisor, llm_api_key: advisor, llm_api_base_url: advisor, llm_model: advisor,
             phylo_placement_promote: "removed on 2026-11-10: it was to raise an AMBIGUOUS call whose phylogenetic placement is concordant to MEDIUM, and since 2026-11-09 it could not act, because the placement check judges only the models the search labelled HIGH or MEDIUM and each record takes its own model's verdict, so no AMBIGUOUS call has one",
+            discovery_paralog_margin: "removed on 2026-11-16: the margin of the structural discovery's guard against a home relative, which acts only with a panel of home relatives, and no such panel reaches the search",
+            structural_max_length: "removed on 2026-11-16: the structural search folds every protein in overlapping pieces and skips none for its length",
+            disable_paralog_check: "removed on 2026-11-16 with its step, the reciprocal-best paralog check, which needed several home paralogs in the query file and always received one sequence; locus ownership compares each call with the home genes",
+            paralog_confusion_min_gap: "removed on 2026-11-16 with the reciprocal-best paralog check, whose flags it set; that check always received one query sequence and could flag nothing",
         ],
         // Said in the stop of an offOnly switch that is set to true.
         offOnly: [
             goi_chain_query_aware: "removed on 2026-11-10: switched on, its hit chain refused a continuation of the query in the same reading frame 24 bp on and so undid a gain on the curated truth (two hits of one stop-free frame read as one piece, 2026-11-02); every run chains the hits as it did when the switch was off, so remove it",
+            allow_missing_smith_waterman: "removed on 2026-11-16: switched on, it let the search start without parasail, but every search needs parasail (the bit score and the specificity terms of each call's label, the hull rescue and the locus-ownership check are parasail alignments), and such a run stopped at the ownership check after the whole search; install parasail into the run's environment (conda install -c bioconda parasail-python) and remove it",
         ],
         // Said in the stop of an onOnly switch that is set to false.
         onOnly: [
@@ -573,6 +579,10 @@ def validateNumericParams(validationErrors, validationWarnings) {
     if (minFlankSize < 0) {
         validationErrors << "Invalid --min_flanking_size (${params.min_flanking_size}). Must be >= 0."
     }
+    def maxFlankDist = num.call('max_flanking_distance', params.max_flanking_distance, 0)
+    if (maxFlankDist < 0) {
+        validationErrors << "Invalid --max_flanking_distance (${params.max_flanking_distance}). Must be >= 0 (bp; 0 = no limit)."
+    }
     def badQualityTimeout = num.call('bad_quality_timeout', params.bad_quality_timeout, 0)
     if (badQualityTimeout < 0) {
         validationErrors << "Invalid --bad_quality_timeout (${params.bad_quality_timeout}). Must be >= 0."
@@ -638,10 +648,6 @@ def validateNumericParams(validationErrors, validationWarnings) {
         if (structMedium >= structHigh) {
             validationWarnings << "Structural thresholds: --structural_medium_threshold (${params.structural_medium_threshold}) >= --structural_high_threshold (${params.structural_high_threshold})."
         }
-        def structMaxLength = num.call('structural_max_length', params.structural_max_length, 10)
-        if (structMaxLength < 10) {
-            validationErrors << "Invalid --structural_max_length (${params.structural_max_length}). Must be >= 10."
-        }
     }
 
     // Synteny scoring weights should sum to ~1. These need coercion too: with a
@@ -671,15 +677,20 @@ def flattenNestedList(value) {
 // FASTAs inside it (.fna/.fa/.fasta, plain or .gz) so users can simply point at
 // a genome directory; any GFF/TSV/other files in the folder are ignored. Defined
 // at script scope (not inside workflow{}) to keep the workflow method small.
-def resolveTargetGenomeFiles(tg) {
+// A path or pattern that matches nothing is added to `missing` (when given). An empty element of
+// a comma-separated list is skipped.
+def resolveTargetGenomeFiles(tg, List missing = null) {
     def out = []
     if (tg instanceof List) {
-        tg.each { p -> out += resolveTargetGenomeFiles(p) }
+        tg.each { p -> out += resolveTargetGenomeFiles(p, missing) }
         return out
     }
     def s = tg.toString().trim()
     if (s.contains(',')) {
-        s.split(',').each { p -> out += resolveTargetGenomeFiles(p) }
+        s.split(',').each { p -> if (p.trim()) out += resolveTargetGenomeFiles(p, missing) }
+        return out
+    }
+    if (!s) {
         return out
     }
     boolean hasGlob = s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[')
@@ -690,8 +701,11 @@ def resolveTargetGenomeFiles(tg) {
     def resolved = file(s)   // glob → (possibly empty) List; plain path → single Path
     if (resolved instanceof List) {
         out += resolved
+        if (resolved.isEmpty() && missing != null) missing << tg.toString().trim()
     } else if (resolved.exists()) {
         out << resolved      // a Path is Iterable over its name parts; << adds the file itself, not its segments
+    } else if (missing != null) {
+        missing << s
     }
     return out
 }
@@ -701,13 +715,13 @@ def resolveTargetGenomeFiles(tg) {
 // FASTA-only, so users keep genomes and annotations in separate folders. Defined
 // at script scope (like resolveTargetGenomeFiles) to keep the workflow method
 // under the JVM method-size limit.
-def resolveTargetGffFiles(tg) {
+def resolveTargetGffFiles(tg, List missing = null) {
     def out = []
     if (tg == null) {
         return out
     }
     if (tg instanceof List) {
-        tg.each { p -> out += resolveTargetGffFiles(p) }
+        tg.each { p -> out += resolveTargetGffFiles(p, missing) }
         return out
     }
     def s = tg.toString().trim()
@@ -715,7 +729,7 @@ def resolveTargetGffFiles(tg) {
         return out
     }
     if (s.contains(',')) {
-        s.split(',').each { p -> out += resolveTargetGffFiles(p) }
+        s.split(',').each { p -> if (p.trim()) out += resolveTargetGffFiles(p, missing) }
         return out
     }
     boolean hasGlob = s.contains('*') || s.contains('?') || s.contains('{') || s.contains('[')
@@ -726,8 +740,11 @@ def resolveTargetGffFiles(tg) {
     def resolved = file(s)
     if (resolved instanceof List) {
         out += resolved
+        if (resolved.isEmpty() && missing != null) missing << tg.toString().trim()
     } else if (resolved.exists()) {
         out << resolved
+    } else if (missing != null) {
+        missing << s
     }
     return out
 }
@@ -781,14 +798,91 @@ def validateTargetGffs(List errors, List warnings) {
     // Resolve up front so a typo'd path fails at launch instead of silently
     // producing a run with no TargetGene/TargetProduct on any target model.
     def matches = []
+    def missing = []
     try {
-        matches = resolveTargetGffFiles(params.target_gffs)
+        matches = resolveTargetGffFiles(params.target_gffs, missing)
     } catch (Exception e) {
         warnings << "Could not pre-resolve --target_gffs '${params.target_gffs}': ${e.message}"
         return
     }
     if (matches.isEmpty()) {
         errors << "No target annotations found for --target_gffs '${params.target_gffs}'. Pass a folder of GFFs, a quoted glob (\"path/to/*.gff\"), or a comma-separated list. Each annotation is matched to its genome by filename stem (cow.fna <-> cow.gff) or assembly accession."
+    } else if (missing) {
+        errors << "--target_gffs names ${missing.size()} file(s), folder(s) or pattern(s) that match nothing: ${missing.take(8).join(', ')}. Check the paths (a relative path is read from the folder SynVoy starts in; the launcher starts it in the SynVoy folder), or remove them from the list."
+    }
+}
+
+// Pro mode's --target_genomes, resolved up front: a list that gives no genome stops the run, and
+// so does a listed file, folder or pattern that matches nothing while others do.
+def validateTargetGenomes(List errors, List warnings) {
+    if (!params.target_genomes) {
+        warnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
+        return
+    }
+    def matches = []
+    def missing = []
+    try {
+        matches = resolveTargetGenomeFiles(params.target_genomes, missing)
+    } catch (Exception e) {
+        warnings << "Could not pre-resolve --target_genomes '${params.target_genomes}': ${e.message}"
+    }
+    if (matches.isEmpty()) {
+        errors << "No target genomes found for --target_genomes '${params.target_genomes}'. Pass a folder containing genome FASTAs (.fna/.fa/.fasta), a quoted glob (\"path/to/*.fna\"), or a comma-separated list. Relative paths resolve against the Nextflow launch dir; quote globs so the shell doesn't expand them."
+    } else if (missing) {
+        errors << "--target_genomes names ${missing.size()} file(s), folder(s) or pattern(s) that match nothing: ${missing.take(8).join(', ')}. Check the paths (a relative path is read from the folder SynVoy starts in; the launcher starts it in the SynVoy folder), or remove them from the list."
+    }
+    validateInputFileNames(matches, errors)
+}
+
+// Easy mode downloads the home and the target genomes itself, so it would ignore these pro-mode
+// inputs; a run that gives one stops, with the hint that it was meant for --mode pro.
+def validateModeInputs(List errors) {
+    if (params.mode != 'easy') {
+        return
+    }
+    def given = ['home_genome', 'home_gff', 'target_genomes'].findAll { n -> params[n] }
+    if (given) {
+        errors << "--${given.join(', --')} " + (given.size() == 1 ? 'is a pro-mode input' : 'are pro-mode inputs') +
+            ": add --mode pro (easy mode, the default, downloads the home and the target genomes itself and would ignore " +
+            (given.size() == 1 ? 'it' : 'them') + ")."
+    }
+}
+
+// A query FASTA with fewer sequence characters than --min_query_length stops at NORMALIZE_QUERY for
+// certain: that step reads the first record only, removes formatting characters, and translates a
+// DNA query to at most a third of its length. So the run stops before it starts. Easy mode reads
+// --query only when --query_seq is not given.
+def queryLengthPreflight(List errors, List warnings) {
+    def used = params.mode == 'pro' || (params.mode == 'easy' && !params.query_seq)
+    if (!used || !params.query) {
+        return
+    }
+    def minLen
+    try {
+        minLen = new BigDecimal(params.min_query_length.toString().trim())
+        if (minLen <= 0 || !file(params.query).isFile()) {
+            return
+        }
+    } catch (Exception ignored) {
+        return       // an invalid --min_query_length is reported by validateNumericParams
+    }
+    def chars = 0
+    try {
+        file(params.query).eachLine { line -> if (!line.startsWith('>')) chars += line.replaceAll('\\s', '').length() }
+    } catch (Exception e) {
+        warnings << "Could not pre-read --query for its length: ${e.message}"
+        return
+    }
+    if (chars > 0 && chars < minLen) {
+        errors << "Query FASTA '${params.query}' holds ${chars} sequence characters, fewer than --min_query_length (${minLen.stripTrailingZeros().toPlainString()} aa), so the run would stop at NORMALIZE_QUERY. Search with the full-length protein (for a mature peptide, its precursor), or set --min_query_length 0 to search with it anyway."
+    }
+}
+
+// Easy mode with fewer than 3 targets: the labels do not depend on the number of genomes, but other
+// parts of the run use several.
+def warnFewGenomes(int maxGenomes) {
+    if (maxGenomes > 0 && maxGenomes < 3) {
+        log.warn("--max_genomes ${maxGenomes}: each call is labelled from the evidence in its own genome, so the labels mean the same with one target as with many; with fewer than 3 targets, fewer confident calls of closer genomes become queries for the more distant ones, and the phylogenetic placement check, which needs at least ${params.phylo_placement_min_calls} calls, may not run.")
     }
 }
 
@@ -908,25 +1002,6 @@ workflow {
             validationErrors << "Pro mode requires --query (path to query FASTA file)"
         } else if (!file(params.query).exists()) {
             validationErrors << "Query FASTA not found: ${params.query}"
-        } else {
-            // Pre-flight query length check — normalize_query.py enforces this
-            // at runtime, but surfacing it here saves a full pipeline startup.
-            def q_seq_chars = 0
-            try {
-                file(params.query).readLines().each { line ->
-                    if (!line.startsWith('>')) {
-                        q_seq_chars += line.replaceAll('\\s', '').length()
-                    }
-                }
-            } catch (Exception e) {
-                validationWarnings << "Could not pre-read --query for length check: ${e.message}"
-            }
-            if (q_seq_chars > 0 && q_seq_chars < 30) {
-                // Warn (not error): the file may be DNA that normalize_query.py
-                // will translate, turning a 30 nt file into a ~10 aa protein, or
-                // vice versa. normalize_query.py issues the hard stop.
-                validationWarnings << "Query FASTA '${params.query}' contains only ${q_seq_chars} non-header chars. If protein: below SynVoy's 30 aa minimum — searches will be noisy. If DNA: fine (will be translated). normalize_query.py will enforce the final check."
-            }
         }
         if (!params.home_genome) {
             validationErrors << "Pro mode requires --home_genome (path to home genome FASTA)"
@@ -953,24 +1028,11 @@ workflow {
                 validationErrors << "No --home_species provided and none could be inferred from the home-genome filename ('${stem ?: params.home_genome}'). SynVoy refuses to start because taxonomy sorting would silently degrade to kingdom=Unknown / phylo distance 999. Pass --home_species \"Genus species\" (e.g. --home_species \"Photinus pyralis\"), or set --allow_unknown_species true if you genuinely don't need taxonomic context."
             }
         }
-        if (!params.target_genomes) {
-            validationWarnings << "No --target_genomes provided; will run home-genome-only analysis (no iterative search)."
-        } else {
-            // Resolve the folder / glob / list / comma-separated string up front so
-            // students don't see a silent "0 target genomes" downstream.
-            def matches = []
-            try {
-                matches = resolveTargetGenomeFiles(params.target_genomes)
-            } catch (Exception e) {
-                validationWarnings << "Could not pre-resolve --target_genomes '${params.target_genomes}': ${e.message}"
-            }
-            if (matches.isEmpty()) {
-                validationErrors << "No target genomes found for --target_genomes '${params.target_genomes}'. Pass a folder containing genome FASTAs (.fna/.fa/.fasta), a quoted glob (\"path/to/*.fna\"), or a comma-separated list. Relative paths resolve against the Nextflow launch dir; quote globs so the shell doesn't expand them."
-            }
-            validateInputFileNames(matches, validationErrors)
-        }
+        validateTargetGenomes(validationErrors, validationWarnings)
     }
+    validateModeInputs(validationErrors)
     validateTargetGffs(validationErrors, validationWarnings)
+    queryLengthPreflight(validationErrors, validationWarnings)
 
     // --- Universal parameter range validation ---
     // Extracted to script scope so CLI Strings are coerced before comparison
@@ -1047,9 +1109,7 @@ workflow {
         
         // Fetch related genomes for easy mode
         def max_genomes = (params.max_genomes == null ? 10 : params.max_genomes as Integer)
-        if (max_genomes > 0 && max_genomes < 3) {
-            log.warn("max_genomes=${max_genomes}: synteny scoring derives signal from consensus across species; with <3 target genomes, fallback GOI calls tend to be classified as 'ambiguous' (no multi-genome conservation evidence). Consider raising max_genomes to >=3.")
-        }
+        warnFewGenomes(max_genomes)
         def target_species = params.target_species ?: ''
         uiStatus('RUN ', 'FETCH_RELATED', "Fetching related genomes${target_species ? ' (user-specified species)' : ' (auto-detect from taxonomy)'}")
         FETCH_RELATED_GENOMES(home_species_ch, max_genomes, target_species)
@@ -1561,9 +1621,10 @@ workflow {
     // --- Workflow completion handler (must be inside workflow block for NF 26.x) ---
     workflow.onComplete = {
         def done_c = colors()
-        // Collect task logs into results/logs/ regardless of success/failure
+        // The task logs of this session into <outdir>/logs/, after a success and after a failure
+        def n_logs = 0
         try {
-            collectTaskLogs(params.outdir)
+            n_logs = TaskLogs.collect(new File(workflow.workDir.toString()), new File(params.outdir.toString(), 'logs'), workflow.start.toInstant().toEpochMilli() - 2000)
         } catch (Exception e) {
             log.info "${done_c.yellow}[WARN] Could not collect task logs: ${e.message}${done_c.reset}"
         }
@@ -1592,87 +1653,7 @@ workflow {
             log.info "${done_c.dim}Results Directory: ${done_c.reset} ${done_c.cyan}${params.outdir}${done_c.reset}"
             log.info uiRule()
 
-            // Scan for actual output files and report what was generated
-            log.info "${done_c.white}Generated Outputs${done_c.reset}"
-            def outdir = new File(params.outdir.toString())
-            def found_outputs = false
-
-            // Report
-            def report_file = new File(outdir, 'synvoy_report.json')
-            if (report_file.exists() && !fromThisRun(report_file)) {
-                log.info "${done_c.yellow}  ✗${done_c.reset} synvoy_report.json          ${done_c.yellow}(not written by this run: the file there is an earlier run's)${done_c.reset}"
-            } else if (report_file.exists()) {
-                log.info "${done_c.green}  ✓${done_c.reset} synvoy_report.json          ${done_c.dim}(analysis summary)${done_c.reset}"
-                // Try to extract key stats from report
-                try {
-                    def report = new groovy.json.JsonSlurper().parse(report_file)
-                    def summary = report.summary
-                    if (summary) {
-                        // The report's own headline (adjudicated, post-dedup). This used to
-                        // print genomes_with_annotations -- genomes with ANY model, flanking
-                        // included -- as "GOI found in N genome(s)", so a run with the GOI
-                        // in 3 of 4 genomes read "found in 4" next to "absent in 1".
-                        def absent = summary.goi_absent_genomes?.size() ?: 0
-                        def unplaced = summary.goi_found_but_not_syntenic?.size() ?: 0
-                        log.info "${done_c.dim}    → ${summary.headline ?: "${summary.total_goi_annotations ?: 0} GOI annotation(s)"}${done_c.reset}"
-                        if (absent > 0) {
-                            log.info "${done_c.yellow}    → no GOI call placed in ${absent} genome(s)${done_c.reset}"
-                        }
-                        if (unplaced > 0) {
-                            log.info "${done_c.yellow}    → ${unplaced} genome(s) hold a strong GOI hit that no synteny gate accepted (report: rejected_candidates)${done_c.reset}"
-                        }
-                        def low_quality = summary.low_quality_genomes_searched ?: []
-                        if (low_quality) {
-                            log.info "${done_c.yellow}    → LOW-QUALITY assembly searched: ${low_quality.join(', ')} (a gene not found there may be missing from the assembly, not from the species)${done_c.reset}"
-                        }
-                    }
-                } catch (Exception ignored) {}
-                found_outputs = true
-            } else {
-                log.info "${done_c.yellow}  ✗${done_c.reset} synvoy_report.json          ${done_c.yellow}(not generated)${done_c.reset}"
-            }
-
-            // Plots
-            def plots = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_synteny_plot.html') && fromThisRun(output_file) } ?: []
-            if (plots) {
-                plots.each { p ->
-                    log.info "${done_c.green}  ✓${done_c.reset} ${p.name.padRight(28)} ${done_c.dim}(interactive visualization)${done_c.reset}"
-                }
-                found_outputs = true
-            }
-
-            // Trees
-            def trees = outdir.listFiles()?.findAll { output_file -> output_file.name.endsWith('_tree.nwk') && fromThisRun(output_file) } ?: []
-            if (trees) {
-                trees.each { t ->
-                    log.info "${done_c.green}  ✓${done_c.reset} ${t.name.padRight(28)} ${done_c.dim}(GOI phylogeny)${done_c.reset}"
-                }
-                found_outputs = true
-            }
-
-            // Regions
-            def regions_dir = new File(outdir, 'regions')
-            if (regions_dir.exists()) {
-                def beds = regions_dir.listFiles()?.findAll { output_file -> output_file.name.endsWith('.regions.bed') && fromThisRun(output_file) } ?: []
-                if (beds) {
-                    log.info "${done_c.green}  ✓${done_c.reset} regions/                      ${done_c.dim}(${beds.size()} region BED file(s))${done_c.reset}"
-                    found_outputs = true
-                }
-            }
-
-            if (!found_outputs) {
-                log.info "${done_c.yellow}  No output files found in ${params.outdir}${done_c.reset}"
-            }
-
-            // Logs
-            def logsDir = new File(params.outdir.toString(), 'logs')
-            if (logsDir.exists()) {
-                def logDirs = logsDir.listFiles()?.findAll { output_file -> output_file.isDirectory() } ?: []
-                if (logDirs) {
-                    log.info "${done_c.green}  ✓${done_c.reset} logs/                         ${done_c.dim}(task logs for ${logDirs.size()} process(es))${done_c.reset}"
-                }
-            }
-
+            printGeneratedOutputs(done_c, n_logs)
             log.info uiRule()
         } else {
             uiStatus('FAIL', 'PIPELINE', 'Pipeline execution failed')
@@ -1688,7 +1669,7 @@ workflow {
             }
             log.info ""
             log.info "${done_c.dim}Troubleshooting tips:${done_c.reset}"
-            log.info "${done_c.dim}  • Check task logs:            ${params.outdir}/logs/ (collected per process)${done_c.reset}"
+            log.info "${done_c.dim}  • Check task logs:            ${params.outdir}/logs/ (one folder per task of this run)${done_c.reset}"
             log.info "${done_c.dim}  • Check the Nextflow log:     .nextflow.log${done_c.reset}"
             log.info "${done_c.dim}  • Re-run with -resume to pick up from the last successful step${done_c.reset}"
             if (workflow.stats.failedCount > 0) {
@@ -1711,7 +1692,7 @@ def olderOutputs(File outdir) {
     if (workflow.resume || !outdir.exists()) return []
     def old = []
     outdir.eachFileRecurse(groovy.io.FileType.FILES) { f ->
-        if (!f.path.contains("${File.separator}logs${File.separator}") && !fromThisRun(f)) old << f
+        if (!fromThisRun(f)) old << f
     }
     return old.sort { it.path }
 }
@@ -1733,69 +1714,81 @@ def localTimeKill() {
     return m.find() ? m.group(1) : 'a task'
 }
 
-// Collect task logs from work/ into results/logs/ for easy debugging.
-// Structure: logs/<PROCESS_NAME>/stdout.log, stderr.log, script.sh
-// When a process runs multiple times (e.g. per-locus), the tag from .command.run
-// is used to disambiguate (e.g. logs/CLUSTER_REGIONS__GCA_001234/...).
-def collectTaskLogs(outdir) {
-    def logsDir = new File(outdir.toString(), 'logs')
-    logsDir.mkdirs()
-    def workDir = new File(workflow.workDir.toString())
-    if (!workDir.exists()) return
+// The "Generated Outputs" part of the end summary: this run's report, figures, trees, region tables
+// and task logs (lib/RunSummary.groovy). Script scope: keeps the workflow{} text small.
+def printGeneratedOutputs(c, int nLogs) {
+    log.info "${c.white}Generated Outputs${c.reset}"
+    def outdir = new File(params.outdir.toString())
+    def found_outputs = false
 
-    def seenNames = [:] as Map  // track duplicates
-    workDir.eachDirRecurse { taskDir ->
-        def cmdRun = new File(taskDir, '.command.run')
-        def cmdLog = new File(taskDir, '.command.log')
-        def cmdErr = new File(taskDir, '.command.err')
-        def cmdSh  = new File(taskDir, '.command.sh')
-        if (!cmdRun.exists()) return  // not a task directory
-
-        // Skip if no log content at all
-        if ((!cmdLog.exists() || cmdLog.length() == 0) && (!cmdErr.exists() || cmdErr.length() == 0)) return
-
-        // Extract process name and tag from .command.run header
-        def processName = 'unknown'
-        def tag = ''
+    // Report
+    def report_file = new File(outdir, 'synvoy_report.json')
+    if (report_file.exists() && !fromThisRun(report_file)) {
+        log.info "${c.yellow}  ✗${c.reset} synvoy_report.json          ${c.yellow}(not written by this run: the file there is an earlier run's)${c.reset}"
+    } else if (report_file.exists()) {
+        log.info "${c.green}  ✓${c.reset} synvoy_report.json          ${c.dim}(analysis summary)${c.reset}"
+        // Try to extract key stats from report
         try {
-            def lines = cmdRun.readLines().take(10)
-            lines.each { line ->
-                def m = (line =~ /name:\s*'([^']+)'/)
-                if (m.find()) {
-                    processName = m.group(1).replaceAll(/[^a-zA-Z0-9_.-]/, '_')
+            def report = new groovy.json.JsonSlurper().parse(report_file)
+            def summary = report.summary
+            if (summary) {
+                // The report's own headline (adjudicated, post-dedup).
+                def absent = summary.goi_absent_genomes?.size() ?: 0
+                def unplaced = summary.goi_found_but_not_syntenic?.size() ?: 0
+                log.info "${c.dim}    → ${summary.headline ?: "${summary.total_goi_annotations ?: 0} GOI annotation(s)"}${c.reset}"
+                if (absent > 0) {
+                    log.info "${c.yellow}    → no GOI call placed in ${absent} genome(s)${c.reset}"
                 }
-                // Also extract Nextflow outputs for tag hints
-                def mOut = (line =~ /- '([^']+)'/)
-                if (mOut.find() && !tag) {
-                    tag = mOut.group(1).replaceAll(/.*\//, '').replaceAll(/[^a-zA-Z0-9_.-]/, '_')
+                if (unplaced > 0) {
+                    log.info "${c.yellow}    → ${unplaced} genome(s) hold a strong GOI hit that no synteny gate accepted (report: rejected_candidates)${c.reset}"
+                }
+                def low_quality = summary.low_quality_genomes_searched ?: []
+                if (low_quality) {
+                    log.info "${c.yellow}    → LOW-QUALITY assembly searched: ${low_quality.join(', ')} (a gene not found there may be missing from the assembly, not from the species)${c.reset}"
                 }
             }
         } catch (Exception ignored) {}
+        found_outputs = true
+    } else {
+        log.info "${c.yellow}  ✗${c.reset} synvoy_report.json          ${c.yellow}(not generated)${c.reset}"
+    }
 
-        // Build unique directory name
-        def dirName = processName
-        if (tag) {
-            dirName = "${processName}__${tag}".take(120)
-        }
-        // Handle duplicates by appending counter
-        def count = seenNames.getOrDefault(dirName, 0) + 1
-        seenNames[dirName] = count
-        if (count > 1) {
-            dirName = "${dirName}__${count}"
-        }
+    // Figures: the anchor grid (the main figure) and the ribbon plot of each home locus
+    def ofRun = { String suffix -> (outdir.listFiles()?.findAll { f -> f.name.endsWith(suffix) && fromThisRun(f) } ?: []).sort { f -> f.name } }
+    ofRun.call('_anchor_grid.html').each { g ->
+        log.info "${c.green}  ✓${c.reset} ${g.name.padRight(28)} ${c.dim}(main figure)${c.reset}"
+        found_outputs = true
+    }
+    ofRun.call('_synteny_plot.html').each { p ->
+        log.info "${c.green}  ✓${c.reset} ${p.name.padRight(28)} ${c.dim}(ribbon plot)${c.reset}"
+        found_outputs = true
+    }
 
-        def destDir = new File(logsDir, dirName)
-        destDir.mkdirs()
-
-        // Copy files with actual content
-        [[cmdLog, 'stdout.log'], [cmdErr, 'stderr.log'], [cmdSh, 'script.sh']].each { entry ->
-            def src = entry[0]
-            def destName = entry[1]
-            if (src.exists() && src.length() > 0) {
-                try {
-                    new File(destDir, destName).text = src.text
-                } catch (Exception ignored) {}
-            }
+    // Trees: a placeholder is named as one
+    ofRun.call('_tree.nwk').each { t ->
+        if (RunSummary.treeKind(t) == 'tree') {
+            log.info "${c.green}  ✓${c.reset} ${t.name.padRight(28)} ${c.dim}(GOI phylogeny)${c.reset}"
+            found_outputs = true
+        } else {
+            def why = paramBool(params.skip_tree) ? 'no tree inferred: --skip_tree, which the low_mem profile sets' : 'fewer than 3 GOI sequences, or an alignment without information'
+            log.info "${c.dim}  –${c.reset} ${t.name.padRight(28)} ${c.dim}(placeholder, ${why})${c.reset}"
         }
+    }
+
+    // Regions: regions/<locus>/<genome>.regions.bed
+    def beds = RunSummary.regionBeds(outdir, { f -> fromThisRun(f) })
+    if (beds) {
+        def loci = beds.collect { b -> b.parentFile.name }.unique().size()
+        log.info "${c.green}  ✓${c.reset} regions/                      ${c.dim}(${beds.size()} region BED file(s) in ${loci} home-locus folder(s))${c.reset}"
+        found_outputs = true
+    }
+
+    if (!found_outputs) {
+        log.info "${c.yellow}  No output files found in ${params.outdir}${c.reset}"
+    }
+
+    // Logs of this run's tasks (lib/TaskLogs.groovy)
+    if (nLogs > 0) {
+        log.info "${c.green}  ✓${c.reset} logs/                         ${c.dim}(task logs of ${nLogs} task(s))${c.reset}"
     }
 }

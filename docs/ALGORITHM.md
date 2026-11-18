@@ -117,16 +117,19 @@ genes are predicted and the genes of an annotated target are transferred,
      the next level.
    - **Candidates.** All assemblies under the level's taxon. Each species is used at
      most once, and the home species is excluded (compared without strain names).
-   - **Ranking** (`assembly_rank_tuple`, mode `hybrid`): reference genome before
-     representative before other RefSeq before GenBank; then chromosome-level before
-     complete before scaffold before contig; then fewer contigs, fewer scaffolds,
-     larger contig N50, larger scaffold N50.
+   - **Ranking** (`assembly_rank_tuple`, mode `hybrid`): chromosome-level before
+     complete before scaffold before contig; then reference genome before
+     representative before other RefSeq before GenBank; then fewer contigs, fewer
+     scaffolds, larger contig N50, larger scaffold N50. It chooses the assembly of a
+     species and, in that order, the species that fill a level's places.
    - **Quality gate** (`is_bad_quality`): chromosome-level and complete assemblies
      always pass. Any other assembly is low quality when its best N50 is below 5 kb,
      when a known contig or scaffold count exceeds 500,000, or when it is contig-level
      and has no quality figures at all. With `bad_quality_policy = auto` such an
      assembly is dropped from the automatic search, and kept with a warning when the
-     user named the species (`--target_species`) or it is the home assembly.
+     user named the species (`--target_species`) or it is the home assembly. The gate
+     runs on each candidate as it is about to fill a place, so the next candidate of
+     the level takes the place of a dropped one.
 
 **Genetic codes.** Each genome is translated with its NCBI table: `--home_genetic_code`
 for the home side, `--target_genetic_codes` (a TSV of genome and table) or
@@ -462,7 +465,8 @@ next door.
    Without parasail the step uses a coarser test and says so in the log: the best share
    of shared 3-residue words, scaled by the length ratio, above 30 %. That test needs
    about 75 to 80 % identity at equal length, so a query from another species or a short
-   isoform falls through to miniprot.
+   isoform falls through to miniprot. (A pipeline run without parasail stops at the start
+   of the search, [§7.6](#76-search-inside-the-window); this test serves the step run on its own.)
 3. **miniprot**, when no annotated gene matches: on each scaffold, the stretch from the
    first to the last hit of the locating step (at any E-value) ± `gap_search_window`
    (50 kb). Scaffolds are tried in the order of the hit tables, and the first that gives
@@ -902,8 +906,9 @@ reading frame. The traceback needs memory in proportion to query length × frame
 so a frame beyond 200 million cells is aligned in overlapping pieces (overlap: twice the
 query length) and the best alignment of each piece is returned; up to 1.1 Mb of window for a 550-aa query nothing changes. A query
 longer than 10,000 aa is not searched with Smith-Waterman (a warning says so): the
-memory of one piece grows with the square of the query length. A missing
-Smith-Waterman backend stops the run (`allow_missing_smith_waterman = false`).
+memory of one piece grows with the square of the query length. Without
+parasail the search stops at its start: the bit scores and the specificity terms of the label
+([§7.8](#78-confidence)) need it as well.
 Each piece is scored without a traceback first (parasail's score-only kernel); the
 traceback runs only where the score can give a hit that is kept (E ≤ 1, read from the
 printed value: one raw score below the first score with E ≤ 1), so the kept hits are the
@@ -1091,11 +1096,8 @@ home proteome (§7.12) and its query coverage:
   after the report).
 - **Slot.** Without the home locus span (`goi=` in the anchor headers) no block has a
   slot; the search then warns once and judges in the core, the window or the genome.
-- **Without parasail** (with `allow_missing_smith_waterman true`, with
-  `--enable_smith_waterman false`, or with `--sw_method ssearch36` and the ssearch36
-  program alone) no `Bits=` is computed: every
-  candidate type is ordered by the best bit score of its own search hits and gets no
-  specificity terms (one warning).
+- **parasail** computes `Bits=` and the specificity terms, so the search stops at its
+  start when parasail cannot be loaded, whatever the Smith-Waterman settings.
 - **Precision.** The judge and the seed bar work on the full-precision values; the GFF
   holds E-values with 3 significant digits and `SpecMargin` at 0.1 bit, for reading only:
   a value that rounds to a bar does not pass it.
@@ -1617,15 +1619,14 @@ from those copies.
 The same inputs give the same output files:
 
 - the searches inside a window run on one thread: MMseqs2 because of
-  `deterministic_goi_search`, tblastn and parasail always (ssearch36, used only when
-  parasail is not installed, takes the task's threads);
+  `deterministic_goi_search`, tblastn and parasail always;
 - the results of a wave are joined in genome order and sorted by id;
 - sets are sorted before they are iterated, and `PYTHONHASHSEED` is fixed to 0;
 - region hits are put into one total order before scoring;
 - the permutation test uses a fixed seed;
-- except the gene tree: IQ-TREE has a fixed seed, but with more than one thread
-  (`compute_tree_cpus`, 2 by default) its branch lengths and bootstrap supports can differ
-  slightly from run to run. With `--compute_tree_cpus 1` the tree is the same every time.
+- the gene tree: IQ-TREE has a fixed seed and runs in one thread (`compute_tree_cpus`, 1 by
+  default), so the tree is the same every time. With more threads its branch lengths and
+  bootstrap supports can differ slightly from run to run; the report then warns.
 
 ## 14. Properties and known limits
 
@@ -1719,9 +1720,6 @@ large family the extra queries fill the candidate regions.
 
 - The figures and the tree are built from the search output. They do not include
   rescue models, and they still show calls that the report relabelled.
-- `RECIPROCAL_BEST_PARALOG` still runs but cannot flag anything: it needs several
-  query sequences and always receives one. Paralogs are handled by locus ownership
-  ([§10](#10-adjudication-and-the-report)), which is not affected.
 - Locus ownership compares a call with proteins of the *home* genome. A paralog that
   exists only in the target lineage is not in that panel; the only check that can
   flag it is phylogenetic placement, which is advisory.

@@ -5,8 +5,9 @@
 #
 #     demo/run_uniprot.sh P36192
 #
-#  Fetches that protein from UniProt, then runs SynVoy in PRO mode against three
-#  pre-downloaded Drosophila genomes (no genome download at demo time).
+#  Fetches that protein from UniProt, then runs SynVoy in PRO mode on genomes that
+#  demo/fetch_data_insect.sh downloaded before: home D. melanogaster, targets
+#  D. pseudoobscura and Anopheles gambiae (no genome download at demo time).
 #
 #  The ID must be a *Drosophila melanogaster* protein (OX=7227) — the home genome
 #  is D. melanogaster, so a protein from any other organism has no home locus to
@@ -84,10 +85,14 @@ fi
 OUTDIR="results/demo_${SYM}"
 
 # Explicit two-genome list, NOT a glob over $DEMO/genomes/. D. simulans and
-# D. yakuba are still on disk as spares; naming the targets here keeps the demo
-# at three genomes without moving files around.
+# D. yakuba are on disk too (the insect demo's targets); naming the targets here
+# keeps this demo at three genomes.
 TARGETS="$DEMO/genomes/Drosophila_pseudoobscura.fna,$DEMO/genomes/Anopheles_gambiae.fna"
 TGFFS="$DEMO/target_gffs/Drosophila_pseudoobscura.gff,$DEMO/target_gffs/Anopheles_gambiae.gff"
+
+for f in ${TARGETS//,/ } ${TGFFS//,/ }; do
+    [ -s "$f" ] || { echo "ERROR: $f missing. Run demo/fetch_data_insect.sh first."; exit 1; }
+done
 
 echo
 echo "=============================================================="

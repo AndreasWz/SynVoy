@@ -7,8 +7,8 @@ The short version is in the [README](../README.md#install). This page gives the 
 | | |
 |---|---|
 | **Operating system** | Linux on x86-64, where SynVoy is developed and tested. For a Mac, see [macOS](#macos). On ARM Linux the environment cannot be created, because BLAST+ 2.17.0 has no build for it. |
-| **conda** | [Miniforge](https://github.com/conda-forge/miniforge) is recommended: it comes with mamba, which SynVoy needs to build its tool environment. With Miniconda or Anaconda, install mamba too (see [Troubleshooting](#troubleshooting)). |
-| **Memory** | 8 GB for the launcher's default profile ([on 8 GB machines](USAGE.md#process-requirement-exceeds-available-memory)), 16 GB or more for `-profile standard`, and more for vertebrate genomes. |
+| **conda** | [Miniforge](https://github.com/conda-forge/miniforge) is recommended: it comes with mamba, which builds SynVoy's tool environment faster than conda. With Miniconda or Anaconda, conda builds it, or install mamba too (`conda install -n base -c conda-forge mamba`). |
+| **Memory** | 8 GB for the launcher's default profile, 16 GB or more for `-profile standard`, and more for vertebrate genomes. |
 | **Disk** | Room for two conda environments built from `environment.yml` (`synvoy_env`, and the one Nextflow builds in `work/conda/`, see [step 4](#4-the-first-run-builds-the-tool-environment)), and for the genomes of each run: in Easy Mode the downloaded genomes stay in `work/` and are copied to the results folder. The quickstart's run needs about 5 GB besides the environments. |
 | **git** | To download SynVoy and to update it. |
 | **Network** | For the installation and the first run; in Easy Mode for downloading the query and the genomes; in both modes for NCBI's taxonomy and for gene names in the figures. Without it, the genomes are ordered by sequence similarity instead. |
@@ -58,7 +58,7 @@ The environment pins the versions SynVoy is tested with:
 
 Entrez Direct, ete3 and numpy are not pinned. Every run records the versions of its tools in the report, under `run_settings.tool_versions`.
 
-The experimental search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`, both off by default) need more packages, listed in `environment-ml.yml`. Neither `install.sh` nor the Docker image installs them, and installing them into `synvoy_env`, as the header of `environment-ml.yml` says, does not reach the pipeline's steps under the conda profiles, which run in the environment Nextflow builds from `environment.yml` (step 4). How to set these steps up: the GPU example profiles in [USAGE.md](USAGE.md#5-running-on-hpc--slurm).
+The experimental search steps that use a protein language model or predicted structures (`--enable_plm_search`, `--enable_structural_search`, both off by default) need more packages. `environment-ml.yml` holds the packages of `environment.yml` and these. Under the conda profiles Nextflow builds the steps' environment from it instead of `environment.yml` when one of the two steps is on (step 4), so nothing has to be installed by hand. Neither `install.sh` nor the Docker image installs them. How to run these steps on a GPU cluster: the GPU example profiles in [USAGE.md](USAGE.md#5-running-on-hpc--slurm).
 
 ## 3. Check the installation
 
@@ -70,7 +70,7 @@ The launcher activates `synvoy_env` and checks that conda or mamba, Nextflow and
 
 ## 4. The first run builds the tool environment
 
-The pipeline's steps do not run in `synvoy_env`. With the conda profiles, which include the launcher's default `auto,low_mem` and `standard`, Nextflow builds a second environment from the same `environment.yml` when the first step starts, and runs every step in it. This needs the network and takes from a few minutes to an hour on a slow shared file system (Nextflow waits up to 3 hours).
+The pipeline's steps do not run in `synvoy_env`. With the conda profiles, which include the launcher's default `auto,low_mem` and `standard`, Nextflow builds a second environment from the same `environment.yml` when the first step starts, and runs every step in it (from `environment-ml.yml` when a language-model or structure search step is on). This needs the network and takes from a few minutes to an hour on a slow shared file system (Nextflow waits up to 3 hours).
 
 Nextflow keeps this environment in `work/conda/` and reuses it, so later runs start at once. When you delete `work/`, the environment is built again. To keep it in one place for all your runs, set `NXF_CONDA_CACHEDIR` to a folder of your choice before you start SynVoy.
 
@@ -135,17 +135,10 @@ Singularity needs the image as a file. Build the Docker image on a machine with 
 docker save synvoy-local:latest -o synvoy.tar
 ```
 
-The image puts its tools on the `PATH` only through its Docker entrypoint, which Singularity does not run. Convert it with a short definition file that puts them there:
+Then convert it. The image sets the `PATH` to its tools, and the folder of Augustus' gene models, as image variables, which Singularity keeps (it does not run the Docker entrypoint):
 
 ```bash
-cat > synvoy.def <<'EOF'
-Bootstrap: docker-archive
-From: synvoy.tar
-
-%environment
-    export PATH=/opt/synvoy/bin:/opt/conda/bin:$PATH
-EOF
-singularity build --fakeroot synvoy.sif synvoy.def    # or: apptainer build ...; without --fakeroot as root
+singularity build synvoy.sif docker-archive://synvoy.tar    # or: apptainer build ...
 ```
 
 Copy `synvoy.sif` to the machine that runs SynVoy and give its path with `--docker_container`:
@@ -155,7 +148,7 @@ nextflow run main.nf -profile singularity --docker_container /path/to/synvoy.sif
     --mode easy --query_id P01501 --max_genomes 5 --outdir results/melittin_singularity
 ```
 
-The Singularity route has not been tested end to end yet. If a step says that a tool is not found, check the image with `singularity exec synvoy.sif mmseqs version`.
+The Singularity route has not been tested end to end yet. If a step says that a tool is not found, check the image with `singularity exec synvoy.sif mmseqs version`. An image built from an earlier `Dockerfile` lacks these variables: build it again.
 
 ## Clusters (SLURM)
 
@@ -169,16 +162,9 @@ A Nextflow of your own must be version 25.10 or newer; the environment pins 26.0
 ## Troubleshooting
 
 - **`conda env 'synvoy_env' not found`:** the launcher needs the environment; run `./install.sh`.
-- **`mamba: command not found` while Nextflow creates the environment:** SynVoy's configuration has Nextflow build the tool environment with mamba (`conda.useMamba` in `nextflow.config`). Install mamba into your base environment (`conda install -n base -c conda-forge mamba`) and make sure it is on your `PATH` also while `synvoy_env` is active, as it is under the launcher (`conda activate synvoy_env`, then `command -v mamba` must print a path). Or start SynVoy with a small configuration file that switches mamba off:
-
-  ```bash
-  echo 'conda.useMamba = false' > no_mamba.config
-  ./run_synvoy.sh -c no_mamba.config --mode easy ...
-  ```
-
 - **The environment does not solve on a Mac:** see [macOS](#macos).
 - **`parasail` cannot be imported:** a Python virtualenv probably shadows the conda environment (VS Code activates one by itself). Run `deactivate` and start again. If parasail is really missing, rebuild the environment with `./install.sh`.
 - **`No module named 'cgi'` when ete3 is imported:** the environment has Python 3.13, which ete3 does not support. Rebuild it from the current `environment.yml`, which pins Python 3.12.
-- **Creating the environment takes very long:** use mamba (Miniforge has it). Nextflow gives up after 3 hours.
+- **Creating the environment takes very long:** use mamba (Miniforge has it). Nextflow builds the environment with mamba when a `mamba` is on the `PATH` of the shell that starts SynVoy (`command -v mamba` prints a path), and with conda otherwise (`conda.useMamba` in `nextflow.config`). Nextflow gives up after 3 hours.
 
 More problems and their fixes: [USAGE.md § 8](USAGE.md#8-troubleshooting).

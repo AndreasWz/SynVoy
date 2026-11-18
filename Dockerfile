@@ -15,7 +15,16 @@ RUN micromamba install -y -n base -f /tmp/environment.yml && \
 
 # Copy bin scripts
 COPY --chown=$MAMBA_USER:$MAMBA_USER bin/ /opt/synvoy/bin/
-ENV PATH="/opt/synvoy/bin:$PATH"
+
+# The tools' folder and the variables that activating the environment sets, as image variables:
+# Docker runs the image's entrypoint, which activates the environment, but Singularity and
+# Apptainer do not run it (singularity exec), and they keep these variables. Augustus reads its
+# gene models from AUGUSTUS_CONFIG_PATH.
+ENV PATH="/opt/conda/bin:/opt/synvoy/bin:$PATH" \
+    CONDA_PREFIX="/opt/conda" \
+    AUGUSTUS_CONFIG_PATH="/opt/conda/config/" \
+    AUGUSTUS_SCRIPTS_PATH="/opt/conda/bin/" \
+    AUGUSTUS_BIN_PATH="/opt/conda/bin/"
 
 # Set working directory
 WORKDIR /data

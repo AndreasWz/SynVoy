@@ -101,8 +101,8 @@ IQTREE_SEED = 1
 
 
 def write_info(path, **info):
-    """<locus>_tree.info.json: how the tree was made (seed, threads, sequences, bootstrap) and its
-    leaves."""
+    """<locus>_tree.info.json: how the tree was made (seed, threads, whether a rerun gives the same
+    tree, which needs one thread: reproducible; sequences, bootstrap) and its leaves."""
     with open(path, "w") as fh:
         json.dump(info, fh, indent=1, sort_keys=True)
 
@@ -162,7 +162,9 @@ def main():
     parser = argparse.ArgumentParser(description="Compute phylogenetic tree from FASTA")
     parser.add_argument("--input", required=True, help="Input protein FASTA")
     parser.add_argument("--output", required=True, help="Output Newick tree file")
-    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--threads", type=int, default=1,
+                        help="Threads of MAFFT and IQ-TREE (default 1). Above 1 a rerun on the same "
+                             "alignment can give other branch lengths and supports (IQ-TREE 3.1.2)")
     parser.add_argument("--seed", type=int, default=IQTREE_SEED,
                         help="IQ-TREE's random seed (fixed by default; in one thread, --threads 1, a rerun "
                              "gives the same tree)")
@@ -185,6 +187,10 @@ def main():
         write_placeholder_tree(args.input, args.output, reason="<3 sequences")
         sys.exit(0)
 
+    if args.threads > 1:
+        print(f"WARNING: IQ-TREE runs with {args.threads} threads: a rerun on the same alignment can give "
+              "other branch lengths and supports (one thread, --compute_tree_cpus 1, gives the same tree).",
+              file=sys.stderr)
     aln_file = args.input + ".aln"
     print(f"Aligning {count} sequences with MAFFT...")
     try:
@@ -205,6 +211,7 @@ def main():
 
     def info(status, reps, reason=""):
         write_info(info_path, locus=locus, seed=args.seed, threads=args.threads, sequences=count,
+                   reproducible=args.threads == 1,
                    bootstrap={"status": status, "replicates": reps, "reason": reason}, leaves=leaves)
 
     try:

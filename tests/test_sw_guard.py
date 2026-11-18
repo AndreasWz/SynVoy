@@ -376,11 +376,18 @@ def test_a_child_killed_for_memory_says_so(tmp_path, monkeypatch, rc, stderr, wh
 
 
 def test_a_backend_that_cannot_run_stops_the_search_at_its_start():
+    """Every search needs parasail (item 21 of the bug list of 16 Nov 2026): the check is on parasail
+    itself and stops the search before the backend is recorded, whatever --sw_method and
+    --enable_smith_waterman say; with parasail installed every --sw_method runs in parasail."""
     src = open(isr.__file__).read()
-    block = src[src.index("sw_missing = None"):]
-    block = block[:block.index("sys.exit(1)") + 11]
-    assert "args.sw_method == 'parasail' and not HAS_PARASAIL" in block
-    assert "args.sw_record['backend'] == 'ssearch36' and not shutil.which('ssearch36')" in block
+    main = src[src.index("def main():"):]
+    block = main[main.index("parasail_error = parasail_requirement_error("):]
+    block = block[:block.index("args.sw_record = {'backend': 'off'")]
+    assert "sys.exit(1)" in block and "backend_info(args.sw_method)" in block
+    assert block.index("sys.exit(1)") < block.index("backend_info(args.sw_method)")
+    if sws.HAS_PARASAIL:
+        for method in ("auto", "parasail", "ssearch36"):
+            assert sws.backend_info(method)["backend"] in ("parasail", "parasail_best_hit_rounds")
 
 
 def test_a_child_that_cannot_start_stops_the_genomes_search(tmp_path, monkeypatch):

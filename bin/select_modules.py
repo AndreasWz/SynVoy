@@ -66,11 +66,11 @@ LEGACY_ALIAS = {
 # Switches: a whole step on or off, a benchmark control or a run-level choice. A switch
 # becomes a default after its own gate, never per gene (profile handoff, section 3).
 SWITCHES = frozenset({
-    "exon_level_search", "enable_smith_waterman", "sw_method", "allow_missing_smith_waterman",
+    "exon_level_search", "enable_smith_waterman", "sw_method",
     "deterministic_goi_search", "tandem_copy_parent", "enable_dispersed_goi_rescue",
     "report_nonsyntenic_candidates", "disable_goi_hull_rescue", "disable_strong_synteny_rescue",
     "disable_distant_synteny_rescue", "goi_genome_wide_path",
-    "disable_locus_ownership", "disable_paralog_check", "require_paralog_panel",
+    "disable_locus_ownership", "require_paralog_panel",
     "rank_wave_binning", "disable_wavefront", "disable_anchor_resolution",
     "disable_relative_query", "disable_synteny_collinearity", "synteny_bridge_two_sided",
     "tandem_query_restart", "goi_first_exon_guard",
@@ -691,7 +691,7 @@ def check_constraints(settings: Dict[str, Any], source: Dict[str, str], p: Dict[
             continue
         ok, keys, detail = res
         srcs = [str(source.get(k, "default")) for k in keys]
-        stop = (not any(s in ("user_set", "user_cli") for s in srcs)
+        stop = (not any(s == "user_set" for s in srcs)
                 and any(s.startswith("module:") for s in srcs))
         out.append({"id": cid, "doc": doc, "applies": True, "ok": bool(ok),
                     "on_violation": "stop" if stop else "warn", "keys": list(keys),

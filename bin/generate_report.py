@@ -3402,6 +3402,11 @@ def main():
             if boot.get("status") == "dropped_after_failure":
                 report.setdefault("warnings", []).append(
                     f"The {locus} tree has no branch support: {boot.get('reason', '')} (trees).")
+            threads = t.get("threads")
+            if isinstance(threads, int) and threads > 1 and boot.get("status") != "placeholder_tree":
+                report.setdefault("warnings", []).append(
+                    f"The {locus} tree was inferred with {threads} IQ-TREE threads: a rerun can give "
+                    "other branch lengths and supports (--compute_tree_cpus 1 gives the same tree) (trees).")
     uniprot = load_goi_info_block(args.goi_info, "uniprot_lookup")
     if uniprot and uniprot.get("status") == "failed":
         # Its names can decide which home gene is the GOI (fix-phase d7).

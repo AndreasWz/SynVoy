@@ -47,8 +47,9 @@ dependencies:
   #   --enable_plm_search true        (ProtT5 embedding search)
   #   --enable_structural_search true (ESMFold + Foldseek structural search)
   # These deps (torch + CUDA, transformers, sentencepiece, foldseek) are large
-  # and GPU/driver-specific, so they live in a separate overlay rather than here.
-  # Install on top of an existing env when you want them:
-  #   mamba env update -n synvoy_env -f environment-ml.yml
+  # and GPU/driver-specific, so they are not here: environment-ml.yml holds this
+  # file's packages and theirs, and the conda profiles build the steps' environment
+  # from it when one of the two layers is on (nextflow.config, process.conda).
+  # Keep the two package lists equal (tests/test_conda_environments.py).
   # See environment-ml.yml (LRZ AI Systems / GPU notes) and the `lrz_ai` profile
   # in nextflow.config. ESMFold needs a GPU with >=8 GB VRAM for ~400 aa proteins.

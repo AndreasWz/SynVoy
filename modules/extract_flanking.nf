@@ -22,7 +22,9 @@ process EXTRACT_FLANKING {
 
     script:
     def goi_arg = (goi_faa && goi_faa.name != 'NO_GOI') ? "--goi_faa ${goi_faa} --goi_relative_evalue ${settings.goi_relative_evalue} --goi_relative_statistic ${settings.goi_relative_statistic}" : ""
-    def dist_arg = params.max_flanking_distance > 0 ? "--max_flanking_distance ${params.max_flanking_distance}" : ""
+    // A number from the command line arrives as text: read it as one (main.nf checks it is >= 0).
+    def max_dist = new BigDecimal((params.max_flanking_distance ?: 0).toString().trim())
+    def dist_arg = max_dist > 0 ? "--max_flanking_distance ${max_dist.toBigInteger()}" : ""
     def expand_arg = settings.expand_goi_similar.toString().toBoolean() ? "--expand_goi_similar true --expand_goi_similar_distance ${params.expand_goi_similar_distance}" : ""
     def gc_arg = GeneticCodes.homeArg(params)   // the home genome's code; '' for table 1
     """

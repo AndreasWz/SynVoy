@@ -50,10 +50,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The home species labels the home row and is a leaf of the species tree (with one target
 # genome, the only other one). Not given: read from the run. Its task logs hold the value the
-# pipeline used (logs/PLOT_SYNTENY*/script.sh, logs/PHYLO_SORT*/script.sh), but a work folder
-# shared by several runs leaves the logs of all of them, so only a "Genus species" name counts,
-# several are told apart by the file name of the home GFF (pro mode: Genus_species.gff), and
-# that name alone is used when the run kept no logs.
+# pipeline used (logs/PLOT_SYNTENY*/script.sh, logs/PHYLO_SORT*/script.sh). The logs/ of a run
+# made with SynVoy 1.0.1 or earlier can hold those of other runs that shared its work folder, so
+# only a "Genus species" name counts, several are told apart by the file name of the home GFF
+# (pro mode: Genus_species.gff), and that name alone is used when the run kept no logs.
 genus_species() { sed -nE 's/^([A-Z][a-z]+ [a-z]+).*/\1/p'; }
 same_species() { [ "$(printf '%s\n' "$1" | tr '_' ' ' | awk '{print tolower($1" "$2)}')" = "$(printf '%s\n' "$2" | tr '_' ' ' | awk '{print tolower($1" "$2)}')" ]; }
 logged="$( { grep -hos -- '--home_species "[^"]*"' "$RUN"/logs/PLOT_SYNTENY*/script.sh || true

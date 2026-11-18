@@ -41,27 +41,26 @@ def has_parasail_available() -> bool:
         return False
 
 
-class SmithWatermanUnavailable(RuntimeError):
-    """Raised when SW is requested (auto mode) but parasail is unavailable and the
-    degraded path was not explicitly allowed. Callers turn this into a loud exit."""
+def parasail_requirement_error(parasail_available: bool, virtualenv: Optional[str] = None) -> Optional[str]:
+    """The message that stops the search when parasail cannot be imported, else None.
 
-
-def resolve_smith_waterman_enabled(enable: bool, sw_method: str,
-                                   parasail_available: bool,
-                                   allow_missing: bool) -> bool:
-    """Pure decision for the auto-mode SW/parasail guard (testable in isolation).
-
-    SW is the load-bearing tier for divergent GOI recovery, so an auto-mode request that
-    can't be honoured (no parasail) must FAIL LOUD rather than silently drop to
-    mmseqs/tblastn — unless the caller explicitly opts into the degraded path.
-    Returns the resolved ``enable_smith_waterman`` flag, or raises
-    ``SmithWatermanUnavailable`` when it must fail loud.
-    """
-    if enable and sw_method == "auto" and not parasail_available:
-        if allow_missing:
-            return False
-        raise SmithWatermanUnavailable("parasail unavailable for requested Smith-Waterman")
-    return enable
+    Every search needs parasail, whatever the Smith-Waterman settings: the Bits= of each GOI
+    candidate and its specificity terms (synvoy_specificity), from which its label is computed,
+    are parasail alignments, and so are the default Smith-Waterman search, the hull rescue's
+    labels and the locus-ownership panel. Without it a run would label its calls without the
+    specificity test, model nothing in the hull rescue, and stop at the ownership panel after
+    the whole search, so it stops here, before the first genome. ``virtualenv``: the active
+    $VIRTUAL_ENV, the usual reason (it shadows the conda environment)."""
+    if parasail_available:
+        return None
+    note = (f"\n  NOTE: a Python virtualenv is active (VIRTUAL_ENV={virtualenv}); it is likely "
+            f"shadowing the conda environment that has parasail. Deactivate it / strip it from PATH."
+            if virtualenv else "")
+    return ("parasail is not importable in this environment. Every search needs it: the bit score and "
+            "the specificity terms of each GOI call, from which its label is computed, the Smith-Waterman "
+            "search, the hull rescue and the locus-ownership check are parasail alignments." + note +
+            "\n  Fix: install parasail into the run's environment (conda install -c bioconda "
+            "parasail-python; environment.yml has it).")
 
 
 def _tail_lines(text: str, n: int = 20) -> str:
@@ -9472,7 +9471,9 @@ def run_gpu_augment_phase(args, genome_map=None):
                 conf = dr.confidence_from_scores(
                     tm, hit.get("embedding_similarity"),
                     tm_high=getattr(args, 'structural_high_threshold', 0.7),
-                    tm_medium=getattr(args, 'structural_medium_threshold', 0.5))
+                    tm_medium=getattr(args, 'structural_medium_threshold', 0.5),
+                    emb_high=getattr(args, 'plm_high_threshold', 0.85),
+                    emb_medium=getattr(args, 'plm_medium_threshold', 0.7))
                 idx = len(new_by_genome[genome])
                 gff_lines, faa = dr.build_discovery_gff(
                     orf, genome, idx, tm, hit.get("embedding_similarity"), conf)
@@ -9629,10 +9630,6 @@ def main():
     parser.add_argument("--enable_smith_waterman", type=str2bool, default=True, help="Enable Smith-Waterman search")
     parser.add_argument("--sw_method", type=str, default="auto", choices=["auto", "parasail", "ssearch36"],
                         help="Smith-Waterman backend (auto, parasail, ssearch36)")
-    parser.add_argument("--allow_missing_smith_waterman", type=str2bool, default=False,
-                        help="Proceed (with only mmseqs/tblastn) when SW is requested but parasail is "
-                             "unavailable, instead of failing loud. SW is load-bearing for divergent "
-                             "GOI recovery, so this degrades results silently — opt in deliberately.")
     parser.add_argument("--sw_min_score", type=float, default=50.0)
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=3600,
@@ -9844,9 +9841,11 @@ def main():
     parser.add_argument("--plm_similarity_threshold", type=float, default=0.5,
                         help="Minimum cosine similarity for PLM-discovered ORFs (0-1)")
     parser.add_argument("--plm_medium_threshold", type=float, default=0.7,
-                        help="Embedding similarity above this can boost LOW → MEDIUM")
+                        help="Embedding similarity above this can boost LOW → MEDIUM, and labels a "
+                             "structural-discovery model MEDIUM")
     parser.add_argument("--plm_high_threshold", type=float, default=0.85,
-                        help="Embedding similarity above this can boost MEDIUM → HIGH")
+                        help="Embedding similarity above this can boost MEDIUM → HIGH, and labels a "
+                             "structural-discovery model HIGH")
 
     # Gene predictor selection (Augustus for eukaryotes, Prodigal for prokaryotes)
     parser.add_argument("--gene_predictor", type=str, default="auto",
@@ -9865,8 +9864,6 @@ def main():
                         help="TM-score above this can boost LOW → MEDIUM")
     parser.add_argument("--structural_high_threshold", type=float, default=0.7,
                         help="TM-score above this can boost MEDIUM → HIGH")
-    parser.add_argument("--structural_max_length", type=int, default=700,
-                        help="Max sequence length for ESMFold (VRAM safety, default 700)")
     parser.add_argument("--structural_fold_window", type=int, default=380,
                         help="Windowed-fold size for the main-process GPU phase; long "
                              "proteins are tiled into overlapping windows (each <= VRAM "
@@ -10196,61 +10193,19 @@ def main():
                      "search need it. Install miniprot (bioconda) in the run's environment.")
         sys.exit(1)
 
-    # SW is the load-bearing tier for divergent GOI recovery (e.g. re-finding a 26-40 %
-    # myrmicitoxin from a melittin query). Silently dropping it on a missing-parasail env —
-    # the classic case is a `.venv` shadowing the conda env on PATH — changes results on
-    # exactly the hard cases SynVoy exists for, with no loud signal. So in auto mode, a
-    # requested-but-unavailable SW is a HARD ERROR unless the user explicitly opts into the
-    # degraded path.
-    _sw_before = args.enable_smith_waterman
-    try:
-        args.enable_smith_waterman = resolve_smith_waterman_enabled(
-            _sw_before, args.sw_method,
-            has_parasail_available(), args.allow_missing_smith_waterman,
-        )
-        if _sw_before and not args.enable_smith_waterman:  # degraded path was opted into
-            logger.warning(
-                "parasail not available in auto mode; Smith-Waterman DISABLED for this run "
-                "(--allow_missing_smith_waterman set). Divergent GOI recovery is degraded to "
-                "mmseqs/tblastn only."
-            )
-        # What runs the search on this machine (backend, parasail version, SIMD code), for the
-        # target-policy tables and the report (fix-phase item 18).
-        if args.enable_smith_waterman:
-            from smith_waterman_search import backend_info, HAS_PARASAIL
-            args.sw_record = backend_info(args.sw_method)
-            sw_missing = None
-            if args.sw_method == 'parasail' and not HAS_PARASAIL:
-                sw_missing = "--sw_method parasail, and parasail is not importable"
-            elif args.sw_record['backend'] == 'ssearch36' and not shutil.which('ssearch36'):
-                sw_missing = "neither parasail nor ssearch36 is installed"
-            if sw_missing:
-                # Until 2026-10-28 such a search degraded in silence; since then a window whose
-                # search fails stops the run, so this stops it before the first window.
-                logger.error(f"Smith-Waterman cannot run here: {sw_missing}. Install parasail "
-                             f"(conda install -c bioconda parasail-python) or ssearch36 (fasta3), "
-                             f"or set --enable_smith_waterman false.")
-                sys.exit(1)
-        else:
-            args.sw_record = {'backend': 'off', 'parasail_version': '', 'simd': ''}
-    except SmithWatermanUnavailable:
-        venv_hint = os.environ.get("VIRTUAL_ENV")
-        env_note = (
-            f"\n  NOTE: a Python virtualenv is active (VIRTUAL_ENV={venv_hint}); it is likely "
-            f"shadowing the conda env that has parasail. Deactivate it / strip it from PATH."
-            if venv_hint else ""
-        )
-        logger.error(
-            "Smith-Waterman was requested (--enable_smith_waterman true, --sw_method auto) "
-            "but parasail is not importable in this environment. SW is load-bearing for "
-            "divergent GOI recovery, so refusing to silently continue without it." + env_note +
-            "\n  Fix one of:\n"
-            "    - install parasail into the run's env  (conda install -c bioconda parasail-python)\n"
-            "    - --sw_method ssearch36                 (use the slower FASTA/ssearch36 backend)\n"
-            "    - --enable_smith_waterman false         (deliberately search without SW)\n"
-            "    - --allow_missing_smith_waterman true   (proceed degraded, keep SW auto-off)"
-        )
+    # Every search needs parasail (parasail_requirement_error); without it (usually a `.venv`
+    # that shadows the conda env on PATH) the run stops here, before the first genome.
+    parasail_error = parasail_requirement_error(has_parasail_available(), os.environ.get("VIRTUAL_ENV"))
+    if parasail_error:
+        logger.error(parasail_error)
         sys.exit(1)
+    # What runs the search on this machine (backend, parasail version, SIMD code), for the
+    # target-policy tables and the report (fix-phase item 18).
+    if args.enable_smith_waterman:
+        from smith_waterman_search import backend_info
+        args.sw_record = backend_info(args.sw_method)
+    else:
+        args.sw_record = {'backend': 'off', 'parasail_version': '', 'simd': ''}
 
     # Gene predictor validation
     if args.gene_predictor not in ("auto", "augustus", "prodigal"):
@@ -10311,9 +10266,6 @@ def main():
         if args.structural_device not in ("cpu", "cuda"):
             logger.error("structural_device must be 'cpu' or 'cuda'")
             sys.exit(1)
-        if args.structural_max_length < 10:
-            logger.error("structural_max_length must be >= 10")
-            sys.exit(1)
 
     logger.info("")
     logger.info("═══ Iterative Search Configuration ═══")
@@ -10339,7 +10291,6 @@ def main():
         logger.info(f"  Structural search: enabled (ESMFold+Foldseek, device={args.structural_device})")
         logger.info(f"  Struct TM thresh: {args.structural_tm_threshold}")
         logger.info(f"  Struct boost:     MEDIUM≥{args.structural_medium_threshold}, HIGH≥{args.structural_high_threshold}")
-        logger.info(f"  Struct max len:   {args.structural_max_length}")
     else:
         logger.info(f"  Structural search: disabled")
     logger.info(f"  Max blocks/genome:{args.max_blocks_per_genome}")
@@ -10501,7 +10452,7 @@ def main():
                 db_fasta=args.initial_db,
                 output_dir=args.output_dir,
                 device=args.structural_device,
-                max_length=args.structural_max_length,
+                max_length=getattr(args, 'structural_max_length', 700),
             )
             if not goi_structs:
                 logger.warning(

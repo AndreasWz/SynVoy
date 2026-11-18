@@ -201,7 +201,7 @@ def _tree_main(tmp_path, monkeypatch, fail_with_bootstrap):
 
 def test_the_tree_records_how_it_was_made(tmp_path, monkeypatch):
     info = _tree_main(tmp_path, monkeypatch, False)
-    assert info == {"locus": "locus_2", "seed": 1, "threads": 3, "sequences": 5,
+    assert info == {"locus": "locus_2", "seed": 1, "threads": 3, "sequences": 5, "reproducible": False,
                     "bootstrap": {"status": "ultrafast", "replicates": 1000, "reason": ""},
                     "leaves": [f"GOI_x|s{i}" for i in range(5)]}        # since fix item 46
 

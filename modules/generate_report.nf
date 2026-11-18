@@ -12,8 +12,6 @@ process GENERATE_REPORT {
     path augmented       // unused sentinel – single file, no collision
     path qc_json
     path score_files,    stageAs: 'scores/?/*'
-    path paralog_check_files, stageAs: 'paralog_check/?/*'  // §1j Phase B
-    val paralog_confusion_min_gap
     val qc_policy
     path locus_ownership_files, stageAs: 'locus_ownership/?/*'  // §1m
     path panel_meta            // §1m panel sidecar — single file or sentinel
@@ -32,7 +30,7 @@ process GENERATE_REPORT {
 
     script:
     """
-    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/paralog_check staged_results/locus_ownership staged_results/phylo_placement staged_results/tree_info
+    mkdir -p staged_results/regions staged_results/hits staged_results/scores staged_results/locus_ownership staged_results/phylo_placement staged_results/tree_info
     # Each staging loop lists only files that exist (find -type f), so a copy that fails is a real
     # failure and stops the task (fix-phase d5): until 2026-11-02 every cp ended in
     # '2>/dev/null || true', and a full disk left the report without a genome's results in silence.
@@ -41,7 +39,7 @@ process GENERATE_REPORT {
     for f in \$(find -L phylo_placement -type f 2>/dev/null); do
         fname=\$(basename "\$f")
         case "\$fname" in
-            NO_PHYLO_PLACEMENT|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
+            NO_PHYLO_PLACEMENT|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
         cp "\$f" staged_results/phylo_placement/
     done
@@ -49,15 +47,6 @@ process GENERATE_REPORT {
     # Stage how each tree was made (fix-phase d6).
     for f in \$(find -L tree_info -type f -name '*_tree.info.json' 2>/dev/null); do
         cp "\$f" staged_results/tree_info/
-    done
-
-    # Stage paralog-check TSVs from numbered subdirs (§1j Phase B).
-    for f in \$(find -L paralog_check -type f 2>/dev/null); do
-        fname=\$(basename "\$f")
-        case "\$fname" in
-            NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
-        esac
-        cp "\$f" staged_results/paralog_check/
     done
 
     # Stage region outputs (.faa / .gff / .homology.tsv) from numbered subdirs
@@ -97,7 +86,7 @@ process GENERATE_REPORT {
     for f in \$(find -L locus_ownership -type f 2>/dev/null); do
         fname=\$(basename "\$f")
         case "\$fname" in
-            NO_LOCUS_OWNERSHIP|NO_PARALOG_CHECK|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
+            NO_LOCUS_OWNERSHIP|NO_REGIONS|NO_HITS|NO_AUGMENTED|NO_GFF|NO_GFFS|NO_HOMOLOGY|NO_SPECIES_MAP|NO_SCORES) continue ;;
         esac
         cp "\$f" staged_results/locus_ownership/
     done
@@ -114,7 +103,6 @@ process GENERATE_REPORT {
         --results_dir staged_results \\
         --qc_json "${qc_json}" \\
         --qc_policy "${qc_policy}" \\
-        --paralog_confusion_min_gap ${paralog_confusion_min_gap} \\
         --locus_ownership_tiebreak_gap ${params.locus_ownership_tiebreak_gap} \\
         --identity_decoupled_min_identity ${params.identity_decoupled_min_identity} \\
         --identity_decoupled_max_qcov ${params.identity_decoupled_max_qcov} \\

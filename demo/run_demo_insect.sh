@@ -47,6 +47,17 @@ fi
 
 OUTDIR="results/demo_insect_${QUERY_NAME,,}"
 
+# The three Drosophila targets by name: demo/fetch_data_insect.sh also fetches Anopheles gambiae
+# (for demo/run_uniprot.sh), which a glob over genomes/ would add to this demo.
+TARGETS="" TGFFS=""
+for n in Drosophila_simulans Drosophila_yakuba Drosophila_pseudoobscura; do
+    for f in "$DEMO/genomes/$n.fna" "$DEMO/target_gffs/$n.gff"; do
+        [ -s "$f" ] || { echo "ERROR: $f missing. Run demo/fetch_data_insect.sh first."; exit 1; }
+    done
+    TARGETS="${TARGETS:+$TARGETS,}$DEMO/genomes/$n.fna"
+    TGFFS="${TGFFS:+$TGFFS,}$DEMO/target_gffs/$n.gff"
+done
+
 echo "=============================================================="
 echo " SynVoy insect demo — query ${QUERY_NAME}, 3 Drosophila targets"
 echo " output: ${OUTDIR}"
@@ -60,7 +71,7 @@ echo "=============================================================="
     --home_genome    "$DEMO/home/Drosophila_melanogaster.fna" \
     --home_gff       "$DEMO/home/Drosophila_melanogaster.gff" \
     --home_species   "Drosophila melanogaster" \
-    --target_genomes "$DEMO/genomes/*.fna" \
-    --target_gffs    "$DEMO/target_gffs/*.gff" \
+    --target_genomes "$TARGETS" \
+    --target_gffs    "$TGFFS" \
     --outdir         "$OUTDIR" \
     "$@"

@@ -52,12 +52,14 @@ Generated Outputs
   ✓ synvoy_report.json          (analysis summary)
     → 2 ortholog(s) (1 high, 1 medium confidence); 2 need curation (2 gene order only); across 4 genome(s).
     → no GOI call placed in 1 genome(s)
-  ✓ synteny_block_locus_1_synteny_plot.html (interactive visualization)
-  ✓ locus_1_tree.nwk             (GOI phylogeny)
-  ✓ logs/                         (task logs for 22 process(es))
+  ✓ synteny_block_locus_1_anchor_grid.html (main figure)
+  ✓ synteny_block_locus_1_synteny_plot.html (ribbon plot)
+  – locus_1_tree.nwk             (placeholder, no tree inferred: --skip_tree, which the low_mem profile sets)
+  ✓ regions/                      (4 region BED file(s) in 1 home-locus folder(s))
+  ✓ logs/                         (task logs of 41 task(s))
 ```
 
-The first `→` line is the report's headline: how many orthologs SynVoy found, how many candidates need curation, and in how many genomes it placed any model of the gene (`LOW` ones included). The lines after it count the genomes in which SynVoy placed no model of the gene, not even a `LOW` one: first those without a strong match of it, then those with a strong match that no synteny rule accepted. The report names them (`summary.goi_absent_genomes`, `summary.goi_found_but_not_syntenic`). On the default profile, `locus_1_tree.nwk` is only a placeholder, because the tree step is skipped.
+The first `→` line is the report's headline: how many orthologs SynVoy found, how many candidates need curation, and in how many genomes it placed any model of the gene (`LOW` ones included). The lines after it count the genomes in which SynVoy placed no model of the gene, not even a `LOW` one: first those without a strong match of it, then those with a strong match that no synteny rule accepted. The report names them (`summary.goi_absent_genomes`, `summary.goi_found_but_not_syntenic`). On the default profile the tree step is skipped, and the summary names `locus_1_tree.nwk` a placeholder.
 
 If a rescue, paralog-check or ownership step failed for a genome, the run still finishes, and the report says so: a sentence in `warnings` and a row in `failed_steps` (see [USAGE.md](USAGE.md#a-step-failed-but-the-run-finished-failed_steps-in-the-report)).
 
@@ -125,6 +127,6 @@ Read the error message first: SynVoy's messages say what broke, why, and what to
 - **No ortholog in a genome where you expected one:** see [No call in a genome where you expected one](USAGE.md#no-call-in-a-genome-where-you-expected-one).
 - **The report step stops with `zero annotation and zero region files`:** see [The report step stops](USAGE.md#the-report-step-stops-zero-annotation-and-zero-region-files).
 - **Out of memory** (for example `cannot fit database into memory` or exit code 137): the default profile already uses the smallest memory tier. Lower MMseqs2's memory further (`--mmseqs_split_memory_limit 1G`), search fewer or smaller genomes, or use a machine with more memory. See [Out of memory](USAGE.md#out-of-memory-exit-code-137).
-- **`Process requirement exceeds available memory`:** one step asks for 8 GB, and your machine reports less. See [USAGE.md](USAGE.md#process-requirement-exceeds-available-memory) for the one-line fix.
-- **`parasail` cannot be imported:** the launcher stops before the run, on purpose, because the Smith-Waterman search needs parasail to find divergent genes. The usual cause is a Python virtualenv that shadows the conda environment (VS Code activates one by itself): run `deactivate` and start again. Otherwise rebuild the environment with `./install.sh`.
+- **`Process requirement exceeds available memory`:** a step asks for more memory than your machine reports. See [USAGE.md](USAGE.md#process-requirement-exceeds-available-memory).
+- **`parasail` cannot be imported:** the launcher stops before the run, on purpose, because every search needs parasail: the Smith-Waterman search, which finds divergent genes, and the label of each call. The usual cause is a Python virtualenv that shadows the conda environment (VS Code activates one by itself): run `deactivate` and start again. Otherwise rebuild the environment with `./install.sh`.
 - **`-resume` reruns everything:** `-resume` continues the last run started in the `SynVoy` folder, and a changed path or parameter reruns the steps that use it. `nextflow log`, called in the `SynVoy` folder with `synvoy_env` active, lists the runs, and `-resume <run name>` continues a particular one.

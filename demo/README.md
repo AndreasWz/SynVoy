@@ -124,12 +124,9 @@ because labels and counts can change between versions.
   query Defensin (`Adh` as the conserved control). Fetch the data once with
   `demo/fetch_data_insect.sh`.
 - `demo/run_uniprot.sh <UniProt ID>` lets the audience pick a *D. melanogaster*
-  protein: it downloads the protein from UniProt and searches it in *D. pseudoobscura*,
-  with the insect demo's data. The script also names an *Anopheles gambiae* genome,
-  which `demo/fetch_data_insect.sh` does not download. To search it as well, save it as
-  `local_data/demo_insect/genomes/Anopheles_gambiae.fna` and its annotation as
-  `local_data/demo_insect/target_gffs/Anopheles_gambiae.gff`; without them the run
-  searches *D. pseudoobscura* only. The script's header lists IDs that are known to work.
+  protein: it downloads the protein from UniProt and searches it in *D. pseudoobscura*
+  and *Anopheles gambiae*, with the insect demo's data (`demo/fetch_data_insect.sh`
+  downloads both). The script's header lists IDs that are known to work.
 - `demo/demo_yeastscale.config` fixes the distances in base pairs, an experiment kept
   only to reproduce it. By default SynVoy derives the distances for each home locus and
   target genome.
