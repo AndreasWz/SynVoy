@@ -30,7 +30,7 @@
 set -uo pipefail
 
 # ── paths ────────────────────────────────────────────────────────────────
-REPO="${REPO:-/home/faw/dev/projects/SynVoy}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"   # the SynVoy checkout this script is in
 GENOMES_DIR="${GENOMES_DIR:-${REPO}/local_data/benchmark/genomes}"
 OUTDIR="${OUTDIR:-${REPO}/benchmark_results/toga}"
 WORK="${OUTDIR}/work"

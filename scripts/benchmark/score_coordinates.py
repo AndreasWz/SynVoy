@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Score SynVoy calls against the melittin truth set by COORDINATE OVERLAP (§1y).
+"""Score SynVoy calls against the melittin truth set by COORDINATE OVERLAP.
 
 Why this exists
 ---------------
 `score_benchmark.py` scores **species presence**: did the tool say PRESENT for a
-species whose truth is PRESENT. That is the number in `docs/STATE_OF_THE_PROJECT.md`
-D.1 (SynVoy F1 0.700, recall 0.875), and it is the number that let two overclaims
+species whose truth is PRESENT. That is the number that let two overclaims
 through:
 
   * The *T. bicarinatum* melittin "recovery" was **132 bp of an 855 bp gene** -- one
     exon, `ModelStatus=partial`. Presence scoring records that as a clean TP.
-  * The 2026-06-30 run **lost that hit entirely** (its nearest call is 2,543 bp away
+  * A later run **lost that hit entirely** (its nearest call is 2,543 bp away
     from the nearest truth model) and still scored PRESENT for the species, because
     some other call on the same scaffold kept the species flag up.
 
@@ -37,7 +36,7 @@ is not a miss, and silently counting it as one understates recall.
 Usage
 -----
     score_coordinates.py --truth tests/benchmark_truth/melittin_loci.tsv \\
-                         --run   local_runs/mel_det_rep2 \\
+                         --run   results/melittin_run \\
                          [--min-confidence MEDIUM] [--out report.tsv]
 
 `--run` may be a SynVoy output directory (every `*.gff` under it is scanned for

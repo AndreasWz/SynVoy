@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Family-recovery benchmark on the curated ant venom families.
 
-Design: docs/NEXT_SESSION_FAMILY_BENCHMARK.md. This is its Phase 0 harness.
-
 Why this exists
 ---------------
 Every SynVoy claim so far rests on one gene at a time (melittin, oskar, STE2, decorin),
-each with a hand-built truth set. The Ant_Venoms `final_dataset` is an independent,
+each with a hand-built truth set. The curated `final_dataset` of ant venom genes is an independent,
 labelled truth set: 939 curated gene models, each tagged `family=` and `locus=`, across
 34 species. This script turns it into a benchmark that says not only how much was
 found but **which pipeline layer lost what**, and which misses were never reachable by
@@ -46,17 +44,16 @@ Tiers -- relative to the home loci the run actually searched
                    synteny from this home BY CONSTRUCTION; excluded from locus recall.
   unassigned_label the curation assigns the gene to NO orthologous locus (per-species
                    survey labels, per-scaffold labels): counted at family level only,
-                   excluded from locus recall AND locus precision. (Amendment 1.)
+                   excluded from locus recall AND locus precision.
 
 Truth genes whose protein is not detectably homologous to the searched query (E-value >
-MAX_SEED_EVALUE) are flagged `seed_unrelated`; locus recall is reported both raw and
-excluding them. (Amendment 1 introduced the flag after a curated Vespa model scored 38
-against its own family's seed; Amendment 2 made it length-aware.) Likewise genes on a
-contig shorter than MIN_CONTIG_BP are flagged `assembly_limited` (Amendment 2): no search
-can anchor them, so a miss there is not a layer-A search failure.
+MAX_SEED_EVALUE, a length-aware test) are flagged `seed_unrelated`; locus recall is reported
+both raw and excluding them. Likewise genes on a contig shorter than MIN_CONTIG_BP are
+flagged `assembly_limited`: no search can anchor them, so a miss there is not a layer-A
+search failure.
 
-Seeds -- the home locus must BE the label's address (Amendment 2)
-------------------------------------------------------------------
+Seeds -- the home locus must BE the label's address
+---------------------------------------------------
 A seed stands for its curated `locus=` label, but the outgroup (Apis) labels were
 assigned by sequence, not by position: in four families the curated Apis gene does not
 sit at its label's curated address (LOCUS_ANCHORS anchor_up/anchor_dn), so its run
@@ -64,8 +61,8 @@ searches a neighbourhood the ant members do not share. Such a family is also run
 the address seed -- the Apis gene or ORF that DOES sit at the address -- via
 `stage --seed <home gene | name> --family F [--label L] [--seed-faa F --seed-coords C]`,
 and a curated seed that sits at ANOTHER label's address is scored under that label
-(`stage --seed GM --label L`). The audit is by hand, before the runs; results in the
-gitignored tests/benchmark_truth/family_benchmark_private.md.
+(`stage --seed GM --label L`). The audit is by hand, before the runs; its results stay
+with the unpublished truth data.
 
 The `no_home_anchor` tier is the big one: with Apis as home, most ant genes of the
 multi-copy families (SP, PLA2, APH, VA) sit at loci Apis does not have.
@@ -101,8 +98,8 @@ Usage
     family_recovery.py score --run RESULTS/ --family FAM_APYR [--out-prefix P]
     family_recovery.py callcheck --run RESULTS/ --targets RUN_INPUTS/targets
 
-`--data` is the Ant_Venoms `data/` directory holding `final_dataset/` and `genomes/`
-(default: $SYNVOY_FAMILY_DATA, else ../Ant_Venoms_git/data next to this repo).
+`--data` is the curated dataset's `data/` directory holding `final_dataset/` and `genomes/`
+(default: $SYNVOY_FAMILY_DATA, else ../Ant_Venoms_git/data next to this repository).
 """
 import argparse
 import csv
@@ -1527,7 +1524,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default=DEFAULT_DATA,
-                    help="Ant_Venoms data/ dir with final_dataset/ and genomes/")
+                    help="the curated dataset's data/ folder, with final_dataset/ and genomes/ "
+                         "(default: $SYNVOY_FAMILY_DATA, else ../Ant_Venoms_git/data next to "
+                         "this repository)")
     ap.add_argument("--home-species", default=DEFAULT_HOME)
     sub = ap.add_subparsers(dest="cmd", required=True)
 

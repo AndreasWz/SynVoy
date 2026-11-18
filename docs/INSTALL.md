@@ -30,7 +30,7 @@ cd SynVoy
 
 `install.sh` creates the conda environment `synvoy_env` from `environment.yml`, with mamba if you have it. Then it checks the tools: Nextflow, Java 17 or newer, MMseqs2, BLAST, Prodigal, Augustus, miniprot, MAFFT, IQ-TREE, NCBI datasets, Entrez Direct, Python 3.10 to 3.12 with ete3 and numpy, and a test alignment with parasail. When `synvoy_env` exists already, it asks whether to rebuild it.
 
-At the end, `install.sh` prints example commands that call `nextflow run main.nf ... -profile standard` directly, for the human gene LY6E. Do not start with them: check the installation as in step 3, and start runs with `./run_synvoy.sh`, which runs its checks and uses the memory-safe default profile. A vertebrate gene such as LY6E needs a machine with at least 32 GB of memory ([QUICKSTART.md](QUICKSTART.md#going-further)).
+At the end, `install.sh` prints the next commands, all through `./run_synvoy.sh`, which runs its checks and uses the memory-safe default profile: the check of [step 3](#3-check-the-installation), the quickstart's Easy Mode run ([QUICKSTART.md](QUICKSTART.md)) and a Pro Mode command for your own files.
 
 To create the environment by hand instead:
 

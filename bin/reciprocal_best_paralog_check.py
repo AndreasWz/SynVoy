@@ -117,7 +117,8 @@ def _align(query_seq: str, paralog_seq: str) -> tuple[float, float]:
     (fix item 45); 32-bit, as the search's alignments, so a long protein does not saturate.
     """
     if parasail is None:
-        raise RuntimeError("parasail is required for §1j reciprocal-best paralog check")
+        raise RuntimeError("parasail is required for the Smith-Waterman alignments of the "
+                           "locus-ownership check")
     res = parasail.sw_trace_striped_32(query_seq, paralog_seq, 12, 1,
                                        parasail.blosum62)
     score = float(res.score)

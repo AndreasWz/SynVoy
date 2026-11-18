@@ -357,12 +357,13 @@ def main() -> None:
         except ImportError:
             venv = os.environ.get("VIRTUAL_ENV")
             logger.error(
-                "parasail is not importable, but the §1m home-paralog panel needs it for "
-                "Smith-Waterman alignment. The locus-ownership / paralog safety net cannot run."
+                "parasail is not importable, but the home-paralog panel of the locus-ownership "
+                "check needs it for Smith-Waterman alignment. The locus-ownership / paralog "
+                "safety net cannot run."
                 + (f"\n  NOTE: a virtualenv is active (VIRTUAL_ENV={venv}); it is likely shadowing "
                    f"the conda env that has parasail — deactivate it / strip it from PATH." if venv else "")
                 + "\n  Fix: conda install -c bioconda parasail-python, "
-                  "or --disable_locus_ownership to skip §1m deliberately."
+                  "or --disable_locus_ownership to run without the ownership check."
             )
             sys.exit(1)
 

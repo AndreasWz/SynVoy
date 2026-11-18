@@ -4621,17 +4621,16 @@ def define_waves(genome_entries, args):
         # genomes, so every target is searched with the initial DB only.
         waves = [list(genome_entries)]
         logger.info(
-            "F4 wavefront DISABLED: all %d genome(s) in ONE parallel wave — "
-            "no expanding-database iteration (control arm).", len(genome_entries)
+            "wavefront disabled (--disable_wavefront): all %d genome(s) in one wave, "
+            "searched with the initial query set only.", len(genome_entries)
         )
     elif args.rank_wave_binning:
         # §A4 (TODO_JUN): bin by phylo-distance RANK so a saturated metric
         # (tight clade, all dist≈0.99) still grades close→far.
         waves = assign_waves_by_rank(genome_entries)
         logger.info(
-            "§A4 rank/quantile wave binning: ENABLED — "
-            f"{len(waves)} graded waves (closest serial → farthest parallel), "
-            "robust to saturated phylo-distance."
+            f"rank wave binning: {len(waves)} waves, closest genomes first "
+            "(docs/ALGORITHM.md 6)."
         )
     else:
         waves = []
@@ -7049,8 +7048,8 @@ def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene
         _n_bridged = sum(1 for _b in synteny_blocks if _b.get('bridged'))
         if _n_bridged:
             logger.info(
-                f"[{genome_name}] §1m collinearity: bridged a flanking gap in "
-                f"{_n_bridged} block(s) (home-order continuation across rearrangement)."
+                f"[{genome_name}] collinearity: bridged a flanking gap in "
+                f"{_n_bridged} block(s) (the flanking genes continue the home order across the gap)."
             )
         for _b in synteny_blocks:
             if _b.get('bridge_anchors'):
@@ -7222,7 +7221,7 @@ def blocks_with_rescue(seed_hits, args, genome_name, select_rescue=None, **block
     rescue = select_rescue(blocks or [])
     if not rescue.seeds:
         return blocks, n, rescue
-    logger.info(f"[{genome_name}] §1o dispersed-GOI rescue: building the blocks again with "
+    logger.info(f"[{genome_name}] dispersed-GOI rescue: building the blocks again with "
                 f"{len(rescue.seeds)} rescued GOI hit(s) as seeds.")
     keep = [(b['chrom'], int(b['start']), int(b['end'])) for b in blocks or ()]
     rebuilt, n_rebuilt = build_genome_blocks(list(seed_hits) + list(rescue.seeds), args, genome_name,
@@ -7606,7 +7605,7 @@ def _write_nonsyntenic_candidates(args, prefix, genome_name, records, gff_lines=
             try:
                 os.remove(path)
             except OSError as exc:
-                logger.warning(f"[{genome_name}] §1x could not remove {path}: {exc}")
+                logger.warning(f"[{genome_name}] could not remove the old non-syntenic GOI candidate table {path}: {exc}")
         return
     locus = str(getattr(args, 'prefix', '') or '')
     models = _goi_models_by_chrom(gff_lines) if gff_lines is not None else {}
@@ -7625,14 +7624,14 @@ def _write_nonsyntenic_candidates(args, prefix, genome_name, records, gff_lines=
         n_refused = sum(1 for r in records if r.get('outcome') == 'refused')
         n_searched = sum(1 for r in records if r.get('outcome') == 'searched')
         n_listed = len(records) - n_refused - n_searched
-        logger.info(f"[{genome_name}] §1x wrote {n_refused} refused GOI candidate(s)"
+        logger.info(f"[{genome_name}] wrote {n_refused} refused GOI candidate(s)"
                     + (f", {n_searched} refused hit(s) a rescue-seeded block searched" if n_searched else "")
                     + f" and {n_listed} dropped GOI hit(s)"
                     + (f" (of {n_dropped} outside every searched GOI zone)"
                        if n_dropped is not None and n_dropped > n_listed else "")
                     + f" to {os.path.basename(path)}")
     except OSError as exc:
-        logger.warning(f"[{genome_name}] §1x could not write {path}: {exc}")
+        logger.warning(f"[{genome_name}] could not write the non-syntenic GOI candidates to {path}: {exc}")
 
 
 def _dispersed_seed_key(h) -> Tuple[Any, ...]:
@@ -7868,14 +7867,14 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
     for r in ctx['rescue_refused']:
         bp = r.get('nearest_anchor_bp')
         logger.info(
-            f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({r.get('rejected_by')}): "
+            f"[{genome_name}] non-syntenic GOI candidate REJECTED ({r.get('rejected_by')}): "
             f"{r.get('chrom')}:{r.get('start')}-{r.get('end')} id={float(r.get('identity') or 0):.1f}% "
             f"e={r.get('evalue')} aln={aligned_query_residues(r)} query residues — nearest flanking anchor "
             + (f"{r.get('nearest_anchor_gene')} at {int(bp):,} bp" if bp not in ('', None)
                else "none on this sequence"))
     rules = [s.get('rescue_rule', '') for s in rescue.seeds]
     logger.info(
-        f"[{genome_name}] §1o dispersed-GOI rescue: {len(rescue.seeds)} seed(s) (envelope "
+        f"[{genome_name}] dispersed-GOI rescue: {len(rescue.seeds)} seed(s) (envelope "
         f"{rules.count('envelope')}, near_neighbour {rules.count('near_neighbour')}) in "
         f"{n_blocks} block(s); {len(rescue.in_zone)} passing GOI hit(s) left to the GOI zones "
         f"of the blocks"
@@ -9774,7 +9773,7 @@ def main():
     parser.add_argument("--n_flanking_genes", type=int, default=10,
                         help="Flanking genes per side of the home locus (pipeline param): the "
                              "specificity's neighbourhood also holds q's own home gene and this "
-                             "many home genes on each side of it (review fix RF-2)")
+                             "many home genes on each side of it (docs/ALGORITHM.md 7.12)")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--evalue", type=float, default=1e-5)
     parser.add_argument("--min_identity", type=float, default=40.0)
@@ -9783,8 +9782,8 @@ def main():
                              "(qend - qstart + 1; the pipeline passes min_hit_length)")
     parser.add_argument("--max_intron", type=int, default=20000)
     parser.add_argument("--tandem_copy_parent", choices=["seed", "home"], default="seed",
-                        help="Whose model a single-segment tandem copy is: 'seed' (default, as "
-                             "until 2026-10-15) names it GOI_copy_<n> (record id "
+                        help="Whose model a single-segment tandem copy is: 'seed' (default) names "
+                             "it GOI_copy_<n> (record id "
                              "GOI_copy_<n>|<genome>_b<k>_l<j>_by_<parent>), which becomes a GOI of "
                              "its own once it seeds and is then judged against the seed; 'home' "
                              "names it under the home GOI (<parent>|<genome>_b<k>_l<j>_tc<n>), so "
@@ -9836,7 +9835,7 @@ def main():
                              "gene model of the relative searched most recently")
     parser.add_argument("--disable_anchor_resolution", type=str2bool, default=False,
                         help="Count every flanking gene with a hit, also where several "
-                             "flanking genes hit the same target DNA (behaviour before 2026-10-08)")
+                             "flanking genes hit the same target DNA (as in runs made before 2026-10-08)")
     parser.add_argument("--anchor_max_places", type=count_or_auto, default=None,
                         help="Each flanking gene seeds blocks only at its N best places in a "
                              "target genome (by summed bit score); 0 = at every place. 'auto' "
@@ -9856,15 +9855,14 @@ def main():
     parser.add_argument("--goi_miniprot_timeout", type=int, default=3600,
                         help="Guard of a miniprot run that models a GOI in a window, in seconds: "
                              "a run that does not finish stops the genome's search and the task "
-                             "(default: 3600; until 2026-10-28 a timeout of 120 s gave no model)")
+                             "(default: 3600)")
     parser.add_argument("--flanking_miniprot_timeout", type=int, default=3600,
                         help="Guard of a miniprot run that models a flanking gene in a window, in "
                              "seconds: a run that does not finish stops the genome's search and the "
-                             "task (default: 3600; until 2026-10-28 a timeout of 120 s gave a "
-                             "hit-chain model instead)")
+                             "task (default: 3600)")
     parser.add_argument("--gene_prediction_timeout", type=int, default=3600,
                         help="Guard of one Augustus run of the structural discovery, in seconds: a "
-                             "run that does not finish stops the run (fix-phase item 18)")
+                             "run that does not finish stops the run (default: 3600)")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
     parser.add_argument("--mmseqs_verbosity", type=int, default=1,
@@ -9875,16 +9873,16 @@ def main():
                              "and the windows (default 300, MMseqs2's own)")
     parser.add_argument(
         "--deterministic_goi_search", type=str2bool, default=True,
-        help="A0 reproducibility: force the per-region augmented GOI MMseqs search to "
-             "--threads 1 so marginal/divergent GOI hits don't jitter run-to-run "
-             "(tblastn is already single-threaded; regions are tiny so the speed cost "
-             "is small). Set false to restore the multithreaded (non-deterministic) path."
+        help="Run the MMseqs2 search of each window with one thread, so a rerun gives the "
+             "same GOI hits (docs/ALGORITHM.md 13); tblastn and Smith-Waterman run in one "
+             "thread anyway, and a window is small, so it costs little time. false: the "
+             "window search uses --threads, faster but not reproducible (default: true)"
     )
     parser.add_argument("--region_padding", type=bp_or_auto, default=None,
                         help="Window margin in bp. 'auto' (default) = derive it from "
                              "--window_margin_genes. With a number the margin of each block is "
                              "adapted to the spacing of its hits between --padding_min and "
-                             "--padding_max, as before 2026-10-08")
+                             "--padding_max (as in runs made before 2026-10-08)")
     parser.add_argument("--padding_min", type=int, default=50000,
                         help="Smallest margin, only with a fixed --region_padding")
     parser.add_argument("--padding_max", type=int, default=200000,
@@ -9896,9 +9894,8 @@ def main():
     parser.add_argument("--sw_min_identity", type=float, default=20.0)
     parser.add_argument("--sw_timeout_seconds", type=int, default=3600,
                         help="Guard of the Smith-Waterman search of one window, in seconds: a search "
-                             "that does not finish stops the genome's search and the task (until "
-                             "2026-10-28 a timeout of 300 s kept the window without its "
-                             "Smith-Waterman hits)")
+                             "that does not finish stops the genome's search and the task "
+                             "(default: 3600)")
     parser.add_argument("--window_tblastn_word_size", type=int, default=3,
                         help="tblastn -word_size of the window search (3 = tblastn's default)")
     parser.add_argument("--window_tblastn_comp_stats", type=int, default=2, choices=[0, 1, 2, 3],
@@ -9925,9 +9922,9 @@ def main():
                         help="Where a GOI model lacks a short home first (or last) exon (<= 30 aa, "
                              "the missing query residues within 5 aa of it), do not walk to an ATG "
                              "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
-                             "instead. Home GOI and decoys only (batch G3A; off by default)")
+                             "instead. Home GOI and decoys only (off by default)")
     parser.add_argument("--goi_genome_wide_path", type=str2bool, default=False,
-                        help="The strong hit without synteny (FINAL step 5), in every searched genome: "
+                        help="The strong hit without synteny (docs/ALGORITHM.md 7.11), in every searched genome: "
                              "a GOI hit outside every searched GOI zone gets one answer per home GOI "
                              "when the judge's HIGH terms hold in the genome place (E <= 1e-6 over the "
                              "genome, >= 0.7 of the query covered by its hits, no other home protein "
@@ -9940,12 +9937,12 @@ def main():
                              "MEDIUM) model of the home query or its decoy when it continues the "
                              "model's query on its strand, within goi_fallback_max_gap and with no "
                              "other model in between: miniprot again over both, kept only when the "
-                             "judge ranks the joined model strictly first (batch G3B; off by default)")
+                             "judge ranks the joined model strictly first (off by default)")
     parser.add_argument("--tandem_query_restart", type=str2bool, default=False,
                         help="Tandem copies of the GOI are query restarts: copies built per strand "
                              "from hits that continue the query, counted at >= 0.35 union "
                              "coverage, a tandem when two counted copies overlap in the query; each "
-                             "copy one mRNA with one CDS per hit (batch G2; off by default)")
+                             "copy one mRNA with one CDS per hit (off by default)")
     parser.add_argument("--report_copies_in_slot", type=str2bool, default=False,
                         help="Write CopiesInSlot / SlotRank on the GOI models (advisory)")
     parser.add_argument("--sw_max_alignments_per_piece", type=int, default=1,
@@ -10000,15 +9997,14 @@ def main():
     parser.add_argument(
         "--synteny_bridge_min_anchors", type=int, default=2,
         help="Min distinct anchored flanking genes a block needs before it may bridge a gap "
-             "(2 since 2026-10-14, was 3). Also the minimum collinear run of the two-sided "
+             "(default: 2). Also the minimum collinear run of the two-sided "
              "rule (--synteny_bridge_two_sided, off)."
     )
     parser.add_argument(
         "--synteny_bridge_two_sided", type=str2bool, nargs='?', const=True, default=False,
         help="Weigh the whole cluster on the FAR side of a gap when deciding to bridge, "
-             "not just its first locus. Fixes the asymmetry where identical collinear "
-             "evidence bridges or not depending on where the gap falls "
-             "(docs/CAN_BRIDGE_ANALYSIS.md). Default off pending the A/B measurement."
+             "not just its first locus, so the same collinear evidence bridges wherever "
+             "the gap falls. Off by default: its effect on the calls has not been measured."
     )
     parser.add_argument(
         "--synteny_bridge_max_per_block", type=int, default=2,
@@ -10020,22 +10016,23 @@ def main():
     # longer precursor is structurally low-coverage even on a perfect hit).
     parser.add_argument(
         "--fallback_short_query_len", type=int, default=150,
-        help="§A1: queries shorter than this (aa) gate their GOI fallback on aligned "
-             "length + bitscore, NOT query coverage (the mature peptide may be a small "
-             "fraction of a precursor). 0 = legacy coverage gate for all queries. In a block "
+        help="Queries shorter than this (aa) have their GOI hit chain tested on aligned "
+             "length and bit score, not on query coverage (the mature peptide may be a small "
+             "fraction of a precursor; docs/ALGORITHM.md 7.7). 0 = the coverage test for every "
+             "query. In a block "
              "with E_syn <= 0.1 these length, coverage and bit-score tests refuse no chain: it "
              "is written with RefusalLifted= and judged (the span limit still applies)."
     )
     parser.add_argument(
         "--fallback_short_min_aln_aa", type=int, default=15,
-        help="§A1: minimum aligned length for a short-query GOI fallback, in aligned query "
+        help="Minimum aligned length for the hit chain of a short query, in aligned query "
              "residues (qend - qstart + 1, summed over the chain's hits); rejects micro-window "
              "overcalls while admitting short mature peptides (e.g. 26-aa melittin)."
     )
     parser.add_argument(
         "--fallback_short_min_bits", type=float, default=30.0,
-        help="§A1: minimum bitscore for a short-query GOI fallback (significance floor that "
-             "lets a high-bitscore divergent hit pass where coverage would have vetoed it)."
+        help="Minimum bit score for the hit chain of a short query (a divergent hit with a "
+             "high bit score passes where query coverage would refuse it)."
     )
     parser.add_argument(
         "--quiet_subtools",
@@ -10053,7 +10050,7 @@ def main():
                              "and write their calls to decoys/ (never seeded, never counted). Every "
                              "decoy call is false: their rate per label and place calibrates the labels.")
     parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
-                        help="§1x: record GOI hits that clear the quality bar but are "
+                        help="Record GOI hits that clear the quality bar but are "
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
                              "so the report can distinguish 'no ortholog found' from "
                              "'found one, could not place it syntenically'. Default on.")
@@ -10065,25 +10062,21 @@ def main():
     # maximum seed propagation (the §A3 precondition), distant genomes in larger
     # waves for parallelism. Deterministic (pure function of the sorted order).
     parser.add_argument("--rank_wave_binning", type=str2bool, default=True,
-                        help="§A4 / F4: bin waves by phylo-distance RANK/quantile instead "
-                             "of absolute-distance thresholds. Default ON since 2026-07-26: "
-                             "the legacy binning compares ABSOLUTE cut-offs (0.05/0.15) "
-                             "against a divide-by-max NORMALISED distance, which is "
-                             "incoherent by construction — the farthest genome is always "
-                             "1.0, so the closest reaches the serial tier only if it is "
-                             ">=20x nearer. Measured over 44 runs on disk: legacy gave the "
-                             "closest genome a serial wave in 7, rank binning in 44. Pass "
-                             "false to restore the legacy behaviour.")
+                        help="Group the target genomes, sorted closest first, into waves by "
+                             "rank: the closest tenth one genome at a time, then pairs up to "
+                             "35 %% of the list, threes up to 70 %% and fives after that "
+                             "(docs/ALGORITHM.md 6). false: by phylogenetic distance (closer "
+                             "than 0.05 one at a time, up to 0.15 at most three, beyond that "
+                             "at most five), as in runs made before 2026-07-26 (default: true)")
     # F4 control arm: the wavefront is the mechanism the method is named for, but no
     # run has ever demonstrated that it changes the result. Comparing rank-vs-legacy
     # binning cannot answer that (both still iterate); the control is NO iteration at
     # all — every genome searched with the initial DB only. This flag provides it.
     parser.add_argument("--disable_wavefront", type=str2bool, default=False,
-                        help="F4 control arm: place ALL genomes in ONE parallel wave, so "
-                             "no genome is ever searched with a nearer relative's recovered "
-                             "ortholog (the expanding database never expands). This is the "
-                             "measurement baseline for 'does the wavefront earn its place'; "
-                             "it is not a performance option. Overrides --rank_wave_binning.")
+                        help="Search every genome in one wave, so the genes found never join "
+                             "the queries: a control, to run a set both ways and see what the "
+                             "growing query set changes. Overrides --rank_wave_binning "
+                             "(default: false)")
     # Model status (ModelStatus = fragment / partial / complete); the label is synvoy_label's.
     parser.add_argument("--classify_fragment_max_qcov", type=float, default=0.4,
                         help="Query coverage below this marks model as fragment")
@@ -10185,24 +10178,24 @@ def main():
     # GOI zone of the blocks seeds a block of its own inside the envelope of the anchors on its
     # sequence, or beside a lone anchor; there is no rearrangement test.
     parser.add_argument("--enable_dispersed_goi_rescue", type=str2bool, default=True,
-                        help="§1o: seed a block from a strong GOI hit that lies outside every "
+                        help="Seed a block from a strong GOI hit that lies outside every "
                              "GOI zone of the blocks (block +- the GOI margin), when it lies "
                              "inside the envelope of the best hits of >= "
                              "--dispersed_min_chrom_anchors flanking genes on its sequence, or "
                              "within the GOI margin of such a hit on a sequence with fewer "
                              "(default on)")
     parser.add_argument("--dispersed_goi_min_identity", type=float, default=40.0,
-                        help="§1o: minimum %%identity for a dispersed GOI hit to be rescued")
+                        help="Minimum %%identity for a dispersed GOI hit to be rescued")
     parser.add_argument("--dispersed_goi_max_evalue", type=float, default=1e-10,
-                        help="§1o: maximum e-value for a dispersed GOI hit to be rescued")
+                        help="Maximum e-value for a dispersed GOI hit to be rescued")
     parser.add_argument("--dispersed_goi_min_alnlen", type=int, default=50,
-                        help="§1o: minimum alignment length for a dispersed GOI hit, in aligned "
+                        help="Minimum alignment length for a dispersed GOI hit, in aligned "
                              "query residues (qend - qstart + 1)")
     parser.add_argument("--dispersed_min_chrom_anchors", type=int, default=3,
-                        help="§1o: a chromosome must carry >= this many distinct flanking "
+                        help="A chromosome must carry >= this many distinct flanking "
                              "genes to define a rescue envelope (macro-synteny evidence)")
     parser.add_argument("--dispersed_envelope_margin", type=bp_or_auto, default=None,
-                        help="§1o: pad the flanking envelope by this many bp on each side. "
+                        help="Pad the flanking envelope by this many bp on each side. "
                              "'auto' (default) = derive it from --dispersed_envelope_margin_genes")
 
     args = parser.parse_args()
@@ -10286,12 +10279,13 @@ def main():
     # disabled or empty, process_single_genome falls back to legacy clustering.
     if args.disable_synteny_collinearity:
         args.home_rank = {}
-        logger.info("§1m collinearity-aware seed placement: DISABLED (legacy gene-count clustering).")
+        logger.info("collinearity-aware block placement: off (--disable_synteny_collinearity): "
+                    "blocks by gene count, no bridging.")
     else:
         args.home_rank = build_home_rank(args.initial_db)
         logger.info(
-            f"§1m collinearity-aware seed placement: ENABLED "
-            f"({len(args.home_rank)} flanking anchors ranked)."
+            f"collinearity-aware block placement: on "
+            f"({len(args.home_rank)} flanking genes in home order)."
         )
 
     # The GOI entries of the pristine query set are the home protein; everything that

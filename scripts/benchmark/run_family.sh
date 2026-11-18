@@ -1,22 +1,22 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
 # One family of the family-recovery benchmark, end to end: stage -> SynVoy -> score
-# -> callcheck. Design: docs/NEXT_SESSION_FAMILY_BENCHMARK.md. Harness: family_recovery.py.
+# -> callcheck. Harness: family_recovery.py (its --help gives the tiers and the scores).
 #
 #   run_family.sh <FAMILY> <SEED> <OUT_ROOT> [extra nextflow args ...]
 #
-# SEED is a curated home gene model (GM_...), or for an address seed (Amendment 2) a
-# home-genome gene id, or the name of an unannotated home ORF given by SEED_FAA +
-# SEED_COORDS. SEED_LABEL: the curated label the seed stands for, from the address audit.
-# e.g. (local, conda off, tools from synvoy_env):
-#   PATH=/home/faw/miniforge3/envs/synvoy_env/bin:$PATH \
+# SEED is a curated home gene model (GM_...), or for an address seed a home-genome gene
+# id, or the name of an unannotated home ORF given by SEED_FAA + SEED_COORDS.
+# SEED_LABEL: the curated label the seed stands for, from the address audit.
+# e.g. (local, conda off, tools from the activated synvoy_env; noconda.config holds
+# conda.enabled = false):
 #   scripts/benchmark/run_family.sh FAM_APYR <SEED> local_runs/family_bench \
-#       -c local_data/dcn_rerun/noconda.config --iterative_search_cpus 4
+#       -c noconda.config --iterative_search_cpus 4
 #
 # Seeds (gitignored, unpublished): tests/benchmark_truth/family_preregistration*.tsv
-# Env: SYNVOY_FAMILY_DATA (Ant_Venoms data/ dir), WORK_ROOT (Nextflow work parent,
-# default <OUT_ROOT>/work), PYTHON (default python3), SEED_LABEL / SEED_FAA /
-# SEED_COORDS (see above).
+# Env: SYNVOY_FAMILY_DATA (the curated dataset's data/ folder; default
+# ../Ant_Venoms_git/data next to this repository), WORK_ROOT (Nextflow work parent,
+# default <OUT_ROOT>/work), PYTHON (default python3), SEED_LABEL / SEED_FAA / SEED_COORDS.
 #
 # Every run uses the SAME pipeline flags: the default configuration is what is being
 # benchmarked. Anything passed after OUT_ROOT is recorded in <run>/run_args.txt, so a

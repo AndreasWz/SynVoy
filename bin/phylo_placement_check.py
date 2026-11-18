@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Phylogenetic placement check — is a recovered GOI call where orthology predicts?
 
-docs/STATE_OF_THE_PROJECT.md F9. Three earlier attempts to curb the over-calling all
-failed, and they failed for the same reason: identity, coverage, flanking support and
-home-paralog RBH are all evaluated **one call at a time**, and one call in isolation
-carries no information about whether it is the ortholog or a lineage-specific paralog.
-The measured proof is that the highest-identity call in the melittin benchmark (93.8 %,
-*Bombus terrestris*, where melittin is known lost) outranks every true positive.
+Identity, coverage, flanking support and the home-paralog check all judge **one call
+at a time**, and one call in isolation carries no information about whether it is the
+ortholog or a lineage-specific paralog. In the melittin benchmark, for example, the call
+with the highest identity (93.8 %, *Bombus terrestris*, where melittin is known lost)
+outranks every true positive.
 
 This check asks a question no single call can answer:
 
@@ -34,8 +33,8 @@ resolvable topology and its bootstrap support would be noise. A rate/distance co
 test extracts the orthology signal that IS present without pretending to a topology that
 is not. `compute_tree.py` still builds the display tree.
 
-Output is advisory by default: it emits verdicts, and `generate_report.py` decides what to
-do with them.
+Output is advisory: it emits verdicts, which the report records (docs/ALGORITHM.md 10);
+no confidence label changes.
 """
 import argparse
 import csv

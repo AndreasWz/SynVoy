@@ -481,7 +481,9 @@ def _cds_coverage(cds_rows, query_len: int) -> float:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="GOI synteny-hull rescue (fumble fix)")
+    ap = argparse.ArgumentParser(description="GOI synteny-hull rescue: miniprot of the GOI over the "
+                                             "flanking neighbourhood (the hull) of each target "
+                                             "sequence (docs/ALGORITHM.md 9)")
     ap.add_argument("--region_gff", required=True, help="Per-genome SynVoy region GFF (flanking + goi)")
     ap.add_argument("--target_genome", required=True, help="Target genome FASTA")
     ap.add_argument("--query", required=True, help="GOI query protein FASTA")
@@ -489,7 +491,7 @@ def main() -> int:
     ap.add_argument("--output", required=True, help="Output GFF")
     ap.add_argument("--output_faa",
                     help="Optional protein FASTA of the rescued model(s), so the "
-                         "§1m locus-ownership check can RBH them against the home "
+                         "locus-ownership check can align them with the home "
                          "paralog panel. Written even when empty.")
     ap.add_argument("--samtools_bin", default="samtools")
     ap.add_argument("--min_flanking", type=int, default=4,
@@ -508,7 +510,7 @@ def main() -> int:
                          "20000000 without that record")
     ap.add_argument("--min_identity", type=float, default=40.0,
                     help="Min miniprot %%identity for a model to be judged (a cost filter in "
-                         "front of the judge, kept by decision of 2026-10-15)")
+                         "front of the judge)")
     ap.add_argument("--min_coverage", type=float, default=None,
                     help="Min CDS aa / query length for a model to be judged (a cost filter; "
                          "the judge reads the query span of the alignment). Default: the run's "
@@ -527,11 +529,11 @@ def main() -> int:
     ap.add_argument("--n_flanking_genes", type=int, default=10,
                     help="Flanking genes per side (pipeline param): the specificity's "
                          "neighbourhood also holds q's own home gene and this many home genes "
-                         "on each side of it (review fix RF-2)")
+                         "on each side of it (docs/ALGORITHM.md 7.12)")
     ap.add_argument("--goi_info",
                     help="goi_info.json of ANNOTATE_GOI: the home gene the home step took as the "
                          "query's names the query's own gene in the specificity terms, as in the "
-                         "main search (review fix RF-2b); without it, the identity rule")
+                         "main search; without it, the identity rule")
     ap.add_argument("--blocks_tsv",
                     help="The search's block table of this genome and home locus "
                          "(blocks/<locus>_<genome>.blocks.tsv): a model inside the core or window "
@@ -542,7 +544,7 @@ def main() -> int:
     ap.add_argument("--miniprot_timeout", type=int, default=3600,
                     help="Guard of the miniprot run of one hull window, in seconds (pipeline: "
                          "goi_miniprot_timeout): a run that does not finish ends the run (exit "
-                         "STEP_FAILED_EXIT; until 2026-10-28 the window was skipped after 600 s)")
+                         "STEP_FAILED_EXIT)")
     ap.add_argument("--target_genetic_codes", default="",
                     help="Genetic codes of target genomes, 'genome=table,...'; the table of "
                          "--target_genome is used (lib/GeneticCodes.groovy builds this)")

@@ -855,7 +855,7 @@ def _search_gff_by_region_and_sequence(gff_file, genome_file, query_seq, hit_reg
         import parasail  # noqa: F401  # type: ignore
     except ImportError:
         print("[GFF Match] parasail missing: the gene by position is the best shared-3-mer "
-              "score above 30 (the rule before 2026-10-15), not the name path's check.")
+              "score above 30 (the fallback without Smith-Waterman), not the name path's check.")
         best = None
         for gene_id, gene_info in candidate_genes.items():
             chrom = gene_info['chrom']

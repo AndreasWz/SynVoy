@@ -42,7 +42,7 @@ jobs:
 
       - name: Run pytest
         # NOTE: tests/benchmark_truth/ is gitignored (unpublished curated coordinates),
-        # so the §1y coordinate-freeze cases in tests/test_coordinate_benchmark.py SKIP
+        # so the coordinate-freeze cases in tests/test_coordinate_benchmark.py SKIP
         # here and only their scoring logic is exercised. A green run on this workflow
         # is NOT evidence that the ant-melittin coordinate regression is still caught.
         # To gate on it, run somewhere the truth table exists with:

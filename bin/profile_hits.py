@@ -251,7 +251,9 @@ def build_profile(hits, query_len, window, strong_frac, max_evalue=None, gene_sp
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Profile LOCATE_GENE hits into hit_profile.json (TODO §1f)")
+    ap = argparse.ArgumentParser(description="Profile LOCATE_GENE hits into hit_profile.json "
+                                             "(read by the preset chooser and the preset modules; "
+                                             "docs/ALGORITHM.md 5.3)")
     ap.add_argument("--blast", help="BLAST -outfmt 6 hits (12 cols)")
     ap.add_argument("--mmseqs", help="MMseqs m8 hits (12 cols)")
     ap.add_argument("--query", help="Query protein FASTA (for query_len)")

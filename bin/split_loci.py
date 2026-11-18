@@ -49,7 +49,7 @@ def parse_args():
                         help="auto (default): the annotated home gene is the primary locus, "
                              "further loci come from the alignments. gene_only: only the "
                              "annotated gene's locus. alignment: loci from the alignments "
-                             "alone, as before 2026-10-08")
+                             "alone, as in runs made before 2026-10-08")
     parser.add_argument("--max_loci", type=int, default=5,
                         help="Hard cap on the number of distinct loci to keep (default: 5). "
                              "Protects against large paralog families (e.g. luciferase / "

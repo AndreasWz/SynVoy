@@ -98,8 +98,8 @@ def parse_args():
         default=5,
         help="A cluster sitting on >= this many HIGH-confidence flanking genes (from "
              "--target_gff) but with no GOI model is surfaced as a "
-             "'goi_missing_but_strong_synteny' region at MEDIUM confidence rather than "
-             "being dropped (docs/TODO.md §1e). Set 0 to disable.",
+             "'goi_missing_but_strong_synteny' region, at least MEDIUM, rather than "
+             "being dropped (docs/ALGORITHM.md 8). Set 0 to disable.",
     )
     # Distant-macrosynteny regions: keep the region of a strong GOI hit that landed far from
     # its flanking anchors because the neighbourhood dispersed (the Aedes oskar case: the
@@ -111,11 +111,11 @@ def parse_args():
     # MEDIUM, else goi_hit_no_call. See target_rearrangement_score /
     # qualifies_distant_macrosynteny_rescue.
     parser.add_argument("--legacy_strand_score", action="store_true",
-                        help="F2: revert strand_consistency to the pre-2026-07-26 "
-                             "measure (fraction of hits on the cluster's own majority "
+                        help="Compute strand_consistency as in runs made before "
+                             "2026-07-26 (fraction of hits on the cluster's own majority "
                              "strand), which never compares against the home genome and "
                              "so scores a fully inverted neighbourhood as perfectly "
-                             "conserved. Only for reproducing old numbers.")
+                             "conserved. Only for comparing with such runs.")
     parser.add_argument("--disable_distant_synteny_rescue", action="store_true",
                         help="Disable the distant-macrosynteny region floor (kill switch).")
     parser.add_argument("--distant_synteny_min_identity", type=float, default=40.0,
@@ -1507,7 +1507,8 @@ def main():
                     print(
                         f"INFO: Surfaced {rescued} strong-synteny region(s) with no GOI model "
                         f"(>= {args.strong_synteny_min_flanking} HIGH flanking genes) beyond the "
-                        f"adaptive cap (docs/TODO.md §1e).",
+                        f"adaptive cap (region class goi_missing_but_strong_synteny; "
+                        f"docs/ALGORITHM.md 8).",
                         file=sys.stderr,
                     )
 

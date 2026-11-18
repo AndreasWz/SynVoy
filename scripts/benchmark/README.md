@@ -168,6 +168,11 @@ python scripts/benchmark/score_coordinates.py \
 curated model on a different assembly than the run used is reported as
 `assembly_mismatch` and excluded, not counted as a miss.
 
+`build_melittin_loci.py` writes the truth table `tests/benchmark_truth/melittin_loci.tsv` from
+`melittin_orthologs.tsv` and the curated ant GFFs. `--ant-dir` names the folder of those GFFs
+(default: `$SYNVOY_ANT_ANNOTATIONS`, else `../Ant_Venoms/data/annotations` next to this
+repository); the script stops when the folder does not exist.
+
 ## LY6 ground-truth check
 
 `run_ly6_ground_truth_check.py` compares the GOI calls of a finished LY6 run with curated

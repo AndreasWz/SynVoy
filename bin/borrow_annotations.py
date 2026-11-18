@@ -511,8 +511,7 @@ def main():
     parser.add_argument("--miniprot_timeout", type=int, default=3600,
                         help="Guard of each miniprot run that transfers a target protein to the "
                              "home window, in seconds (pipeline: flanking_miniprot_timeout): a run "
-                             "that does not finish stops the task (until 2026-10-28 a timeout of "
-                             "120 s left that protein out)")
+                             "that does not finish stops the task (default: 3600)")
     args = parser.parse_args()
     set_genetic_code(args.genetic_code)
     if args.miniprot_timeout < 1:

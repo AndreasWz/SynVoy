@@ -153,7 +153,7 @@ strong loci, `preset_paralog_discrimination`; a home locus covered 1.5 times or 
 recorded (`legacy_preset` in `effective_params.json`). The console names the preset:
 
 ```
-[INFO] §1f preset applied: preset_paralog_discrimination (auto_preset.json chose preset_paralog_discrimination)
+[INFO] preset applied: preset_paralog_discrimination (auto_preset.json chose preset_paralog_discrimination)
 ```
 
 Under the default `--modules auto` the same line reads `preset applied: none (modules auto: …)`,

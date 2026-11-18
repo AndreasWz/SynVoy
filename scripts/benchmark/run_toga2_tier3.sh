@@ -30,7 +30,7 @@
 set -uo pipefail
 
 # ── paths ────────────────────────────────────────────────────────────────
-REPO="${REPO:-/home/faw/dev/projects/SynVoy}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"   # the SynVoy checkout this script is in
 # By default reuse the same work tree as TOGA1 so chains/2bits are shared.
 TOGA1_WORK="${TOGA1_WORK:-${REPO}/benchmark_results/toga/work}"
 OUTDIR="${OUTDIR:-${REPO}/benchmark_results/toga2}"

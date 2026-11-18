@@ -2,7 +2,7 @@
 """Rewrite an MMseqs2 table written with the two header columns (sequence_utils.MMSEQS_FORMAT_OUTPUT)
 into the 12-column BLAST-tabular table the pipeline's readers parse, the query and the target named by
 the first word of their FASTA headers: MMseqs2's own name columns rewrite names that start with a
-database tag or with uc or consensus_ (lcl|chr1 as chr1, gnl|a|1 and gnl|b|1 both as 1; fix item 29).
+database tag or with uc or consensus_ (lcl|chr1 as chr1, gnl|a|1 and gnl|b|1 both as 1).
 
     mmseqs_first_words.py --input hits_mmseqs.raw --output hits_mmseqs.m8
 """

@@ -2148,9 +2148,10 @@ def build_gene_family_advisory(records, n_home_loci=0,
         "advice": (
             "Gene-family / multi-paralog query detected. SynVoy is validated for "
             "divergent LOW-COPY genes via conserved flanking synteny; within a large "
-            "paralog family, ortholog-vs-paralog assignment is unreliable. Treat GOI "
-            "calls as CANDIDATES needing manual curation and weight the §1m ownership / "
-            "§1j self-consistency flags over raw identity." if is_family else ""
+            "paralog family, ortholog-vs-paralog assignment is unreliable. Treat the GOI "
+            "calls as candidates that need curation, and read each record's locus "
+            "ownership (goi_class paralog_not_goi, owning_gene) and the report's "
+            "self_consistency flags." if is_family else ""
         ),
     }
 
@@ -2482,7 +2483,7 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
                     f"The GOI's own home locus ({owning_locus}/{owning_gene}) did NOT "
                     f"recover this ortholog — it was only found via {provenance}. The "
                     "true locus's flanking is likely rearranged in this genome so no "
-                    "GOI-search block formed there (docs/TODO.md §1m search-core fix)."
+                    "GOI-search block formed there."
                 ),
             })
         if not owning_is_goi:
@@ -2580,7 +2581,7 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 "end": rec["end"],
                 "loci": rec["provenance"],
                 "identity": rec["identity"],
-                "note": "same gene identically modeled from multiple home loci; collapsed into one record (§1h)",
+                "note": "same gene identically modeled from multiple home loci; collapsed into one record",
             })
 
     # QW3 (docs/TODO_JUN.md): identity<->coverage decoupling. A GOI call with high
@@ -3477,13 +3478,13 @@ def main():
     )
     parser.add_argument(
         "--phylo_placement_dir", default=None,
-        help="Directory of PHYLO_PLACEMENT_CHECK TSVs (F9). Defaults to "
-             "<results_dir>/phylo_placement.",
+        help="Directory of PHYLO_PLACEMENT_CHECK TSVs (the phylogenetic placement check, "
+             "docs/ALGORITHM.md 10). Defaults to <results_dir>/phylo_placement.",
     )
     parser.add_argument(
         "--disable_coverage_demotion", action="store_true",
         help="Keep high-identity/low-coverage GOI calls in the headline counts "
-             "(advisory-only, the pre-2026-08-22 behaviour).",
+             "(listed only, as in runs made before 2026-08-22).",
     )
     parser.add_argument(
         "--identity_decoupled_min_identity", type=float, default=50.0,

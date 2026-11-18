@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Resolve effective preset-affected params at workflow runtime (docs/TODO.md §1f).
+"""Resolve the preset-affected settings of a run at workflow runtime (docs/ALGORITHM.md 5.3).
 
 Background: `bin/auto_select_preset.py` produces an *advisory* `auto_preset.json`
-after LOCATE_GENE. Nextflow params are immutable after launch, so historically
-the recommendation could not be applied within the same run — users had to
-re-launch with `-profile <preset>`. §1f turns that advisory into an actual
-runtime override by emitting a flat JSON map of resolved settings, which the
+after LOCATE_GENE, and the preset modules (select_modules.py) test the query's features.
+Nextflow params are immutable after launch, so a value chosen during the run cannot
+change them. This script emits a flat JSON map of resolved settings instead, which the
 downstream processes (ITERATIVE_SEARCH, CLUSTER_REGIONS, EXTRACT_FLANKING)
 read via Nextflow value-channel staging instead of `${params.X}`.
 
 This file is the *single source of truth* for what each preset overrides
 (``PRESET_OVERRIDES`` below). The Groovy ``conf/presets/*.config`` files
 remain for the static `-profile preset_X` startup path and must be kept in
-sync — ``tests/test_resolve_effective_params.py::test_presets_match_groovy_configs``
+sync — ``tests/test_resolve_effective_params.py::test_preset_overrides_match_groovy_configs``
 diffs them and fails CI on drift.
 
 Resolution order (later wins):
@@ -23,7 +22,7 @@ Resolution order (later wins):
   4. values the user set themselves           (detected via --shipped_config)
 
 Under --modules legacy the module triggers are evaluated and recorded only
-(modules_would_fire); the preset is applied exactly as before the modules existed, and
+(modules_would_fire); the chooser's preset is applied, and
 its nominal module set is listed in modules_applied (reason "legacy: <preset>").
 
 Besides the settings, the output records (any mode): ``profile``, the design quantities
@@ -34,18 +33,19 @@ max(2, c + 1), c = 3 (A1)"); and ``constraints``, the checks of how the settings
 relate to each other. A violation that only the module rules made is a bug: the script
 exits 2 and the run stops before the search.
 
-Step 3 exists because the --defaults map is the launch-time ``params``: it
+Step 4 exists because the --defaults map is the launch-time ``params``: it
 already contains whatever the user passed on the command line, in a params
-file, a ``-c`` config or a ``-profile``. Without step 3 a preset silently
-overwrote those values -- ``--goi_relative_evalue 1e-4`` did nothing whenever
-the tandem-family preset fired. A value counts as user-set when it differs from
+file, a ``-c`` config or a ``-profile``. Without step 4 a module rule or a preset
+would overwrite those values: ``--goi_relative_evalue 1e-4`` would do nothing
+whenever the local_family module or the tandem-family preset sets that key. A
+value counts as user-set when it differs from
 the default shipped in ``nextflow.config``; the one case this cannot see is a user
 explicitly passing the shipped default, for which ``--auto_apply_preset false``
 remains the way to pin it.
 
-If --disable_auto_apply is set, skip step 2 entirely — defaults flow through
-unchanged. If both --preset_override and an auto_preset.json are provided, the
-explicit override wins. An unparseable / sentinel auto_preset is a no-op.
+With --disable_auto_apply no module and no preset is applied (steps 2 and 3): the
+--defaults values flow through unchanged. If both --preset_override and an auto_preset.json
+are provided, the explicit override wins. An unparseable / sentinel auto_preset is a no-op.
 """
 from __future__ import annotations
 
@@ -441,8 +441,8 @@ def main() -> None:
     ap.add_argument("--shipped_config", default="",
                     help="Path to the shipped nextflow.config. A --defaults value that "
                          "differs from the default declared there was set by the user "
-                         "and is kept over the preset. Omit for the old behaviour "
-                         "(a preset overrides every key it names).")
+                         "and is kept over the preset. Without it a preset overrides "
+                         "every key it names.")
     ap.add_argument("--hit_profile", default="",
                     help="hit_profile.json of LOCATE_GENE (with query_features); a sentinel or "
                          "missing file = no hit features")
@@ -475,9 +475,11 @@ def main() -> None:
     ap.add_argument("--run_resource", action="append", default=[], metavar="KEY=VAL",
                     help="A resource value the run used (Nextflow profile, MMseqs2 sensitivity and "
                          "split limit, CPUs, memory, skip_tree), written as run_resources: a "
-                         "profile changes these without a settings key (fix-phase d6)")
+                         "profile changes these without a settings key (the report's "
+                         "run_settings, docs/OUTPUT.md)")
     ap.add_argument("--tool_versions", action="store_true",
-                    help="Record the versions of the run's tools (tool_versions; fix-phase d8)")
+                    help="Record the versions of the run's tools (tool_versions; the report's "
+                         "run_settings, docs/OUTPUT.md)")
     ap.add_argument("--output", required=True, help="Where to write the resolved JSON")
     args = ap.parse_args()
 

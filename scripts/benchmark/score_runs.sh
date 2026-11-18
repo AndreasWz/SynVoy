@@ -5,7 +5,8 @@
 # <FAM>__<seed>; a dir of neither form is skipped with a message. $EXTRA is passed
 # through to `family_recovery.py score` (e.g. EXTRA="--min-confidence HIGH"). A run the scorer
 # refuses (exit 2: unknown family, another truth) prints its ERROR line and the script ends with 1.
-PY=${PY:-/home/faw/miniforge3/envs/synvoy_env/bin/python3}
+# $PY is the Python that runs the scorer (default: python3 on the PATH, e.g. that of synvoy_env).
+PY=${PY:-python3}
 HERE=$(cd "$(dirname "$0")" && pwd)
 rc=0
 for d in "$@"; do

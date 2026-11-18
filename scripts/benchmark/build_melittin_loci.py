@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Build tests/benchmark_truth/melittin_loci.tsv — the §1y COORDINATE truth set.
+"""Build tests/benchmark_truth/melittin_loci.tsv — the COORDINATE truth set of the melittin benchmark.
 
 One row per curated MODEL (not per species, as `melittin_orthologs.tsv` is), because
-"did the tool find the gene" is a question about a locus, not a species. See
-docs/TODO.md §1y and docs/STATE_OF_THE_PROJECT.md D.1b.
+"did the tool find the gene" is a question about a locus, not a species.
+scripts/benchmark/score_coordinates.py scores runs against it.
 
 Sources, and why each is trusted:
 
   * Bee rows come from `melittin_orthologs.tsv`'s `syntenic_locus` column — already
     curated, reused verbatim so the two truth files cannot drift apart.
-  * Ant rows are collapsed from the curated UGENE/manual GFFs in the Ant_Venoms data
-    tree. Every scaffold's assembly membership was verified against the downloaded
-    FASTAs (OV788322.1 in GCA_928718305.1, CM0208xx in GCA_009859135.1,
-    CM0797xx in GCA_019399895.2) rather than inferred from the file name.
+  * Ant rows are collapsed from the curated UGENE/manual GFFs of the ant venom
+    annotation data (--ant-dir). Every scaffold's assembly membership was verified
+    against the downloaded FASTAs (OV788322.1 in GCA_928718305.1, CM0208xx in
+    GCA_009859135.1, CM0797xx in GCA_019399895.2) rather than inferred from the file name.
 
 Regenerate after editing either source:
 
     python3 scripts/benchmark/build_melittin_loci.py [--ant-dir DIR]
+
+DIR holds the curated ant GFFs (default: $SYNVOY_ANT_ANNOTATIONS, else data/annotations of an
+Ant_Venoms checkout next to this repository); the script stops when it does not exist.
 
 NOTE tests/benchmark_truth/ is gitignored (unpublished annotation data), so this script
 is the committed record of how that file is produced.
@@ -30,7 +33,8 @@ import sys
 
 # scripts/benchmark/<this file>  ->  repo root is three levels up
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_ANT_DIR = "/home/faw/dev/projects/Ant_Venoms/data/annotations"
+DEFAULT_ANT_DIR = (os.environ.get("SYNVOY_ANT_ANNOTATIONS")
+                   or os.path.normpath(os.path.join(ROOT, "..", "Ant_Venoms", "data", "annotations")))
 BEE_SRC = os.path.join(ROOT, "tests", "benchmark_truth", "melittin_orthologs.tsv")
 OUT = os.path.join(ROOT, "tests", "benchmark_truth", "melittin_loci.tsv")
 
@@ -145,9 +149,16 @@ def ant_rows(ant_dir):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ant-dir", default=DEFAULT_ANT_DIR)
+    ap.add_argument("--ant-dir", default=DEFAULT_ANT_DIR,
+                    help="folder of the curated ant GFFs (default: $SYNVOY_ANT_ANNOTATIONS, else "
+                         "../Ant_Venoms/data/annotations next to this repository)")
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args()
+    if not os.path.isdir(args.ant_dir):
+        # Without it every ant row would be skipped and the truth table written without them.
+        print(f"ERROR: no folder of curated ant GFFs at {args.ant_dir}: pass --ant-dir DIR "
+              "or set SYNVOY_ANT_ANNOTATIONS", file=sys.stderr)
+        return 2
 
     rows = bee_rows() + ant_rows(args.ant_dir)
     for r in rows:

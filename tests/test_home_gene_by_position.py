@@ -214,4 +214,4 @@ def test_without_parasail_the_old_rule_is_called_explicitly(tmp_path, monkeypatc
     monkeypatch.setattr(builtins, "__import__", no_parasail)
     m = _find(lay, gene)
     assert m['gene_id'] == 'gene-G' and m['found_by'] == 'position_3mer'
-    assert "the rule before 2026-10-15" in capsys.readouterr().out
+    assert "the fallback without Smith-Waterman" in capsys.readouterr().out

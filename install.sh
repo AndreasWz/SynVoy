@@ -12,11 +12,11 @@ echo "==========================================="
 ENV_NAME="synvoy_env"
 
 # A Python virtualenv (.venv) active on PATH shadows the conda env at runtime — its python
-# lacks parasail etc., which silently disables Smith-Waterman and crashes the §1m panel when
-# you later run the pipeline. Warn loudly; SynVoy's binaries live in the conda env, not a venv.
+# lacks parasail etc., which every search needs, so a run started from it stops. Warn
+# loudly; SynVoy's binaries live in the conda env, not a venv.
 if [ -n "${VIRTUAL_ENV:-}" ]; then
     echo "[!!] A Python virtualenv is active: VIRTUAL_ENV=${VIRTUAL_ENV}"
-    echo "     It can shadow the conda env at RUN time (parasail/SW silently drop out)."
+    echo "     It can shadow the conda env at RUN time (without parasail the search stops)."
     echo "     Recommended: 'deactivate' this venv before installing and before running SynVoy."
     echo ""
 fi
@@ -198,15 +198,16 @@ else
 fi
 
 echo ""
-echo "To get started:"
+echo "Next steps (run from this folder; the launcher activates ${ENV_NAME} itself):"
 echo ""
-echo "  conda activate ${ENV_NAME}"
+echo "  ./run_synvoy.sh --check-only"
 echo ""
-echo "  # Easy Mode (auto-fetch genomes):"
-echo "  nextflow run main.nf --mode easy --query_id Q16553 --max_genomes 5 --outdir results -profile standard"
+echo "  # Easy Mode: SynVoy downloads the genomes (honeybee melittin, see docs/QUICKSTART.md)"
+echo "  ./run_synvoy.sh --mode easy --query_id P01501 --max_genomes 5 --outdir results/quickstart_melittin"
 echo ""
-echo "  # Pro Mode (local files):"
-echo "  nextflow run main.nf --mode pro --query query.faa --home_genome genome.fna --target_genomes 'targets/*.fna' --outdir results -profile standard"
+echo "  # Pro Mode: your own files"
+echo "  ./run_synvoy.sh --mode pro --query gene.faa --home_species \"Genus species\" \\"
+echo "      --home_genome reference.fna --home_gff reference.gff --target_genomes genomes/ --outdir results/my_run"
 echo ""
-echo "  # See USAGE.md for the full parameter reference."
+echo "  First run: docs/QUICKSTART.md   Options: docs/USAGE.md   Every parameter: docs/PARAMETERS.md"
 echo ""

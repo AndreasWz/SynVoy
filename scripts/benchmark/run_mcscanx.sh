@@ -29,7 +29,7 @@
 
 set -uo pipefail
 
-REPO="${REPO:-/home/faw/dev/projects/SynVoy}"
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"   # the SynVoy checkout this script is in
 PROTEOMES_DIR="${PROTEOMES_DIR:-${REPO}/local_data/benchmark/proteomes}"
 GENOMES_DIR="${GENOMES_DIR:-${REPO}/local_data/benchmark/genomes}"
 EXISTING_DIR="${EXISTING_DIR:-${REPO}/local_data/ground_truth/melettin/targets}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compare what the figures show by the candidate regions with the choice by the label's own
-scoring that the figures make with block tables (plot selection, steps 2-3, 2026-10-19/21).
+scoring that the figures make with block tables (--plot_block_selection, docs/PARAMETERS.md).
 Read-only: it changes nothing in the pipeline and writes one table.
 
     scripts/compare_plot_selection.py <run dir> [--max_regions 6] [--out <tsv>]

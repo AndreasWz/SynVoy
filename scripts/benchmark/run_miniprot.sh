@@ -17,15 +17,15 @@ MIN_IDENTITY="${MIN_IDENTITY:-0.20}"  # 20% identity, fraction (miniprot uses fr
 mkdir -p "${OUTDIR}/work"
 WORK="${OUTDIR}/work"
 
-# Try both env locations: synvoy_env (where SynVoy uses miniprot) and synvoy_benchmark
+# miniprot from $MINIPROT, else from the PATH (synvoy_env has it; synvoy_benchmark only after
+# the install the error below names)
 MINIPROT="${MINIPROT:-}"
 if [[ -z "${MINIPROT}" ]]; then
     if command -v miniprot >/dev/null 2>&1; then
         MINIPROT=$(command -v miniprot)
-    elif [[ -x /home/faw/miniforge3/envs/synvoy_env/bin/miniprot ]]; then
-        MINIPROT=/home/faw/miniforge3/envs/synvoy_env/bin/miniprot
     else
-        echo "ERROR: miniprot not found. Install: mamba install -n synvoy_benchmark -c bioconda miniprot" >&2
+        echo "ERROR: miniprot not found on the PATH. Activate synvoy_env, or set MINIPROT=/path/to/miniprot," >&2
+        echo "       or install it: mamba install -n synvoy_benchmark -c bioconda miniprot" >&2
         exit 1
     fi
 fi

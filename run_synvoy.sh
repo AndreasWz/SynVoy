@@ -2,28 +2,29 @@
 # =============================================================================
 #  run_synvoy.sh — the one safe way to launch SynVoy
 # =============================================================================
-#  Designed for non-expert users (the Bachelor cohort) and weak laptops. It:
+#  Designed for non-expert users and weak laptops. It:
 #    1. prints the exact SynVoy version you are about to run (no more guessing);
-#    2. REFUSES to run a dangerously old checkout (the stale-code → 49-locus
-#       runaway → OOM that has been crashing everyone);
+#    2. warns loudly, and waits 5 s, before running a dangerously old checkout
+#       (one without the multi-locus cap, on which a gene-family query can fan
+#       out to dozens of loci and run out of memory);
 #    3. runs a pre-flight check of every tool + Python package and FAILS CLEARLY
 #       with the one command to fix it (it never silently rebuilds your env);
 #    4. launches Nextflow with a memory-safe profile by default (auto,low_mem).
 #
 #  Usage (easy mode, auto-fetch genomes — the common case):
-#     ./run_synvoy.sh --mode easy --query_id Q16553 --max_genomes 5 \
+#     ./run_synvoy.sh --mode easy --query_id P01501 --max_genomes 5 \
 #                     --outdir results/my_run
 #
 #  Pro mode (local files):
-#     ./run_synvoy.sh --mode pro --query q.faa --home_genome g.fna \
-#                     --home_gff g.gff --target_genomes 'targets/*.fna' \
-#                     --outdir results/my_run
+#     ./run_synvoy.sh --mode pro --query gene.faa --home_species "Genus species" \
+#                     --home_genome reference.fna --home_gff reference.gff \
+#                     --target_genomes genomes/ --outdir results/my_run
 #
 #  Just check my setup, don't run anything:
 #     ./run_synvoy.sh --check-only
 #
 #  Override the profile (e.g. a beefy workstation):
-#     ./run_synvoy.sh -profile standard --mode easy --query_id Q16553 ...
+#     ./run_synvoy.sh -profile standard --mode easy --query_id P01501 ...
 #
 #  Everything after the script name is passed straight through to
 #  `nextflow run main.nf`, so any normal SynVoy flag works.
@@ -149,12 +150,12 @@ if [ -n "$ABSENT" ]; then
 fi
 
 # 4d. Virtualenv-shadow trap (the parasail killer). A `.venv` active on PATH shadows the
-# conda env that Nextflow's tasks inherit; its python lacks parasail, which SILENTLY disabled
-# Smith-Waterman (load-bearing for divergent GOI recovery) and crashed the §1m panel — for a
-# full run before anyone noticed. Now the pipeline fails loud on that, but catch it here in 1s.
+# conda env that Nextflow's tasks inherit; its python lacks parasail, which every search
+# needs (Smith-Waterman, and the bit score and specificity of each call's label). The
+# search stops at its start without it; catch it here in 1 s instead.
 if [ -n "${VIRTUAL_ENV:-}" ]; then
     warn "a Python virtualenv is active: ${BOLD}VIRTUAL_ENV=${VIRTUAL_ENV}${RST}"
-    warn "  it can shadow the conda env in Nextflow tasks (parasail/Smith-Waterman drop out)."
+    warn "  it can shadow the conda env in Nextflow tasks (without parasail the search stops)."
     warn "  recommended: run ${BOLD}deactivate${RST} first, then re-run this launcher."
 fi
 # Functional probe: can the python Nextflow tasks will most likely inherit import parasail?

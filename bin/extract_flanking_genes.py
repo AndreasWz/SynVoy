@@ -472,7 +472,7 @@ def main():
     parser.add_argument("--home_hits", action="append", default=[],
                         help="Raw hit table of the query's home search (12 columns); repeat for "
                              "several. Relatives with hits raise the walk's limit per side "
-                             "(batch HG-4); without them R = 0")
+                             "(docs/ALGORITHM.md 5.7); without them R = 0")
     parser.add_argument("--max_evalue", type=float, default=0.01,
                         help="E-value limit for the hits of --home_hits (the pipeline passes "
                              "search_evalue; default 0.01)")

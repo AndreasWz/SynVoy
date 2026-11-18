@@ -139,7 +139,8 @@ def test_an_older_run_is_drawn_from_a_renamed_copy(tmp_path):
     assert ribbons == 5                              # 4 flanking genes + the GOI: needs the keys
     redrawn = (out / "REDRAWN.txt").read_text()
     assert "only the drawing is new" in redrawn
-    assert f"Labels from code before the label rework of 2026-10-15, not today's labels: {LOCUS}\n" in redrawn
+    assert (f"Labels from SynVoy code before 2026-10-15 (an earlier label rule), not this version's "
+            f"labels: {LOCUS}\n") in redrawn
     assert f"Older run format, drawn from a renamed copy: {LOCUS}\n" in redrawn
     assert f"Rows ordered by the GOI gene tree, not the species tree: {LOCUS}\n" in redrawn
     assert "Loci: 1, failed: 0" in redrawn
@@ -164,12 +165,12 @@ def test_a_run_in_todays_format_is_drawn_from_the_run_itself(tmp_path):
     run = _current_run(tmp_path / "run")
     proc = _redraw(REPLOT_RUN, run)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "older run format" not in proc.stdout and "label rework" not in proc.stdout
+    assert "older run format" not in proc.stdout and "earlier label rule" not in proc.stdout
     (out,) = run.glob("figures_redrawn_*")
     rows, ribbons = _figures(out)
     assert _goi_states(rows) == ["placed"] and ribbons == 5
     redrawn = (out / "REDRAWN.txt").read_text()
-    assert "Older run format" not in redrawn and "label rework" not in redrawn
+    assert "Older run format" not in redrawn and "earlier label rule" not in redrawn
 
 
 def test_a_failed_locus_fails_the_run_and_the_others_are_drawn(tmp_path):

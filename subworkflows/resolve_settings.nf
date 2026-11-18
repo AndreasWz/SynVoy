@@ -44,7 +44,7 @@ workflow RESOLVE_SETTINGS {
         .map { f ->
             def parsed = new groovy.json.JsonSlurper().parse(f)
             // Surface the chosen preset and modules in the console banner for auditability.
-            log.info "[INFO] §1f preset applied: ${parsed.preset_applied ?: 'none'} (${parsed.apply_reason})"
+            log.info "[INFO] preset applied: ${parsed.preset_applied ?: 'none'} (${parsed.apply_reason})"
             def fmt = { list -> list ? list.collect { m -> "${m.id} ${m.name} (${m.reason})" }.join(', ') : 'none' }
             def shown = parsed.modules_mode == 'legacy' ? 'triggers firing (recorded only)' : 'applied'
             def mods = parsed.modules_mode == 'legacy' ? parsed.modules_would_fire : parsed.modules_applied

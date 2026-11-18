@@ -139,7 +139,7 @@ for dir in "${inputs[@]}"; do
         echo "[$locus] older run format: drawing from a renamed copy"
         older="$older $locus"
     fi
-    # Labels from before the label rework of 2026-10-15 carry no Basis= (the judge's field).
+    # Labels made by SynVoy code before 2026-10-15 carry no Basis= (the judge's field).
     targets=("$dir"/*.fna.gff "$dir"/*.fa.gff "$dir"/*.fasta.gff "$dir"/*.fna.gz.gff "$dir"/*.fa.gz.gff "$dir"/*.fasta.gz.gff)
     old=0
     if grep -qs -m1 'Role=goi' "${targets[@]}" && ! grep -qs -m1 'Basis=' "${targets[@]}"; then
@@ -184,7 +184,7 @@ fi
     echo "plot_inputs_* folders; only the drawing is new."
     if [ -n "$species" ]; then echo "Home species: $species ($species_from)"
     else echo "Home species: none (the home row reads \"Home genome\")"; fi
-    [ -n "$old_labels" ] && echo "Labels from code before the label rework of 2026-10-15, not today's labels:$old_labels"
+    [ -n "$old_labels" ] && echo "Labels from SynVoy code before 2026-10-15 (an earlier label rule), not this version's labels:$old_labels"
     [ -n "$older" ] && echo "Older run format, drawn from a renamed copy:$older"
     [ -n "$gene_tree" ] && echo "Rows ordered by the GOI gene tree, not the species tree:$gene_tree"
     echo "Loci: ${#inputs[@]}, failed: $failed"

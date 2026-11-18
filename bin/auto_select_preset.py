@@ -90,7 +90,9 @@ def select_preset(profile, *, short_peptide_max=100, tandem_max_strong=5,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Auto-select a query-type preset from hit_profile.json (TODO §1f)")
+    ap = argparse.ArgumentParser(description="Choose a query-type preset from hit_profile.json "
+                                             "(applied under --modules legacy, recorded otherwise; "
+                                             "docs/ALGORITHM.md 5.3)")
     ap.add_argument("--hit_profile", required=True, help="hit_profile.json from profile_hits.py")
     ap.add_argument("--output", help="Optional JSON with the decision")
     ap.add_argument("--preset_override", default=None,
