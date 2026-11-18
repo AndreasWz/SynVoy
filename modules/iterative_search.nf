@@ -104,7 +104,6 @@ process ITERATIVE_SEARCH {
         --goi_first_exon_guard ${params.goi_first_exon_guard} \\
         --goi_join_leftover_hits ${params.goi_join_leftover_hits} \\
         --goi_genome_wide_path ${params.goi_genome_wide_path} \\
-        --goi_genome_wide_without_blocks ${params.goi_genome_wide_without_blocks} \\
         --goi_max_models_per_locus ${settings.goi_max_models_per_locus} \\
         --goi_miniprot_timeout ${params.goi_miniprot_timeout} \\
         --flanking_miniprot_timeout ${params.flanking_miniprot_timeout} \\

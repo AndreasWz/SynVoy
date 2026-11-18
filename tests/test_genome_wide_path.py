@@ -1,7 +1,7 @@
-"""The genome-wide path for strong GOI hits outside every searched window (FINAL step 5, batch
-of 2026-10-15; --goi_genome_wide_path, off by default): places of GOI hits outside the windows,
-modelled when significant over the genome (E <= 1e-3) and specific, at most the home family
-size + 1 per GOI and genome, best E first; windows judged in the genome place. All synthetic."""
+"""The genome-wide path (FINAL step 5; --goi_genome_wide_path): places of GOI
+hits outside every searched GOI zone and every written row, tried when the judge's HIGH terms
+hold in the genome place, best first per home GOI; windows clipped at the zones and judged in the
+genome place. The answer rules are in test_genome_wide_answer.py. All synthetic."""
 import os
 import sys
 import types
@@ -17,17 +17,42 @@ def _hit(q, chrom, s, e, strand="+", pident=30.0):
             "qstart": 1, "qend": (e - s) // 3, "evalue": 1e-5, "bits": 40.0}
 
 
-def test_places_are_the_goi_hits_outside_every_window():
+def test_places_are_the_goi_hits_outside_every_goi_zone_and_every_row():
     hits = [_hit("GOI_q", "c1", 1000, 1300), _hit("GOI_q|exon_2", "c1", 4000, 4300),   # one place
             _hit("GOI_q", "c1", 90000, 90300),                                         # a second
             _hit("GOI_q|Sp_fna_b0_l1_exon_ann", "c2", 500, 800),                        # a model hit
-            _hit("GOI_q", "c1", 200000, 200300),                                       # in a window
+            _hit("GOI_q", "c1", 200000, 200300),                                       # in a GOI zone
             _hit("gene-FLANK", "c1", 5000, 5300),                                      # flanking
-            _hit("GOI_q~rev", "c3", 100, 400)]                                         # a decoy
-    places = isr.genome_wide_places(hits, [("c1", 150000, 250000)], {"GOI_q"}, max_gap=10000)
+            _hit("GOI_q~rev", "c3", 100, 400),                                         # a decoy
+            _hit("GOI_q", "c4", 7000, 7300)]                                           # under a row
+    places = isr.genome_wide_places(hits, [("c1", 150000, 250000)], {"GOI_q"}, max_gap=10000,
+                                    records=[("c4", 6900, 8000)])
     assert [(p["chrom"], p["start"], p["end"], p["hits"]) for p in places] == \
         [("c1", 1000, 4300, 2), ("c1", 90000, 90300, 1), ("c2", 500, 800, 1)]
     assert {p["parent"] for p in places} == {"GOI_q"}
+
+
+def test_a_hit_between_a_goi_zone_and_the_window_edge_is_a_place():
+    """Bug list item 4: the window is searched over block +- 7 gene steps, the GOI zone is block +-
+    2; a hit between the two was skipped as "inside a window" and is a place now."""
+    zone, window = ("c1", 20000, 30000), ("c1", 5000, 45000)
+    hits = [_hit("GOI_q", "c1", 38000, 38600)]
+    assert isr.genome_wide_places(hits, [window], {"GOI_q"}, max_gap=10000) == []
+    places = isr.genome_wide_places(hits, [zone], {"GOI_q"}, max_gap=10000)
+    assert [(p["start"], p["end"]) for p in places] == [(38000, 38600)]
+
+
+def test_no_place_spans_a_goi_zone():
+    """Two hits on either side of a narrow GOI zone, closer than max_gap, are two places: a place
+    across the zone had a window that held the block's zone (searched again in the genome place)."""
+    hits = [_hit("GOI_q", "c1", 99000, 99300), _hit("GOI_q", "c1", 146000, 146300)]
+    places = isr.genome_wide_places(hits, [("c1", 100000, 145000)], {"GOI_q"}, max_gap=50000)
+    assert [(p["start"], p["end"]) for p in places] == [(99000, 99300), (146000, 146300)]
+    for p in places:
+        lo, hi = isr.genome_wide_window(p, 48000, 1_000_000, [("c1", 100000, 145000)])
+        assert not isr.overlaps_any("c1", lo, hi, [("c1", 100000, 145000)])
+    joined = isr.genome_wide_places(hits, [], {"GOI_q"}, max_gap=50000)
+    assert [(p["start"], p["end"], p["hits"]) for p in joined] == [(99000, 146300, 2)]
 
 
 def test_hits_of_another_gene_need_their_own_home_parent():
@@ -37,67 +62,14 @@ def test_hits_of_another_gene_need_their_own_home_parent():
     assert [(p["parent"], p["start"]) for p in two] == [("GOI_a", 5000)]       # copy: no parent
 
 
-def _place(parent, chrom, start, e, specific=True):
-    return {"parent": parent, "chrom": chrom, "start": start, "end": start + 300, "evalue": e,
-            "specific": specific}
-
-
-def test_choice_significant_specific_best_e_first_up_to_the_cap():
-    places = [_place("GOI_q", "c1", 100, 2e-10), _place("GOI_q", "c2", 50, 1e-5),
-              _place("GOI_q", "c1", 900, 1e-5), _place("GOI_q", "c3", 0, 0.5),
-              _place("GOI_q", "c4", 0, 1e-20, specific=False)]
-    kept = isr.choose_genome_wide_places(places, lambda parent: 2)
-    assert [(p["chrom"], p["start"]) for p in kept] == [("c1", 100), ("c1", 900)]   # tie: position
-    assert [p["decision"] for p in places] == ["modelled", "cut_by_cap", "modelled",
-                                               "not_significant", "not_specific"]
-    assert [p["rank"] for p in places] == [1, 3, 2, "", ""] and [p["cap"] for p in places] == [2, 2, 2, "", ""]
-    asked = []
-    isr.choose_genome_wide_places([_place("GOI_q", "c1", 0, 0.5)], lambda parent: asked.append(parent) or 1)
-    assert asked == []                                                  # no eligible place: no count
-
-
-def test_the_cap_is_per_home_gene():
-    places = [_place("GOI_a", "c1", 0, 1e-9), _place("GOI_a", "c2", 0, 1e-8), _place("GOI_b", "c3", 0, 1e-7)]
-    kept = isr.choose_genome_wide_places(places, lambda parent: 1)
-    assert [(p["parent"], p["chrom"]) for p in kept] == [("GOI_a", "c1"), ("GOI_b", "c3")]
-
-
-def test_the_window_stays_outside_every_other_window():
+def test_the_window_stays_outside_every_goi_zone():
     place = {"chrom": "c1", "start": 10000, "end": 11000}
     assert isr.genome_wide_window(place, 5000, 100000, []) == (5000, 16000)
     assert isr.genome_wide_window(place, 5000, 12000, []) == (5000, 12000)               # chromosome end
-    wins = [("c1", 0, 8000), ("c1", 13000, 20000), ("c2", 0, 100000)]
-    assert isr.genome_wide_window(place, 5000, 100000, wins) == (8000, 13000)
-
-
-class FakeProteome:
-    def __init__(self, scores, family, own="gene-q"):
-        self._scores, self._family, self._own = scores, family, own
-        self.records = [(rid, "M" * length) for rid, length in
-                        {"gene-q": 100, "gene-a": 100, "gene-b": 100, "gene-c": 100}.items()]
-        self.tested = []
-
-    def own_gene(self, q_id, q_seq, gene_id=None):
-        return gene_id or self._own
-
-    def scores(self, seq):
-        return self._scores
-
-    def family_evalue(self, q_id, q_seq, p_id):
-        self.tested.append(p_id)
-        return self._family[p_id]
-
-
-def test_home_family_size_tests_only_what_the_prefilter_lets_through():
-    isr._FAMILY_SIZE_CACHE.clear()
-    # raw SW scores: q itself, two relatives, one chance protein (KA E > 0.1 for 100 x 100)
-    proteome = FakeProteome([(900.0, "gene-q"), (120.0, "gene-a"), (80.0, "gene-b"), (30.0, "gene-c")],
-                            {"gene-q": 1e-90, "gene-a": 1e-20, "gene-b": 0.05, "gene-c": 1e-9})
-    assert isr.home_family_size(proteome, "GOI_q", "M" * 100) == 1
-    assert proteome.tested == ["gene-a", "gene-b"]                       # q and gene-c not tested
-    proteome.tested.clear()
-    assert isr.home_family_size(proteome, "GOI_q", "M" * 100, "gene-a") == 1   # own gene by id
-    assert proteome.tested == ["gene-q", "gene-b"]
+    zones = [("c1", 0, 8000), ("c1", 13000, 20000), ("c2", 0, 100000)]
+    assert isr.genome_wide_window(place, 5000, 100000, zones) == (8000, 13000)
+    lo, hi = isr.genome_wide_window(place, 5000, 100000, [("c1", 10500, 30000)])   # a later zone on it
+    assert hi <= lo
 
 
 def test_genome_wide_windows_are_no_blocks():
@@ -116,19 +88,22 @@ def test_hit_pieces_are_split_at_stops_on_both_strands():
     assert isr._hit_pieces({"c": rc}, {"chrom": "c", "start": 0, "end": 24, "strand": "-"}) == ["AAAAA"]
 
 
-def test_the_pass_needs_a_significant_block_and_the_home_proteome(monkeypatch):
-    args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 0.5}}, home_goi_ids={"GOI_q"})
-    assert isr.genome_wide_goi_pass(args, [], {}, {}, "g", "u", 1, None, "", 5000) == ([], [])
-    args.genome_ctx["block_esyn"][1] = 1e-4
-    monkeypatch.setattr(isr, "_home_proteome", lambda a: (None, None))
-    assert isr.genome_wide_goi_pass(args, [], {}, {}, "g", "u", 1, None, "", 5000) == ([], [])
-
-
-def test_no_place_outside_the_windows_is_said_and_tabled(monkeypatch, tmp_path, caplog):
-    """Fix item 6: with every GOI hit inside a searched window the pass returned without a word and
-    without its table; now it logs the zero like its other ends and writes the header-only table."""
+def test_the_pass_needs_the_home_proteome(monkeypatch, caplog):
+    """A significant block is not needed any more (the genome place does not depend on the
+    blocks); the home proteome is: without it there is no specificity and no answer."""
     import logging
-    args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 1e-4}, "windows": [("c1", 0, 1000)]},
+    args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 0.5}}, home_goi_ids={"GOI_q"})
+    monkeypatch.setattr(isr, "_home_proteome", lambda a: (None, None))
+    with caplog.at_level(logging.INFO, logger=isr.logger.name):
+        assert isr.genome_wide_goi_pass(args, [], {}, {}, "g", "u", 1, None, "", 5000) == ([], [])
+    assert "no home proteome" in caplog.text and "not run" in caplog.text
+
+
+def test_no_place_outside_the_goi_zones_is_said_and_tabled(monkeypatch, tmp_path, caplog):
+    """Fix item 6: with every GOI hit inside a searched GOI zone the pass says so and writes the
+    header-only table (a pass without a significant block runs as well)."""
+    import logging
+    args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 0.5}, "goi_cores": [("c1", 0, 1000)]},
                                  home_goi_ids={"GOI_q"}, gap_search_window=500, max_intron=1000,
                                  goi_home_span=0, expansion=1.0, output_dir=str(tmp_path))
     monkeypatch.setattr(isr, "_home_proteome", lambda a: (object(), None))
@@ -136,18 +111,33 @@ def test_no_place_outside_the_windows_is_said_and_tabled(monkeypatch, tmp_path, 
         out = isr.genome_wide_goi_pass(args, [_hit("GOI_q", "c1", 100, 400)], {}, {}, "g", "u", 1,
                                        None, "", 5000)
     assert out == ([], [])
-    assert "[g] genome-wide path: 0 place(s) outside every window" in caplog.text
+    assert "[g] genome-wide path: 0 place(s) outside every searched GOI zone" in caplog.text
     table = tmp_path / "hits" / "g.genome_wide.tsv"
     assert table.read_text().splitlines() == ["\t".join(isr.GENOME_WIDE_COLUMNS)]
 
 
-def test_the_report_lists_the_places_and_warns_only_when_one_was_modelled(tmp_path):
+def test_the_report_lists_the_places_and_the_decoy_places_apart(tmp_path):
     path = tmp_path / "locus_1_G.fna.genome_wide.tsv"
-    path.write_text("\t".join(isr.GENOME_WIDE_COLUMNS) + "\n"
-                    + "G.fna\tGOI_q\tc1\t100\t400\t2\t27.5\t2e-10\t60.1\tgene-p\t17.0\t1\t1\t1\t2\tmodelled\n"
-                    + "G.fna\tGOI_q\tc2\t100\t400\t1\t40.0\t1e-05\t50.0\tgene-p\t12.0\t1\t1\t3\t2\tcut_by_cap\n")
+    rows = [dict(genome="G.fna", parent="GOI_q", chrom="c1", start=100, end=400, hits=2,
+                 best_hit_identity=87.5, evalue_genome="2e-80", bits="260.1", coverage="0.910",
+                 retrocopy_hits="0", best_other="gene-p", margin="47.0", real_competitor=1, specific=1,
+                 rank=1, decision="modelled", block=5003, model_decision="answer", near_block="",
+                 significant_blocks=0, median_flank_identity="71.2"),
+            dict(genome="G.fna", parent="GOI_q", chrom="c2", start=100, end=400, hits=1,
+                 best_hit_identity=40.0, evalue_genome="1e-05", coverage="0.400", decision="evalue",
+                 significant_blocks=0, median_flank_identity="71.2"),
+            dict(genome="G.fna", parent="GOI_q", decoy="rev", chrom="c3", start=10, end=90, hits=1,
+                 best_hit_identity=30.0, evalue_genome="0.3", coverage="0.100", decision="evalue",
+                 significant_blocks=0, median_flank_identity="71.2")]
+    with open(path, "w") as fh:
+        fh.write("\t".join(isr.GENOME_WIDE_COLUMNS) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(r.get(c, "")) for c in isr.GENOME_WIDE_COLUMNS) + "\n")
     records = gr.collect_genome_wide_places([str(path)])
     block = gr.summarize_genome_wide_places(records)
-    assert block["total"] == 2 and block["by_decision"] == {"modelled": 1, "cut_by_cap": 1}
-    assert [r["evalue_genome"] for r in block["places"]] == ["2e-10", "1e-05"]
-    assert "no decoy calibration" in block["note"]
+    assert block["total"] == 2 and block["by_decision"] == {"modelled": 1, "evalue": 1}
+    assert block["by_model_decision"] == {"answer": 1}
+    assert [r["evalue_genome"] for r in block["places"]] == ["2e-80", "1e-05"]
+    assert block["places"][0]["coverage"] == "0.910" and block["places"][0]["block"] == "5003"
+    assert block["decoy_places"]["total"] == 1 and block["decoy_places"]["places"][0]["decoy"] == "rev"
+    assert "decoy_mode" in block["note"]

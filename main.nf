@@ -220,7 +220,9 @@ def homeLocusMode() {
 //              longer do in that form;
 //   no effect  the run goes on with a warning: the parameter changed nothing when it was removed;
 //   off only   a switch whose removal keeps what it did when off: set to true the run stops
-//              (the reason is said), set to false (its old default) it goes on with a warning.
+//              (the reason is said), set to false (its old default) it goes on with a warning;
+//   on only    a switch whose removal keeps what it did when on: set to false (its old
+//              default) the run stops (the reason is said), set to true it goes on with a warning.
 def removedParams() {
     def advisor = "the LLM parameter advisor was removed on 2026-10-22: on the Nextflow versions SynVoy runs on (25.10 and later) it only printed suggested flags and applied none, and the settings that depend on the gene come from the preset modules (--modules)"
     return [
@@ -266,6 +268,10 @@ def removedParams() {
         // Said in the stop of an offOnly switch that is set to true.
         offOnly: [
             goi_chain_query_aware: "removed on 2026-11-10: switched on, its hit chain refused a continuation of the query in the same reading frame 24 bp on and so undid a gain on the curated truth (two hits of one stop-free frame read as one piece, 2026-11-02); every run chains the hits as it did when the switch was off, so remove it",
+        ],
+        // Said in the stop of an onOnly switch that is set to false.
+        onOnly: [
+            goi_genome_wide_without_blocks: "removed on 2026-11-16: the genome-wide path now runs in every searched genome, with or without a significant block (the genome place does not depend on the blocks), and its retrocopy test is always on; to search no genome-wide places use --goi_genome_wide_path false",
         ],
     ]
 }
@@ -446,6 +452,15 @@ def validateNumericParams(validationErrors, validationWarnings) {
                 validationErrors << "--${name} no longer exists: ${reason}."
             } else {
                 validationWarnings << "--${name} no longer exists. Set to false, its old default, it changes nothing; remove it from the command line or config."
+            }
+        }
+    }
+    removed.onOnly.each { name, reason ->
+        if (params.containsKey(name)) {
+            if (params[name].toString().trim().toBoolean()) {
+                validationWarnings << "--${name} no longer exists. Set to true, it changes nothing: it is always so now; remove it from the command line or config."
+            } else {
+                validationErrors << "--${name} no longer exists: ${reason}."
             }
         }
     }

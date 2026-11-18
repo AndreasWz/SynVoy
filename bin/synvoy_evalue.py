@@ -218,14 +218,29 @@ def blastp_evalue(query: str, subjects: Sequence[str], searchsp: int) -> Tuple[f
     -comp_based_stats 2 -seg no -word_size 2 -threshold 11 and an explicit -searchsp,
     read from blastp's JSON output (tabular output prints E with 3 decimals between 0.001
     and 0.1: 0.00146 reads as 0.001). (inf, 0.0) when nothing aligns; a missing blastp, a
-    nonzero exit, an empty or unparsable output also give (inf, 0.0), each with a warning."""
+    nonzero exit, an empty or unparsable output also give (inf, 0.0), each with a warning.
+    The smallest of blastp_hsps, by E and then bits."""
+    best = (float("inf"), 0.0)
+    for e, b, _qfrom, _qto, _subject in blastp_hsps(query, subjects, searchsp):
+        if (e, -b) < (best[0], -best[1]):
+            best = (e, b)
+    return best
+
+
+def blastp_hsps(query: str, subjects: Sequence[str], searchsp: int) -> List[Tuple[float, float, int, int, int]]:
+    """Every HSP of the query against the subjects, as (E, bits, query_from, query_to, subject),
+    ``subject`` the index of the subject among the non-empty ``subjects``, in blastp's order; the
+    run of blastp_evalue (the same command and numbers). [] when nothing aligns; a missing
+    blastp, a nonzero exit, an empty or unparsable output also give [], each with a warning
+    (counted in BLASTP_FAILURES)."""
     blastp = _blastp()
     subjects = [s for s in subjects if s]
     if not query or not subjects:
-        return float("inf"), 0.0
+        return []
     if not blastp:
-        return _blastp_failed("blastp not found")
-    best = (float("inf"), 0.0)
+        _blastp_failed("blastp not found")
+        return []
+    hsps: List[Tuple[float, float, int, int, int]] = []
     with tempfile.TemporaryDirectory(prefix="synvoy_eeff_") as tmp:
         qf = os.path.join(tmp, "q.faa")
         with open(qf, "w") as fh:
@@ -239,22 +254,28 @@ def blastp_evalue(query: str, subjects: Sequence[str], searchsp: int) -> Tuple[f
                                "-searchsp", str(int(searchsp)), "-outfmt", "15"],
                               capture_output=True, text=True, check=False)
         if proc.returncode != 0:
-            return _blastp_failed(f"exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+            _blastp_failed(f"exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+            return []
         if not proc.stdout.strip():
-            return _blastp_failed("no output")
+            _blastp_failed("no output")
+            return []
         try:
             data = json.loads(proc.stdout)
         except ValueError:
-            return _blastp_failed("unparsable JSON output")
+            _blastp_failed("unparsable JSON output")
+            return []
         for rep in data.get("BlastOutput2", []):
             results = rep.get("report", {}).get("results", {})
-            for search in results.get("bl2seq", []) or ([results["search"]] if "search" in results else []):
+            searches = results.get("bl2seq", []) or ([results["search"]] if "search" in results else [])
+            for position, search in enumerate(searches):
                 for hit in search.get("hits", []):
+                    title = str(((hit.get("description") or [{}])[0]).get("title") or "").split()
+                    index = (int(title[0][1:]) if title and title[0][:1] == "s" and title[0][1:].isdigit()
+                             else position)
                     for hsp in hit.get("hsps", []):
-                        e, b = float(hsp["evalue"]), float(hsp["bit_score"])
-                        if (e, -b) < (best[0], -best[1]):
-                            best = (e, b)
-    return best
+                        hsps.append((float(hsp["evalue"]), float(hsp["bit_score"]),
+                                     int(hsp.get("query_from", 0)), int(hsp.get("query_to", 0)), index))
+    return hsps
 
 
 # ------------------------------------------------------------------ tblastn at full precision

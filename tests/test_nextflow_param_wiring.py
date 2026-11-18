@@ -364,7 +364,7 @@ def test_the_two_options_of_2026_11_10_are_removed():
     main_nf = (ROOT / "main.nf").read_text()
     block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
     no_effect = set(re.findall(r"'([a-z_]+)'", block.split("noEffect:")[1].split("noEffectNote:")[0]))
-    off_only = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("offOnly:")[1], re.M))
+    off_only = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("offOnly:")[1].split("onOnly:")[0], re.M))
     assert "phylo_placement_promote" in no_effect
     assert "phylo_placement_promote:" in block.split("noEffectNote:")[1].split("offOnly:")[0]
     assert off_only == {"goi_chain_query_aware"}
@@ -373,6 +373,24 @@ def test_the_two_options_of_2026_11_10_are_removed():
             + sorted((ROOT / "bin").glob("*.py")) + sorted((ROOT / "lib").glob("*.groovy")):
         text = path.read_text()
         assert "phylo_placement_promote" not in text and "goi_chain_query_aware" not in text, path.name
+
+
+def test_the_genome_wide_switch_without_blocks_is_removed():
+    """goi_genome_wide_without_blocks (2026-11-16): the genome-wide path runs in every searched
+    genome and its retrocopy test is always on, so the switch's ON behaviour is the only one
+    (onOnly: false stops, true warns). It is declared nowhere, passed by no module and read by no
+    script; the module still passes goi_genome_wide_path."""
+    main_nf = (ROOT / "main.nf").read_text()
+    block = re.search(r"def removedParams\(\) \{(.*?)\n\}", main_nf, re.S).group(1)
+    on_only = set(re.findall(r"^\s+([a-z_]+)\s*:\s*\"", block.split("onOnly:")[1], re.M))
+    assert on_only == {"goi_genome_wide_without_blocks"}
+    assert "removed.onOnly.each" in main_nf
+    assert "goi_genome_wide_without_blocks" not in set(_declared_params())
+    for path in sorted((ROOT / "modules").glob("*.nf")) + sorted((ROOT / "subworkflows").glob("*.nf")) \
+            + sorted((ROOT / "bin").glob("*.py")) + sorted((ROOT / "lib").glob("*.groovy")) \
+            + sorted((ROOT / "conf").rglob("*.config")) + [CONFIG]:
+        assert "goi_genome_wide_without_blocks" not in path.read_text(), path.name
+    assert "--goi_genome_wide_path ${params.goi_genome_wide_path}" in (ROOT / "modules" / "iterative_search.nf").read_text()
 
 
 def test_removed_label_parameters_are_classified_as_the_handover_asks():

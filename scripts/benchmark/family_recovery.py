@@ -686,7 +686,9 @@ def load_report_records(run_dir):
     """goi_dedup.records from synvoy_report.json -- the ADJUDICATED calls.
 
     These carry the post-ownership / post-coverage-demotion labels and include rescue
-    models, which older runs did not publish. Empty when the report is absent.
+    models, which older runs did not publish. An answer of the genome-wide path (a strong hit
+    without synteny, the record field genome_wide_strong_hit) is a reading of its own, never a
+    final call. Empty when the report is absent.
     """
     path = os.path.join(run_dir, "synvoy_report.json") if os.path.isdir(run_dir) else ""
     if not path or not os.path.isfile(path):
@@ -711,7 +713,9 @@ def load_report_records(run_dir):
             # to), else the home loci whose search produced it.
             "home_loci": ({r["owning_locus"]} if r.get("owning_locus")
                           else set(r.get("provenance") or [])),
-            "final": conf in ("HIGH", "MEDIUM") and cls not in DEMOTED_CLASSES,
+            "final": (conf in ("HIGH", "MEDIUM") and cls not in DEMOTED_CLASSES
+                      and not r.get("genome_wide_strong_hit")),
+            "genome_wide_strong_hit": bool(r.get("genome_wide_strong_hit")),
             "phylo_verdict": r.get("phylo_verdict", ""),
             "source": "report",
         })
@@ -1031,6 +1035,7 @@ def score_run(genes, family, home_species, home_labels, addresses, gff_calls,
             continue
         cls = classify(c)[0]
         tier = c["confidence"] + ("" if c["final"] or c["confidence"] not in ("HIGH", "MEDIUM")
+                                  else "->genome_wide_strong_hit" if c.get("genome_wide_strong_hit")
                                   else f"->{c['goi_class']}")
         census["by_confidence"][tier][cls] += 1
         census["by_phylo_verdict"][c.get("phylo_verdict") or "none"][cls] += 1

@@ -1124,6 +1124,11 @@ home proteome (§7.12) and its query coverage:
 - ML scores (`--enable_plm_search`, `--enable_structural_search`) are recorded on the
   rows (`EmbeddingSimilarity`, `StructuralSimilarity`); they lift a label by one step only
   on a row the judge did not label (`_ml_relabel`).
+- **The genome-wide path** (§7.11, `goi_genome_wide_path`): a model of one of its windows is
+  an answer only when the judge labels it HIGH in the genome place
+  (`synvoy_label.genome_wide_answer`); it is then written as MEDIUM with
+  `GOIClass=genome_wide_strong_hit` (a tandem copy too) and never counted (§10). A window of
+  the path writes no other model.
 - A model also gets a status that does not depend on confidence: `fragment` below
   0.4 coverage, `complete` from 0.7 coverage with at least 2 exons (a tandem copy: one exon
   is enough), else `partial`; a rescued exon or raw hit is always `fragment`. The
@@ -1195,38 +1200,54 @@ hit in the genome only. As a measure, each refused row also gives the flanking g
 hit on its sequence (`genes_on_sequence`), and `dispersed_refused_per_piece_pass` counts the
 refused hits that counting each gene on every sequence where it has a hit would have seeded.
 
-With `goi_genome_wide_path` (off by default) a GOI hit outside every searched window is
-modelled without these gates, in a genome that has at least one block at E_syn ≤ 0.1:
+With `goi_genome_wide_path` (off by default), a GOI hit that lies outside every searched GOI
+zone and outside every model the search wrote, where no block predicted the gene, gets an answer
+of its own when it is strong: the strong hit without synteny. The step runs in every searched
+genome that has the home proteome, with or without a block, after its windows:
 
-- the GOI hits outside every window are grouped per chromosome into places (hits within
-  the larger of the model margin and the GOI's intron bound of each other);
-- a place qualifies when the home protein's blastp E against its hits (in their frames, in
-  pieces between stops) over the whole genome (`-searchsp` = |q| × genome / 3) is at most
-  1e-3, the label's MEDIUM bar, and the specificity holds in the genome place: no real
-  competitor, or a margin of at least 3.3 bits (§7.8). A place another home protein
-  explains as well is not modelled, so it never becomes "needs curation";
-- at most N places per home GOI and genome are modelled, best E first, N = the query's
-  home family members + 1: the home proteins other than the query's own gene that the
-  label's family test calls family members (blastp E ≤ 1e-3 with composition-based
-  statistics and SEG; only proteins whose Smith-Waterman score gives a Karlin-Altschul
-  E ≤ 0.1 are tested);
-- each place is searched in a window of its hits ± the model margin, outside every other
-  window, without decoys and without the flanking pass. Its candidates are judged in the
-  genome place (no multiplier), carry `GenomeWide=1`, and one that another home protein
-  explains as well is not kept.
+- the GOI hits outside every searched GOI zone (block ± the GOI margin; a window of this step is
+  a zone as a whole) and outside every written model are grouped per home GOI and sequence into
+  places: hits within the larger of the model margin and the GOI's intron bound of each other,
+  never across a zone. A hit between a GOI zone and the edge of its block's window (searched by
+  the window, not kept by the zone) is such a hit; its place is near that block (`NearBlock`);
+- a place is tried when the terms of the judge's HIGH hold for the home protein against its hits
+  (in their frames, in pieces between stops), from one blastp run in the genome place
+  (`-searchsp` = |q| × ⌊genome/3⌋): E ≤ 1e-6; the union of its HSPs with E ≤ 1 (at most one
+  chance alignment that good in the genome) covers ≥ 0.7 of the query (with
+  `core_completeness`, the larger of the query's and its core's coverage); no HSP covers an
+  exon junction of an annotated home gene of ≥ 2 exons with 10 residues on each side (the
+  target would encode both exons without an intron, as a retrocopy does); and no other home
+  protein is a real competitor within 10 bits (§7.12);
+- per home GOI the places are tried in the order E (equal below 1e-10), bits, coverage,
+  position, until one gives an answer, at most `max_blocks_per_genome` windows per genome
+  (`genome_wide_tries_cap`; the decoy pass below has a bound of its own): a window of the
+  place ± the model margin, cut at the GOI zones, searched without the flanking pass, its
+  candidates judged in the genome place (no multiplier);
+- a candidate is an answer when the judge labels it HIGH there, no CDS of it and no hit of the
+  home query inside it spans a home junction (`RetrocopyCandidate=1`), it is not frame-broken
+  without an intron (`FrameBroken=1` with every gap between its CDS rows shorter than 40 bp:
+  miniprot can split a frameshifted copy into two pieces a few bp apart), and it overlaps no
+  model written before. A window keeps its best answer and writes nothing else, so the step
+  adds no LOW row and no call that needs curation.
 
-Every place is listed in the report's `genome_wide_path` block with its E over the
-genome, its specificity terms, its rank, the cap and what became of it (`modelled`,
-`cut_by_cap`, `not_specific`, `not_significant`, `no_window`). The genome place has no
-decoy calibration: decoys are searched in block windows only.
+An answer is written as MEDIUM (no synteny supports it), `GOIClass=genome_wide_strong_hit`,
+`Basis=significant_specific`, with `GenomeWide=1`, `GenomeWideCoverage` (the place's union
+coverage), `RetrocopyCandidate=0` where the test applies, `NeighbourMedianIdentity` and, inside a
+block's searched window, `NearBlock` (that block's number). `NeighbourMedianIdentity` is the
+median identity of the flanking genes' best hits in the genome, recorded for the curator and never
+a test: it has no stated false-call rate, flanking genes are the conserved anchors and so do not
+measure how far the GOI has diverged, and it is missing in the genomes without flanking hits. An
+answer never seeds and is not in the tree (§7.12, §11); the report keeps at most one per genome,
+only where no call is counted (§10). Every place is listed in
+`hits/<locus>_<genome>.genome_wide.tsv` and in the report's `genome_wide_path` block with its
+terms and what became of it.
 
-With `goi_genome_wide_without_blocks` as well the path also runs in a genome without
-a block at E_syn ≤ 0.1, and in one where no block is found at all (the search then goes on
-with no block instead of stopping; the cross-chromosome flanking recovery is skipped there).
-With that switch, a genome-wide call carries `RetrocopyCandidate=1` when one of its CDS,
-or one hit of the home query in it, aligns 10 residues on both sides of an exon junction
-of the home gene (annotated, ≥ 2 exons): the target encodes both exons there without an
-intron, as a retrocopy does (and an ortholog that lost the intron).
+With `--decoy_mode` the genome place is calibrated too (§7.13): the reversed and shuffled home
+proteins are searched in the genome in the same MMseqs2 run as the query set, their rows leave the
+genome's hit table before anything reads it, and their places take the same steps against the GOI
+zones as they were before the real pass (the decoy pass). Decoys calibrate chance and composition,
+not a homologous non-ortholog: a paralog, a retrocopy that kept its frame or an assembly duplicate
+can still be an answer, which is one reason the answer is never counted.
 
 ### 7.12 What is added to the query set
 
@@ -1274,7 +1295,9 @@ is chosen among them. Every other HIGH or MEDIUM call is passed to the tree only
 AMBIGUOUS and LOW calls never seed. A hit chain written although the fallback gate refused
 it (`RefusalLifted`, §7.7) neither seeds nor goes to the tree, and is left out before the
 HIGH/MEDIUM pool is formed: a lifted HIGH call does not make the genome's MEDIUM calls
-tree-only. A seeded tandem copy is, by default
+tree-only. So is an answer of the genome-wide path (`GenomeWide=1`, §7.11): later waves search
+as they would without it, and a MEDIUM call of the main search in the same genome seeds by the
+rule above. A seeded tandem copy is, by default
 (`tandem_copy_parent seed`), recorded as `GOI_copy_<n>` and therefore a gene of its own in
 the following waves, judged against the seed; with `--tandem_copy_parent home` it is a
 model of the home gene and can be its relative query. Its record id ends with the query it
@@ -1328,7 +1351,8 @@ call (`copies_in_slot`, e.g. `2:3`). Both decide nothing: equal rank is not posi
 orthology (Dewey 2011), since each gain or loss in an array shifts every rank behind it.
 
 **Decoy mode** (`--decoy_mode`, off): in every window the reversed home protein and two
-shuffles of it (seeded by the query id) are searched like the home protein, modelled,
+shuffles of it (seeded by the decoy kind and the protein sequence, so a rerun repeats them and a
+renamed gene gets the same decoys) are searched like the home protein, modelled,
 labelled and judged with the same terms, and written to
 `decoys/locus_<N>/locus_<N>_<genome>.decoy.gff` and `.decoy.tsv`. Each decoy case (home
 gene × decoy kind) is chosen among its own candidates, so a call of one kind never
@@ -1345,8 +1369,12 @@ labels without a truth set. Each window is searched with three decoy queries bes
 each real query, so the window search takes several times as long. The report sums the
 decoy cases that were searched (home gene × target genome with a search window ×
 decoy kind; the home genome itself is never searched) into `decoy_rate`: per label the
-calls and the upper end of the exact 95 % interval. Decoy mode is a run-level option; no
-preset module sets it.
+calls and the upper end of the exact 95 % interval. With `goi_genome_wide_path` the decoys of
+the home protein are also searched in the whole genome and take the genome-wide path's steps
+(§7.11); their calls carry `GenomeWide=1`, are left out of these counts and are counted apart
+(`decoy_gw_cases`, `decoy_gw_answers`: a case with a decoy answer and no window decoy call of
+MEDIUM or better; `decoy_rate.genome_wide`). Decoy mode is a run-level option; no preset module
+sets it.
 
 ## 8. Region scores
 
@@ -1448,7 +1476,11 @@ The rescue models are published under `rescue/locus_<N>/` and reach the report.
 `generate_report.py` → `build_report` reads all loci and genomes once and applies, in
 this order:
 
-1. **Deduplication** (`dedupe_goi_annotations`). HIGH, MEDIUM and AMBIGUOUS calls of
+1. **Deduplication** (`dedupe_goi_records`, `dedupe_goi_annotations`). The answers of the
+   genome-wide path (`GOIClass=genome_wide_strong_hit`, §7.11) are deduplicated among
+   themselves, marked `genome_wide_strong_hit` (a field, since the class can become
+   `cross_locus_duplicate`) and listed after the other records, which are exactly as without
+   them; the steps below see both. HIGH, MEDIUM and AMBIGUOUS calls of
    one genome and scaffold are one gene when they overlap reciprocally by more than
    80 %, when one lies at least 90 % inside the other, or when two gene models on one
    strand meet only where the upstream model's last CDS row and the downstream model's
@@ -1510,16 +1542,28 @@ this order:
 4. **Coverage demotion** (`apply_coverage_demotion`). A HIGH or MEDIUM call with
    identity ≥ 50 % and a recorded coverage below 0.35 is relabelled
    `identity_coverage_decoupled`.
-5. **Gene-order-only calls** (`drop_gene_order_only`). An AMBIGUOUS call with
+5. **Strong hits without synteny** (`drop_genome_wide_strong_hits`). An answer of the
+   genome-wide path that ownership did not relabel is dropped in a genome that has a counted
+   call (HIGH or MEDIUM, not relabelled in steps 3–4, no answer), where it overlaps a HIGH,
+   MEDIUM or AMBIGUOUS record of any other source (another home locus, a rescue pass), and
+   where another answer of its genome ranks first; the dropped ones are listed in
+   `goi_dedup.genome_wide_strong_hits_dropped_records` with the reason, and the figures leave
+   them out (`apply_report_drops.py`). One relabelled `paralog_not_goi` stays a visible record
+   of that class and is no answer.
+6. **Gene-order-only calls** (`drop_gene_order_only`). An AMBIGUOUS call with
    `Basis=gene_order_only` is dropped in a genome that has a counted call (HIGH or MEDIUM,
-   not relabelled in steps 3–4); the dropped calls are listed in
-   `goi_dedup.gene_order_only_dropped_records`. It runs after steps 3–4, so a genome whose
-   only counted call is relabelled keeps its gene-order-only candidate.
-6. **Headline.** HIGH and MEDIUM calls are counted without the two relabelled classes.
-   AMBIGUOUS calls are reported as needing curation, split by `Basis`; those that
-   ownership gave to another home gene are counted apart. LOW calls are reported
+   not relabelled in steps 3–4, no answer of the genome-wide path); the dropped calls are
+   listed in `goi_dedup.gene_order_only_dropped_records`. It runs after steps 3–4, so a
+   genome whose only counted call is relabelled keeps its gene-order-only candidate.
+7. **Headline.** HIGH and MEDIUM calls are counted without the two relabelled classes and
+   without the answers of the genome-wide path. AMBIGUOUS calls are reported as needing
+   curation, split by `Basis`; those that ownership gave to another home gene are counted
+   apart. The kept answers are named apart, "strong hit(s) without synteny (not counted)",
+   and those whose place lies inside a block's window "strong hit(s) near a block, outside its
+   GOI zone (not counted)"; their genomes leave the lists of genomes without the gene
+   (`strong_hit_without_synteny`, `strong_hit_near_block`). LOW calls are reported
    separately.
-7. **Self-consistency flags**: strong synteny without a GOI (a genome, home locus and
+8. **Self-consistency flags**: strong synteny without a GOI (a genome, home locus and
    scaffold with at least 2 × `n_flanking_genes` HIGH flanking models and no HIGH GOI
    call; `strong_synteny_no_goi_min_flanking`), the same gene found from several home
    loci, and the flags of steps 2–4.
@@ -1527,7 +1571,8 @@ this order:
 ## 11. Tree
 
 `compute_tree.py` aligns the GOI proteins of the search (the home GOI, the seeds and every
-other HIGH or MEDIUM call, §7.12; no exon records or query pieces) with MAFFT (`--auto`,
+other HIGH or MEDIUM call, §7.12, but neither a lifted hit chain nor an answer of the
+genome-wide path; no exon records or query pieces) with MAFFT (`--auto`,
 the iterative refinement in one thread, `--threadit 0`, so the alignment does not depend
 on the threads) and builds a tree with IQ-TREE (model selection `-m MFP`; 1000 ultrafast
 bootstrap replicates from 4 sequences). With fewer than 3 sequences a placeholder tree

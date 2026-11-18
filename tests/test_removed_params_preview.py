@@ -6,7 +6,8 @@ pro-mode input, about 8 s per run; skipped without Nextflow on PATH (CI has none
 * ``replaced``: the old value asks for something the pipeline can no longer do, so the
   run stops and the message names what does it now;
 * ``noEffect``: the run goes on with a warning;
-* ``offOnly``: a switch set to true stops the run (the reason is said), set to false it warns.
+* ``offOnly``: a switch set to true stops the run (the reason is said), set to false it warns;
+* ``onOnly``: a switch set to false stops the run (the reason is said), set to true it warns.
 
 The parameters of the identity-based GOI label (removed 2026-10-15) are the cases.
 """
@@ -80,3 +81,23 @@ def test_the_query_aware_chain_stops_when_on_and_warns_when_off(tmp_path):
     assert code == 0, text[-2000:]
     assert ("--goi_chain_query_aware no longer exists. Set to false, its old default, it changes "
             "nothing; remove it from the command line or config.") in text
+
+
+def test_the_genome_wide_switch_without_blocks_warns_when_on_and_stops_when_off(tmp_path):
+    code, text = _preview(tmp_path, "--goi_genome_wide_without_blocks", "true")
+    assert code == 0, text[-2000:]
+    assert ("--goi_genome_wide_without_blocks no longer exists. Set to true, it changes nothing: it is "
+            "always so now; remove it from the command line or config.") in text
+    assert "All parameters validated" in text
+    code, text = _preview(tmp_path, "--goi_genome_wide_without_blocks", "false")
+    assert code != 0
+    assert ("--goi_genome_wide_without_blocks no longer exists: removed on 2026-11-16: the genome-wide "
+            "path now runs in every searched genome") in text
+    assert "use --goi_genome_wide_path false" in text
+
+
+def test_the_genome_wide_path_previews_on_and_off(tmp_path):
+    for value in ("true", "false"):
+        code, text = _preview(tmp_path, "--goi_genome_wide_path", value)
+        assert code == 0, text[-2000:]
+        assert "All parameters validated" in text

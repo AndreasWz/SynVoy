@@ -69,7 +69,7 @@ SWITCHES = frozenset({
     "exon_level_search", "enable_smith_waterman", "sw_method", "allow_missing_smith_waterman",
     "deterministic_goi_search", "tandem_copy_parent", "enable_dispersed_goi_rescue",
     "report_nonsyntenic_candidates", "disable_goi_hull_rescue", "disable_strong_synteny_rescue",
-    "disable_distant_synteny_rescue", "goi_genome_wide_path", "goi_genome_wide_without_blocks",
+    "disable_distant_synteny_rescue", "goi_genome_wide_path",
     "disable_locus_ownership", "disable_paralog_check", "require_paralog_panel",
     "rank_wave_binning", "disable_wavefront", "disable_anchor_resolution",
     "disable_relative_query", "disable_synteny_collinearity", "synteny_bridge_two_sided",

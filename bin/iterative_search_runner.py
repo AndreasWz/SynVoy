@@ -105,7 +105,7 @@ try:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
         StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
@@ -127,7 +127,7 @@ except ImportError:
         parse_gff_attributes as _parse_gff_attributes,
         str2bool,
         longest_collinear_run as _shared_longest_collinear_run,
-        sw_align, sw_align_span, sw_aligned_pairs, sw_bits, SW_K_11_1, SW_LAMBDA_11_1,
+        sw_align, sw_align_span, sw_aligned_pairs, sw_bits,
         get_genetic_code, set_genetic_code, genetic_code_flag, genetic_code_for,
         parse_genetic_code_spec, low_complexity_mask, block_index_of,
         StepFailed, run_guarded, sequence_not_in_genome, stream_fasta_lengths, fragment_of,
@@ -902,8 +902,11 @@ def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
     (``<parent>~rel``), ids ``<parent>~rev~rel`` etc. (review fix RF-3, decision of
     2026-10-15): like the real ``~rel`` candidates, their models are measured against the
     home decoy of the same kind and filed under it (rebase_relative_candidates), so each
-    decoy case calibrates both paths of the window search. Shuffles are seeded by the id,
-    so a rerun repeats them. A query that is not a home protein or its relative's query
+    decoy case calibrates both paths of the window search. Shuffles are seeded by the decoy
+    kind (``~shuf1``, ``~shuf2``, with ``~rel`` for the relative's query) and the protein
+    sequence, never by the gene's name: a rerun repeats them, a renamed gene with the same
+    protein gets the same decoys, and the relative's decoys follow the relative's own
+    sequence. A query that is not a home protein or its relative's query
     gets none: the model of an earlier genome that is a query of its own (a GOI known only
     from models, such as a seeded tandem copy ``GOI_copy_1|<genome>_b0_l1_by_<parent>``) would
     give ``GOI_copy_1|...~shuf1``, whose hits are filed under the real parent ``GOI_copy_1``
@@ -925,7 +928,7 @@ def decoy_queries(queries, home_ids=None) -> List[Dict[str, str]]:
         out.append({'id': home_parent + '~rev' + suffix, 'seq': seq[::-1]})
         for tag in DECOY_TAGS[1:]:
             residues = list(seq)
-            random.Random(zlib.crc32((home_parent + tag + suffix).encode())).shuffle(residues)
+            random.Random(zlib.crc32(f"{tag}{suffix}|{seq}".encode())).shuffle(residues)
             out.append({'id': home_parent + tag + suffix, 'seq': ''.join(residues)})
     return out
 
@@ -937,6 +940,54 @@ def decoy_cases(candidates) -> List[List[Dict[str, Any]]]:
     for c in candidates:
         cases[_candidate_parent(c)].append(c)
     return [cases[k] for k in sorted(cases)]
+
+
+def genome_search_decoys(db_sequences, home_ids=None) -> List[Dict[str, str]]:
+    """The decoys of the home GOI proteins of the query set (decoy_queries of the home protein of
+    each GOI, select_goi_queries without the relative): the queries the genome-wide path's decoy
+    pass searches in the whole genome, as the window decoys are searched in a window."""
+    queries, _by_parent, _alias = select_goi_queries(db_sequences, home_ids, use_relative=False)
+    return decoy_queries(queries, home_ids)
+
+
+def query_db_with_decoys(db_path: str, decoys, out_path: str) -> str:
+    """``db_path`` (the wave's query set) copied byte for byte with ``decoys`` appended, so that
+    the genome search of the query set and of the decoys is one MMseqs2 run (MMseqs2 searches each
+    query on its own; the real rows come out as without the decoys). Returns ``out_path``."""
+    shutil.copyfile(db_path, out_path)
+    ends_open = False
+    with open(out_path, 'rb') as fh:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() > 0:
+            fh.seek(-1, os.SEEK_END)
+            ends_open = fh.read(1) != b'\n'
+    with open(out_path, 'a') as fh:
+        if ends_open:
+            fh.write('\n')
+        for d in decoys:
+            fh.write(f">{d['id']}\n{d['seq']}\n")
+    return out_path
+
+
+def split_decoy_rows(hits_file: str, decoy_path: str) -> int:
+    """The rows of decoy queries (is_decoy_parent of the first column's base id) of an MMseqs2
+    table moved to ``decoy_path``; every other row stays in ``hits_file``, in its order and byte
+    for byte (a temporary file, then os.replace). Returns the number of decoy rows."""
+    n = 0
+    if not os.path.exists(hits_file):
+        open(decoy_path, 'wb').close()
+        return n
+    tmp_path = hits_file + '.real'
+    with open(hits_file, 'rb') as src, open(tmp_path, 'wb') as real, open(decoy_path, 'wb') as decoys:
+        for line in src:
+            query = line.split(b'\t', 1)[0].strip().decode('utf-8', 'replace')
+            if is_decoy_parent(extract_base_gene_id(query)):
+                decoys.write(line)
+                n += 1
+            else:
+                real.write(line)
+    os.replace(tmp_path, hits_file)
+    return n
 
 
 def augustus_steps_model_error(args) -> Optional[str]:
@@ -1328,7 +1379,8 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
             'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome',
             'SearchQuery',      # <parent>~<kind>~rel: found by the decoy of the relative's query
             'DispersedRescue', 'RescueRule',    # found only through the dispersed-GOI rescue
-            'RefusalLifted']    # a hit chain written only because its block is significant
+            'RefusalLifted',    # a hit chain written only because its block is significant
+            'GenomeWide', 'NearBlock']    # a decoy of the genome-wide path (decoy pass)
     n = 0
     with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
         fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")
@@ -1356,13 +1408,16 @@ def decoy_case_counts(lines: List[str], home_parents) -> Dict[str, int]:
     with the best label of its decoy models. Only cases that were searched count: a genome
     without a search window passes no home parents (and the home genome is never searched,
     so its cases never count; decoy_rates.py of 2026-10-14 counted them from the plot inputs:
-    270 instead of 225 cases on the Candida pilot)."""
+    270 instead of 225 cases on the Candida pilot). The decoys of the genome-wide path
+    (GenomeWide=1) are counted apart (decoy_gw_counts)."""
     best = {(p, t): -1 for p in home_parents for t in DECOY_TAGS}
     for ln in lines:
         cols = ln.split('\t')
         if len(cols) < 9 or cols[2] not in ('mRNA', 'gene'):
             continue
         a = _parse_gff_attr_string(cols[8])
+        if a.get('GenomeWide') == '1':
+            continue
         parent = a.get('SynVoy_Parent', '')
         tag = next((t for t in DECOY_TAGS if parent.endswith(t)), None)
         if tag is None:
@@ -1373,6 +1428,37 @@ def decoy_case_counts(lines: List[str], home_parents) -> Dict[str, int]:
             'decoy_high': sum(1 for r in best.values() if r >= 3),
             'decoy_medium_plus': sum(1 for r in best.values() if r >= 2),
             'decoy_ambiguous_plus': sum(1 for r in best.values() if r >= 1)}
+
+
+DECOY_GW_COLUMNS = ['decoy_gw_cases', 'decoy_gw_answers']
+
+
+def decoy_gw_counts(lines: List[str], searched_parents) -> Dict[str, int]:
+    """Decoy cases of the genome-wide path in one genome search (decoy mode with
+    --goi_genome_wide_path): ``decoy_gw_cases``, the cases (home GOI x decoy kind) whose decoy
+    was in the genome-wide search and the decoy pass (``searched_parents``: the home GOIs it
+    ran for); ``decoy_gw_answers``, the cases with a decoy row of class GENOME_WIDE_CLASS and
+    no window decoy row (GenomeWide not 1) of MEDIUM or better of the same case, as the report
+    keeps an answer only in a genome without a counted call."""
+    answered, counted = set(), set()
+    for ln in lines:
+        cols = ln.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene'):
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        parent = a.get('SynVoy_Parent', '')
+        tag = next((t for t in DECOY_TAGS if parent.endswith(t)), None)
+        if tag is None:
+            continue
+        key = (parent[:-len(tag)], tag)
+        if a.get('GenomeWide') == '1':
+            if a.get('GOIClass') == synvoy_label.GENOME_WIDE_CLASS:
+                answered.add(key)
+        elif DECOY_RANK.get(a.get('Confidence', ''), 0) >= DECOY_RANK['MEDIUM']:
+            counted.add(key)
+    cases = {(p, t) for p in searched_parents for t in DECOY_TAGS}
+    return {'decoy_gw_cases': len(cases),
+            'decoy_gw_answers': len((answered - counted) & cases)}
 
 
 def home_goi_parents(args) -> List[str]:
@@ -1625,9 +1711,13 @@ def relabel_goi_lines(gff_lines: List[str],
     on Eeff, its place and block, specificity and coverage. Confidence keeps its four
     codes; Basis says why (significant_specific / not_specific / gene_order_only /
     not_significant); GOIClass follows the label (a tandem copy keeps tandem_goi_copy).
-    A GOI row without an Eeff keeps its provisional LOW (_provisional_goi_label) and is
-    counted as ``LOW/unjudged`` in the log. ``numbers_by_id``: the full-precision terms
-    per model id (judge_numbers; finalize_place_evalues adds Eeff), judged on where present."""
+    A row of the genome-wide path (GenomeWide=1) that the judge labels HIGH is the answer of
+    synvoy_label.genome_wide_answer: MEDIUM, class genome_wide_strong_hit (also for a tandem
+    copy), counted as ``MEDIUM/genome_wide``; the window kept only such rows, so any other
+    is LOW with a warning. A GOI row without an Eeff keeps its provisional LOW
+    (_provisional_goi_label) and is counted as ``LOW/unjudged`` in the log. ``numbers_by_id``:
+    the full-precision terms per model id (judge_numbers; finalize_place_evalues adds Eeff),
+    judged on where present."""
     out, counts = [], defaultdict(int)
     for line in gff_lines:
         cols = line.split('\t')
@@ -1641,9 +1731,20 @@ def relabel_goi_lines(gff_lines: List[str],
             out.append(line)
             continue
         conf, basis = _judge_attrs(a, 'Eeff', (numbers_by_id or {}).get(a.get('ID', '')))
-        counts[f"{conf}/{basis}"] += 1
-        goi_class = ('tandem_goi_copy' if a.get('EvidenceType') == 'tandem_copy'
-                     else GOI_CLASS_OF_LABEL[conf])
+        if a.get('GenomeWide') == '1':
+            mapped = synvoy_label.genome_wide_answer(conf, basis)
+            if mapped:
+                conf, basis, goi_class = mapped
+                counts["MEDIUM/genome_wide"] += 1
+            else:
+                logger.warning(f"genome-wide row {a.get('ID', '')} is {conf}/{basis} at the genome's "
+                               "end, not the HIGH its window kept it for: written as LOW.")
+                conf, goi_class = 'LOW', GOI_CLASS_OF_LABEL['LOW']
+                counts[f"{conf}/{basis}"] += 1
+        else:
+            counts[f"{conf}/{basis}"] += 1
+            goi_class = ('tandem_goi_copy' if a.get('EvidenceType') == 'tandem_copy'
+                         else GOI_CLASS_OF_LABEL[conf])
         pairs = []
         for pair in cols[8].split(';'):
             k = pair.split('=', 1)[0]
@@ -4594,26 +4695,32 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     w_start = max(0, block['start'] - search_pad)
     w_end = min(slen, block['end'] + search_pad)
     # A place of the genome-wide path (FINAL step 5, genome_wide_goi_pass) is no block: its
-    # window is given, outside every other window, and it is judged in the genome place.
+    # window is given, outside every searched GOI zone, and it is judged in the genome place.
+    # ``decoy_case``: a window of the path's decoy pass, searched with that decoy alone.
     genome_wide = bool(block.get('genome_wide'))
+    decoy_case = block.get('decoy_case') if genome_wide else None
     if genome_wide:
         w_start, w_end = int(block['window'][0]), int(block['window'][1])
         hood_start, hood_end = w_start, w_end
     subseq = genome_seqs[chrom][w_start:w_end]
-    # Where the window ran past a scaffold end (ContextTruncated; target_policy.tsv).
-    window_truncated = '' if genome_wide else context_truncation(block['start'], block['end'], search_pad, slen)
-    if getattr(args, 'genome_ctx', None) is not None:
-        if not genome_wide:
-            args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
-        args.genome_ctx.setdefault('windows', []).append((chrom, w_start, w_end))
+    # Where the window ran past a scaffold end (ContextTruncated; target_policy.tsv); for a
+    # window of the genome-wide path, where its place +- the model margin did.
+    window_truncated = (context_truncation(block['start'], block['end'], int(block.get('margin', 0) or 0), slen)
+                        if genome_wide else context_truncation(block['start'], block['end'], search_pad, slen))
+    if getattr(args, 'genome_ctx', None) is not None and not genome_wide:
+        args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
+        # The searched windows of the blocks with their numbers: a place of the genome-wide
+        # path inside one of them is near that block (NearBlock).
+        args.genome_ctx.setdefault('block_windows', []).append((chrom, w_start, w_end, block_idx))
     # Keep final GOI calls anchored near the flanking-defined block.
     core_margin = goi_core_margin(args)
     core_start = max(0, block['start'] - core_margin)
     core_end = min(slen, block['end'] + core_margin)
     if genome_wide:
         core_start, core_end = w_start, w_end
-    elif getattr(args, 'genome_ctx', None) is not None:
-        # The searched GOI cores of the genome, for its dead-zone count (log_genome_limits).
+    if getattr(args, 'genome_ctx', None) is not None and not decoy_case:
+        # The searched GOI zones of the genome (a genome-wide window is one as a whole): its
+        # dead-zone count (log_genome_limits), and where the genome-wide path places nothing.
         args.genome_ctx.setdefault('goi_cores', []).append((chrom, core_start, core_end))
     # DNA around a candidate's hits that the gene model may use: never less than the
     # gene's own span at home.
@@ -4719,9 +4826,21 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         goi_query_by_parent = collapse_goi_queries_by_parent(goi_queries)
         goi_queries = list(goi_query_by_parent.values())
 
+    if decoy_case:
+        # A window of the genome-wide path's decoy pass: placed by the decoy's own genome-wide
+        # hits, searched with that decoy alone (genome_wide_goi_pass).
+        _decoy = dict(block.get('decoy_query') or {})
+        goi_queries = [_decoy] if _decoy.get('seq') else []
+        goi_query_by_parent = {_decoy.get('id', ''): _decoy} if goi_queries else {}
+        relative_alias = {}
+        if not goi_queries:
+            if os.path.exists(temp_fa):
+                os.remove(temp_fa)
+            return [], []
+
     if getattr(args, 'decoy_mode', False) and not genome_wide:
-        # No decoys in a genome-wide window: it is placed by the real query's own hit, so
-        # decoys there calibrate nothing (the report says the genome place is uncalibrated).
+        # No window decoys in a genome-wide window: it is placed by the real query's own hit;
+        # the path's own decoys are placed by theirs (the decoy pass of genome_wide_goi_pass).
         _decoys = decoy_queries(goi_queries, home_goi_ids)
         goi_queries = goi_queries + _decoys
         goi_query_by_parent = dict(goi_query_by_parent, **{d['id']: d for d in _decoys})
@@ -4896,7 +5015,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             if not is_goi_query_id(hit.get('query', '')):
                 continue
             region_hit = dict(hit)
-            if home_goi_ids:
+            if decoy_case:
+                if hit.get('query', '') not in goi_query_by_parent:
+                    continue
+            elif home_goi_ids:
                 hit_query = hit.get('query', '')
                 if hit_query in relative_alias:
                     region_hit['query'] = relative_alias[hit_query]
@@ -5833,25 +5955,16 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         args.genome_ctx.setdefault('block_slot', {})[block_idx] = (place_terms['slot'],
                                                                    place_terms['slot_inverted'])
     if genome_wide:
-        # The genome-wide path's origin flag (FINAL step 5): the rule below is keyed on it,
-        # not on Place=genome, which hull models and weak blocks' candidates share. With PR-9 a
-        # call whose CDS or hit of the home query runs across a home exon junction is a
-        # retrocopy candidate (annotated home gene of >= 2 exons).
-        _junctions = (getattr(args, 'home_goi_junctions', None) or []
-                      if getattr(args, 'goi_genome_wide_without_blocks', False) else [])
-        for _c in raw_candidates:
-            if not _c.get('gff'):
-                continue
-            _c['gff'][0] += ";GenomeWide=1"
-            if _junctions:
-                _parent = _candidate_parent(_c)
-                _g0, _g1 = int(_c['start']) - w_start - 1, int(_c['end']) - w_start
-                _pieces = [(int(h['qstart']), int(h['qend'])) for h in hits_by_gene.get(_parent, [])
-                           if min(int(h['gend']), _g1) - max(int(h['gstart']), _g0) > 0]
-                if _c.get('model_parent') == _parent:
-                    _pieces += [(int(e['qstart']), int(e['qend'])) for e in _c.get('model_exons') or []]
-                if spans_a_junction(_pieces, _junctions):
-                    _c['gff'][0] += ";RetrocopyCandidate=1"
+        # The genome-wide path's origin flag (FINAL step 5): the rules below and the report are
+        # keyed on it, not on Place=genome, which hull models and weak blocks' candidates share;
+        # with the junction test of an annotated multi-exon home gene (RetrocopyCandidate), the
+        # place's coverage, the genome's median neighbour identity and NearBlock. Decoys of the
+        # decoy pass carry the same.
+        _junctions = getattr(args, 'home_goi_junctions', None) or []
+        mark_genome_wide_candidates(raw_candidates, hits_by_gene, w_start, _junctions,
+                                    block.get('place_attrs') or {})
+        mark_genome_wide_candidates(decoy_candidates, hits_by_gene, w_start, _junctions,
+                                    block.get('place_attrs') or {})
     # A block the dispersed-GOI rescue seeded: its GOI models outside every GOI zone of the
     # blocks built without the rescue carry DispersedRescue=1 (mark_dispersed_rescue), decoys
     # too, so that decoy.tsv gives the false-call rate of such calls.
@@ -5910,19 +6023,30 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         _judge_all([joined])
         return joined
 
+    def _keep_genome_wide(cands):
+        """The answer of a genome-wide window (genome_wide_keep: judged HIGH, no retrocopy, not
+        frame-broken without an intron, no written row under it; the best one): nothing else of
+        the window is written, so the path adds no LOW rows and nothing to "needs curation". The
+        drops of real candidates are counted by reason and the window's outcome is recorded
+        (genome_wide_goi_pass writes it to the table)."""
+        kept, dropped = genome_wide_keep(cands, block.get('records_index'))
+        _ctx = getattr(args, 'genome_ctx', None)
+        if _ctx is not None:
+            if not decoy_case:
+                _counts = _ctx.setdefault('genome_wide_dropped', {})
+                for _c, _reason in dropped:
+                    _counts[_reason] = _counts.get(_reason, 0) + 1
+            _ctx.setdefault('genome_wide_outcome', {})[block_idx] = (
+                'answer' if kept else (dropped[0][1] if dropped else 'no_candidate'))
+        return kept
+
     def _judge_window(cands):
         """The judged candidates (_judge_all), with --goi_join_leftover_hits (batch G3B) the
-        leftover hits joined into confident models, then the choice among them."""
+        leftover hits joined into confident models, then the choice among them; in a window of
+        the genome-wide path its answer only (_keep_genome_wide)."""
         _judge_all(cands)
         if genome_wide:
-            # A model of the genome-wide path that another home protein explains as well is
-            # not kept: paralogs from all over the genome would fill "needs curation"
-            # (REPORT finding 5a). Its place was specific; its model is not.
-            _kept = [c for c in cands if c.get('window_basis') != 'not_specific']
-            if len(_kept) < len(cands) and getattr(args, 'genome_ctx', None) is not None:
-                args.genome_ctx['genome_wide_dropped'] = (args.genome_ctx.get('genome_wide_dropped', 0)
-                                                          + len(cands) - len(_kept))
-            cands = _kept
+            cands = _keep_genome_wide(cands)
         if getattr(args, 'goi_join_leftover_hits', False):
             cands, n_joined = join_leftover_hits(
                 cands, getattr(args, 'goi_fallback_max_gap', args.max_intron),
@@ -5930,6 +6054,9 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             if n_joined:
                 logger.info(f"[{genome_name}] block {block_idx}: {n_joined} leftover hit(s) joined "
                             f"into gene models (--goi_join_leftover_hits)")
+                if genome_wide:
+                    # A joined model is judged again: it must still be an answer.
+                    cands = _keep_genome_wide(cands)
         # The full-precision terms for the genome-end label and the seed rule (RF-1f).
         _ctx = getattr(args, 'genome_ctx', None)
         if _ctx is not None:
@@ -6290,7 +6417,9 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
     A hit chain written only because its block is significant (``refusal_lifted``, the
     model's RefusalLifted=; fallback_decision) neither seeds nor feeds the tree, and is left
     out before the pool is formed: a lifted HIGH does not make the genome's MEDIUM calls
-    tree-only.
+    tree-only. The same holds for a call of the genome-wide path (``genome_wide``, GenomeWide=1,
+    class genome_wide_strong_hit): no synteny supports it, so later waves search as they would
+    without the path; the genome's other MEDIUM calls seed by the rule above.
 
     Until then a call seeded when it was HIGH or MEDIUM and of class confident_goi /
     probable_goi (a tandem copy never seeded, a paralog MEDIUM next to a HIGH call did),
@@ -6307,7 +6436,8 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
         role = meta.get("role", "goi" if is_goi_query_id_fn(gid) else "flanking")
         if role != "goi":
             continue
-        if meta.get("refusal_lifted"):
+        if (meta.get("refusal_lifted") or meta.get("genome_wide")
+                or meta.get("goi_class") == synvoy_label.GENOME_WIDE_CLASS):
             suppressed += 1
             continue
         confidence = meta.get("confidence", "")
@@ -6593,6 +6723,9 @@ LIMIT_KEYS = [
     'blocks_capped', 'blocks_capped_goi_seeded', 'blocks_capped_without_home_order',
     'dispersed_identity', 'dispersed_evalue', 'dispersed_alnlen', 'dispersed_in_goi_zone',
     'dead_zone', 'dispersed_refused_per_piece_pass',
+    # the genome-wide path (--goi_genome_wide_path): places it did not try because the genome's
+    # windows of the path reached max_blocks_per_genome
+    'genome_wide_tries_cap',
     # MMseqs2 after a memory failure (fix-phase d6): the genome search, and the windows, that ran
     # on a lower rung of the low-memory ladder (sensitivity 7.0 or 6.0, one thread, 2G split)
     'mmseqs_genome_lower_rung', 'mmseqs_window_lower_rung',
@@ -6756,8 +6889,7 @@ def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene
 
     if not synteny_blocks:
         logger.info(f"[{genome_name}] No valid syntenic region found."
-                    + (" The genome-wide path searches it (--goi_genome_wide_without_blocks)."
-                       if gw_any_genome else ""))
+                    + (" The genome-wide path searches it." if gw_any_genome else ""))
         if not gw_any_genome:
             return None, 0
 
@@ -7038,7 +7170,8 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
     nonsyntenic.tsv lists the strongest NONSYNTENIC_DROPPED_MAX_ROWS (0 until the genome's
     end). The limit_* columns (LIMIT_KEYS) count what each limit dropped (0 until the
     genome's end). With --genome_axis the GENOME_AXIS_COLUMNS follow: this genome's
-    genome-axis values and their sources."""
+    genome-axis values and their sources. With --decoy_mode the DECOY_COLUMNS, and with the
+    genome-wide path as well its DECOY_GW_COLUMNS."""
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.target_policy.tsv")
     ctx = ctx or {}
     esyn = ctx.get('block_esyn') or {}
@@ -7071,6 +7204,10 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
         # the report sums them into the run's decoy rate.
         row.update(ctx.get('decoy_counts') or dict.fromkeys(DECOY_COLUMNS, 0))
         columns += DECOY_COLUMNS
+        if getattr(args, 'goi_genome_wide_path', False):
+            # The decoy cases of the genome-wide path's decoy pass (decoy_gw_counts), apart.
+            row.update(ctx.get('decoy_gw_counts') or dict.fromkeys(DECOY_GW_COLUMNS, 0))
+            columns += DECOY_GW_COLUMNS
     limits = ctx.get('limits') or {}
     row.update({f'limit_{k}': int(limits.get(k, 0)) for k in LIMIT_KEYS})
     columns += LIMIT_COLUMNS
@@ -7559,58 +7696,66 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# FINAL step 5 (batch of 2026-10-15; --goi_genome_wide_path, off by default): strong GOI
-# hits outside every searched window. The §1o rescue models such a hit only at >= 40 %
-# identity, E <= 1e-10 and >= 50 aligned residues, inside the envelope of >= 3 anchors on its
-# chromosome (select_dispersed_goi_seeds); the rest go to the §1x table. This path has none
-# of those gates: the GOI hits outside every window are grouped into places (per chromosome,
-# within the GOI's intron bound or the model margin), and a place is modelled when the home protein's blastp E
-# against its hits over the whole genome is at most the label's MEDIUM bar and the
-# specificity holds in the genome place (synvoy_label.is_specific): a non-specific place is
-# not modelled. At most N places per home GOI and genome, best E first, N = q's home family
-# members + 1 (home_family_size; REPORT finding 5b). Each window is the place +- the model
-# margin, outside every other window, without decoys and without the flanking pass; its
-# candidates are judged in the genome place (no multiplier), carry GenomeWide=1, and one that
-# another home protein explains as well is not kept. Only in a genome with at least one block
-# at E_syn <= 0.1. Every place is listed in hits/<genome>.genome_wide.tsv.
+# FINAL step 5 (--goi_genome_wide_path): the strong hit without synteny. A GOI
+# hit outside every searched GOI zone (block +- the GOI margin; a window of this path is one as
+# a whole) and outside every row the search wrote in this genome lies where no block predicted
+# the gene: the dispersed-GOI rescue takes such a hit only beside its anchors
+# (select_dispersed_goi_seeds), the rest go to the §1x table. This path gives such a hit one
+# answer when it meets the judge's HIGH terms in the genome place, in every searched genome
+# that has the home proteome (blocks or not):
+#   - places: the GOI hits per home GOI and sequence, joined while within the larger of the
+#     model margin and the GOI's intron bound of each other, never across a GOI zone
+#     (genome_wide_places);
+#   - a place is tried (choose_genome_wide_places) when the home protein's blastp E against its
+#     hits (in their frames, in pieces between stops) with -searchsp = |q| x floor(G/3) is
+#     <= synvoy_label.HIGH_EVALUE, the HSPs at E <= GENE_ORDER_EVALUE cover >= COMPLETE_QCOV of
+#     the query (their union; with core_completeness the larger of query and core coverage), no
+#     HSP runs across an exon junction of an annotated multi-exon home gene
+#     (RETROCOPY_JUNCTION_FLANK_AA residues on each side), and no other home protein is a real
+#     competitor within HIGH_MARGIN_BITS;
+#   - per home GOI the places are tried in the order E (ties below EVALUE_TIE), bits, coverage,
+#     sequence, start until one gives an answer, at most max_blocks_per_genome windows per pass
+#     (genome_wide_tries_cap): the place +- the model margin, clipped at the GOI zones, searched
+#     without the flanking pass and judged in the genome place (no multiplier);
+#   - a candidate of such a window is an answer (genome_wide_keep) when the judge labels it HIGH,
+#     no CDS or hit of it runs across a home junction (RetrocopyCandidate), it is not frame-
+#     broken without an intron, and it overlaps no row written before; the best one per window
+#     is kept and labelled MEDIUM, GOIClass=genome_wide_strong_hit (synvoy_label.
+#     genome_wide_answer). It never seeds the next wave and never reaches the tree; the report
+#     keeps it apart from the counted calls, one per genome, only in a genome without a counted
+#     call (generate_report.drop_genome_wide_strong_hits);
+#   - a place inside a block's searched window (outside its GOI zone) is near that block:
+#     NearBlock=<block number> on its answer, near_block in the table;
+#   - with --decoy_mode the reversed and shuffled home proteins were searched in the genome as
+#     well (process_single_genome): their places go through the same steps against the GOI
+#     zones as they were before the real pass (the decoy pass), their calls to decoys/ with
+#     GenomeWide=1, counted per case in target_policy.tsv (decoy_gw_counts).
+# Every place is listed in hits/<genome>.genome_wide.tsv with what became of it.
 # ---------------------------------------------------------------------------
-GENOME_WIDE_FAMILY_PREFILTER_EVALUE = 0.1   # family count: test proteins whose SW gives KA E <= this
-GENOME_WIDE_COLUMNS = ['genome', 'parent', 'chrom', 'start', 'end', 'hits', 'best_hit_identity',
-                       'evalue_genome', 'bits', 'best_other', 'margin', 'real_competitor',
-                       'specific', 'rank', 'cap', 'decision', 'own_copy_set_aside', 'own_copy_bits']
-_FAMILY_SIZE_CACHE: Dict[Tuple[str, str, str], int] = {}
+GENOME_WIDE_COLUMNS = ['genome', 'parent', 'decoy', 'chrom', 'start', 'end', 'hits',
+                       'best_hit_identity', 'evalue_genome', 'bits', 'coverage', 'retrocopy_hits',
+                       'best_other', 'margin', 'real_competitor', 'specific', 'rank', 'decision',
+                       'block', 'model_decision', 'near_block', 'significant_blocks',
+                       'median_flank_identity', 'own_copy_set_aside', 'own_copy_bits']
+# What became of a place (decision) and of its window (model_decision, for a modelled place).
+GENOME_WIDE_DECISIONS = ('evalue', 'coverage', 'retrocopy_hits', 'specificity', 'not_tried',
+                         'no_window', 'modelled')
+GENOME_WIDE_MODEL_DECISIONS = ('answer', 'judge_not_high', 'retrocopy_cds', 'frame_broken_no_intron',
+                               'overlaps_record', 'second_in_window', 'no_candidate')
 
 
-def home_family_size(proteome, q_id: str, q_seq: str, own_gene_id: Optional[str] = None) -> int:
-    """q's home family: home proteins other than q's own gene that the label's own family
-    test calls family members (HomeProteome.family_evalue <= FAMILY_MEMBER_EVALUE: blastp
-    with composition-based statistics and SEG on both proteins), over the whole home
-    proteome. Only proteins whose Smith-Waterman score against q gives a pairwise
-    Karlin-Altschul E <= GENOME_WIDE_FAMILY_PREFILTER_EVALUE (100 x that bar) are tested.
-    Checked against the test on every home protein for the 14 Candida pilot queries: the same
-    count in 14 of 14 (0 to 18 members), the largest member's prefilter E 0.024."""
-    own = proteome.own_gene(q_id, q_seq, own_gene_id)
-    key = (q_id, q_seq, own or '')      # the resolved gene: an AmbiguousGeneId equals its plain id (fix item 43)
-    if key not in _FAMILY_SIZE_CACHE:
-        seqs = dict(proteome.records)
-        n = 0
-        for raw, rid in proteome.scores(q_seq):
-            if rid == own:
-                continue
-            ka = SW_K_11_1 * len(q_seq) * len(seqs.get(rid, '')) * math.exp(-SW_LAMBDA_11_1 * raw)
-            if ka > GENOME_WIDE_FAMILY_PREFILTER_EVALUE:
-                continue
-            if proteome.family_evalue(q_id, q_seq, rid) <= synvoy_specificity.FAMILY_MEMBER_EVALUE:
-                n += 1
-        _FAMILY_SIZE_CACHE[key] = n
-    return _FAMILY_SIZE_CACHE[key]
-
-
-def genome_wide_places(hits, windows, home_parents, max_gap: int) -> List[Dict[str, Any]]:
-    """The GOI hits outside every searched window (``windows``: (chrom, start, end), 0-based
-    half-open like the hits), per home GOI and chromosome, joined into places while a hit
-    starts at most ``max_gap`` after the place ends. A hit of a model or exon query belongs
-    to its home parent; with one home GOI, every GOI hit does. Sorted by parent and position."""
+def genome_wide_places(hits, cores, home_parents, max_gap: int, records=(),
+                       decoy_parents=None) -> List[Dict[str, Any]]:
+    """The GOI hits outside every searched GOI zone (``cores``: (chrom, start, end), 0-based
+    half-open like the hits) and outside every row the search wrote (``records``, the same
+    form), per home GOI and sequence, joined into places while a hit starts at most ``max_gap``
+    after the place ends and no zone lies between them: no place spans a zone. A hit of a model
+    or exon query belongs to its home parent; with one home GOI, every GOI hit does. With
+    ``decoy_parents`` (the decoy pass) only the hits of those decoy queries are taken, each under
+    its own id. Sorted by parent and position."""
+    zones = intervals_by_chrom(cores)
+    rows = intervals_by_chrom(records)
+    home_parents = set(home_parents or ())
     parents = sorted(home_parents)
     grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for h in hits:
@@ -7618,69 +7763,103 @@ def genome_wide_places(hits, windows, home_parents, max_gap: int) -> List[Dict[s
         if not is_goi_query_id(query):
             continue
         base = extract_base_gene_id(query)
-        if is_decoy_parent(base):
-            continue
-        parent = base if base in home_parents else (parents[0] if len(parents) == 1 else None)
-        if parent is None:
-            continue
+        if decoy_parents is not None:
+            if base not in decoy_parents:
+                continue
+            parent = base
+        else:
+            if is_decoy_parent(base):
+                continue
+            parent = base if base in home_parents else (parents[0] if len(parents) == 1 else None)
+            if parent is None:
+                continue
         c, s, e = h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0))
-        if e <= s or any(wc == c and s < we and e > ws for wc, ws, we in windows):
+        if e <= s or overlaps_indexed(zones, c, s, e) or overlaps_indexed(rows, c, s, e):
             continue
         grouped[(parent, c)].append(h)
     places = []
     for (parent, chrom), group in sorted(grouped.items()):
         group.sort(key=lambda h: (int(h['start']), int(h['end'])))
-        runs = [[group[0]]]
+        runs, run_end = [[group[0]]], int(group[0]['end'])
         for h in group[1:]:
-            if int(h['start']) - max(int(x['end']) for x in runs[-1]) <= max_gap:
+            hs = int(h['start'])
+            if hs - run_end <= max_gap and not (hs > run_end and overlaps_indexed(zones, chrom, run_end, hs)):
                 runs[-1].append(h)
+                run_end = max(run_end, int(h['end']))
             else:
                 runs.append([h])
+                run_end = int(h['end'])
         places += [{'parent': parent, 'chrom': chrom, 'start': min(int(h['start']) for h in run),
                     'end': max(int(h['end']) for h in run), 'hit_list': run, 'hits': len(run)}
                    for run in runs]
     return places
 
 
-def choose_genome_wide_places(places: List[Dict[str, Any]], cap_of) -> List[Dict[str, Any]]:
-    """The places to model: E over the genome at most synvoy_label.MEDIUM_EVALUE and
-    specific, per home GOI best E first (ties by position), the first ``cap_of(parent)``.
-    Sets ``decision`` (modelled / cut_by_cap / not_specific / not_significant) on every place,
-    ``rank`` and ``cap`` on the eligible ones; ``cap_of`` is asked only for a GOI that has one."""
+def genome_wide_place_rank(p) -> Tuple[Any, ...]:
+    """The order in which a home GOI's places are tried: E over the genome (all equal below
+    synvoy_label.EVALUE_TIE), then more bits, more coverage, the sequence and the start."""
+    return (max(float(p.get('evalue', float('inf'))), synvoy_label.EVALUE_TIE),
+            -float(p.get('bits_value', 0.0) or 0.0), -float(p.get('coverage_value', 0.0) or 0.0),
+            str(p.get('chrom', '')), int(p.get('start', 0)))
+
+
+def choose_genome_wide_places(places: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The places to try, in the order of their tries: per parent (sorted), those whose terms
+    meet the judge's HIGH in the genome place, ranked by genome_wide_place_rank. Every other
+    place gets its ``decision``, the first term it fails, in this order: ``evalue`` (E above
+    synvoy_label.HIGH_EVALUE), ``coverage`` (below COMPLETE_QCOV), ``retrocopy_hits`` (an HSP
+    across a home exon junction), ``specificity`` (a real competitor within HIGH_MARGIN_BITS, or
+    no specificity terms). ``rank`` (1, 2, ... per parent) is set on the places returned."""
     eligible: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for p in places:
         p.setdefault('rank', '')
-        p.setdefault('cap', '')
-        if not float(p.get('evalue', float('inf'))) <= synvoy_label.MEDIUM_EVALUE:
-            p['decision'] = 'not_significant'
-        elif not p.get('specific'):
-            p['decision'] = 'not_specific'
+        margin = p.get('margin_value')
+        if not float(p.get('evalue', float('inf'))) <= synvoy_label.HIGH_EVALUE:
+            p['decision'] = 'evalue'
+        elif not float(p.get('coverage_value', 0.0) or 0.0) >= synvoy_label.COMPLETE_QCOV:
+            p['decision'] = 'coverage'
+        elif str(p.get('retrocopy_hits', '')) == '1':
+            p['decision'] = 'retrocopy_hits'
+        elif (p.get('real_competitor') in (None, '')
+              or (int(p['real_competitor']) and not (margin is not None
+                                                     and float(margin) >= synvoy_label.HIGH_MARGIN_BITS))):
+            p['decision'] = 'specificity'
         else:
             eligible[p['parent']].append(p)
-    kept = []
+    ordered = []
     for parent in sorted(eligible):
-        ordered = sorted(eligible[parent], key=lambda p: (float(p['evalue']), p['chrom'], int(p['start'])))
-        cap = cap_of(parent)
-        for i, p in enumerate(ordered, 1):
-            p['rank'], p['cap'] = i, cap
-            p['decision'] = 'modelled' if i <= p['cap'] else 'cut_by_cap'
-            if p['decision'] == 'modelled':
-                kept.append(p)
-    return kept
+        for i, p in enumerate(sorted(eligible[parent], key=genome_wide_place_rank), 1):
+            p['rank'] = i
+            ordered.append(p)
+    return ordered
 
 
-def genome_wide_window(place: Dict[str, Any], margin: int, chrom_len: int, windows) -> Tuple[int, int]:
-    """The window of a place: its hits +- ``margin``, inside its chromosome and outside every
-    searched window on it (the place itself lies outside all of them)."""
-    lo, hi = max(0, int(place['start']) - margin), min(int(chrom_len), int(place['end']) + margin)
-    for c, ws, we in windows:
+def genome_wide_window(place: Dict[str, Any], margin: int, chrom_len: int, cores) -> Tuple[int, int]:
+    """The window of a place: its hits +- ``margin``, inside its sequence and clipped at every
+    searched GOI zone on it (``cores``, (chrom, start, end)). The place lies outside the zones
+    it was formed against; one that a zone recorded since then (an earlier window of this path)
+    overlaps gets no window: an empty span (lo >= hi)."""
+    start, end = int(place['start']), int(place['end'])
+    lo, hi = max(0, start - margin), min(int(chrom_len), end + margin)
+    for c, zs, ze in cores:
         if c != place['chrom']:
             continue
-        if we <= int(place['start']):
-            lo = max(lo, int(we))
-        elif ws >= int(place['end']):
-            hi = min(hi, int(ws))
+        if int(ze) <= start:
+            lo = max(lo, int(ze))
+        elif int(zs) >= end:
+            hi = min(hi, int(zs))
+        else:
+            return start, start
     return lo, hi
+
+
+def near_block_of(place: Dict[str, Any], block_windows) -> Any:
+    """The number of the first block (lowest number) whose searched window overlaps the place
+    (``block_windows``: (chrom, start, end, number)), '' when none: a place outside the GOI zone
+    of that block, inside its window."""
+    near = [int(n) for c, ws, we, n in block_windows or ()
+            if c == place['chrom'] and int(place['start']) < int(we) and int(ws) < int(place['end'])]
+    return min(near) if near else ''
 
 
 def _hit_pieces(genome_seqs, h) -> List[str]:
@@ -7693,8 +7872,8 @@ def _hit_pieces(genome_seqs, h) -> List[str]:
     return synvoy_evalue.split_at_stops(translate(dna)) if dna else []
 
 
-# PR-9 (H1, --goi_genome_wide_without_blocks): a genome-wide call that encodes two home exons
-# contiguously across their junction, this far on each side, is a retrocopy candidate.
+# A genome-wide call that encodes two home exons contiguously across their junction, this far on
+# each side, is a retrocopy candidate (RetrocopyCandidate=1; no answer).
 RETROCOPY_JUNCTION_FLANK_AA = 10
 
 
@@ -7714,6 +7893,95 @@ def spans_a_junction(pieces, junctions, flank: int = RETROCOPY_JUNCTION_FLANK_AA
     return any(qs <= j - flank + 1 and qe >= j + flank for qs, qe in pieces for j in junctions)
 
 
+def mark_genome_wide_candidates(candidates, hits_by_gene, w_start: int, junctions, place_attrs) -> None:
+    """The attributes of a candidate of a genome-wide window, on its feature row: GenomeWide=1;
+    with ``junctions`` (an annotated home gene of >= 2 exons) RetrocopyCandidate=1 when one of
+    its CDS rows or one hit of its parent's query inside it spans a junction
+    (spans_a_junction), else 0; GenomeWideCoverage (the place's union coverage), and when known
+    NeighbourMedianIdentity (the genome's median flanking identity, recorded only) and NearBlock
+    (``place_attrs``: coverage, neighbour_median, near_block)."""
+    cov = place_attrs.get('coverage')
+    median = place_attrs.get('neighbour_median')
+    near = place_attrs.get('near_block')
+    for c in candidates:
+        if not c.get('gff'):
+            continue
+        attrs = ";GenomeWide=1"
+        if junctions:
+            parent = _candidate_parent(c)
+            g0, g1 = int(c['start']) - w_start - 1, int(c['end']) - w_start
+            pieces = [(int(h['qstart']), int(h['qend'])) for h in hits_by_gene.get(parent, [])
+                      if min(int(h['gend']), g1) - max(int(h['gstart']), g0) > 0]
+            if c.get('model_parent') == parent:
+                pieces += [(int(e['qstart']), int(e['qend'])) for e in c.get('model_exons') or []]
+            attrs += f";RetrocopyCandidate={1 if spans_a_junction(pieces, junctions) else 0}"
+        if cov not in (None, ''):
+            attrs += f";GenomeWideCoverage={float(cov):.3f}"
+        if median is not None:
+            attrs += f";NeighbourMedianIdentity={float(median):.1f}"
+        if near not in (None, ''):
+            attrs += f";NearBlock={near}"
+        c['gff'][0] += attrs
+
+
+def _has_intron(gff_rows) -> bool:
+    """Whether two consecutive CDS rows of a model lie at least GOI_CHAIN_MIN_INTRON_BP apart:
+    miniprot can split a frameshifted copy into two "exons" a few bp apart."""
+    cds = sorted((int(c[3]), int(c[4])) for c in (line.split('\t') for line in gff_rows or ())
+                 if len(c) >= 9 and c[2] == 'CDS')
+    return any(b[0] - a[1] - 1 >= GOI_CHAIN_MIN_INTRON_BP for a, b in zip(cds, cds[1:]))
+
+
+def genome_wide_drop_reason(cand, records_index=None) -> Optional[str]:
+    """Why a judged candidate of a genome-wide window is no answer, None when it is one: the
+    judge's window label is not HIGH (``judge_not_high``), it is a retrocopy candidate
+    (``retrocopy_cds``), frame-broken without an intron (``frame_broken_no_intron``), or it
+    overlaps a row the search wrote before the pass (``overlaps_record``; ``records_index``:
+    intervals_by_chrom of (chrom, start, end), 0-based half-open)."""
+    gff = cand.get('gff') or []
+    cols = gff[0].split('\t') if gff else []
+    if len(cols) < 9 or synvoy_label.genome_wide_answer(cand.get('window_label'),
+                                                        cand.get('window_basis')) is None:
+        return 'judge_not_high'
+    a = _parse_gff_attr_string(cols[8])
+    if a.get('RetrocopyCandidate') == '1':
+        return 'retrocopy_cds'
+    if a.get('FrameBroken') == '1' and not _has_intron(gff[1:]):
+        return 'frame_broken_no_intron'
+    if records_index and overlaps_indexed(records_index, cols[0], int(cols[3]) - 1, int(cols[4])):
+        return 'overlaps_record'
+    return None
+
+
+def genome_wide_keep(cands, records_index=None) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], str]]]:
+    """The answer of one genome-wide window: of its judged candidates in the judge's order
+    (rank_key), the first that genome_wide_drop_reason passes. Returns ``(kept, dropped)``:
+    ``kept`` that one (or none), ``dropped`` every other candidate with its reason, in the same
+    order (``second_in_window`` for an answer behind the first)."""
+    if cands and all('rank_key' in c for c in cands):
+        ordered = sorted(cands, key=lambda c: c['rank_key'])
+    else:
+        ordered = sorted(cands, key=goi_candidate_order)
+    kept, dropped = [], []
+    for c in ordered:
+        reason = genome_wide_drop_reason(c, records_index)
+        if reason is None and kept:
+            reason = 'second_in_window'
+        if reason is None:
+            kept.append(c)
+        else:
+            dropped.append((c, reason))
+    return kept, dropped
+
+
+def written_rows(gff_lines) -> List[Tuple[str, int, int]]:
+    """(chrom, start, end), 0-based half-open, of every mRNA or gene row of ``gff_lines``: what
+    the search wrote in a genome (GOI and flanking models of the blocks, rearranged flanking
+    models), where the genome-wide path places nothing."""
+    return [(c[0], int(c[3]) - 1, int(c[4])) for c in (ln.split('\t') for ln in gff_lines or ())
+            if len(c) >= 9 and c[2] in ('mRNA', 'gene')]
+
+
 def _write_genome_wide_table(args, prefix, genome_name, places) -> None:
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.genome_wide.tsv")
     try:
@@ -7727,102 +7995,184 @@ def _write_genome_wide_table(args, prefix, genome_name, places) -> None:
         logger.warning(f"[{genome_name}] could not write {path}: {exc}")
 
 
+def evaluate_genome_wide_place(p, q, genome_seqs, genome_len: int, proteome, hood, n_flank: int,
+                               own_gene_id=None, junctions=()) -> None:
+    """The terms of one place (choose_genome_wide_places) from one blastp of ``q`` against its
+    hits' pieces in the genome place: E (the smallest), the union coverage of the HSPs at E <=
+    synvoy_label.GENE_ORDER_EVALUE (with core_completeness the larger of query and core
+    coverage), whether one of them spans a home junction (``retrocopy_hits``, '' without
+    junctions), and, where those meet the HIGH terms, the specificity against the home proteome
+    (bits and the judged piece from first_best_subject). Written on ``p``."""
+    # The place's hits in their order, each hit's pieces in transcript order, each piece once:
+    # the order item 37's rule reads (a sorted set made the letters decide a tie).
+    subjects = list(dict.fromkeys(piece for h in p['hit_list'] for piece in _hit_pieces(genome_seqs, h)))
+    p['best_hit_identity'] = round(max(float(h.get('pident', 0) or 0) for h in p['hit_list']), 1)
+    p.update(evalue=float('inf'), evalue_genome='inf', coverage_value=0.0, coverage=f"{0.0:.3f}",
+             retrocopy_hits='')
+    if not q or not subjects:
+        return
+    hsps = synvoy_evalue.blastp_hsps(q, subjects, synvoy_evalue.search_space(len(q), genome_len))
+    e = min((h[0] for h in hsps), default=float('inf'))
+    spans = [(int(a), int(b)) for ev, _b, a, b, _s in hsps if ev <= synvoy_label.GENE_ORDER_EVALUE]
+    cov = _query_union_coverage([{'qstart': a, 'qend': b} for a, b in spans], len(q))
+    cov = completeness_coverage(cov, core_coverage(spans, q) if spans else 0.0, CORE_COMPLETENESS)
+    p.update(evalue=e, evalue_genome=f"{e:.3g}", coverage_value=float(cov or 0.0),
+             coverage=f"{float(cov or 0.0):.3f}",
+             retrocopy_hits=int(spans_a_junction(spans, junctions)) if junctions else '')
+    if not (e <= synvoy_label.HIGH_EVALUE and p['coverage_value'] >= synvoy_label.COMPLETE_QCOV
+            and str(p['retrocopy_hits']) != '1'):
+        return
+    try:
+        bits, best = first_best_subject(q, subjects)
+        spec = synvoy_specificity.specificity(proteome, p['parent'], q, best, bits, hood, n_flank,
+                                              own_gene_id=own_gene_id)
+    except RuntimeError as exc:
+        logger.warning(f"genome-wide place {p['chrom']}:{p['start']}-{p['end']}: no specificity ({exc})")
+        return
+    specific = synvoy_label.is_specific(spec['margin'], spec['real_competitor'], 'genome',
+                                        False, spec.get('in_neighbourhood'))
+    p.update(bits_value=float(bits), bits=f"{bits:.1f}", best_other=spec['best_other'],
+             margin_value=float(spec['margin']), margin=f"{float(spec['margin']):.1f}",
+             real_competitor=int(bool(spec['real_competitor'])), specific=int(bool(specific)),
+             own_copy_set_aside=spec.get('own_copy_set_aside') or '',
+             own_copy_bits=(f"{float(spec['own_copy_bits']):+.1f}" if spec.get('own_copy_set_aside') else ''))
+
+
 def genome_wide_goi_pass(args, hits, genome_seqs, db_sequences, genome_name, unique_id,
-                         threads_per_job, native_annot_index, prefix, first_idx, block_numbers=None):
-    """FINAL step 5 for one genome (see above): ``(genes, gff_lines)`` of the windows it
-    searched. The window of the k-th kept place is numbered ``first_idx + k`` (a place without
-    a window leaves its number out); with ``block_numbers``, the genome's used numbers, a taken
+                         threads_per_job, native_annot_index, prefix, first_idx, records=(),
+                         decoy_hits=None, decoy_query_list=None, block_numbers=None):
+    """FINAL step 5 for one genome (see above): ``(genes, gff_lines)`` of the answers' windows.
+    ``records``: (chrom, start, end), 0-based half-open, of every mRNA/gene row the search wrote
+    in this genome so far; no place and no answer overlaps one. ``decoy_hits`` (decoy mode): the
+    genome-wide hits of the home GOI's decoys (``decoy_query_list``, their records), whose pass
+    follows the real one against the GOI zones as they were before it; its calls go to
+    ``genome_ctx['decoy_lines']`` only. The window of the k-th place in the order of the tries
+    (real places, then decoy places) is numbered ``first_idx + k``; a place without a window or
+    not tried leaves its number out; with ``block_numbers``, the genome's used numbers, a taken
     number moves up to the next free one (next_block_number)."""
     ctx = args.genome_ctx
-    n_sig = sum(1 for e in (ctx.get('block_esyn') or {}).values()
-                if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN)
-    if not n_sig and not getattr(args, 'goi_genome_wide_without_blocks', False):
-        logger.info(f"[{genome_name}] genome-wide path: no block at E_syn <= "
-                    f"{synvoy_evalue.SIGNIFICANT_BLOCK_ESYN}, not run (--goi_genome_wide_without_blocks "
-                    f"runs it).")
-        return [], []
     proteome, hood = _home_proteome(args)
     if proteome is None:
-        logger.warning(f"[{genome_name}] genome-wide path: no home proteome, so no specificity "
-                       f"and no family size: not run.")
+        logger.warning(f"[{genome_name}] genome-wide path: no home proteome, so no specificity: "
+                       f"not run.")
         return [], []
     home_parents = set(home_goi_parents(args))
     _q, by_parent, _alias = select_goi_queries(db_sequences, getattr(args, 'home_goi_ids', None),
                                                use_relative=False)
-    windows = ctx.setdefault('windows', [])
+    cores = ctx.setdefault('goi_cores', [])
+    zones_before = list(cores)
+    block_windows = list(ctx.get('block_windows') or [])
     margin = max(int(args.gap_search_window),
                  int(getattr(args, 'goi_home_span', 0) * float(getattr(args, 'expansion', 1.0) or 1.0)))
-    # Hits closer than the model margin are one place, so no two windows overlap.
+    # Hits closer than the model margin are one place, so no two windows of one parent overlap.
     max_gap = max(margin, int(getattr(args, 'goi_fallback_max_gap', args.max_intron) or args.max_intron))
-    places = genome_wide_places(hits, list(windows), home_parents, max_gap)
-    if not places:
-        # Said like every other end of the path (fix item 6): one 'genome-wide path:' line per genome
-        # where the path ran, and the table with its header only.
-        _write_genome_wide_table(args, prefix, genome_name, [])
-        logger.info(f"[{genome_name}] genome-wide path: 0 place(s) outside every window (no hit of the "
-                    f"home GOI lies outside the searched windows).")
-        return [], []
+    records = [tuple(r) for r in records or ()]
+    record_index = intervals_by_chrom(records)
     genome_len = int(ctx.get('genome_len') or 0)
     own_id = getattr(args, 'home_goi_gene_id', None)
     n_flank = int(getattr(args, 'n_flanking_genes', 0) or 0)
-    for p in places:
-        q = (by_parent.get(p['parent']) or {}).get('seq', '')
-        # The place's hits in their order, each hit's pieces in transcript order, each piece once:
-        # the order item 37's rule reads (a sorted set made the letters decide a tie).
-        subjects = list(dict.fromkeys(piece for h in p['hit_list'] for piece in _hit_pieces(genome_seqs, h)))
-        p.update(genome=genome_name,
-                 best_hit_identity=round(max(float(h.get('pident', 0) or 0) for h in p['hit_list']), 1))
-        if not q or not subjects:
-            p['evalue_genome'], p['evalue'] = 'inf', float('inf')
-            continue
-        e, _b = synvoy_evalue.blastp_evalue(q, subjects, synvoy_evalue.search_space(len(q), genome_len))
-        p['evalue'], p['evalue_genome'] = e, f"{e:.3g}"
-        if e > synvoy_label.MEDIUM_EVALUE:
-            continue
-        bits, best = first_best_subject(q, subjects)
-        spec = synvoy_specificity.specificity(proteome, p['parent'], q, best, bits, hood, n_flank,
-                                              own_gene_id=own_id)
-        p['specific'] = synvoy_label.is_specific(spec['margin'], spec['real_competitor'], 'genome',
-                                                 False, spec.get('in_neighbourhood'))
-        p.update(bits=f"{bits:.1f}", best_other=spec['best_other'], margin=f"{float(spec['margin']):.1f}",
-                 real_competitor=int(bool(spec['real_competitor'])), specific=int(bool(p['specific'])),
-                 own_copy_set_aside=spec.get('own_copy_set_aside') or '',
-                 own_copy_bits=(f"{float(spec['own_copy_bits']):+.1f}" if spec.get('own_copy_set_aside') else ''))
-    caps = {}
-
-    def cap_of(parent):
-        if parent not in caps:
-            q = (by_parent.get(parent) or {}).get('seq', '')
-            caps[parent] = home_family_size(proteome, parent, q, own_id) + 1 if q else 1
-        return caps[parent]
-    kept = choose_genome_wide_places(places, cap_of)
+    junctions = getattr(args, 'home_goi_junctions', None) or []
+    flank_median = ctx.get('flank_median')
+    common = {'genome': genome_name,
+              'significant_blocks': sum(1 for e in (ctx.get('block_esyn') or {}).values()
+                                        if e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN),
+              'median_flank_identity': f"{flank_median:.1f}" if flank_median is not None else 'NA'}
+    tries_cap = int(getattr(args, 'max_blocks_per_genome', 0) or 0)
+    numbers = {'k': 0}
     genes, gff = [], []
-    dropped_before = ctx.get('genome_wide_dropped', 0)
-    for k, p in enumerate(kept):
-        lo, hi = genome_wide_window(p, margin, len(genome_seqs.get(p['chrom'], '')), windows)
-        if hi <= lo:
-            p['decision'] = 'no_window'
-            continue
-        block = {'chrom': p['chrom'], 'start': p['start'], 'end': p['end'], 'genes': [p['parent']],
-                 'genes_count': 1, 'loci_count': p['hits'], 'genome_wide': True, 'window': (lo, hi)}
-        number = (first_idx + k if block_numbers is None
-                  else next_block_number(block_numbers, first_idx + k))
-        g, lines = process_region_block(number, block, hits, genome_seqs, db_sequences,
-                                        genome_name, args, unique_id, threads_per_job,
-                                        native_annot_index=native_annot_index)
-        genes.extend(g)
-        gff.extend(lines)
-    _write_genome_wide_table(args, prefix, genome_name, places)
-    counts = defaultdict(int)
+
+    def run(places, seq_of, window_hits, zones, decoy):
+        """Evaluate, rank and try the places of one pass; a pass tries at most ``tries_cap``
+        windows (0: no cap)."""
+        for p in places:
+            p.update(common)
+            evaluate_genome_wide_place(p, seq_of(p['parent']), genome_seqs, genome_len, proteome, hood,
+                                       n_flank, own_gene_id=None if decoy else own_id, junctions=junctions)
+        answered, tried = set(), 0
+        for p in choose_genome_wide_places(places):
+            k = numbers['k']
+            numbers['k'] += 1
+            if p['parent'] in answered:
+                p['decision'] = 'not_tried'
+                continue
+            if tries_cap > 0 and tried >= tries_cap:
+                p['decision'] = 'not_tried'
+                if not decoy:
+                    count_limit(args, 'genome_wide_tries_cap')
+                continue
+            lo, hi = genome_wide_window(p, margin, len(genome_seqs.get(p['chrom'], '')), zones)
+            if hi <= lo:
+                p['decision'] = 'no_window'
+                continue
+            p['near_block'] = near_block_of(p, block_windows)
+            block = {'chrom': p['chrom'], 'start': p['start'], 'end': p['end'], 'genes': [p['parent']],
+                     'genes_count': 1, 'loci_count': p['hits'], 'genome_wide': True, 'window': (lo, hi),
+                     'margin': margin, 'records_index': record_index,
+                     'place_attrs': {'coverage': p['coverage_value'], 'neighbour_median': flank_median,
+                                     'near_block': p['near_block']}}
+            if decoy:
+                block.update(decoy_case=p['parent'], decoy_query={'id': p['parent'], 'seq': seq_of(p['parent'])})
+            number = (first_idx + k if block_numbers is None
+                      else next_block_number(block_numbers, first_idx + k))
+            tried += 1
+            g, lines = process_region_block(number, block, window_hits, genome_seqs, db_sequences,
+                                            genome_name, args, unique_id, threads_per_job,
+                                            native_annot_index=native_annot_index)
+            outcome = (ctx.get('genome_wide_outcome') or {}).get(number, 'no_candidate')
+            p.update(decision='modelled', block=number, model_decision=outcome)
+            if outcome == 'answer':
+                answered.add(p['parent'])
+            if not decoy:
+                genes.extend(g)
+                gff.extend(lines)
+        return answered
+
+    places = genome_wide_places(hits, zones_before, home_parents, max_gap, records)
     for p in places:
-        counts[p.get('decision', '')] += 1
-    logger.info(
-        f"[{genome_name}] genome-wide path: {len(places)} place(s) outside every window: "
-        + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
-        + f"; cap {', '.join(f'{pa} {c}' for pa, c in sorted(caps.items())) or '-'} "
-        f"(home family + 1); {ctx.get('genome_wide_dropped', 0) - dropped_before} model(s) not kept "
-        f"(not specific).")
+        p['decoy'] = ''
+    answered = run(places, lambda parent: (by_parent.get(parent) or {}).get('seq', ''), hits, cores, False)
+    decoy_places = []
+    if decoy_hits is not None:
+        # The decoy pass: the home GOI's decoys as cases of their own (home GOI x kind), placed by
+        # their own genome-wide hits against the zones the real pass saw.
+        decoy_seq = {d['id']: d.get('seq', '') for d in decoy_query_list or ()}
+        decoy_places = genome_wide_places(decoy_hits, zones_before, None, max_gap, records,
+                                          decoy_parents=set(decoy_seq))
+        run(decoy_places, lambda parent: decoy_seq.get(parent, ''), decoy_hits, zones_before, True)
+        for p in decoy_places:
+            # In the table as in decoy.tsv: the home GOI, and the decoy kind apart.
+            tag = next((t for t in DECOY_TAGS if p['parent'].endswith(t)), '')
+            p['decoy'], p['parent'] = tag.lstrip('~'), p['parent'][:-len(tag)] if tag else p['parent']
+        ctx['decoy_gw_parents'] = sorted({d['id'][:-len(t)] for d in decoy_query_list or ()
+                                          for t in DECOY_TAGS if d['id'].endswith(t)})
+    _write_genome_wide_table(args, prefix, genome_name, places + decoy_places)
+    if not places:
+        logger.info(f"[{genome_name}] genome-wide path: 0 place(s) outside every searched GOI zone "
+                    f"(no hit of the home GOI lies outside them and outside every written row).")
+    else:
+        logger.info(f"[{genome_name}] genome-wide path: {len(places)} place(s) outside every searched "
+                    f"GOI zone: {_count_text(p.get('decision', '') for p in places)}; "
+                    f"{len(answered)} answer(s)"
+                    + (f"; windows: {_count_text(p['model_decision'] for p in places if p.get('model_decision'))}"
+                       if any(p.get('model_decision') for p in places) else "")
+                    + (f"; candidates not kept: {_count_text(ctx['genome_wide_dropped'])}"
+                       if ctx.get('genome_wide_dropped') else "") + ".")
+    if decoy_hits is not None:
+        logger.info(f"[{genome_name}] genome-wide path, decoy pass: {len(decoy_places)} place(s)"
+                    + (f": {_count_text(p.get('decision', '') for p in decoy_places)}" if decoy_places else "")
+                    + ".")
     return genes, gff
+
+
+def _count_text(items) -> str:
+    """'a 2, b 1': the items counted (a dict is taken as its counts), sorted by name."""
+    counts: Dict[str, int] = defaultdict(int)
+    if isinstance(items, dict):
+        counts.update(items)
+    else:
+        for item in items:
+            counts[item] += 1
+    return ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
 
 
 def full_length_goi_templates(all_goi):
@@ -7920,10 +8270,22 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         _bridge_two_sided = bool(getattr(args, 'synteny_bridge_two_sided', False))
         _bridge_max_per_block = getattr(args, 'synteny_bridge_max_per_block', 2)
 
+        # Decoy mode with the genome-wide path: the reversed and shuffled home GOI proteins are
+        # searched in the genome in the same MMseqs2 call as the query set, for the path's decoy
+        # pass (genome_wide_goi_pass); their rows leave the table before anything reads it.
+        genome_decoys = None
+        search_db = db_path
+        if getattr(args, 'decoy_mode', False) and getattr(args, 'goi_genome_wide_path', False):
+            genome_decoys = genome_search_decoys(base_db_sequences, getattr(args, 'home_goi_ids', None))
+            if genome_decoys:
+                os.makedirs(tmp_dir, exist_ok=True)
+                search_db = query_db_with_decoys(db_path, genome_decoys,
+                                                 os.path.join(tmp_dir, 'query_with_decoys.faa'))
+
         # 1. Search (MMseqs) with low-memory retries for fragmented genomes.
         genome_rung: Dict[str, Any] = {}
         mmseqs_ok, mmseqs_details, resource_fail = run_mmseqs_easy_search_with_retries(
-            db_path=db_path,
+            db_path=search_db,
             genome_path=genome_path,
             hits_file=hits_file,
             tmp_dir=tmp_dir,
@@ -7947,6 +8309,16 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             raise RuntimeError(
                 f"MMseqs easy-search failed for {genome_name}: {mmseqs_details}"
             )
+
+        decoy_hits = None
+        if genome_decoys:
+            # hits/<genome>.m8 keeps the real rows only, as without decoys (CLUSTER_REGIONS and
+            # the report read it, and a decoy's row there would count as a hit).
+            _decoy_m8 = os.path.join(tmp_dir, 'decoy_genome.m8')
+            split_decoy_rows(hits_file, _decoy_m8)
+            decoy_hits = parse_hits(
+                _decoy_m8, args.min_identity, args.min_length, args.evalue,
+                query_lengths=dict(query_lengths, **{d['id']: len(d['seq']) for d in genome_decoys}))
 
         hits = parse_hits(
             hits_file,
@@ -8044,11 +8416,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         if _flank_median is not None:
             logger.info(f"[{genome_name}] Median flanking identity: {_flank_median:.1f}% "
                         f"over {_flank_n} flanking gene(s).")
+        # Written on the answers of the genome-wide path too (NeighbourMedianIdentity), never a gate.
+        args.genome_ctx['flank_median'] = _flank_median
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n)
         _write_block_table(args, prefix, genome_name)
 
-        _gw_any_genome = (getattr(args, 'goi_genome_wide_path', False)
-                          and getattr(args, 'goi_genome_wide_without_blocks', False))
+        # With the genome-wide path a genome without any block is searched on (the path runs in
+        # every searched genome); without it the search of such a genome ends here.
+        _gw_any_genome = bool(getattr(args, 'goi_genome_wide_path', False))
         _block_opts = dict(home_rank=home_rank, bridge=_bridge, gene_gap=_gene_gap,
                            goi_seeded=_goi_seeded, proxy_parents=goi_proxy_flanking_parents,
                            gw_any_genome=_gw_any_genome)
@@ -8515,12 +8890,14 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                     _covered.append((_lchrom, _lstart - args.region_padding,
                                      _lend + args.region_padding))
 
-        # FINAL step 5: strong GOI hits outside every searched window (genome_wide_goi_pass).
+        # FINAL step 5: the strong GOI hits outside every searched GOI zone and every row written
+        # so far (genome_wide_goi_pass).
         if getattr(args, 'goi_genome_wide_path', False):
             _gw_genes, _gw_gff = genome_wide_goi_pass(
                 args, hits, genome_seqs, base_db_sequences, genome_name, unique_id,
                 threads_per_job, native_annot_index, prefix, len(synteny_blocks) + 5000,
-                block_numbers=_block_numbers)
+                records=written_rows(all_gff_lines), decoy_hits=decoy_hits,
+                decoy_query_list=genome_decoys, block_numbers=_block_numbers)
             all_genes.extend(_gw_genes)
             all_gff_lines.extend(_gw_gff)
 
@@ -8576,6 +8953,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             n_decoy = write_decoy_outputs(args, prefix, genome_name, _decoy_lines)
             args.genome_ctx['decoy_counts'] = decoy_case_counts(
                 _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
+            if getattr(args, 'goi_genome_wide_path', False):
+                args.genome_ctx['decoy_gw_counts'] = decoy_gw_counts(
+                    _decoy_lines, args.genome_ctx.get('decoy_gw_parents') or [])
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
         log_genome_limits(args, genome_name)
         _rows, _n_dropped = rescue_table_rows(args.genome_ctx, args.genome_ctx.get('goi_cores') or [])
@@ -8635,6 +9015,8 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                      "structural_similarity": attrs.get("StructuralSimilarity", ""),
                      # a hit chain the gate refused, written in a significant block: no seed
                      "refusal_lifted": attrs.get("RefusalLifted", ""),
+                     # a call of the genome-wide path (a strong hit without synteny): no seed
+                     "genome_wide": attrs.get("GenomeWide", "") == "1",
                      # full precision for the seed bar (RF-1f), the GFF string otherwise
                      "spec_margin": _numbers_of(args, model_id).get("SpecMargin", attrs.get("SpecMargin", "")),
                      "real_competitor": _numbers_of(args, model_id).get("RealCompetitor",
@@ -9286,17 +9668,14 @@ def main():
                              "(or stop) in the intron; flag FirstExon=missing / MissingQueryStart "
                              "instead. Home GOI and decoys only (batch G3A; off by default)")
     parser.add_argument("--goi_genome_wide_path", type=str2bool, default=False,
-                        help="Model GOI hits outside every searched window when the home protein's "
-                             "E against them over the whole genome is <= 1e-3 and no other home "
-                             "protein explains them as well; at most the home family size + 1 "
-                             "places per GOI and genome, best E first, judged in the genome place; "
-                             "only in a genome with a block at E_syn <= 0.1 (FINAL step 5; off by "
-                             "default)")
-    parser.add_argument("--goi_genome_wide_without_blocks", type=str2bool, default=False,
-                        help="With --goi_genome_wide_path: run the genome-wide path also in a genome "
-                             "without a block at E_syn <= 0.1 (or without any block), and mark a "
-                             "genome-wide call that runs across a home exon junction without an "
-                             "intron RetrocopyCandidate=1 (PR-9; off by default)")
+                        help="The strong hit without synteny (FINAL step 5), in every searched genome: "
+                             "a GOI hit outside every searched GOI zone gets one answer per home GOI "
+                             "when the judge's HIGH terms hold in the genome place (E <= 1e-6 over the "
+                             "genome, >= 0.7 of the query covered by its hits, no home exon junction "
+                             "inside one hit, no other home protein within 10 bits) and its model is "
+                             "judged HIGH there, is no retrocopy and not frame-broken without an "
+                             "intron; written as MEDIUM, GOIClass=genome_wide_strong_hit, never a "
+                             "seed, not counted by the report (its own reading); default %(default)s")
     parser.add_argument("--goi_join_leftover_hits", type=str2bool, default=False,
                         help="Join a GOI hit that no gene model covers into a confident (HIGH or "
                              "MEDIUM) model of the home query or its decoy when it continues the "
@@ -9410,9 +9789,10 @@ def main():
 
     parser.add_argument("--decoy_mode", type=str2bool, default=False,
                         help="Also search the reversed home protein and two shuffles of it in "
-                             "every window, model and label them like the real query, and write "
-                             "their calls to decoys/ (never seeded, never counted). Every decoy call "
-                             "is false: their rate per label and place calibrates the labels.")
+                             "every window (with --goi_genome_wide_path also in the whole genome, "
+                             "for the path's decoy pass), model and label them like the real query, "
+                             "and write their calls to decoys/ (never seeded, never counted). Every "
+                             "decoy call is false: their rate per label and place calibrates the labels.")
     parser.add_argument("--report_nonsyntenic_candidates", type=str2bool, default=True,
                         help="§1x: record GOI hits that clear the quality bar but are "
                              "refused by a synteny gate to hits/<genome>.nonsyntenic.tsv, "
@@ -9576,10 +9956,9 @@ def main():
     # exon lengths of an annotated multi-exon home gene (the first-exon guard of G3A).
     _home_method, _home_lengths = read_home_exons(getattr(args, "goi_info", None))
     args.home_goi_exons, args.home_goi_structure = home_exon_terms(_home_method, _home_lengths)
-    # The junctions of an annotated multi-exon home gene (RetrocopyCandidate, PR-9).
+    # The junctions of an annotated multi-exon home gene: a genome-wide call across one without
+    # an intron is a retrocopy candidate (RetrocopyCandidate=1), and no answer.
     args.home_goi_junctions = home_exon_junctions(_home_lengths) if args.home_goi_structure else []
-    if getattr(args, 'goi_genome_wide_without_blocks', False) and not getattr(args, 'goi_genome_wide_path', False):
-        logger.warning("--goi_genome_wide_without_blocks has no effect without --goi_genome_wide_path.")
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov

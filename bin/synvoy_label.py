@@ -23,6 +23,12 @@ significance levels (tmp/formula_check_2026-10-14/FINAL_for_vscode.md, section 3
   AMBIGUOUS  gene_order_only       1e-3 < Eeff <= 1 in the slot of a significant block, and
                                    specific ("weak match where the gene should be")
   LOW        not_significant       everything else
+
+A call of the genome-wide path (a place outside every searched GOI zone, judged in the genome
+place; genome_wide_answer) is an answer only when the judge labels it HIGH there:
+
+  MEDIUM     significant_specific  class GENOME_WIDE_CLASS ("strong hit without synteny"):
+                                   never HIGH, never counted, never a seed; else no answer
 """
 import math
 from typing import Any, Dict, Optional, Tuple
@@ -34,6 +40,8 @@ HIGH_MARGIN_BITS = 10.0
 SPECIFIC_MARGIN_BITS = 3.3
 COMPLETE_QCOV = 0.7
 EVALUE_TIE = 1e-10          # E-values below this are equal for ranking
+
+GENOME_WIDE_CLASS = "genome_wide_strong_hit"
 
 LABEL_RANK = {"HIGH": 4, "MEDIUM": 3, "AMBIGUOUS": 2, "LOW": 1}
 BASIS_TEXT = {
@@ -78,6 +86,15 @@ def judge(e_eff: Optional[float], place: str, block_significant: bool,
     if e <= GENE_ORDER_EVALUE and place == "slot" and block_significant and specific:
         return "AMBIGUOUS", "gene_order_only"
     return "LOW", "not_significant"
+
+
+def genome_wide_answer(confidence: str, basis: str) -> Optional[Tuple[str, str, str]]:
+    """A call of the genome-wide path (a place no anchor holds) is an answer only when the judge
+    labels it HIGH in the genome place: it is then MEDIUM (no synteny supports it), with the
+    judge's basis and class GENOME_WIDE_CLASS. None otherwise."""
+    if confidence == "HIGH" and basis == "significant_specific":
+        return "MEDIUM", basis, GENOME_WIDE_CLASS
+    return None
 
 
 def rank_key(confidence: str, e_eff: Optional[float], block_esyn: Optional[float],

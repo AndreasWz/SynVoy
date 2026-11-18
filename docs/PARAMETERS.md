@@ -1495,8 +1495,10 @@ support never takes this route. `true` switches it off. It changes regions only,
 
 Three passes look for the gene where no window reached it or no model was built there: the
 dispersed-GOI rescue inside the search, and after the search the hull rescue and the strong-synteny
-rescue. A fourth, the genome-wide path, is off by default. The judge labels the models of the
-rescues like those of the search, except the strong-synteny rescue's, which stay LOW. The rules:
+rescue. A fourth, the genome-wide path ([`goi_genome_wide_path`](#goi_genome_wide_path)), gives a
+strong hit outside every searched GOI zone an answer of its own, which is never counted. The judge
+labels the models of the rescues like those of the search, except the strong-synteny rescue's,
+which stay LOW. The rules:
 [ALGORITHM.md § 7.11](ALGORITHM.md#711-goi-hits-far-from-their-anchors) and
 [§ 9](ALGORITHM.md#9-rescue-passes); the files: [OUTPUT.md](OUTPUT.md#rescue-models).
 
@@ -1531,23 +1533,45 @@ out. A hit of a short query, or of a gene with short exons, cannot reach 50 alig
 the module rule. The length is the hit's aligned query residues (qend − qstart + 1); the
 `alnlen` that `rejected_candidates` lists is MMseqs2's own column, the target span in nucleotides.
 
-### `goi_genome_wide_path` / `goi_genome_wide_without_blocks`
-**Defaults:** `false` / `false`
+### `goi_genome_wide_path`
+**Default:** `false`
 
-The genome-wide path models GOI hits that lie outside every searched window. The hits are grouped
-into places, and a place is modelled when the home protein's E-value against its hits over the
-whole genome is at most 1e-3 and no other home protein explains them as well (the label's
-specificity test); at most the size of the gene's home family + 1 places per gene and genome, the
-best E-value first. Each place is searched in a window of its own, without decoys and without
-flanking genes, and its calls are judged in the genome place: they carry `GenomeWide=1` and
-`Place=genome`. It runs only in a genome with at least one significant block (E_syn ≤ 0.1). The
-report lists every place under `genome_wide_path`, with what became of it
-([OUTPUT.md](OUTPUT.md#the-other-top-level-keys)).
+The strong hit without synteny: a GOI hit of the genome-wide search that lies outside every
+searched GOI zone (block ± the GOI margin) and outside every model the search wrote lies where no
+block predicted the gene. With this switch, every searched genome that has the home proteome, with
+or without a block, gets one more step after its windows. The hits are grouped into places (per home
+gene and sequence, hits within the larger of the model margin and the gene's intron bound of each
+other, never across a GOI zone), and a place is tried when the terms of the judge's HIGH hold for
+its hits in the genome place ([ALGORITHM.md § 7.11](ALGORITHM.md#711-goi-hits-far-from-their-anchors)):
 
-`goi_genome_wide_without_blocks` (only with `goi_genome_wide_path`) runs the path also in a genome
-without a significant block, and marks a call whose CDS or hit runs across an exon junction of the
-home gene, with 10 residues on each side, `RetrocopyCandidate=1`. A retrocopy looks like that, and
-so does an ortholog that lost the intron.
+- the home protein's blastp E-value against them over the whole genome is at most 1e-6;
+- the HSPs with an E-value of at most 1 cover at least 0.7 of the query, their union (with
+  [`core_completeness`](#core_completeness), the larger of the query's and its core's coverage);
+- no HSP runs across an exon junction of the annotated home gene (≥ 2 exons), with 10 residues on
+  each side: the target would encode both exons without an intron, as a retrocopy does;
+- no other home protein is a real competitor within 10 bits of it.
+
+Per home gene the places are tried best first (E-value, then bits, then coverage) until one gives
+an answer, at most [`max_blocks_per_genome`](#max_blocks_per_genome) windows per genome
+(`genome_wide_tries_cap` in the limit counts). A try searches the place ± the model margin, cut at
+the GOI zones, without flanking genes, and judges its models in the genome place. Its best model
+is the answer when the judge labels it HIGH there, no CDS or hit of it runs across a home junction
+(`RetrocopyCandidate=1`), it is not frame-broken without an intron (a frameshifted copy split into
+two pieces a few bp apart), and it overlaps no model the search wrote before.
+
+An answer is written as MEDIUM, `GOIClass=genome_wide_strong_hit`, with `GenomeWide=1`,
+`GenomeWideCoverage`, `NeighbourMedianIdentity` (the genome's median flanking identity, recorded
+for the curator and never a test) and, when its place lies inside the searched window of a block
+(outside its GOI zone), `NearBlock` (that block's number). It never joins the query set of the next
+wave and is not in the gene tree. The report counts no answer: it keeps one per genome, only in a
+genome without a counted call and where no other record lies at its place, and names the kept ones
+in the headline as "(not counted)", those near a block apart
+([OUTPUT.md](OUTPUT.md#the-headline)). With [`decoy_mode`](#decoy_mode) the reversed and shuffled
+home proteins are searched in the genome as well and take the same steps, so the report gives the
+decoy rate of the genome place (`decoy_rate.genome_wide`). Every place is listed under
+`genome_wide_path`, with what became of it ([OUTPUT.md](OUTPUT.md#the-other-top-level-keys)). An
+answer is a candidate for curation: the rule's false-call rate on genes it was not developed on
+has not been measured.
 
 ### `disable_goi_hull_rescue`
 **Default:** `false`
@@ -2027,14 +2051,18 @@ These measure SynVoy rather than improve a result. Leave them at their defaults 
 **Default:** `false`
 
 Calibrates the labels without a truth set. In every search window the reversed home protein and two
-shuffles of it (seeded by the query id, so a rerun repeats them), and those of the relative's query
+shuffles of it (seeded by the decoy kind and the protein sequence, so a rerun repeats them and a
+renamed gene gets the same decoys), and those of the relative's query
 where the window has one, are searched like the home protein: modelled, labelled, and given the
 same E-values and specificity terms. They compete only with each other, never seed the next wave,
 and never reach the result GFFs or the figures; they are written to `decoys/locus_<N>/`. Every
 decoy call is false, so the share of decoy cases that reach a label is that label's false-call rate
 on your data. The report gives it as `decoy_rate`, with the upper end of the exact (Clopper-Pearson)
-95 % interval ([OUTPUT.md](OUTPUT.md#decoy-calls---decoy_mode)). It makes the window search about
-four times as long. No module sets it.
+95 % interval ([OUTPUT.md](OUTPUT.md#decoy-calls---decoy_mode)). With
+[`goi_genome_wide_path`](#goi_genome_wide_path) the same decoys are also searched in the whole
+genome, in the same MMseqs2 run as the query set, and take the genome-wide path's steps
+(`decoy_rate.genome_wide`). It makes the window search about four times as long. No module sets
+it.
 
 ### The comparison switches
 
@@ -2057,7 +2085,7 @@ on a set of genomes can be measured. Run the set both ways and compare.
 | `--tandem_copy_parent home` | [§ 10](#tandem_copy_parent) | tandem copies judged against the home protein |
 | `--disable_coverage_demotion` | [§ 10](#disable_coverage_demotion) | the report's coverage check advisory only |
 | `--legacy_strand_score` | [§ 12](#legacy_strand_score) | the strand term of older versions in the region score |
-| `--goi_genome_wide_path` | [§ 13](#goi_genome_wide_path--goi_genome_wide_without_blocks) | the gene also modelled outside the windows |
+| `--goi_genome_wide_path` | [§ 13](#goi_genome_wide_path) | a strong hit outside every searched GOI zone gets an answer of its own (never counted) |
 
 Write a switch with its value (`--disable_wavefront true`).
 
@@ -2065,11 +2093,13 @@ Write a switch with its value (`--disable_wavefront true`).
 
 ## 20. Removed parameters
 
-These parameters were removed before version 1.0.0. What a run does when you still give one:
+These parameters were removed, before version 1.0.0 unless the table says when. What a run does
+when you still give one:
 
 - **Replaced**: the run stops at its start and names what to use instead.
 - **Had no effect**, and **the LLM parameter advisor**: a warning, and the value is ignored.
 - **`goi_chain_query_aware`**: `true` stops the run at its start, `false` gives a warning.
+- **`goi_genome_wide_without_blocks`**: `false` stops the run at its start, `true` gives a warning.
 
 **Replaced**
 
@@ -2113,6 +2143,12 @@ These parameters were removed before version 1.0.0. What a run does when you sti
 | Parameter | Why it went |
 |---|---|
 | `goi_chain_query_aware` | a hit chain that follows the query (off by default). Switched on, it refused a continuation of the query in the same reading frame 24 bp on, and so lost true calls in a test. Its link rule lives on in the leftover join (`goi_join_leftover_hits`) |
+
+**Warns when on, stops when off**
+
+| Parameter | Why it went |
+|---|---|
+| `goi_genome_wide_without_blocks` | removed on 2026-11-16 (after 1.0.1). With `goi_genome_wide_path` it ran the genome-wide path also in a genome without a significant block and marked retrocopy candidates. The path now runs in every searched genome, with or without a block (the genome place does not depend on the blocks), and its retrocopy test is always on. To search no genome-wide places, use `--goi_genome_wide_path false` |
 
 **The LLM parameter advisor** (read only by the advisor, which was removed with them)
 

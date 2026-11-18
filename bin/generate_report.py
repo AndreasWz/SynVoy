@@ -200,6 +200,9 @@ def _process_gffs_unified(gff_files):
     goi_evidence_counts = Counter()
     fallback_goi_annotations = 0
     total_annotations = 0
+    # The rows of the genome-wide path's answers (GOIClass=genome_wide_strong_hit): a reading of
+    # their own, counted here only, so that the counts above describe the other rows alone.
+    genome_wide_answer_rows = 0
     # ── collect_goi_annotations accumulator ───────────────────────────────
     goi_records = []
     # ── collect_high_flanking_per_locus accumulator ───────────────────────
@@ -221,6 +224,7 @@ def _process_gffs_unified(gff_files):
                 "goi_class_counts": Counter(),
                 "evidence_type_counts": Counter(),
                 "model_status_counts": Counter(),
+                "genome_wide_answer_annotations": 0,
             },
         )
 
@@ -261,34 +265,41 @@ def _process_gffs_unified(gff_files):
                     goi_class = attrs.get("GOIClass", "")
                     evidence_type = attrs.get("EvidenceType", attrs.get("Type", "")) or "unknown"
                     model_status = attrs.get("ModelStatus", "")
+                    genome_wide_answer = role == "goi" and goi_class == synvoy_label.GENOME_WIDE_CLASS
 
-                    # — summarize_annotations bookkeeping —
-                    ann_stats["total_annotations"] += 1
-                    ann_stats["role_counts"][role] += 1
-                    ann_stats["evidence_type_counts"][evidence_type] += 1
-                    if model_status:
-                        ann_stats["model_status_counts"][model_status] += 1
-                        model_status_counts[model_status] += 1
-                    ann_stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
-                    if role == "goi" and goi_class:
-                        ann_stats["goi_class_counts"][goi_class] += 1
+                    # — summarize_annotations bookkeeping (not for an answer of the genome-wide
+                    # path, which is counted apart) —
+                    if genome_wide_answer:
+                        ann_stats["genome_wide_answer_annotations"] += 1
+                        genome_wide_answer_rows += 1
+                    else:
+                        ann_stats["total_annotations"] += 1
+                        ann_stats["role_counts"][role] += 1
+                        ann_stats["evidence_type_counts"][evidence_type] += 1
+                        if model_status:
+                            ann_stats["model_status_counts"][model_status] += 1
+                            model_status_counts[model_status] += 1
+                        ann_stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
+                        if role == "goi" and goi_class:
+                            ann_stats["goi_class_counts"][goi_class] += 1
 
-                    total_annotations += 1
-                    role_counts[role] += 1
-                    evidence_type_counts[evidence_type] += 1
+                        total_annotations += 1
+                        role_counts[role] += 1
+                        evidence_type_counts[evidence_type] += 1
 
                     if role == "goi":
-                        ann_stats["goi_annotations"] += 1
-                        goi_confidence_counts[confidence] += 1
-                        if goi_class:
-                            goi_class_counts[goi_class] += 1
-                        goi_evidence_counts[evidence_type] += 1
-                        if goi_class == "ambiguous_goi_family_member":
-                            ann_stats["ambiguous_goi_annotations"] += 1
-                        else:
-                            ann_stats["resolved_goi_annotations"] += 1
-                        if evidence_type in {"fallback_hit_span", "raw_hit", "rescued_exon"}:
-                            fallback_goi_annotations += 1
+                        if not genome_wide_answer:
+                            ann_stats["goi_annotations"] += 1
+                            goi_confidence_counts[confidence] += 1
+                            if goi_class:
+                                goi_class_counts[goi_class] += 1
+                            goi_evidence_counts[evidence_type] += 1
+                            if goi_class == "ambiguous_goi_family_member":
+                                ann_stats["ambiguous_goi_annotations"] += 1
+                            else:
+                                ann_stats["resolved_goi_annotations"] += 1
+                            if evidence_type in {"fallback_hit_span", "raw_hit", "rescued_exon"}:
+                                fallback_goi_annotations += 1
 
                         # — collect_goi_annotations bookkeeping —
                         try:
@@ -339,6 +350,16 @@ def _process_gffs_unified(gff_files):
                             "rescue_rule": (attrs.get("RescueRule", "") or "").strip(),
                             "rescue_anchors": (attrs.get("RescueAnchors", "") or "").strip(),
                             "rescue_anchor_bp": (attrs.get("RescueAnchorBp", "") or "").strip(),
+                            # A model judged on its hit regions alone (no clean frame).
+                            "frame_broken": (attrs.get("FrameBroken", "") or "").strip() == "1",
+                            # A call of the genome-wide path (GenomeWide=1): the place's union
+                            # coverage, its retrocopy test ("" when untested), the genome's median
+                            # neighbour identity (recorded only) and the block whose window holds it.
+                            "genome_wide": (attrs.get("GenomeWide", "") or "").strip() == "1",
+                            "genome_wide_coverage": (attrs.get("GenomeWideCoverage", "") or "").strip(),
+                            "retrocopy_candidate": (attrs.get("RetrocopyCandidate", "") or "").strip(),
+                            "neighbour_median_identity": (attrs.get("NeighbourMedianIdentity", "") or "").strip(),
+                            "near_block": (attrs.get("NearBlock", "") or "").strip(),
                         })
 
                     elif role == "flanking" and confidence == "HIGH":
@@ -366,6 +387,8 @@ def _process_gffs_unified(gff_files):
             "goi_class_counts": dict(stats["goi_class_counts"]),
             "evidence_type_counts": dict(stats["evidence_type_counts"]),
             "model_status_counts": dict(stats["model_status_counts"]),
+            **({"genome_wide_answer_annotations": stats["genome_wide_answer_annotations"]}
+               if stats["genome_wide_answer_annotations"] else {}),
         }
         per_genome_list.append(row)
         if stats["goi_annotations"] == 0:
@@ -385,6 +408,7 @@ def _process_gffs_unified(gff_files):
         "fallback_goi_annotations": fallback_goi_annotations,
         "genomes_without_goi": genomes_without_goi,
         "genomes_with_only_ambiguous_goi": genomes_with_only_ambiguous_goi,
+        **({"genome_wide_answer_rows": genome_wide_answer_rows} if genome_wide_answer_rows else {}),
     }
     flanking_per_locus = {key: len(genes) for key, genes in flanking_seen.items()}
     return annotation_summary, goi_records, flanking_per_locus
@@ -603,6 +627,7 @@ def collect_sw_backend(paths):
 
 
 DECOY_COUNT_COLUMNS = ("decoy_cases", "decoy_high", "decoy_medium_plus", "decoy_ambiguous_plus")
+DECOY_GW_COUNT_COLUMNS = ("decoy_gw_cases", "decoy_gw_answers")
 LIMIT_PREFIX = "limit_"
 
 
@@ -645,9 +670,13 @@ def collect_decoy_rate(paths):
     target-policy row (one row per home locus and searched genome; a case = home GOI x decoy
     kind, as iterative_search_runner.decoy_case_counts counts it), summed. Per label: the
     calls and the upper end of the exact (Clopper-Pearson) 95 % interval; no bare rate, so
-    that 0 calls is never read as "0 %". None when no row carries decoy counts."""
-    totals = dict.fromkeys(DECOY_COUNT_COLUMNS, 0)
-    rows = 0
+    that 0 calls is never read as "0 %". None when no row carries decoy counts.
+
+    With the genome-wide path, ``genome_wide``: its decoy pass apart (decoy_gw_cases: a case =
+    home GOI x decoy kind searched in the genome place; decoy_gw_answers: cases with a decoy
+    answer and no window decoy call of MEDIUM or better), the answers with their interval."""
+    totals = dict.fromkeys(DECOY_COUNT_COLUMNS + DECOY_GW_COUNT_COLUMNS, 0)
+    rows = gw_rows = 0
     for path in sorted(paths):
         try:
             with open(path, newline="") as fh:
@@ -657,6 +686,10 @@ def collect_decoy_rate(paths):
                     rows += 1
                     for k in DECOY_COUNT_COLUMNS:
                         totals[k] += int(float(row.get(k) or 0))
+                    if str(row.get("decoy_gw_cases") or "").strip():
+                        gw_rows += 1
+                        for k in DECOY_GW_COUNT_COLUMNS:
+                            totals[k] += int(float(row.get(k) or 0))
         except (OSError, csv.Error, ValueError):
             continue
     if not rows:
@@ -668,6 +701,11 @@ def collect_decoy_rate(paths):
         k = totals[key]
         out[label] = {"calls": k,
                       "ci95_upper": round(clopper_pearson(k, n)[1], 4) if n else None}
+    if gw_rows:
+        n_gw, k_gw = totals["decoy_gw_cases"], totals["decoy_gw_answers"]
+        out["genome_wide"] = {"cases": n_gw, "genome_searches": gw_rows,
+                              "answers": {"calls": k_gw,
+                                          "ci95_upper": round(clopper_pearson(k_gw, n_gw)[1], 4) if n_gw else None}}
     return out
 
 
@@ -682,22 +720,35 @@ def genome_absence_categories(records, target_policy, demoted_classes):
       unknown_context_truncated   that window ran past a scaffold end: the place where
                                   the gene should sit is partly missing from the assembly
       absent_no_block             the search found no block in this genome
-    The first is a property of the calls, the other three of the search; a genome can be
-    nearest_paralog_only and one of the three."""
-    counted = {r.get("genome") for r in records
-               if r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in demoted_classes}
+      strong_hit_without_synteny  it holds an answer of the genome-wide path (a strong hit
+                                  outside every searched window; not counted)
+      strong_hit_near_block       it holds such an answer inside a block's searched window,
+                                  outside its GOI zone (NearBlock)
+    The first is a property of the calls, the others of the search; a genome can be
+    nearest_paralog_only (read on the records other than the answers) and one of the others. A
+    genome with an answer is not absent and is in none of the three absent lists."""
+    counted = {r.get("genome") for r in records if _is_counted(r, demoted_classes)}
+    answered = {}
+    for r in genome_wide_answer_records(records, demoted_classes):
+        answered.setdefault(r.get("genome"), r)
     by_genome = {}
     for r in records:
-        by_genome.setdefault(r.get("genome"), []).append(r)
-    genomes = sorted((set(target_policy) | set(by_genome)) - counted - {None})
+        if not r.get("genome_wide_strong_hit"):
+            by_genome.setdefault(r.get("genome"), []).append(r)
+    genomes = sorted((set(target_policy) | set(by_genome) | set(answered)) - counted - {None})
     out = {"nearest_paralog_only": [], "absent_context_complete": [],
-           "unknown_context_truncated": [], "absent_no_block": []}
+           "unknown_context_truncated": [], "absent_no_block": [],
+           "strong_hit_without_synteny": [], "strong_hit_near_block": []}
     for g in genomes:
         recs = by_genome.get(g, [])
         if recs:
             best = min(recs, key=_record_rank)
             if best.get("confidence") == "AMBIGUOUS" and best.get("basis") == "not_specific":
                 out["nearest_paralog_only"].append(g)
+        if g in answered:
+            out["strong_hit_near_block" if str(answered[g].get("near_block") or "").strip()
+                else "strong_hit_without_synteny"].append(g)
+            continue
         ctx = (target_policy.get(g) or {}).get("best_block_context") or "NA"
         if ctx == "complete":
             out["absent_context_complete"].append(g)
@@ -1016,19 +1067,27 @@ def genomes_without_flanking_hits(paths):
     return sorted(out)
 
 
-GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched window, from the genome-wide "
-                     "path (FINAL step 5, --goi_genome_wide_path): modelled when the home "
-                     "protein's E against them over the whole genome is <= 1e-3 and no other "
-                     "home protein explains them as well, at most the home family size + 1 per "
-                     "genome, best E first. Their calls carry GenomeWide=1 and Place=genome. The "
-                     "genome place has no decoy calibration: decoys are searched in block windows "
-                     "only.")
+GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched GOI zone and every written row, from "
+                    "the genome-wide path (--goi_genome_wide_path). A place is tried when the home "
+                    "protein's blastp E against its hits over the whole genome (-searchsp = |q| x "
+                    "genome/3) is <= 1e-6, its HSPs at E <= 1 cover >= 0.7 of the query, none runs "
+                    "across a home exon junction and no other home protein is a real competitor "
+                    "within 10 bits; per home GOI the places are tried best first until one gives an "
+                    "answer: a model the judge labels HIGH in the genome place, no retrocopy, not "
+                    "frame-broken without an intron, overlapping no row. An answer is written as "
+                    "MEDIUM, GOIClass=genome_wide_strong_hit, GenomeWide=1; it never seeds and is "
+                    "never counted; the report keeps one per genome, only in a genome without a "
+                    "counted call (summary.genome_wide_strong_hits; one inside a block's window is "
+                    "near that block, summary.near_block_strong_hits). The genome place is calibrated "
+                    "by decoys only in a --decoy_mode run (decoy_rate.genome_wide; decoy_places here).")
 
 
 def collect_genome_wide_places(paths):
     """The places of the genome-wide path (hits/<genome>.genome_wide.tsv,
-    iterative_search_runner.genome_wide_goi_pass): one record per place with its E over the
-    genome and what became of it. Unreadable files are skipped."""
+    iterative_search_runner.genome_wide_goi_pass): one record per place with its terms over the
+    genome and what became of it (``decision``, and for a tried place its window's
+    ``model_decision``); a decoy place (decoy mode) has its decoy kind in ``decoy``. Tables written
+    before 2026-11-16 load with the columns they have. Unreadable files are skipped."""
     records = []
     for path in sorted(paths):
         try:
@@ -1039,35 +1098,58 @@ def collect_genome_wide_places(paths):
                     records.append({
                         "genome": canonical_genome_id(
                             row.get("genome") or os.path.basename(path).split(GENOME_WIDE_SUFFIX)[0]),
-                        "parent": row.get("parent", ""), "chrom": row.get("chrom", ""),
+                        "parent": row.get("parent", ""), "decoy": row.get("decoy", "") or "",
+                        "chrom": row.get("chrom", ""),
                         "start": _safe_int(row.get("start")), "end": _safe_int(row.get("end")),
                         "hits": _safe_int(row.get("hits")),
                         "best_hit_identity": _safe_float(row.get("best_hit_identity")),
                         "evalue_genome": row.get("evalue_genome", ""),
+                        "bits": row.get("bits", "") or "",
+                        "coverage": row.get("coverage", "") or "",
+                        "retrocopy_hits": row.get("retrocopy_hits", "") or "",
                         "best_other": row.get("best_other", ""), "margin": row.get("margin", ""),
                         "real_competitor": row.get("real_competitor", ""),
-                        "rank": row.get("rank", ""), "cap": row.get("cap", ""),
+                        "rank": row.get("rank", ""),
                         "decision": row.get("decision", ""),
+                        "block": row.get("block", "") or "",
+                        "model_decision": row.get("model_decision", "") or "",
+                        "near_block": row.get("near_block", "") or "",
+                        "significant_blocks": row.get("significant_blocks", "") or "",
+                        "median_flank_identity": row.get("median_flank_identity", "") or "",
+                        **({"cap": row["cap"]} if row.get("cap") else {}),
                         **({"own_copy_set_aside": row["own_copy_set_aside"],
                             "own_copy_bits": row.get("own_copy_bits", "")}
                            if row.get("own_copy_set_aside") else {}),
                     })
         except (OSError, csv.Error):
             continue
-    records.sort(key=lambda r: (r["genome"], r["parent"], r["chrom"], r["start"]))
+    records.sort(key=lambda r: (r["genome"], r["decoy"], r["parent"], r["chrom"], r["start"]))
     return records
 
 
 def summarize_genome_wide_places(records):
-    """Report block of the genome-wide path: places per decision and genome, every place
-    (the ones cut by the cap with their E), and the note on calibration."""
-    by_decision, per_genome = {}, {}
-    for r in records:
-        by_decision[r["decision"]] = by_decision.get(r["decision"], 0) + 1
-        g = per_genome.setdefault(r["genome"], {})
-        g[r["decision"]] = g.get(r["decision"], 0) + 1
-    return {"total": len(records), "by_decision": by_decision, "per_genome": per_genome,
-            "note": GENOME_WIDE_NOTE, "places": records}
+    """Report block of the genome-wide path: the real places per decision, per window outcome
+    (model_decision) and per genome, every place, and the decoy places (decoy mode) apart, with
+    the note on the rule and its calibration."""
+    def tally(rows):
+        by_decision, by_model, per_genome = {}, {}, {}
+        for r in rows:
+            by_decision[r["decision"]] = by_decision.get(r["decision"], 0) + 1
+            if r.get("model_decision"):
+                by_model[r["model_decision"]] = by_model.get(r["model_decision"], 0) + 1
+            g = per_genome.setdefault(r["genome"], {})
+            g[r["decision"]] = g.get(r["decision"], 0) + 1
+        return by_decision, by_model, per_genome
+    real = [r for r in records if not r.get("decoy")]
+    decoys = [r for r in records if r.get("decoy")]
+    by_decision, by_model, per_genome = tally(real)
+    block = {"total": len(real), "by_decision": by_decision, "by_model_decision": by_model,
+             "per_genome": per_genome, "note": GENOME_WIDE_NOTE, "places": real}
+    if decoys:
+        d_decision, d_model, _per = tally(decoys)
+        block["decoy_places"] = {"total": len(decoys), "by_decision": d_decision,
+                                 "by_model_decision": d_model, "places": decoys}
+    return block
 
 
 def build_staging_diagnostics(results_dir, dir_patterns, match_counts):
@@ -1108,19 +1190,22 @@ def low_quality_warnings(failed_genomes, searched):
 
 
 def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_basis=None,
-                         other_home_gene=0):
+                         other_home_gene=0, genome_wide=0, near_block=0):
     """One-line summary of the GOI yield, for the summary block (docs/TODO.md §1k; names of
     the label rework, 2026-10-14):
 
         12 orthologs (9 high, 3 medium confidence); 4 need curation (3 gene order only,
-        1 another home gene fits as well); 2 of another home gene; 40 no significant match;
-        across 33 genome(s).
+        1 another home gene fits as well); 2 of another home gene; 1 strong hit(s) without
+        synteny (not counted); 40 no significant match; across 33 genome(s).
 
     Only HIGH and MEDIUM are orthologs. AMBIGUOUS calls are named apart and never counted:
     ``gene_order_only`` is a weak match in the slot where the gene was expected,
     ``not_specific`` a significant match that another home gene explains as well.
-    ``other_home_gene``: AMBIGUOUS calls that ownership gave to another home gene."""
-    if not (high or medium or low or ambiguous or other_home_gene):
+    ``other_home_gene``: AMBIGUOUS calls that ownership gave to another home gene.
+    ``genome_wide`` / ``near_block``: the answers of the genome-wide path that the report kept,
+    outside every searched window / inside a block's window outside its GOI zone; never counted.
+    ``n_genomes`` counts the genomes with a GOI row other than such an answer."""
+    if not (high or medium or low or ambiguous or other_home_gene or genome_wide or near_block):
         return "No GOI ortholog annotations were produced."
     parts = []
     if high or medium:
@@ -1145,6 +1230,10 @@ def _format_goi_headline(high, medium, low, n_genomes, ambiguous=0, curation_by_
         parts.append(f"{ambiguous} need curation" + (f" ({', '.join(detail)})" if detail else ""))
     if other_home_gene:
         parts.append(f"{other_home_gene} of another home gene")
+    if genome_wide:
+        parts.append(f"{genome_wide} strong hit(s) without synteny (not counted)")
+    if near_block:
+        parts.append(f"{near_block} strong hit(s) near a block, outside its GOI zone (not counted)")
     if low:
         parts.append(f"{low} no significant match")
     return "; ".join(parts) + f"; across {n_genomes} genome(s)."
@@ -1480,6 +1569,15 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                     "rescue_anchors": rep.get("rescue_anchors", ""),
                     "rescue_anchor_bp": rep.get("rescue_anchor_bp", "")}
                    if rep.get("dispersed_rescue") else {}),
+                # Only on a call of the genome-wide path (GenomeWide=1): frame_broken says that its
+                # model has no clean frame (an answer then has an intron).
+                **({"genome_wide": True,
+                    "genome_wide_coverage": rep.get("genome_wide_coverage", ""),
+                    "retrocopy_candidate": rep.get("retrocopy_candidate", ""),
+                    "neighbour_median_identity": rep.get("neighbour_median_identity", ""),
+                    "near_block": rep.get("near_block", ""),
+                    "frame_broken": bool(rep.get("frame_broken"))}
+                   if rep.get("genome_wide") else {}),
             })
 
     records.sort(key=lambda r: (_record_rank(r), r["genome"], r["chrom"]))
@@ -1496,18 +1594,96 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
     }
 
 
+def _is_counted(r, demoted_classes):
+    """A counted call: HIGH or MEDIUM, of no demoted class (ownership, the coverage rule), and no
+    answer of the genome-wide path (``genome_wide_strong_hit``, a reading of its own; the field
+    says so, not the class, which the cross-locus relabel can overwrite)."""
+    return (r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in demoted_classes
+            and not r.get("genome_wide_strong_hit"))
+
+
+def dedupe_goi_records(annotations):
+    """dedupe_goi_annotations of the GOI rows, the answers of the genome-wide path
+    (GOIClass=genome_wide_strong_hit) apart: they are deduped among themselves, marked
+    ``genome_wide_strong_hit`` and appended after the other records, so that phylo, ownership and
+    the coverage demotion see them; every count of the result is that of the other records, which
+    are exactly as without the answers."""
+    answers = [a for a in annotations if a.get("goi_class") == synvoy_label.GENOME_WIDE_CLASS]
+    goi_dedup = dedupe_goi_annotations([a for a in annotations
+                                        if a.get("goi_class") != synvoy_label.GENOME_WIDE_CLASS])
+    if answers:
+        extra = dedupe_goi_annotations(answers)["records"]
+        for r in extra:
+            r["genome_wide_strong_hit"] = True
+        goi_dedup["records"].extend(extra)
+    return goi_dedup
+
+
+def genome_wide_answer_records(records, demoted_classes):
+    """The answers of the genome-wide path that stand: ``genome_wide_strong_hit`` records not
+    demoted by ownership (a demoted one stays a record of its class and is no answer)."""
+    return [r for r in records or () if r.get("genome_wide_strong_hit")
+            and r.get("goi_class") not in demoted_classes]
+
+
+def drop_genome_wide_strong_hits(goi_dedup, demoted_classes):
+    """The report's rule for the answers of the genome-wide path (genome_wide_answer_records): an
+    answer is dropped, with its reason, in a genome that holds a counted call
+    (``genome_has_counted_call``, _is_counted), where it overlaps (same sequence, any base) a HIGH,
+    MEDIUM or AMBIGUOUS record of any other source, another home locus or a rescue pass
+    (``overlaps_record``; a LOW record holds a poorer model of the same DNA and is no record here),
+    and where another answer of the genome ranks first (``not_best_in_genome``, _record_rank, then
+    sequence and start): at most one answer per genome, and only where nothing is counted. Runs
+    after ownership and the coverage demotion, before drop_gene_order_only. The dropped records are
+    listed (``genome_wide_strong_hits_dropped_records``); apply_report_drops.py leaves their rows
+    out of the figures. Mutates ``goi_dedup``; returns the dropped records."""
+    records = goi_dedup.get("records", [])
+    counted = {r["genome"] for r in records if _is_counted(r, demoted_classes)}
+    others = defaultdict(list)
+    for r in records:
+        if not r.get("genome_wide_strong_hit") and r.get("confidence") in ("HIGH", "MEDIUM", "AMBIGUOUS"):
+            others[(r["genome"], r["chrom"])].append(r)
+    answers = genome_wide_answer_records(records, demoted_classes)
+    reasons = {}
+    for r in answers:
+        if r["genome"] in counted:
+            reasons[id(r)] = "genome_has_counted_call"
+        elif any(int(o["start"]) <= int(r["end"]) and int(r["start"]) <= int(o["end"])
+                 for o in others.get((r["genome"], r["chrom"]), ())):
+            reasons[id(r)] = "overlaps_record"
+    standing = defaultdict(list)
+    for r in answers:
+        if id(r) not in reasons:
+            standing[r["genome"]].append(r)
+    for genome in sorted(standing):
+        rs = standing[genome]
+        best = min(rs, key=lambda r: (_record_rank(r), r["chrom"], int(r["start"]), r.get("mrna_id", "")))
+        for r in rs:
+            if r is not best:
+                reasons[id(r)] = "not_best_in_genome"
+    dropped = [r for r in answers if id(r) in reasons]
+    goi_dedup["records"] = [r for r in records if id(r) not in reasons]
+    goi_dedup["genome_wide_strong_hits_dropped"] = len(dropped)
+    goi_dedup["genome_wide_strong_hits_dropped_records"] = [
+        {"genome": r["genome"], "chrom": r["chrom"], "start": r["start"], "end": r["end"],
+         "mrna_id": r.get("mrna_id", ""), "provenance": r.get("provenance", []),
+         "reason": reasons[id(r)]}
+        for r in dropped]
+    return dropped
+
+
 def drop_gene_order_only(goi_dedup, demoted_classes):
     """A weak match where the gene should be (Basis=gene_order_only) is offered for curation
     only in a genome without a counted call of the gene from any home locus or rescue pass
     (plan 3.4): where the gene was found, it is a second, weaker candidate. Counted = HIGH or
     MEDIUM and not demoted by the ownership or the coverage rule, so this runs after them
     (review fix RF-3: it ran inside the dedup, and a genome whose only call was then demoted
-    had lost its candidate as well). The dropped records are listed
+    had lost its candidate as well); an answer of the genome-wide path is not counted
+    (_is_counted). The dropped records are listed
     (``gene_order_only_dropped_records``): the per-genome GFFs and the figures drop the same
     rows (bin/apply_report_drops.py). Mutates ``goi_dedup``; returns the dropped records."""
     records = goi_dedup.get("records", [])
-    counted = {r["genome"] for r in records
-               if r.get("confidence") in ("HIGH", "MEDIUM") and r.get("goi_class") not in demoted_classes}
+    counted = {r["genome"] for r in records if _is_counted(r, demoted_classes)}
     dropped = [r for r in records if r.get("basis") == "gene_order_only" and r["genome"] in counted]
     keep = {id(r) for r in records} - {id(r) for r in dropped}
     goi_dedup["records"] = [r for r in records if id(r) in keep]
@@ -1516,9 +1692,9 @@ def drop_gene_order_only(goi_dedup, demoted_classes):
         {"genome": r["genome"], "chrom": r["chrom"], "start": r["start"], "end": r["end"],
          "mrna_id": r.get("mrna_id", ""), "provenance": r.get("provenance", [])}
         for r in dropped]
-    goi_dedup["ambiguous_goi_deduped"] = sum(
-        1 for r in goi_dedup["records"] if r.get("confidence") == "AMBIGUOUS")
-    goi_dedup["post_dedup_records"] = len(goi_dedup["records"])
+    main = [r for r in goi_dedup["records"] if not r.get("genome_wide_strong_hit")]
+    goi_dedup["ambiguous_goi_deduped"] = sum(1 for r in main if r.get("confidence") == "AMBIGUOUS")
+    goi_dedup["post_dedup_records"] = len(main)
     return dropped
 
 
@@ -2461,14 +2637,15 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # and locus_4). Collapse those so the headline counts distinct genes, not seeds, and
     # flag bit-for-bit-identical multi-locus hits as cross_locus_duplicate. docs/TODO.md §1h.
     # ``goi_annotations`` + ``flanking_per_locus`` came out of the unified GFF pass above.
-    goi_dedup = dedupe_goi_annotations(goi_annotations)
+    # The answers of the genome-wide path are deduped apart and appended (dedupe_goi_records).
+    goi_dedup = dedupe_goi_records(goi_annotations)
     # F9 phylogenetic placement: each record gets its own model's verdict (advisory, no label
     # moves; the counts below are read after it, as when an option could promote, until 2026-11-10).
     phylo_rows = load_phylo_placement_rows(phylo_placement_dir)
     phylo_flags, phylo_summary = apply_phylo_placement(
         goi_dedup, phylo_rows)
     if phylo_flags or phylo_summary["evaluated"]:
-        recount = [r for r in goi_dedup.get("records", [])]
+        recount = [r for r in goi_dedup.get("records", []) if not r.get("genome_wide_strong_hit")]
         goi_dedup["high_confidence_goi_deduped"] = sum(
             1 for r in recount if r["confidence"] == "HIGH")
         goi_dedup["medium_confidence_goi_deduped"] = sum(
@@ -2529,17 +2706,21 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     )
 
     _DEMOTED_CLASSES = {"paralog_not_goi", "identity_coverage_decoupled"}
+    # The answers of the genome-wide path: one per genome, only where no call is counted.
+    drop_genome_wide_strong_hits(goi_dedup, _DEMOTED_CLASSES)
     drop_gene_order_only(goi_dedup, _DEMOTED_CLASSES)
     absence = genome_absence_categories(goi_dedup.get("records", []), target_policy,
                                         _DEMOTED_CLASSES)
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
     _own_recs = goi_dedup.get("records", [])
-    dedup_high = sum(1 for r in _own_recs
-                     if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
-    dedup_medium = sum(1 for r in _own_recs
-                       if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
-    _counted_recs = [r for r in _own_recs if r.get("confidence") in ("HIGH", "MEDIUM")
-                     and r.get("goi_class") not in _DEMOTED_CLASSES]
+    _counted_recs = [r for r in _own_recs if _is_counted(r, _DEMOTED_CLASSES)]
+    dedup_high = sum(1 for r in _counted_recs if r.get("confidence") == "HIGH")
+    dedup_medium = sum(1 for r in _counted_recs if r.get("confidence") == "MEDIUM")
+    # The answers of the genome-wide path the report keeps (a reading of their own, never
+    # counted): outside every searched window, or near a block (inside its window).
+    _answers = genome_wide_answer_records(_own_recs, _DEMOTED_CLASSES)
+    _near_block_answers = [r for r in _answers if str(r.get("near_block") or "").strip()]
+    _no_synteny_answers = [r for r in _answers if not str(r.get("near_block") or "").strip()]
     # §1x: the refused hits per place; a place that a counted call of the run overlaps (from any
     # home locus or rescue pass) is "modelled", not "found, not syntenic".
     nonsyntenic_block = summarize_nonsyntenic_candidates(
@@ -2552,10 +2733,11 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     # AMBIGUOUS calls: shown as "needs curation", never counted, split by why (Basis). One that
     # ownership gave to another home gene (paralog_not_goi) is that gene's call, named apart.
     _curation = [r for r in _own_recs if r.get("confidence") == "AMBIGUOUS"
-                 and r.get("goi_class") != "paralog_not_goi"]
+                 and r.get("goi_class") != "paralog_not_goi" and not r.get("genome_wide_strong_hit")]
     dedup_ambiguous = len(_curation)
     ambiguous_other_home_gene = sum(1 for r in _own_recs if r.get("confidence") == "AMBIGUOUS"
-                                    and r.get("goi_class") == "paralog_not_goi")
+                                    and r.get("goi_class") == "paralog_not_goi"
+                                    and not r.get("genome_wide_strong_hit"))
     needs_curation_by_basis = dict(Counter(r.get("basis") or "unlabelled" for r in _curation))
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
@@ -2609,12 +2791,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "seeded a block of its own, so a call there rests on the protein match alone "
             "(DispersedRescue=1, RescueRule=no_flanking_hits; summary.genomes_without_flanking_hits).")
     genome_wide_records = collect_genome_wide_places(hits_scan["genome_wide"])
-    genome_wide_modelled = sum(1 for r in genome_wide_records if r["decision"] == "modelled")
-    if genome_wide_modelled:
+    _no_synteny_genomes = sorted({r["genome"] for r in _no_synteny_answers})
+    _near_block_genomes = sorted({r["genome"] for r in _near_block_answers})
+    if _no_synteny_genomes:
         warnings.append(
-            f"{genome_wide_modelled} place(s) outside every searched window were modelled by "
-            "the genome-wide path (GenomeWide=1, Place=genome); the genome place has no decoy "
-            "calibration (genome_wide_path).")
+            f"{len(_no_synteny_genomes)} genome(s) without a counted call hold a strong hit without "
+            "synteny (genome-wide path; MEDIUM, not counted): summary.genome_wide_strong_hit_genomes.")
+    if _near_block_genomes:
+        warnings.append(
+            f"{len(_near_block_genomes)} genome(s) without a counted call hold a strong hit near a "
+            "block, outside its GOI zone (genome-wide path; MEDIUM, not counted): "
+            "summary.near_block_strong_hit_genomes.")
 
     report = {
         # Things a reader must know before reading any number below. Empty on a clean run.
@@ -2636,8 +2823,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         # §1x — the run's known false negatives: strong GOI hits it refused on synteny
         # grounds and used to discard in silence.
         "rejected_candidates": nonsyntenic_block,
+        # Whenever the genome-wide path ran (its tables were staged), also without a place.
         **({"genome_wide_path": summarize_genome_wide_places(genome_wide_records)}
-           if genome_wide_records else {}),
+           if genome_wide_records or hits_scan["genome_wide"] else {}),
         # Per target genome: the median flanking identity, the blocks searched and whether
         # the best block's window ran past a scaffold end (hits/<genome>.target_policy.tsv).
         "target_policy": target_policy,
@@ -2650,7 +2838,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "headline": _format_goi_headline(dedup_high, dedup_medium, goi_low,
                                              genomes_with_goi, ambiguous=dedup_ambiguous,
                                              curation_by_basis=needs_curation_by_basis,
-                                             other_home_gene=ambiguous_other_home_gene),
+                                             other_home_gene=ambiguous_other_home_gene,
+                                             genome_wide=len(_no_synteny_answers),
+                                             near_block=len(_near_block_answers)),
             # How many calls the coverage rule removed from the headline above.
             "coverage_demoted_calls": coverage_demotion_summary.get("demoted", 0),
             "coverage_not_recorded_calls": coverage_demotion_summary.get("coverage_not_recorded", 0),
@@ -2670,7 +2860,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # Calls (AMBIGUOUS or better) whose specificity left an own copy of q out of p*
             # (record field own_copy_set_aside; fix-phase d2).
             "own_copy_set_aside_goi": sum(1 for r in goi_dedup.get("records", [])
-                                          if r.get("own_copy_set_aside")),
+                                          if r.get("own_copy_set_aside")
+                                          and not r.get("genome_wide_strong_hit")),
+            # The answers of the genome-wide path the report kept (one per genome, only where no
+            # call is counted; never counted, not in the headline's ortholog count): outside every
+            # searched window, and near a block (inside its window, outside its GOI zone); and
+            # how many the report dropped (goi_dedup.genome_wide_strong_hits_dropped_records).
+            "genome_wide_strong_hits": len(_no_synteny_answers),
+            "genome_wide_strong_hit_genomes": _no_synteny_genomes,
+            "near_block_strong_hits": len(_near_block_answers),
+            "near_block_strong_hit_genomes": _near_block_genomes,
+            "genome_wide_strong_hits_dropped": goi_dedup.get("genome_wide_strong_hits_dropped", 0),
             "gene_order_only_dropped": goi_dedup.get("gene_order_only_dropped", 0),
             "phylo_discordant_calls": phylo_summary["discordant"],
             "high_confidence_goi_pre_dedup": goi_high,
@@ -2707,13 +2907,15 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # the only thing we know about it.
             "goi_absent_genomes": sorted(
                 g for g in annotation_summary["genomes_without_goi"]
-                if g not in nonsyntenic_by_genome),
+                if g not in nonsyntenic_by_genome
+                and g not in {r["genome"] for r in _answers}),
             # A refused place that a counted call of the run overlaps (another home locus's,
             # a rescue pass's) is modelled: only genomes with a place no counted call covers.
+            # A genome holding a kept answer of the genome-wide path is in the strong_hit lists.
             "goi_found_but_not_syntenic": sorted(
                 set(nonsyntenic_block["unmodelled_genomes"]) - {
                     row["genome"] for row in annotation_summary["per_genome"]
-                    if row.get("goi_annotations", 0) > 0}),
+                    if row.get("goi_annotations", 0) > 0} - {r["genome"] for r in _answers}),
             "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             "nonsyntenic_place_count": nonsyntenic_block["place_count"],
             "nonsyntenic_unmodelled_place_count": nonsyntenic_block["unmodelled_place_count"],
@@ -2736,6 +2938,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "absent_context_complete": absence["absent_context_complete"],
             "unknown_context_truncated": absence["unknown_context_truncated"],
             "absent_no_block": absence["absent_no_block"],
+            "strong_hit_without_synteny": absence["strong_hit_without_synteny"],
+            "strong_hit_near_block": absence["strong_hit_near_block"],
             "nearest_paralog_only": absence["nearest_paralog_only"],
             "nearest_paralog_only_genomes": len(absence["nearest_paralog_only"]),
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
@@ -3232,6 +3436,11 @@ def main():
         med = decoy["medium_or_better"]
         print(f"  Decoy calls MEDIUM or better: {med['calls']} of {decoy['cases']} decoy cases "
               f"(upper end of the exact 95 % interval: {100 * med['ci95_upper']:.2f} %)")
+    gw_decoy = (decoy or {}).get("genome_wide") or {}
+    if gw_decoy.get("cases"):
+        ans = gw_decoy["answers"]
+        print(f"  Decoy answers of the genome-wide path: {ans['calls']} of {gw_decoy['cases']} decoy "
+              f"cases (upper end of the exact 95 % interval: {100 * ans['ci95_upper']:.2f} %)")
     for warning in report.get("warnings", []):
         print(f"  [!] {warning}")
 

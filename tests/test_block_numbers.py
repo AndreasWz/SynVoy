@@ -85,7 +85,7 @@ def test_genome_wide_windows_keep_their_gaps_and_move_up(monkeypatch):
     monkeypatch.setattr(isr, "select_goi_queries", lambda *a, **k: (None, {}, {}))
     monkeypatch.setattr(isr, "genome_wide_places", lambda *a, **k: [dict(p) for p in places])
     monkeypatch.setattr(isr, "_hit_pieces", lambda genome_seqs, h: [])
-    monkeypatch.setattr(isr, "choose_genome_wide_places", lambda ps, cap_of: list(ps))
+    monkeypatch.setattr(isr, "choose_genome_wide_places", lambda ps: list(ps))
     monkeypatch.setattr(isr, "genome_wide_window", lambda p, margin, n, w: windows[p["start"]])
     monkeypatch.setattr(isr, "_write_genome_wide_table", lambda *a, **k: None)
 

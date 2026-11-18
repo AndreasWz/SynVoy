@@ -3,12 +3,15 @@
 
 The report (generate_report.py) offers a weak match in the slot where the gene was expected
 (Basis=gene_order_only) for curation only in a genome without a counted call of the gene;
-elsewhere it drops the record and lists it (``goi_dedup.gene_order_only_dropped_records``).
-This script copies the per-genome GFFs of one home locus into the plot-input folder without
-those rows: a GOI model with Basis=gene_order_only that overlaps a dropped record of the same
-genome, and every row below it (Parent=). The published GFFs (plot_inputs_*/) and every
+elsewhere it drops the record and lists it (``goi_dedup.gene_order_only_dropped_records``). It
+keeps an answer of the genome-wide path (GOIClass=genome_wide_strong_hit) only as the best one of
+a genome without a counted call and without another record at its place, and lists the others
+(``goi_dedup.genome_wide_strong_hits_dropped_records``). This script copies the per-genome GFFs
+of one home locus into the plot-input folder without those rows: a GOI model of the rule's kind
+(Basis=gene_order_only, or GOIClass=genome_wide_strong_hit) that overlaps a dropped record of the
+same genome, and every row below it (Parent=). The published GFFs (plot_inputs_*/) and every
 figure drawn from them then show what the report shows (review fix RF-3). Without a report
-(the NO_REPORT sentinel, or a report from before this rule) the GFFs are copied unchanged.
+(the NO_REPORT sentinel, or a report from before these rules) the GFFs are copied unchanged.
 
     apply_report_drops.py --report synvoy_report.json --out_dir plot_inputs_X a.fna.gff b.fna.gff
 """
@@ -22,12 +25,27 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from generate_report import canonical_genome_id  # noqa: E402
 from sequence_utils import parse_gff_attributes, setup_logging  # noqa: E402
+from synvoy_label import GENOME_WIDE_CLASS  # noqa: E402
 
 logger = setup_logging(name=__name__)
 
 
+# The lists of dropped records in the report, and the GOI rows each one leaves out.
+DROP_LISTS = (("gene_order_only_dropped_records", "gene_order_only"),
+              ("genome_wide_strong_hits_dropped_records", GENOME_WIDE_CLASS))
+
+
+def _is_dropped_kind(attrs, rule):
+    """Whether a GOI row is of the kind a rule drops: Basis=gene_order_only, or an answer of the
+    genome-wide path (GOIClass=genome_wide_strong_hit)."""
+    if rule == GENOME_WIDE_CLASS:
+        return attrs.get("GOIClass") == GENOME_WIDE_CLASS
+    return attrs.get("Basis") == "gene_order_only"
+
+
 def dropped_spans(report_path):
-    """{genome: [(chrom, start, end)]} of the gene_order_only records the report dropped."""
+    """{genome: [(chrom, start, end, rule)]} of the records the report dropped: the
+    gene_order_only records and the answers of the genome-wide path (DROP_LISTS)."""
     if not report_path or not os.path.isfile(report_path):
         return {}
     with open(report_path) as fh:
@@ -37,8 +55,10 @@ def dropped_spans(report_path):
             logger.warning(f"{report_path}: not a report (unparsable JSON); GFFs copied unchanged")
             return {}
     spans = defaultdict(list)
-    for r in (report.get("goi_dedup") or {}).get("gene_order_only_dropped_records") or []:
-        spans[r["genome"]].append((r["chrom"], int(r["start"]), int(r["end"])))
+    dedup = report.get("goi_dedup") or {}
+    for key, rule in DROP_LISTS:
+        for r in dedup.get(key) or []:
+            spans[r["genome"]].append((r["chrom"], int(r["start"]), int(r["end"]), rule))
     return dict(spans)
 
 
@@ -47,9 +67,10 @@ def _parents(attrs):
 
 
 def filter_gff(path, spans, out_path):
-    """Write ``path`` to ``out_path`` without the GOI models with Basis=gene_order_only that
-    overlap one of ``spans`` ([(chrom, start, end)]) and without the rows below them.
-    Returns the ids of the models left out."""
+    """Write ``path`` to ``out_path`` without the GOI models that overlap one of ``spans``
+    ([(chrom, start, end, rule)]; a span without its rule is a gene_order_only record) and are of
+    that rule's kind (_is_dropped_kind), and without the rows below them. Returns the ids of the
+    models left out."""
     with open(path) as fh:
         lines = fh.readlines()
     rows = []
@@ -57,12 +78,13 @@ def filter_gff(path, spans, out_path):
         f = ln.rstrip("\n").split("\t")
         rows.append(parse_gff_attributes(f[8]) if not ln.startswith("#") and len(f) >= 9 else None)
     drop = set()
+    spans = [tuple(sp) if len(sp) > 3 else tuple(sp) + ("gene_order_only",) for sp in spans]
     for ln, a in zip(lines, rows):
-        if a is None or a.get("Basis") != "gene_order_only" or (a.get("SynVoyRole") or "").lower() != "goi":
+        if a is None or (a.get("SynVoyRole") or "").lower() != "goi":
             continue
         f = ln.split("\t")
         s, e = int(f[3]), int(f[4])
-        if any(c == f[0] and s <= ce and cs <= e for c, cs, ce in spans):
+        if any(c == f[0] and s <= ce and cs <= e and _is_dropped_kind(a, rule) for c, cs, ce, rule in spans):
             drop.add(a.get("ID", ""))
     drop.discard("")
     models = sorted(drop)
@@ -97,8 +119,9 @@ def main():
             continue
         left_out = filter_gff(path, genome_spans, out_path)
         if left_out:
-            print(f"[report] {os.path.basename(path)}: left out {len(left_out)} gene-order-only "
-                  f"model(s) the report dropped (the genome has a counted call): {', '.join(left_out)}")
+            print(f"[report] {os.path.basename(path)}: left out {len(left_out)} model(s) the report "
+                  f"dropped (gene-order-only beside a counted call, or a strong hit without synteny "
+                  f"the report did not keep): {', '.join(left_out)}")
 
 
 if __name__ == "__main__":

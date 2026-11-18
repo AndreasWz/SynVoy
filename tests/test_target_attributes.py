@@ -128,7 +128,8 @@ def test_report_splits_genomes_without_a_counted_call(tmp_path):
         r.update(chrom="c1", start=1000 * (i + 1), end=1000 * (i + 1) + 600)
     cat = gr.genome_absence_categories(records, policy, {"paralog_not_goi"})
     assert cat == {"nearest_paralog_only": ["A"], "absent_context_complete": ["A"],
-                   "unknown_context_truncated": ["B"], "absent_no_block": ["C"]}
+                   "unknown_context_truncated": ["B"], "absent_no_block": ["C"],
+                   "strong_hit_without_synteny": [], "strong_hit_near_block": []}
 
 
 def test_target_policy_of_several_loci_keeps_the_complete_view(tmp_path):
