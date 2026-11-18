@@ -95,6 +95,10 @@ def _window_hit(qstart, qend, start=6_000, query="GOI_x"):
 def _stub_window(monkeypatch, window_hits):
     """The window's search, miniprot and the judge's blastp/Smith-Waterman steps stubbed: miniprot
     finds no model, so the GOI hits go to the hit chain."""
+    # miniprot is installed and finds nothing. Without this, a host without miniprot (CI installs
+    # only pytest and parasail) takes the runner's no-miniprot fallback, which reads settings
+    # these stub arguments leave unset.
+    monkeypatch.setattr(isr, "MINIPROT_AVAILABLE", True)
     monkeypatch.setattr(isr, "run_augmented_search", lambda *a, **k: [dict(h) for h in window_hits])
     monkeypatch.setattr(isr, "annotate_models_from_hit_list", lambda *a, **k: [])
     monkeypatch.setattr(age, "detect_tandem_duplications", lambda *a, **k: (False, []))

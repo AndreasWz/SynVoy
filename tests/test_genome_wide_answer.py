@@ -407,6 +407,10 @@ def _stub_window(monkeypatch, window_hits, label="HIGH", seen=None):
         if seen is not None:
             seen.append([q["id"] for q in queries])
         return [dict(h, query=queries[0]["id"]) for h in window_hits]
+    # miniprot is installed and finds nothing (or what a test stubs in). Without this, a host
+    # without miniprot (CI installs only pytest and parasail) takes the runner's no-miniprot
+    # fallback, which reads settings these stub arguments leave unset.
+    monkeypatch.setattr(isr, "MINIPROT_AVAILABLE", True)
     monkeypatch.setattr(isr, "run_augmented_search", search)
     monkeypatch.setattr(isr, "annotate_models_from_hit_list", lambda *a, **k: [])
     monkeypatch.setattr(age, "detect_tandem_duplications", lambda *a, **k: (False, []))
