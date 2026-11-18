@@ -544,6 +544,12 @@ def validateNumericParams(validationErrors, validationWarnings) {
     if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
         validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
     }
+    if (!(params.mmseqs_max_seqs.toString() ==~ /[1-9][0-9]*/)) {
+        validationErrors << "Invalid --mmseqs_max_seqs (${params.mmseqs_max_seqs}). Must be a whole number >= 1."
+    }
+    if (!(params.mmseqs_verbosity.toString() ==~ /[0-3]/)) {
+        validationErrors << "Invalid --mmseqs_verbosity (${params.mmseqs_verbosity}). Must be 0, 1, 2 or 3."
+    }
     // The guards of fix-phase item 18: seconds after which a tool run stops the task
     // (whole numbers: the scripts read them as int; 3600.0 would stop a rescue with exit 2, which it ignores)
     ['sw_timeout_seconds', 'goi_miniprot_timeout', 'flanking_miniprot_timeout',

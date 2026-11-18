@@ -291,8 +291,8 @@ design quantities are computed once from the features (`design_profile`):
 | `adaptive_score_floor_abs` | candidate regions: absolute score floor (§8) | 0.03 | A2 | 0.08 | |
 | `adaptive_max_regions` | candidate regions kept per genome (§8) | 6 | A2 | 4 | |
 | `paralog_panel_max_family` | home relatives in the ownership panel (§10) | 15 | A2 | max(15, `Fam` + 1) | 50 |
-| `classify_complete_min_qcov` | ModelStatus: complete from this coverage | 0.7 | B1 | 0.5 | |
-| `classify_fragment_max_qcov` | ModelStatus: fragment below this coverage | 0.4 | B1 | 0.3 | |
+| `classify_complete_min_qcov` | ModelStatus: complete from this coverage (not the label: HIGH needs 0.7 query coverage, §7.8) | 0.7 | B1 | 0.5 | |
+| `classify_fragment_max_qcov` | ModelStatus: fragment below this coverage (the figures hide fragments; the report's piece rule, §10, reads only fragments) | 0.4 | B1 | 0.3 | |
 | `window_tblastn_word_size` | tblastn word size in the windows | 3 | B1 | 2 | |
 | `window_tblastn_comp_stats` | tblastn composition statistics in the windows (a run with tblastn's defaults still gives `EeffTblastn`) | 2 | B1 | 0 | |
 | `window_mmseqs_min_length` | the shortest ORF, in codons, that MMseqs2 searches in the windows | 30 | B1 | 10 | |
@@ -660,7 +660,9 @@ set of the following waves.
 
 MMseqs2 `easy-search` aligns the whole query set (flanking genes, GOI, and GOI models
 from earlier waves) to the genome. Hits are kept at identity ≥ 10 %, at least 10
-aligned query residues and E ≤ 0.01.
+aligned query residues and E ≤ 0.01. MMseqs2 keeps at most `mmseqs_max_seqs` targets
+per query (300, its own default; a target is a stretch of one reading frame, about one
+exon).
 
 Every length floor of the search counts **aligned query residues**, qend − qstart + 1:
 the query is a protein for MMseqs2, tblastn and Smith-Waterman alike, so this is the one
@@ -967,13 +969,20 @@ For each GOI query:
    of a better model by less than half (`exon_annotation`; ids `…_l1_…`, `…_l1m2_…`, …;
    at most `goi_max_models_per_locus`, 10; the `local_family` module: max(10, home
    copies + 1), at most 60). While a hit of the locus lies on no coding exon of a kept
-   model, the coding exons found so far are masked and miniprot runs again; a model of a later round must reach 30 % of
-   the best score. A model's protein is miniprot's own translation.
+   model, the coding exons found so far are masked and miniprot runs again. A model of a
+   later round must reach 30 % of the first run's best score (miniprot's own `--outs`
+   bound in that run), unless its coding sequence overlaps a hit of the locus that no kept
+   model explains: the hit says the query aligns there, and the judge (§7.8) labels the
+   model by its own E-value. When the cap stops the rounds with such a hit, or an
+   alignment that would have been kept, still left, the report says so in `warnings`
+   (`limits.goi_model_cap_stopped`). A model's protein is miniprot's own translation.
 3. **Tandem copies** (`detect_tandem_duplications`). Hits within 5 kb of each other are
    one candidate copy. When two or more copies each cover at least 35 % of the query (or
    three or more hits mostly cover the same part of it), each such copy that lies on no
    model is written as a one-segment copy (`tandem_copy`). When miniprot returns no model,
-   all of them are.
+   all of them are. Two copies of the gene within 5 kb of each other are therefore one
+   candidate copy, and no tandem: a compact pair is found only as miniprot's models
+   (step 2).
    With `tandem_query_restart` (off by default) copies are built the way the
    hit chain is: per strand, in coding order, a hit extends a copy when it continues the
    query (10 residues of overlap at most) within the GOI's intron bound. A copy counts at
@@ -1333,8 +1342,13 @@ Every kept GOI model carries the evidence the label uses (`bin/synvoy_evalue.py`
 - **`BlockEsyn`**: the expected number of windows as long as the block's neighbourhood
   that hold, by chance, a run of at least the block's collinear support
   (`BlockCollinearSupport`) of anchors in home order, either direction. Each home
-  neighbour with m places in the genome (hits within 5 kb are one place) lies in a
-  random window of length W with probability 1 − exp(−mW/G); the number present is a
+  neighbour with m places in the genome lies in a random window of length W with
+  probability 1 − exp(−mW/G). A place is one occurrence of the gene: its hits on one
+  sequence, each at most the gene's own gap limit (1.5 × its home span × the expansion,
+  at least `max_intron`) after the furthest end of the place so far, as for the anchor
+  places of §7.1, so the exons of a gene with long introns are one place, not one each.
+  The places are counted on every flanking hit of the genome-wide search, before one
+  anchor per place. The number present is a
   Poisson binomial; for n present anchors in random order the chance of a monotone run
   ≥ k is computed exactly (Robinson–Schensted–Knuth). A block with E_syn ≤ 0.1 predicted
   the gene's place.
@@ -1731,7 +1745,12 @@ Consequences of the rules above that a reader of the results should know.
   early stop. Most windows hold no GOI model, and each can add LOW rows.
 - A genome whose MMseqs2 search fails for lack of memory, after retries, is not searched:
   the report lists it, with the reason, under `summary.genomes_not_searched` and says in
-  `warnings` that it is not GOI-absent.
+  `warnings` that it is not GOI-absent. When MMseqs2 cannot fit the genome's database into
+  its split limit (`Cannot fit databases into ...`) no retry is made, since every rung keeps
+  that limit: the reason is `mmseqs_split_memory_limit_too_small`, and `warnings` names
+  `--mmseqs_split_memory_limit` and `--iterative_search_memory`.
+- MMseqs2 keeps at most `mmseqs_max_seqs` (300) targets per query; the report counts the
+  queries that reached it (`limits`), a lower bound.
 - Only the first sequence of a multi-sequence query is used (with a warning).
 - There is no gap-filling search; missing exons are found by miniprot inside its
   window or not at all.

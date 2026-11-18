@@ -449,10 +449,12 @@ RULES: List[Rule] = [
          doc="home relatives added to the ownership panel by homology: one for each home locus of "
              "the family, plus one, so a call on a relative is aligned to that relative"),
     Rule("classify_complete_min_qcov", ("B1",), _const(0.5), "0.5",
-         doc="ModelStatus only: one missed exon is a large share of a short protein "
-             "(the old preset_short_peptide)"),
+         doc="ModelStatus and what reads it (the figures' fragment filter, the report's piece "
+             "rule and its count of fragment calls), not the label, whose HIGH bar stays 0.7: "
+             "one missed exon is a large share of a short protein (the old preset_short_peptide)"),
     Rule("classify_fragment_max_qcov", ("B1",), _const(0.3), "0.3",
-         doc="ModelStatus only (the old preset_short_peptide)"),
+         doc="ModelStatus and what reads it (the figures' fragment filter, the report's piece "
+             "rule and its count of fragment calls), not the label (the old preset_short_peptide)"),
     Rule("window_tblastn_word_size", ("B1",), _const(2), "2",
          doc="finding only: a short query has few words of 3"),
     Rule("window_tblastn_comp_stats", ("B1",), _const(0), "0",

@@ -6,7 +6,9 @@ Two quantities of tmp/formula_check_2026-10-14/FINAL_for_vscode.md, section 3.2:
 E_syn of a search block: the expected number of windows of this length in the genome that
 hold, by chance, a run of >= k anchors in home order (either direction), given how many
 places each home neighbour has in the genome. A neighbour with m places lies in a random
-window of length W with probability 1 - exp(-m W / G); the number present is a Poisson
+window of length W with probability 1 - exp(-m W / G) (a place: the neighbour's hits on one
+sequence, each at most the gene's own gap limit after the last, as for the anchor places of
+the search, so the exons of one gene are one place); the number present is a Poisson
 binomial; for n present anchors in random order the chance of a monotone run >= k is
 exact (Robinson-Schensted-Knuth: the longest increasing run is the first row of the shape,
 the longest decreasing run its number of rows). E_syn = (G / W) x sum_n P(n) P(run >= k | n).
@@ -31,10 +33,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 SIGNIFICANT_BLOCK_ESYN = 0.1    # a block with E_syn at or below this predicted the place
-PLACE_MERGE_BP = 5000           # hits of one anchor closer than this are one place
 
 PLACES = ("slot", "core", "window", "genome")
 
@@ -101,20 +102,27 @@ def e_syn(k: int, places: Sequence[int], window_len: int, genome_len: int) -> fl
     return (genome_len / window_len) * tail
 
 
-def places_per_gene(hits: Iterable[Dict], merge_bp: int = PLACE_MERGE_BP) -> Dict[str, int]:
-    """{anchor gene: number of places in the genome}: its hits (``query`` base id, ``chrom``,
-    ``start``, ``end``) merged when closer than ``merge_bp``."""
+def places_per_gene(hits: Iterable[Dict], gap_limit: Callable[[str], int]) -> Dict[str, int]:
+    """{anchor gene: number of places in the genome}. A place is a run of the gene's hits
+    (``query`` base id, ``chrom``, ``start``, ``end``) on one sequence, sorted by start, in
+    which each hit starts at most ``gap_limit(gene)`` bp after the furthest end of the run so
+    far: the limit that separates two occurrences of the gene (iterative_search_runner
+    _gene_limit, 1.5 x the gene's home span x the expansion, at least max_intron), as for the
+    anchor places of limit_anchor_places. A translated search reports one hit per exon, so
+    without it each exon of a gene with long introns was a place of its own."""
     by_gene: Dict[str, List[Tuple[str, int, int]]] = {}
     for h in hits:
         gene = str(h.get("query", "")).split("|")[0]
         if gene:
-            by_gene.setdefault(gene, []).append((h["chrom"], int(h["start"]), int(h["end"])))
+            start, end = int(h["start"]), int(h["end"])
+            by_gene.setdefault(gene, []).append((str(h["chrom"]), min(start, end), max(start, end)))
     out = {}
-    for gene, spans in by_gene.items():
+    for gene, spans in sorted(by_gene.items()):
+        limit = int(gap_limit(gene))
         spans.sort()
         n, last_chrom, last_end = 0, None, None
         for chrom, s, e in spans:
-            if chrom != last_chrom or s - last_end > merge_bp:
+            if chrom != last_chrom or s - last_end > limit:
                 n += 1
                 last_chrom, last_end = chrom, e
             else:

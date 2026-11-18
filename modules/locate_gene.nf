@@ -23,6 +23,8 @@ process LOCATE_GENE {
     def gc = params.home_genetic_code.toString().toInteger()
     def mm_gc = gc != 1 ? "--translation-table ${gc}" : ''
     def tbn_gc = gc != 1 ? "-db_gencode ${gc}" : ''
+    // MMseqs2 prints its errors at -v 1 and up: a failure below names its cause.
+    def mmseqs_v = Math.max(1, params.mmseqs_verbosity.toString().toInteger())
     """
     # 1. MMseqs2 Search
     # Check query type (Protein vs DNA) - look for amino acid-specific chars
@@ -50,7 +52,8 @@ process LOCATE_GENE {
         --search-type \$SEARCH_TYPE \\
         --threads ${task.cpus} \\
         --split-memory-limit ${params.mmseqs_split_memory_limit} \\
-        -v ${params.mmseqs_verbosity} \\
+        --max-seqs ${params.mmseqs_max_seqs} \\
+        -v ${mmseqs_v} \\
         -e ${params.search_evalue} \\
         --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qheader,theader" \\
         -s ${params.mmseqs_sensitivity} \$MM_GC || {

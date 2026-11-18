@@ -95,6 +95,34 @@ def _is_mmseqs_resource_failure(details: str) -> bool:
     return any(p in txt for p in patterns)
 
 
+def _is_split_limit_failure(details: str) -> bool:
+    """MMseqs2's prefilter found no split of the target database that fits its split limit
+    ("Cannot fit databases into ..."). A larger --split-memory-limit is needed: fewer threads, a
+    lower sensitivity or a smaller limit do not help (MMseqs2 18-8cc5c gives the message at every
+    sensitivity from 1 to 9.5)."""
+    return "cannot fit databases" in (details or "").lower()
+
+
+def _split_limit_bytes(limit) -> float:
+    """An MMseqs2 --split-memory-limit ("8G", "1500M", "0") in bytes; 0 (MMseqs2 uses all the
+    memory it finds) and an unreadable value read as unlimited."""
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([bkmgt]?)", str(limit), re.I)
+    if not m or float(m.group(1)) <= 0:
+        return float("inf")
+    return float(m.group(1)) * 1024 ** "bkmgt".index((m.group(2) or "b").lower())
+
+
+def _mmseqs_search_verbosity(args) -> str:
+    """-v of the MMseqs2 searches: the user's level, at least 1, so that a failure prints its
+    cause (at 0 MMseqs2 says only "Prefilter died")."""
+    return str(max(1, int(getattr(args, 'mmseqs_verbosity', 1))))
+
+
+def _mmseqs_max_seqs(args) -> int:
+    """--max-seqs of the MMseqs2 searches (--mmseqs_max_seqs)."""
+    return int(getattr(args, 'mmseqs_max_seqs', MMSEQS_DEFAULT_MAX_SEQS) or MMSEQS_DEFAULT_MAX_SEQS)
+
+
 # Shared helpers
 # Use our own sequence utilities (no BioPython dependency)
 try:
@@ -3892,7 +3920,10 @@ def run_augmented_mmseqs_with_retries(
     if proc_tdb.returncode != 0:
         return False, _format_mmseqs_failure(proc_tdb)
 
+    too_small = None    # the largest split limit MMseqs2 could not fit the window's databases into
     for i, attempt in enumerate(attempts, start=1):
+        if too_small is not None and _split_limit_bytes(attempt["split"]) <= too_small:
+            continue
         if os.path.exists(aug_hits_file):
             try:
                 os.remove(aug_hits_file)
@@ -3912,7 +3943,8 @@ def run_augmented_mmseqs_with_retries(
             "-e", str(min(args.aug_relaxed_evalue_cap, args.evalue * args.aug_relaxed_evalue_mult)),
             "--min-seq-id", "0.0",
             "--split-memory-limit", str(attempt["split"]),
-            "-v", str(args.mmseqs_verbosity),
+            "--max-seqs", str(_mmseqs_max_seqs(args)),
+            "-v", _mmseqs_search_verbosity(args),
         ] + genetic_code_flag("mmseqs")
         if int(getattr(args, 'window_mmseqs_min_length', 30)) != 30:
             search_cmd += ["--min-length", str(int(args.window_mmseqs_min_length))]
@@ -3930,8 +3962,13 @@ def run_augmented_mmseqs_with_retries(
                 f"[{genome_name}] Augmented MMseqs search attempt {i}/{len(attempts)} failed "
                 f"({attempt['label']}): {details}"
             )
+            shutil.rmtree(attempt_tmp, ignore_errors=True)
             if not resource_fail:
                 break
+            if _is_split_limit_failure(details):
+                # A split limit too small for the window: only a rung with a larger limit can
+                # succeed, so the rungs with the same or a smaller one are skipped.
+                too_small = max(too_small or 0.0, _split_limit_bytes(attempt["split"]))
             continue
 
         # convertalis, then the names by the first word of the FASTA headers (fix item 29)
@@ -3939,7 +3976,7 @@ def run_augmented_mmseqs_with_retries(
             "mmseqs", "convertalis",
             query_db, target_db, result_db, aug_hits_file + ".raw",
             "--format-output", fmt_output,
-            "-v", str(args.mmseqs_verbosity),
+            "-v", _mmseqs_search_verbosity(args),
         ]
         conv_proc = subprocess.run(
             conv_cmd,
@@ -4110,13 +4147,18 @@ def run_augmented_search(region_fasta: str, goi_queries: List[Dict[str, str]],
             )
             count_limit(args, 'window_len_floor_mmseqs', _drops.get('len_floor', 0))
             count_limit(args, 'window_len_floor_lt15_long_query', _drops.get('len_floor_lt15_long_query', 0))
-            count_limit(args, 'mmseqs_maxseqs_window', queries_at_max_seqs(aug_hits_file))
+            count_limit(args, 'mmseqs_maxseqs_window', queries_at_max_seqs(aug_hits_file, _mmseqs_max_seqs(args)))
             if mmseqs_hits:
                 print(f"[{genome_name}] MMseqs2 augmented search found {len(mmseqs_hits)} hits.", flush=True)
                 all_hits.extend(mmseqs_hits)
         else:
             # The window would lose its MMseqs2 hits (fix-phase d6): until 2026-11-02 it kept its
             # tblastn and Smith-Waterman hits only, with one log line.
+            if _is_split_limit_failure(mmseqs_details):
+                raise StepFailed(f"[{genome_name}] MMseqs2 search of a window failed: {mmseqs_details}. "
+                                 f"The split limit is too small: raise --mmseqs_split_memory_limit "
+                                 f"(and --iterative_search_memory when it is set to a size) and run "
+                                 f"again with -resume.")
             raise StepFailed(f"[{genome_name}] MMseqs2 search of a window failed: {mmseqs_details}. "
                              f"After a memory failure (its low-memory retries spent) raise "
                              f"--mmseqs_split_memory_limit or the search's memory.")
@@ -5232,8 +5274,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                                 home_structure=first_exon_guard_structure(args, parent_id),
                                 gap_search_window=goi_model_margin,
                                 sensitive=is_goi_parent,
-                                max_models=(1 if getattr(args, 'disable_multi_model', False)
-                                            else int(getattr(args, 'goi_max_models_per_locus', 10) or 1)),
+                                max_models=int(getattr(args, 'goi_max_models_per_locus', 10) or 1),
                             )
                         if models:
                             exons, model_protein = models[0]
@@ -6352,7 +6393,8 @@ def run_mmseqs_easy_search_with_retries(
             "-s", str(attempt["sens"]),
             "-e", str(args.evalue),
             "--split-memory-limit", str(attempt["split"]),
-            "-v", str(args.mmseqs_verbosity),
+            "--max-seqs", str(_mmseqs_max_seqs(args)),
+            "-v", _mmseqs_search_verbosity(args),
         ] + genetic_code_flag("mmseqs")
 
         search_proc = subprocess.run(
@@ -6370,7 +6412,16 @@ def run_mmseqs_easy_search_with_retries(
                 f"({attempt['label']}: threads={attempt['threads']}, "
                 f"s={attempt['sens']}, split={attempt['split']}): {details}"
             )
+            # The failed attempt's temporary files (about 3.5 times the genome at the largest)
+            # go before the next attempt.
+            shutil.rmtree(attempt_tmp, ignore_errors=True)
             if not resource_fail:
+                break
+            if _is_split_limit_failure(details):
+                # Every rung keeps the split limit and lowers threads and sensitivity, which do
+                # not change what has to fit: the caller records the genome as not searched.
+                logger.warning(f"[{genome_name}] MMseqs2 cannot fit the genome's database into the "
+                               f"split limit {attempt['split']}: no lower rung is tried.")
                 break
             continue
 
@@ -6380,7 +6431,7 @@ def run_mmseqs_easy_search_with_retries(
             "mmseqs", "convertalis",
             query_db, target_db, result_db, hits_file + ".raw",
             "--format-output", fmt_output,
-            "-v", str(args.mmseqs_verbosity),
+            "-v", _mmseqs_search_verbosity(args),
         ]
 
         conv_proc = subprocess.run(
@@ -6753,7 +6804,8 @@ LIMIT_KEYS = [
     'miniprot_timeout_goi', 'miniprot_timeout_flanking', 'miniprot_failed_goi',
     'miniprot_failed_flanking', 'miniprot_no_alignment_goi', 'miniprot_no_alignment_flanking',
     'goi_model_loci', 'goi_models_found', 'goi_models_kept', 'goi_model_cap_stopped',
-    'goi_models_below_outs', 'goi_models_near_outs', 'goi_model_rounds_ended_by_timeout',
+    'goi_models_below_outs', 'goi_models_kept_below_outs', 'goi_models_near_outs',
+    'goi_model_rounds_ended_by_timeout',
     # window search
     'window_len_floor_mmseqs', 'window_len_floor_tblastn', 'window_len_floor_sw',
     'window_len_floor_lt15_long_query', 'mmseqs_maxseqs_window', 'mmseqs_maxseqs_genome',
@@ -6779,8 +6831,8 @@ LIMIT_KEYS = [
 ]
 LIMIT_COLUMNS = [f'limit_{k}' for k in LIMIT_KEYS]
 REDUCED_SEARCH_HEADER = '##synvoy-reduced-search'
-# MMseqs2 search reports at most this many targets per query (its --max-seqs default; the
-# search does not set it): a query with this many result rows may have lost more.
+# MMseqs2's own --max-seqs default, the default of --mmseqs_max_seqs: the search keeps at most
+# that many targets per query, so a query with that many result rows may have lost more.
 MMSEQS_DEFAULT_MAX_SEQS = 300
 # A sensitivity outside these bounds draws a warning, here and at the start (main.nf). MMseqs2
 # documents -s from 1.0 (faster) to 7.5 (sensitive) and sets no upper bound; the pipeline's
@@ -8342,6 +8394,18 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             used=genome_rung,
         )
         if not mmseqs_ok:
+            if resource_fail and _is_split_limit_failure(mmseqs_details):
+                # Not searched, as below, but with the setting that fixes it.
+                advice = (f"MMseqs2 cannot fit this genome's database into the split limit "
+                          f"(--mmseqs_split_memory_limit {getattr(args, 'mmseqs_split_memory_limit', '')}): raise "
+                          f"--mmseqs_split_memory_limit, and --iterative_search_memory when it is set "
+                          f"to a size (as in the laptop_safe and low_mem profiles), and run again "
+                          f"with -resume")
+                logger.error(f"[{genome_name}] NOT SEARCHED: {advice}. The report lists this genome "
+                             f"under genomes_not_searched.")
+                _write_not_searched(args, prefix, genome_name, 'mmseqs_split_memory_limit_too_small',
+                                    f"{advice}. {mmseqs_details}")
+                return genome_name, [], [], None
             if resource_fail:
                 # Skipped, not failed: one fragmented genome must not end the whole search.
                 # But it is not "searched, nothing found" either: the report lists it.
@@ -8387,10 +8451,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         unknown_sequences = sorted({h['chrom'] for h in hits} - sequence_names.keys())
         if unknown_sequences:
             raise sequence_not_in_genome(unknown_sequences[0], genome_name, sequence_names)
-        # Genome-wide places of every anchor, before one-anchor-per-place: how often each
-        # home neighbour falls into a window by chance (synvoy_evalue.e_syn).
-        _anchor_places = synvoy_evalue.places_per_gene(
-            h for h in hits if not is_goi_query_id(h.get('query', '')))
+        # Every flanking hit, before one-anchor-per-place: the genome-wide places of each home
+        # neighbour (below, once the genome's gene gap limits are known).
+        _flank_hits_all = [h for h in hits if not is_goi_query_id(h.get('query', ''))]
         if not getattr(args, 'disable_anchor_resolution', False):
             _n_before = len(hits)
             hits = resolve_anchor_hits(hits)
@@ -8410,6 +8473,12 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # From here on `args` holds this genome's distances in base pairs.
         args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name,
                                  target_bp=sum(sequence_names.values()))
+        # The gap limit of one occurrence of a flanking gene in this genome (bp).
+        _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
+        # Genome-wide places of every anchor: how often each home neighbour falls into a window
+        # by chance (synvoy_evalue.e_syn). A place is one occurrence of the gene, its hits
+        # within the gene's gap limit, as for limit_anchor_places.
+        _anchor_places = synvoy_evalue.places_per_gene(_flank_hits_all, _gene_gap)
         # What the blocks of this genome share for the E-values of their candidates
         # (block_place_terms, finalize_place_evalues) and the decoy calls (decoy mode).
         args.genome_ctx = {'places': _anchor_places, 'genome_len': 0, 'block_esyn': {},
@@ -8419,13 +8488,12 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
             count_limit(args, 'mmseqs_genome_lower_rung')
             args.genome_ctx['reduced_search'] = {'genome': {k: genome_rung[k] for k in
                                                             ('rung', 'sensitivity', 'threads', 'split')}}
-        count_limit(args, 'mmseqs_maxseqs_genome', queries_at_max_seqs(hits_file))
+        count_limit(args, 'mmseqs_maxseqs_genome', queries_at_max_seqs(hits_file, _mmseqs_max_seqs(args)))
         _bridge = {'bridge_max_gap': args.synteny_bridge_max_gap,
                    'bridge_max_rank_gap': _bridge_max_rank_gap,
                    'bridge_min_anchors': _bridge_min_anchors,
                    'bridge_two_sided': _bridge_two_sided,
                    'bridge_max_per_block': _bridge_max_per_block}
-        _gene_gap = (lambda _g: _gene_limit(args, _g, args.max_intron))
         # None = 'auto': every place, unless the genome axis rebuilds (genome_axis_blocks).
         _max_places = int(getattr(args, 'anchor_max_places', None) or 0)
         if _max_places > 0 and flanking_seed_hits:
@@ -9658,7 +9726,12 @@ def main():
                              "run that does not finish stops the run (fix-phase item 18)")
     parser.add_argument("--mmseqs_sens", type=float, default=7.5, help="MMseqs2 sensitivity (higher = more sensitive but slower)")
     parser.add_argument("--mmseqs_split_memory_limit", default="0", help="MMseqs split memory limit (e.g. 3G, 8000M, 0=auto)")
-    parser.add_argument("--mmseqs_verbosity", type=int, default=1, help="MMseqs verbosity (0-3)")
+    parser.add_argument("--mmseqs_verbosity", type=int, default=1,
+                        help="MMseqs verbosity (0-3); the searches run at least at 1, which prints "
+                             "MMseqs2's errors")
+    parser.add_argument("--mmseqs_max_seqs", type=int, default=MMSEQS_DEFAULT_MAX_SEQS,
+                        help="Targets MMseqs2 keeps per query (--max-seqs) in the genome-wide search "
+                             "and the windows (default 300, MMseqs2's own)")
     parser.add_argument(
         "--deterministic_goi_search", type=str2bool, default=True,
         help="A0 reproducibility: force the per-region augmented GOI MMseqs search to "

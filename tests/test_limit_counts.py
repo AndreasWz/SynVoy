@@ -176,11 +176,26 @@ def test_cap_counted_when_a_hit_is_still_unexplained(monkeypatch):
 
 
 def test_masked_round_below_the_score_bound_is_counted(monkeypatch):
-    # Round 2 (masked) returns a model at 0.2 x the best: below the 0.3 bound.
-    _fake_models(monkeypatch, [[_model(0, 300, 100)], [_model(1500, 1600, 20)]])
-    age.miniprot_gene_models("M" * 100, "A" * 2000, "c1", sensitive=True, max_models=5,
-                             evidence=[(1500, 1600)])
+    # Round 2 (masked) returns a model at 0.2 x the best, below the 0.3 bound, away from the
+    # unexplained hit: dropped and counted.
+    _fake_models(monkeypatch, [[_model(0, 300, 100)], [_model(1700, 1800, 20)]])
+    kept = age.miniprot_gene_models("M" * 100, "A" * 2000, "c1", sensitive=True, max_models=5,
+                                    evidence=[(1500, 1600)])
+    assert len(kept) == 1
     assert age.LIMIT_COUNTS["goi_models_below_outs"] == 1
+    assert "goi_models_kept_below_outs" not in age.LIMIT_COUNTS
+
+
+def test_masked_round_below_the_bound_on_an_unexplained_hit_is_kept_and_counted(monkeypatch):
+    # The same alignment on the hit no kept model explains is a model (the judge labels it).
+    _fake_models(monkeypatch, [[_model(0, 300, 100)], [_model(1500, 1600, 20)]])
+    kept = age.miniprot_gene_models("M" * 100, "A" * 2000, "c1", sensitive=True, max_models=5,
+                                    evidence=[(1500, 1600)])
+    assert len(kept) == 2
+    assert age.LIMIT_COUNTS["goi_models_kept_below_outs"] == 1
+    assert "goi_models_below_outs" not in age.LIMIT_COUNTS
+    # Below the bound, so not "near" it.
+    assert age.LIMIT_COUNTS.get("goi_models_near_outs", 0) == 0
 
 
 def test_masked_round_above_the_bound_is_kept_and_not_counted(monkeypatch):

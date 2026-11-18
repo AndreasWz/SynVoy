@@ -1382,22 +1382,25 @@ def tandem_copies_by_query_restart(hits, query_seq, chrom_seq, chrom_name, max_g
 
 
 def detect_tandem_duplications(hits, query_seq, chrom_seq, chrom_name,
-                                max_intergenic_distance=50000, query_restart=False, max_gap=None):
+                                query_restart=False, max_gap=None):
     """With ``query_restart`` (--tandem_query_restart, batch G2): tandem_copies_by_query_restart.
-    Otherwise, as before:
-    Detect tandem duplications among search hits.
-    
-    Distinguishes between:
-    - Exons: Hits covering DIFFERENT parts of the query (non-overlapping in query space)
-    - Tandem copies: Hits each covering a LARGE/SIMILAR part of the query 
-      (overlapping in query space, non-overlapping in genome space)
-    
-    Criteria for tandem duplication:
-    1. Multiple hits on same chromosome within max_intergenic_distance
-    2. Hits overlap significantly in QUERY space (each covers >40% of query)
-       OR hits that individually align well to the query
-    3. Translated products from each hit region have high identity to query
-    
+    Otherwise:
+    Detect tandem duplications among the search hits of one window (one sequence).
+
+    The hits are a tandem array when at least two of them each cover >= 35 % of the query
+    (by query span; no identity or E-value test), or when more than half of the pairs of
+    at least three hits overlap in the query by more than half of the shorter hit. The
+    copies are then the hits covering >= 35 % of the query (all hits when there are none),
+    clustered by position: a hit that starts less than 5 kb after the previous one ends
+    joins its cluster, on either strand. Each cluster is one copy, translated from its
+    start to the first stop codon; fewer than two copies is no array.
+
+    So two exons of one gene that each cover >= 35 % of the query and lie more than 5 kb
+    apart are two copies, and two copies of the gene less than 5 kb apart are one candidate
+    copy (and alone no array): a compact pair is found only as miniprot's models
+    (miniprot_gene_models), and the search uses these copies only where miniprot has no
+    model.
+
     Returns:
         (is_tandem, copies) where copies is a list of dicts with:
         {'id', 'seq', 'chrom', 'gstart', 'gend', 'strand', 'pident', 'qstart', 'qend'}
@@ -2137,7 +2140,8 @@ def annotate_using_miniprot(query_seq, chrom_seq, chrom_name,
 # A further alignment is a model of its own when it scores at least this share of the best
 # one. It is the limit miniprot applies itself (--outs: 0.3 in the sensitive call used
 # for the gene of interest, 0.99 otherwise) and is applied again to the masked rounds
-# of miniprot_gene_models.
+# of miniprot_gene_models, except, for the gene of interest, to an alignment that lies on a
+# window hit no kept model explains.
 MINIPROT_OUTS_SENSITIVE = 0.3
 MINIPROT_OUTS_DEFAULT = 0.99
 
@@ -2163,11 +2167,20 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
     miniprot runs again on what is left. A locus whose hits are all explained by the
     first model costs one run, as before.
 
+    The score bound of the first run (MINIPROT_OUTS_SENSITIVE or MINIPROT_OUTS_DEFAULT times
+    its best score) applies to the masked rounds too. For the gene of interest
+    (``sensitive``) a masked round's alignment below it is still kept when its coding
+    sequence overlaps a window hit that no kept model explains: the hit says the query aligns
+    there, and the judge labels every model by its own E-value, so a relative score does not
+    decide whether it is a call. An alignment below the bound that explains no such hit is
+    dropped, as before.
+
     Returns ``[(exons, full_protein), ...]``, best first, at most ``max_models``.
 
     For the gene of interest (``sensitive``) LIMIT_COUNTS records per call: the locus, the
-    alignments miniprot returned over all rounds, the models kept, alignments below the
-    score bound of a masked round, kept models within 1.33x of that bound (a proxy for
+    alignments miniprot returned over all rounds, the models kept, alignments of a masked
+    round below the score bound that were dropped, those kept because they lie on an
+    unexplained hit, kept models at or above the bound and within 1.33x of it (a proxy for
     alignments miniprot's own --outs left out), and whether the cap stopped the rounds while an
     alignment or a hit was still unexplained. A miniprot run that does not finish within its
     guard stops the task (StepFailed), so no round ends on time (fix-phase item 18).
@@ -2182,17 +2195,26 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
     target = chrom_seq
     left_over = False
 
-    def unexplained():
-        for start, end in evidence or ():
-            if not any(min(end, ke) - max(start, kb) > 0 for cds in kept_cds for kb, ke in cds):
-                return True
-        return False
+    def unexplained_hits():
+        return [(start, end) for start, end in evidence or ()
+                if not any(min(end, ke) - max(start, kb) > 0 for cds in kept_cds for kb, ke in cds)]
 
-    def would_be_kept(model):
+    def unexplained():
+        return bool(unexplained_hits())
+
+    def on_unexplained_hit(cds, in_round):
+        """A masked round's alignment of the gene of interest whose coding sequence overlaps a
+        window hit no kept model explains: kept below the score bound."""
+        return (sensitive and in_round > 0
+                and any(min(end, ce) - max(start, cb) > 0
+                        for start, end in unexplained_hits() for cb, ce in cds))
+
+    def would_be_kept(model, in_round):
         """The score and overlap tests below, for an alignment the cap left unread."""
-        if best_score is not None and float(model.get('score', 0) or 0) < min_ratio * best_score:
-            return False
         cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
+        if (best_score is not None and float(model.get('score', 0) or 0) < min_ratio * best_score
+                and not on_unexplained_hit(cds, in_round)):
+            return False
         coding = sum(e - b for b, e in cds)
         return coding > 0 and sum(max(0, min(e, ke) - max(b, kb)) for b, e in cds
                                   for other in kept_cds for kb, ke in other) <= 0.5 * coding
@@ -2204,16 +2226,19 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
             _count("goi_models_found", len(found))
         for i, model in enumerate(found):
             if len(kept) >= limit:
-                left_over = sensitive and any(would_be_kept(m) for m in found[i:])
+                left_over = sensitive and any(would_be_kept(m, _round) for m in found[i:])
                 break
             score = float(model.get('score', 0) or 0)
+            cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
+            below_bound = False
             if best_score is None:
                 best_score = score
             elif score < min_ratio * best_score:
-                if sensitive and _round:
-                    _count("goi_models_below_outs")
-                continue
-            cds = [(c['gstart'], c['gend']) for c in model.get('cds_list', [])]
+                if not on_unexplained_hit(cds, _round):
+                    if sensitive and _round:
+                        _count("goi_models_below_outs")
+                    continue
+                below_bound = True
             coding = sum(e - b for b, e in cds)
             if coding <= 0:
                 continue
@@ -2235,6 +2260,8 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
             kept_cds.append(cds)
             kept_scores.append(score)
             added += 1
+            if below_bound:
+                _count("goi_models_kept_below_outs")
         if not added or len(kept) >= limit or not unexplained():
             break
         masked = list(chrom_seq)
@@ -2247,7 +2274,8 @@ def miniprot_gene_models(query_seq, chrom_seq, chrom_name, max_intron=200000,
         _count("goi_models_kept", len(kept))
         if best_score:
             _count("goi_models_near_outs",
-                   sum(1 for s in kept_scores[1:] if s < 1.33 * min_ratio * best_score))
+                   sum(1 for s in kept_scores[1:]
+                       if min_ratio * best_score <= s < 1.33 * min_ratio * best_score))
         if len(kept) >= limit and (left_over or unexplained()):
             _count("goi_model_cap_stopped")
     return kept

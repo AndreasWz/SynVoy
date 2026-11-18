@@ -58,6 +58,7 @@ process ITERATIVE_SEARCH {
         --mmseqs_sens ${sensitivity} \\
         --mmseqs_split_memory_limit ${params.mmseqs_split_memory_limit} \\
         --mmseqs_verbosity ${params.mmseqs_verbosity} \\
+        --mmseqs_max_seqs ${params.mmseqs_max_seqs} \\
         --deterministic_goi_search ${params.deterministic_goi_search} \\
         --evalue ${params.search_evalue} \\
         --min_identity ${settings.min_hit_identity} \\

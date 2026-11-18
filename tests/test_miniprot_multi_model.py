@@ -200,16 +200,54 @@ def test_overlap_is_counted_on_either_strand(fake_runs):
 
 
 def test_masked_round_applies_the_score_floor_of_the_first_run(fake_runs):
-    """A leftover alignment below 30 % of the best score is not a copy of the gene."""
+    """A leftover alignment below 30 % of the best score that lies on no unexplained window
+    hit is not a copy of the gene."""
     seen = fake_runs([_model(1000, [(100, 200)])],
-                     [_model(290, [(1000, 1100)]), _model(310, [(1500, 1600)], rank=2)],
-                     [_model(280, [(1000, 1100)], rank=3)])
+                     [_model(290, [(1200, 1300)], rank=4), _model(310, [(1500, 1600)], rank=2)],
+                     [_model(280, [(1200, 1300)], rank=3)])
     models = ag.miniprot_gene_models("MK", DNA, "chr", sensitive=True,
                                      evidence=[(120, 180), (1020, 1080), (1520, 1580)])
     assert [protein for _ex, protein in models] == ["MP1", "MP2"]
     assert len(seen) == 3                    # round 3: the hit at 1020 is still unexplained
     assert seen[1][100:200] == "N" * 100 and seen[1][:100] == DNA[:100]
     assert seen[2][1500:1600] == "N" * 100 and seen[2][100:200] == "N" * 100
+
+
+def test_a_masked_round_keeps_an_alignment_below_the_floor_on_an_unexplained_hit(fake_runs):
+    """A copy scoring 0.28 x the best, on a window hit no kept model explains, is kept: the hit
+    says the query aligns there, and the judge labels the model by its own E-value."""
+    seen = fake_runs([_model(1000, [(100, 200)]), _model(900, [(600, 700)], rank=2)],
+                     [_model(280, [(1000, 1100)], rank=3), _model(600, [(1500, 1600)], rank=4)])
+    models = ag.miniprot_gene_models("MK", DNA, "chr", sensitive=True,
+                                     evidence=[(120, 180), (620, 680), (1020, 1080), (1520, 1580)])
+    assert [protein for _ex, protein in models] == ["MP1", "MP2", "MP3", "MP4"]
+    assert len(seen) == 2                    # every hit is explained after round 2
+
+
+def test_the_first_run_keeps_its_score_floor(fake_runs):
+    """In the first run the bound is miniprot's own --outs: an alignment below it is dropped
+    even on a hit."""
+    fake_runs([_model(1000, [(100, 200)]), _model(280, [(1000, 1100)], rank=2)], [])
+    models = ag.miniprot_gene_models("MK", DNA, "chr", sensitive=True,
+                                     evidence=[(120, 180), (1020, 1080)])
+    assert [protein for _ex, protein in models] == ["MP1"]
+
+
+def test_an_alignment_below_the_floor_on_an_explained_hit_is_dropped(fake_runs):
+    """Below the bound and only on a hit a kept model already explains: dropped."""
+    fake_runs([_model(1000, [(100, 200)])],
+              [_model(280, [(150, 250), (1200, 1300)], rank=2), _model(500, [(1500, 1600)], rank=3)])
+    models = ag.miniprot_gene_models("MK", DNA, "chr", sensitive=True,
+                                     evidence=[(120, 180), (1520, 1580)])
+    assert [protein for _ex, protein in models] == ["MP1", "MP3"]
+
+
+def test_the_cap_still_bounds_the_models_kept_below_the_floor(fake_runs):
+    fake_runs([_model(1000, [(100, 200)])],
+              [_model(200, [(1000, 1100)], rank=2), _model(250, [(1500, 1600)], rank=3)])
+    models = ag.miniprot_gene_models("MK", DNA, "chr", sensitive=True, max_models=2,
+                                     evidence=[(1020, 1080), (1520, 1580)])
+    assert [protein for _ex, protein in models] == ["MP1", "MP2"]
 
 
 def test_outside_the_sensitive_mode_only_near_ties_are_further_models(fake_runs):

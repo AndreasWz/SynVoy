@@ -13,7 +13,6 @@ from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E40
 from sequence_utils import clopper_pearson  # noqa: E402
 from query_features import completeness_coverage  # noqa: E402
 import synvoy_label  # noqa: E402
-from synvoy_evalue import PLACE_MERGE_BP  # noqa: E402
 import synvoy_settings  # noqa: E402
 import synvoy_specificity  # noqa: E402
 
@@ -1036,6 +1035,11 @@ def collect_nonsyntenic_candidates(paths, dropped_out=None):
                                         _safe_float(r["evalue"], float("inf")), r["chrom"],
                                         r["start"], r["end"], r["query"]))
     return records, per_genome
+
+
+# Refused GOI rows of one home locus and sequence closer than this are one place
+# (nonsyntenic_places).
+PLACE_MERGE_BP = 5000
 
 
 def _row_strength(r):
@@ -3017,6 +3021,14 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             f"{len(not_searched)} genome(s) could not be searched and have no result: "
             f"{', '.join(sorted(not_searched))}. They are not GOI-absent "
             "(summary.genomes_not_searched).")
+        too_small = sorted(g for g, reasons in not_searched.items()
+                           if "mmseqs_split_memory_limit_too_small" in reasons)
+        if too_small:
+            warnings.append(
+                f"MMseqs2 could not fit the database of {len(too_small)} genome(s) into its split limit "
+                f"({', '.join(too_small)}; reason mmseqs_split_memory_limit_too_small): raise "
+                f"--mmseqs_split_memory_limit, and --iterative_search_memory when it is set to a size "
+                f"(as in the laptop_safe and low_mem profiles), and run again with -resume.")
     for rec in goi_dedup.get("records", []):
         if rec.get("genome") in low_quality_ids:
             rec["low_quality_assembly"] = True
@@ -3220,6 +3232,26 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                     f"thread) after a memory failure in {c['total']} {what} ({', '.join(c['genomes'])}): "
                     f"a hit, and so a call, may be missing there (limits.{key}; the genome's GFF says "
                     f"which, ##synvoy-reduced-search). Give MMseqs2 more memory.")
+        # The model cap of a GOI locus stopped its copy rounds with a copy possibly left.
+        c = limits["counts"].get("goi_model_cap_stopped") or {}
+        if c.get("total"):
+            report["warnings"].append(
+                f"The model cap of a GOI locus stopped the copy rounds {c['total']} time(s) "
+                f"({', '.join(c['genomes'])}) while an alignment that would have been kept, or a window "
+                f"hit that no model explains, was left: a copy of the gene may be missing there "
+                f"(limits.goi_model_cap_stopped). Raise --goi_max_models_per_locus.")
+        # MMseqs2 keeps at most --mmseqs_max_seqs targets per query.
+        maxseqs = [(key, limits["counts"].get(key) or {})
+                   for key in ("mmseqs_maxseqs_genome", "mmseqs_maxseqs_window")]
+        if any(c.get("total") for _key, c in maxseqs):
+            where = "; ".join(f"{key} {c['total']} ({', '.join(c['genomes'])})"
+                              for key, c in maxseqs if c.get("total"))
+            report["warnings"].append(
+                f"A query reached MMseqs2's limit of targets per query (--mmseqs_max_seqs) in a search: "
+                f"its further hits there may be missing ({where}; limits). The counts are a lower "
+                f"bound: they count queries with at least that many result rows, and a query whose "
+                f"prefilter kept that many targets but fewer of them passed the E-value is not "
+                f"counted. Raise --mmseqs_max_seqs.")
     # What ran the Smith-Waterman search (fix-phase item 18); main() moves it into run_settings.
     sw_backend = collect_sw_backend(hits_scan["target_policy"])
     if sw_backend is not None:

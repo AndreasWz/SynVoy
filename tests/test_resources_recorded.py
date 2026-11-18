@@ -29,7 +29,10 @@ def _proc(rc, stderr=""):
     return types.SimpleNamespace(returncode=rc, stdout="", stderr=stderr)
 
 
-OOM = "Error: Prefilter died\nCannot fit databases into 2G. Please use a computer with more main memory.\n"
+# A memory kill of the prefilter (the kernel's OOM killer): the ladder's lower rungs may help. A split
+# limit too small for the database ("Cannot fit databases into ...") is not this kind:
+# tests/test_mmseqs_split_limit.py.
+OOM = "/bin/sh: line 1: 4242 Killed mmseqs prefilter\nError: Prefilter died\n"
 
 
 def _args(tmp_path):

@@ -808,9 +808,10 @@ and tblastn and Smith-Waterman write alignment columns (residues plus gaps).
 
 MMseqs2's sensitivity (`-s`) in LOCATE_GENE and the genome-wide search: higher values find more
 distant hits and take longer. Values from about 7 (faster, for close species) to 9.5 are usual.
-After a search of a genome is killed for memory, it is retried with one thread, a sensitivity of
-at most 7.0 and then 6.0, and a split limit of 2G; the search log says so. Below 1 or above 12,
-the start and the search log warn.
+After a search of a genome is killed for memory, it is retried with one thread and a sensitivity
+of at most 7.0, then 6.0, at the same split limit; the search of a window also tries a split limit
+of 2G. The search log says so, and the report counts such searches (`limits`). Below 1 or above
+12, the start and the search log warn.
 
 ### `mmseqs_split_memory_limit`
 **Default:** `8G` · `low_mem` 2G, `laptop_safe` 4G, `docker_max` 70 % of the memory it gives the
@@ -821,10 +822,34 @@ is searched in parts, which lowers the peak memory and costs some time. Give a u
 When a search is killed for memory (exit 137), lower this first. `iterative_search_memory auto`
 counts it in its request ([§ 17](#iterative_search_memory)).
 
+The limit also has a floor: MMseqs2 needs a part of it whatever the number of parts, and stops
+with `Cannot fit databases into ...` when the limit is too small for the genome. With MMseqs2
+18-8cc5c, 1G is too small even for a genome of 200 kb, 4G was too small for a genome of 3.2 Gb
+(6G worked), and a genome of 3.6 Gb needed 8G. Then raise this limit, and `iterative_search_memory`
+with it when that is set to a size (as in `laptop_safe` and `low_mem`); a lower sensitivity or
+fewer threads do not help. The search does not retry such a genome: it is recorded as not searched
+with the reason `mmseqs_split_memory_limit_too_small`, and the report's `warnings` names these two
+settings ([OUTPUT.md](OUTPUT.md#genomes-without-a-call)). A window whose search fails so stops the
+search with the same advice, after its 2G rung when the limit is below 2G.
+
+### `mmseqs_max_seqs`
+**Default:** `300` (MMseqs2's own default)
+
+MMseqs2's `--max-seqs` in LOCATE_GENE, the genome-wide search and the window searches: the most
+targets per query that pass MMseqs2's prefilter. In a translated search a target is one reading
+frame stretch, roughly one exon, so a query with many hits in a genome (a gene family, a repeated
+domain) can lose hits beyond this number. The report's `limits` block counts the queries with at
+least this many result rows (`mmseqs_maxseqs_genome`, `mmseqs_maxseqs_window`), and `warnings`
+has a sentence when one is not 0. The count is a lower bound: a query whose prefilter kept this
+many targets but fewer of them passed the E-value is not counted. A larger value can find more
+hits and takes longer. A whole number of at least 1.
+
 ### `mmseqs_verbosity`
 **Default:** `1` · `low_mem` and `laptop_safe` 0
 
 Passed to MMseqs2 as `-v` (0 to 3; `mmseqs -h` gives the levels). It changes the messages only.
+The searches (LOCATE_GENE, the genome-wide search and the windows) run at 1 or more, so that a
+failure prints MMseqs2's reason; at 0 MMseqs2 says only `Prefilter died`.
 
 ### `deterministic_goi_search`
 **Default:** `true`
@@ -1099,9 +1124,12 @@ Gene models kept per GOI locus. miniprot reports every place where the query ali
 every model is kept whose coding sequence overlaps that of a better model by less than half. Where
 hits of the window search remain on no model, the exons found so far are masked and miniprot runs
 again, because with a long allowed intron it does not report a diverged neighbouring copy in the
-first run. A further model must reach 30 % of the best score, miniprot's own limit. Further models
-carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are labelled like any other. When the cap
-ends the copy rounds of a locus, the report's `limits` block counts it (`goi_model_cap_stopped`).
+first run. A further model must reach 30 % of the first run's best score, miniprot's own limit,
+unless it lies on a window hit that no kept model explains (counted as `goi_models_kept_below_outs`).
+Further models carry `m2`, `m3` … in their id (`…_b0_l1m2_exon_ann`) and are labelled like any
+other. When the cap ends the copy rounds of a locus while such a hit, or an alignment that would
+have been kept, is left, the report's `limits` block counts it (`goi_model_cap_stopped`) and
+`warnings` says that a copy may be missing there.
 
 ### `miniprot_short_orf_max_len`
 **Default:** `60` (aa) · module B1 sets `100`
@@ -1129,14 +1157,15 @@ without miniprot. The strong-synteny rescue has its own guard
 How tandem copies of the gene are found among its hits in a window. Off: hits within 5 kb of each
 other are one candidate copy, two or more copies that each cover at least 35 % of the query make a
 tandem, and each copy is the span of its hits; two exons of one gene that each cover 35 % of the
-query count as two copies. On: copies are built per strand from hits that continue the query (a hit
-starts at most 10 residues before the previous one ends, and ends after it); a copy counts at a
-union query coverage of at least 0.35 with a best hit of at least 20 aligned residues or 30 bits
-(both for a query under 150 aa); copies that share genome are one; and a tandem needs two counted
-copies that overlap in the query by more than half. Each copy is written as one mRNA with one CDS
-per hit and its union coverage, which the label's completeness bar reads. Two exons of one gene, or
-two programs' hits of one exon, then no longer make a tandem. Works with both
-[`tandem_copy_parent`](#tandem_copy_parent) settings.
+query and lie more than 5 kb apart count as two copies, and two copies less than 5 kb apart are one
+candidate copy (miniprot's models find such a pair). On: copies are built per strand from hits that
+continue the query (a hit starts at most 10 residues before the previous one ends, and ends after
+it); a copy counts at a union query coverage of at least 0.35 with a best hit of at least 20
+aligned residues or 30 bits (both for a query under 150 aa); copies that share genome are one; and
+a tandem needs two counted copies that overlap in the query by more than half. Each copy is written
+as one mRNA with one CDS per hit and its union coverage, which the label's completeness bar reads.
+Two exons of one gene, or two programs' hits of one exon, then no longer make a tandem. Works with
+both [`tandem_copy_parent`](#tandem_copy_parent) settings.
 
 ### `goi_first_exon_guard`
 **Default:** `false`
@@ -1221,9 +1250,12 @@ carry `ModelStatus=rescue` instead. Coverage is the share of the home protein
 that the model's alignment covers; with [`core_completeness`](#core_completeness), the larger of
 that and the coverage of the protein's core.
 
-The status does not set the label: HIGH needs 0.7 query coverage whatever these bounds are, and a
-fragment can be MEDIUM when its match in the expected place is significant. The figures hide
-fragment models and draw them in the `*_with_fragments` files ([OUTPUT.md](OUTPUT.md#the-figures)).
+The status does not set the label: HIGH needs 0.7 query coverage whatever these bounds are (module
+B1's 0.5 included), and a fragment can be MEDIUM when its match in the expected place is
+significant. What reads the status: the figures hide fragment models and draw them in the
+`*_with_fragments` files ([OUTPUT.md](OUTPUT.md#the-figures)); in the report only a fragment can be
+the piece that a wider AMBIGUOUS model of the same gene overrules (`overruled_counted_piece`), and
+`summary.counted_fragment_calls` counts the counted calls that are fragments.
 The fragment bound must lie below the complete bound; the search warns when it does not.
 `-c conf/tp53_strict.config` sets 0.35 and 0.75 (see [`goi_family_tokens`](#goi_family_tokens)).
 

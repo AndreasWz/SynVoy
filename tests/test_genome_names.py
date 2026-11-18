@@ -246,7 +246,7 @@ def test_a_hit_on_the_genomes_own_name_passes_that_check(tmp_path, monkeypatch):
     monkeypatch.setattr(isr, "run_mmseqs_easy_search_with_retries", lambda **k: (True, "", False))
     monkeypatch.setattr(isr, "parse_hits", lambda *a, **k: [{"query": "gene-a|exon_1", "chrom": "NODE_1_length_200_cov_1.0",
                                                              "start": 0, "end": 30}])
-    monkeypatch.setattr(isr.synvoy_evalue, "places_per_gene", lambda hits: (_ for _ in ()).throw(RuntimeError("past the check")))
+    monkeypatch.setattr(isr.synvoy_evalue, "places_per_gene", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("past the check")))
     _name, _g, _e, error = isr.process_single_genome(genome, db, _search_args(tmp_path), None, "", 1)
     assert error == "past the check"
 

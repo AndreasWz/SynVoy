@@ -51,6 +51,7 @@ process RESOLVE_EFFECTIVE_PARAMS {
                      nextflow_version: workflow.nextflow.version,
                      mmseqs_sensitivity: params.mmseqs_sensitivity,
                      mmseqs_split_memory_limit: params.mmseqs_split_memory_limit,
+                     mmseqs_max_seqs: params.mmseqs_max_seqs,
                      iterative_search_cpus: params.iterative_search_cpus,
                      iterative_search_memory: params.iterative_search_memory,
                      iterative_search_max_forks: params.iterative_search_max_forks,

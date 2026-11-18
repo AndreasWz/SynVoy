@@ -84,13 +84,54 @@ def test_e_syn_matches_a_simulation():
     assert sum(sims) / len(sims) == pytest.approx(expect, rel=0.25)
 
 
-def test_places_per_gene_merges_nearby_hits():
+def test_places_per_gene_merges_hits_within_the_gene_gap_limit():
     hits = [{"query": "gene-a|exon_1", "chrom": "c1", "start": 100, "end": 400},
             {"query": "gene-a|exon_2", "chrom": "c1", "start": 3000, "end": 3300},
             {"query": "gene-a", "chrom": "c1", "start": 90000, "end": 90300},
             {"query": "gene-a", "chrom": "c2", "start": 100, "end": 300},
             {"query": "gene-b", "chrom": "c1", "start": 5000, "end": 5300}]
-    assert ev.places_per_gene(hits) == {"gene-a": 3, "gene-b": 1}
+    assert ev.places_per_gene(hits, lambda _g: 5000) == {"gene-a": 3, "gene-b": 1}
+
+
+def test_the_exons_of_one_long_intron_gene_are_one_place():
+    """Eight exon hits 12 kb apart: eight places at a 5 kb merge, one under the gene's own
+    limit (1.5 x its home span x the expansion)."""
+    hits = [{"query": f"gene-a|exon_{i}", "chrom": "chr1", "start": 1_000_000 + i * 12_500,
+             "end": 1_000_000 + i * 12_500 + 150} for i in range(8)]
+    assert ev.places_per_gene(hits, lambda _g: 150_000) == {"gene-a": 1}
+    assert ev.places_per_gene(hits, lambda _g: 5_000) == {"gene-a": 8}
+
+
+def test_two_copies_further_apart_than_the_limit_are_two_places():
+    hits = [{"query": "gene-a", "chrom": "chr1", "start": 1_000_000, "end": 1_000_300},
+            {"query": "gene-a", "chrom": "chr1", "start": 2_000_000, "end": 2_000_300}]
+    assert ev.places_per_gene(hits, lambda _g: 150_000) == {"gene-a": 2}
+
+
+def test_the_gap_is_measured_from_the_furthest_end_of_the_place():
+    """A long first hit holds the place open past a short hit inside it."""
+    hits = [{"query": "gene-a", "chrom": "c1", "start": 0, "end": 50_000},
+            {"query": "gene-a", "chrom": "c1", "start": 1_000, "end": 1_300},
+            {"query": "gene-a", "chrom": "c1", "start": 54_000, "end": 54_300}]
+    assert ev.places_per_gene(hits, lambda _g: 5_000) == {"gene-a": 1}
+
+
+def test_each_gene_gets_its_own_limit():
+    hits = [{"query": g, "chrom": "c1", "start": s, "end": s + 100}
+            for g in ("gene-long", "gene-short") for s in (0, 30_000)]
+    limits = {"gene-long": 100_000, "gene-short": 20_000}
+    assert ev.places_per_gene(hits, limits.get) == {"gene-long": 1, "gene-short": 2}
+
+
+def test_a_gene_without_home_coordinates_uses_the_floor():
+    """The runner's limit (synvoy_scale.gene_gap_limit) is the floor (max_intron) for a gene
+    the home geometry does not hold."""
+    import synvoy_scale
+    geometry = {"genes": {"gene-a": {"span": 40_000}}}
+    limit = (lambda g: synvoy_scale.gene_gap_limit(geometry, g, 1.0, 20_000))
+    hits = [{"query": g, "chrom": "c1", "start": s, "end": s + 100}
+            for g in ("gene-a", "gene-b") for s in (0, 30_000)]
+    assert ev.places_per_gene(hits, limit) == {"gene-a": 1, "gene-b": 2}
 
 
 def test_slot_between_the_nearest_neighbours_plus_a_pitch():
