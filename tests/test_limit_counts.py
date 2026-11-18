@@ -456,29 +456,35 @@ def _anchor(gene, chrom, start):
             "pident": 90.0, "evalue": 1e-50, "alnlen": 300, "bits": 500.0}
 
 
+# the GOI zone of a block that holds gene-a0 (1,000,000-1,001,000), GOI margin 10 kb
+A0_ZONE = [("c1", 990_000, 1_011_000)]
+
+
 def test_dispersed_rescue_counts_each_test_in_order():
     anchors = [_anchor(f"gene-a{i}", "c1", 1_000_000 + i * 100_000) for i in range(4)]
     hits = [_goi("c1", 1_150_000, pident=30.0),                 # identity
             _goi("c1", 1_150_000, pident=30.0, evalue=1.0),     # identity first
             _goi("c1", 1_150_000, evalue=1e-3),                 # E
             _goi("c1", 1_150_000, alnlen=40),                   # length (the 50-aa floor)
-            _goi("c1", 1_005_000),                              # near an anchor
+            _goi("c1", 1_005_000),                              # in a block's GOI zone
             _goi("c1", 1_600_000)]                              # seed (inside the envelope)
-    drops, near = {}, []
-    seeds = isr.select_dispersed_goi_seeds(hits, anchors, region_padding=10_000,
-                                           envelope_margin=500_000, drops=drops, near_out=near)
+    drops, in_zone = {}, []
+    seeds = isr.select_dispersed_goi_seeds(hits, anchors, goi_zones=A0_ZONE, region_padding=10_000,
+                                           envelope_margin=500_000, drops=drops, in_zone_out=in_zone)
     assert len(seeds) == 1
     assert drops == {"dispersed_identity": 2, "dispersed_evalue": 1, "dispersed_alnlen": 1,
-                     "dispersed_near_anchor": 1}
-    assert [h["start"] for h in near] == [1_005_000]
+                     "dispersed_in_goi_zone": 1}
+    assert [h["start"] for h in in_zone] == [1_005_000]
 
 
 def test_dispersed_rescue_without_counters_is_unchanged():
     anchors = [_anchor(f"gene-a{i}", "c1", 1_000_000 + i * 100_000) for i in range(4)]
     hits = [_goi("c1", 1_600_000), _goi("c1", 1_005_000)]
-    a = isr.select_dispersed_goi_seeds(hits, anchors, region_padding=10_000, envelope_margin=500_000)
-    b = isr.select_dispersed_goi_seeds(hits, anchors, region_padding=10_000, envelope_margin=500_000,
-                                       drops={}, near_out=[])
+    a = isr.select_dispersed_goi_seeds(hits, anchors, goi_zones=A0_ZONE, region_padding=10_000,
+                                       envelope_margin=500_000)
+    b = isr.select_dispersed_goi_seeds(hits, anchors, goi_zones=A0_ZONE, region_padding=10_000,
+                                       envelope_margin=500_000, drops={}, in_zone_out=[],
+                                       rejected_out=[], dropped_out=[])
     assert a == b and len(a) == 1
 
 
@@ -486,9 +492,9 @@ def test_dead_zone_and_genome_line(caplog):
     args = _ctx_args()
     args.genome_ctx.update({
         "goi_cores": [("c1", 1000, 5000)],
-        "near_anchor_hits": [{"chrom": "c1", "start": 2000, "end": 2300},      # in a core
-                             {"chrom": "c1", "start": 9000, "end": 9300},      # dead zone
-                             {"chrom": "c2", "start": 2000, "end": 2300}]})    # dead zone
+        "in_zone_hits": [{"chrom": "c1", "start": 2000, "end": 2300},      # in a core
+                         {"chrom": "c1", "start": 9000, "end": 9300},      # dead zone
+                         {"chrom": "c2", "start": 2000, "end": 2300}]})    # dead zone
     age.LIMIT_COUNTS["miniprot_timeout_goi"] = 2
     with caplog.at_level(logging.INFO, logger=isr.logger.name):
         isr.log_genome_limits(args, "G.fna")
@@ -502,7 +508,7 @@ def test_dead_zone_and_genome_line(caplog):
 def test_genome_line_says_none(caplog):
     args = _ctx_args()
     args.genome_ctx["goi_cores"] = [("c1", 1000, 5000)]
-    args.genome_ctx["near_anchor_hits"] = [{"chrom": "c1", "start": 2000, "end": 2300}]
+    args.genome_ctx["in_zone_hits"] = [{"chrom": "c1", "start": 2000, "end": 2300}]
     with caplog.at_level(logging.INFO, logger=isr.logger.name):
         isr.log_genome_limits(args, "G.fna")
     assert _limits(args) == {}

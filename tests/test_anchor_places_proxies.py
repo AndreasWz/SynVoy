@@ -63,7 +63,7 @@ def _opts(proxies):
 
 def _goi_seeded_chroms(seeds, hits):
     opts = _opts({"gene-P"})
-    blocks, _values = isr.genome_axis_blocks(seeds, hits, [], _args(), "g", **opts)
+    blocks, _values, _rescue = isr.genome_axis_blocks(seeds, hits, _args(), "g", **opts)
     return sorted({b["chrom"] for b in blocks if opts["goi_seeded"](b)}, key=lambda c: int(c[3:]))
 
 

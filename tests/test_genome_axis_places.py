@@ -76,7 +76,7 @@ def _chroms(blocks):
 
 def test_without_the_axis_the_cap_cuts_as_before():
     hits = _genome()
-    blocks, values = isr.genome_axis_blocks(hits, hits, [], _args(), "g", **_opts())
+    blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, _args(), "g", **_opts())
     assert values is None
     assert _chroms(blocks) == ["chr1", "chr2", "chr3"]       # merge order, cut at 3
     same, n = isr.build_genome_blocks(hits, _args(), "g", **_opts())
@@ -87,7 +87,7 @@ def test_cap_binding_rebuilds_from_the_best_places(caplog):
     hits = _genome()
     a = _args(genome_axis=True)
     with caplog.at_level("INFO"):
-        blocks, values = isr.genome_axis_blocks(hits, hits, [], a, "g", **_opts())
+        blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, a, "g", **_opts())
     assert _chroms(blocks) == ["chr1", "chr5"]
     assert values == {"anchor_max_places": {"value": 5, "source": "genome_axis",
                                             "blocks_before_cap": 8, "blocks_rebuilt": 2}}
@@ -102,7 +102,7 @@ def test_rebuild_is_capped_when_the_cap_still_binds(caplog):
     hits = _genome()
     a = _args(genome_axis=True, max_blocks_per_genome=1)
     with caplog.at_level("INFO"):
-        blocks, values = isr.genome_axis_blocks(hits, hits, [], a, "g", **_opts())
+        blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, a, "g", **_opts())
     assert _chroms(blocks) == ["chr1"]
     assert values["anchor_max_places"] == {"value": 5, "source": "genome_axis",
                                            "blocks_before_cap": 8, "blocks_rebuilt": 2}
@@ -113,8 +113,8 @@ def test_rebuild_is_capped_when_the_cap_still_binds(caplog):
 
 def test_cap_not_reached_changes_nothing():
     hits = _genome()
-    off, _ = isr.genome_axis_blocks(hits, hits, [], _args(max_blocks_per_genome=10), "g", **_opts())
-    on, values = isr.genome_axis_blocks(hits, hits, [], _args(genome_axis=True, max_blocks_per_genome=10),
+    off, _, _rescue = isr.genome_axis_blocks(hits, hits, _args(max_blocks_per_genome=10), "g", **_opts())
+    on, values, _rescue = isr.genome_axis_blocks(hits, hits, _args(genome_axis=True, max_blocks_per_genome=10),
                                         "g", **_opts())
     assert _chroms(on) == _chroms(off) == [f"chr{c}" for c in range(1, 9)]
     assert values == {"anchor_max_places": {"value": 0, "source": "default", "blocks_before_cap": 8}}
@@ -122,12 +122,12 @@ def test_cap_not_reached_changes_nothing():
 
 def test_no_cap_and_no_flanking_anchors_do_not_rebuild():
     hits = _genome()
-    blocks, values = isr.genome_axis_blocks(hits, hits, [], _args(genome_axis=True, max_blocks_per_genome=0),
+    blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, _args(genome_axis=True, max_blocks_per_genome=0),
                                             "g", **_opts())
     assert len(blocks) == 8 and values["anchor_max_places"]["source"] == "default"
     # seeds without flanking anchors (the GOI's own hits): nothing to limit, the cap cuts
     goi = [dict(h, query="GOI_X") for h in hits]
-    blocks, values = isr.genome_axis_blocks(goi, [], [], _args(genome_axis=True, min_block_genes=1),
+    blocks, values, _rescue = isr.genome_axis_blocks(goi, [], _args(genome_axis=True, min_block_genes=1),
                                             "g", **_opts())
     assert len(blocks) == 3 and values["anchor_max_places"] == {
         "value": 0, "source": "default", "blocks_before_cap": 8}
@@ -136,13 +136,13 @@ def test_no_cap_and_no_flanking_anchors_do_not_rebuild():
 def test_a_value_the_user_set_wins():
     hits = _genome()
     # 0: every place for every genome; the cap cuts as before
-    blocks, values = isr.genome_axis_blocks(hits, hits, [], _args(genome_axis=True, anchor_max_places=0),
+    blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, _args(genome_axis=True, anchor_max_places=0),
                                             "g", **_opts())
     assert _chroms(blocks) == ["chr1", "chr2", "chr3"]
     assert values["anchor_max_places"] == {"value": 0, "source": "user_set", "blocks_before_cap": 8}
     # 2: the search limits the seeds itself (process_single_genome), there is no rebuild
     seeds = isr.limit_anchor_places(hits, 2)
-    blocks, values = isr.genome_axis_blocks(seeds, hits, [], _args(genome_axis=True, anchor_max_places=2),
+    blocks, values, _rescue = isr.genome_axis_blocks(seeds, hits, _args(genome_axis=True, anchor_max_places=2),
                                             "g", **_opts())
     assert _chroms(blocks) == ["chr1"]
     assert values["anchor_max_places"] == {"value": 2, "source": "user_set", "blocks_before_cap": 1}
@@ -153,7 +153,7 @@ def test_goi_proxies_keep_every_place_in_the_rebuild():
     GOI-seeded block. The rebuild limits A and B, never P."""
     hits = _genome() + [_hit("gene-P", f"chr{c}", 50_000, 60 - c) for c in range(9, 16)]
     a = _args(genome_axis=True, max_blocks_per_genome=10)
-    blocks, values = isr.genome_axis_blocks(hits, hits, [], a, "g", **_opts(proxies={"gene-P"}))
+    blocks, values, _rescue = isr.genome_axis_blocks(hits, hits, a, "g", **_opts(proxies={"gene-P"}))
     assert values["anchor_max_places"]["source"] == "genome_axis"
     assert values["anchor_max_places"]["blocks_before_cap"] == 15
     assert sorted(_chroms(blocks), key=lambda c: int(c[3:])) == ["chr1", "chr5"] + [f"chr{c}" for c in range(9, 16)]
@@ -164,13 +164,37 @@ def test_goi_proxies_keep_every_place_in_the_rebuild():
     assert [id(h) for h in kept] == [id(h) for h in hits if h in kept]      # input order kept
 
 
-def test_rescued_goi_hits_stay_seeds_of_the_rebuild():
-    hits = _genome()
-    rescued = [_hit("GOI_X", "chr20", 10_000, 300)]
-    a = _args(genome_axis=True)
-    blocks, values = isr.genome_axis_blocks(hits + rescued, hits, rescued, a, "g", **_opts())
+def test_the_rescue_is_chosen_again_for_the_rebuild():
+    """The rescue is chosen against each build's own blocks (rescue_selector, called once per
+    build), and only the rebuild's choice is kept. On chr9 gene-C (its only hit) lies next to weak
+    chance places of gene-A and gene-B: the first build makes one block of the three, whose GOI zone
+    holds the GOI hit beside gene-C. The rebuild (5 best places per gene) cuts those chance places,
+    gene-C alone forms no block, and the hit becomes a seed beside its lone anchor (near_neighbour).
+    The hit on chr20, far from every anchor, is refused in both builds and recorded once."""
+    hits = _genome() + [_hit("gene-A", "chr9", 100_000, 10), _hit("gene-B", "chr9", 110_000, 10),
+                        _hit("gene-C", "chr9", 120_000, 400)]
+    goi = [dict(_hit("GOI_X", "chr9", 121_500, 300), pident=70.0, evalue=1e-60),
+           dict(_hit("GOI_X", "chr20", 10_000, 300), pident=70.0, evalue=1e-60)]
+    a = _args(genome_axis=True, goi_margin=6_000, gap_search_window=50_000,
+              dispersed_envelope_margin=27_000)
+    select = isr.rescue_selector(sorted(goi + hits, key=lambda h: (h["query"], h["chrom"], h["start"])),
+                                 hits, a, "g")
+    calls = []
+
+    def counting(blocks):
+        calls.append(sorted(b["chrom"] for b in blocks))
+        return select(blocks)
+
+    blocks, values, rescue = isr.genome_axis_blocks(hits, hits, a, "g", select_rescue=counting, **_opts())
+    assert len(calls) == 2 and "chr9" in calls[0] and calls[1] == ["chr1", "chr5"]
     assert values["anchor_max_places"]["blocks_before_cap"] == 9
-    assert "chr20" in _chroms(blocks)                         # a GOI-seeded block, kept
+    assert [(s["chrom"], s["rescue_rule"], s["rescue_anchors"]) for s in rescue.seeds] == [
+        ("chr9", "near_neighbour", 1)]
+    assert [r["chrom"] for r in rescue.rejected] == ["chr20"]       # the rebuild's record only
+    assert rescue.in_zone == []
+    assert sorted(_chroms(blocks)) == ["chr1", "chr5", "chr9"]
+    assert [b["genes"] for b in blocks if b["chrom"] == "chr9"] == [["GOI_X", "gene-C"]]
+    assert not (a.genome_ctx.get("limits") or {})                   # counted by apply_rescue only
 
 
 def test_the_e_value_places_are_not_touched():
@@ -179,7 +203,7 @@ def test_the_e_value_places_are_not_touched():
     hits = _genome()
     ctx = {"places": {"gene-A": 8, "gene-B": 8}}
     a = _args(genome_axis=True, genome_ctx=ctx)
-    isr.genome_axis_blocks(hits, hits, [], a, "g", **_opts())
+    isr.genome_axis_blocks(hits, hits, a, "g", **_opts())
     assert a.genome_ctx["places"] == {"gene-A": 8, "gene-B": 8}
 
 

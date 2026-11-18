@@ -825,15 +825,17 @@ search use the task's threads.
 ### `max_blocks_per_genome`
 **Default:** `80` (0 = no cap)
 
-The most blocks searched in one target genome for one home locus. When the cap binds, blocks seeded
-by the gene itself come first, then the blocks with the longer collinear run, then those with more
-genes. Without the home order (`--disable_synteny_collinearity`) the blocks are not sorted: those
-that pass the gene-count filter come in position order and the GOI-seeded ones after them, so the
-cap drops those first. The log says
-`Capping blocks`. With any `--modules` other than `legacy`, a genome in which the cap binds is
-first built again from the 5 best places of each flanking gene
-([`anchor_max_places`](#anchor_max_places)), and the cap applies to that. Each block costs window
-searches and gene models, so the run time grows with the number of blocks.
+The most blocks searched in one target genome for one home locus. When the cap binds, it keeps
+first the blocks seeded by the gene itself and the blocks whose GOI zone holds a strong hit of the
+gene that the dispersed-GOI rescue left to them ([§ 13](#enable_dispersed_goi_rescue)), then the
+blocks with the longer collinear run, then those with more genes; the kept blocks keep their order.
+Without the home order (`--disable_synteny_collinearity`) the other blocks are not sorted: they come
+in position order. In a genome without any hit of a flanking gene the cap keeps the blocks of the
+gene's strongest hits. The log says `Capping blocks` and names each dropped block. With any
+`--modules` other than `legacy`, a genome in which the cap binds is first built again from the 5
+best places of each flanking gene ([`anchor_max_places`](#anchor_max_places)), and the cap applies
+to that. Each block costs window searches and gene models, so the run time grows with the number
+of blocks.
 
 ### `min_block_genes`
 **Default:** `2`
@@ -841,8 +843,8 @@ searches and gene models, so the run time grows with the number of blocks.
 Blocks with fewer distinct flanking genes than this are not searched. A block seeded by the gene
 itself is kept whatever its size: by the gene's own home gene among the anchors, by a rescued GOI
 hit, or by a GOI hit where no flanking gene has a hit at all. When no block passes, every block is
-searched (up to `max_blocks_per_genome`). `1` is very permissive: one flanking hit on a chromosome
-is no evidence of synteny.
+searched (up to `max_blocks_per_genome`), and these blocks stay when rescued GOI hits add blocks of
+their own. `1` is very permissive: one flanking hit on a chromosome is no evidence of synteny.
 
 ### `anchor_max_places`
 **Default:** `auto` (or a number; 0 = every place)
@@ -859,11 +861,12 @@ the seeding of blocks changes.
   genome axis, [§ 1](#modules)); the cap cuts that again if it still binds.
 - A number is used for every genome.
 
-The gene's own home gene among the anchors keeps every place, and rescued GOI hits stay seeds. It
-matters where flanking genes have many places, as in plant genomes; under `--modules legacy`, use
-`--anchor_max_places 5` there and whenever the log says `Capping blocks`. Where a genome has no
-conserved neighbourhood, its two-anchor blocks are chance blocks and the limit removes them; the
-search then falls back to every block, as it does whenever no block passes `min_block_genes`.
+The gene's own home gene among the anchors keeps every place, and the dispersed-GOI rescue is
+chosen again against the rebuilt blocks. It matters where flanking genes have many places, as in
+plant genomes; under `--modules legacy`, use `--anchor_max_places 5` there and whenever the log
+says `Capping blocks`. Where a genome has no conserved neighbourhood, its two-anchor blocks are
+chance blocks and the limit removes them; the search then falls back to every block, as it does
+whenever no block passes `min_block_genes`.
 
 The value used for each genome, and its source (`default`, `genome_axis` or `user_set`), is in the
 search log, in the report's `target_policy` block and in the `##synvoy-genome-axis` line of the
@@ -1485,19 +1488,23 @@ rescues like those of the search, except the strong-synteny rescue's, which stay
 ### `enable_dispersed_goi_rescue`
 **Default:** `true`
 
-A strong GOI hit of the genome-wide search that lies farther than the GOI margin from every anchor
-(the best hit of each flanking gene in the genome) is in no window. With this pass such a hit seeds
-a block of its own, which is then searched and modelled like any other, when it reaches the
-identity, E-value and length below and lies on a sequence that holds the anchors of at least
-`dispersed_min_chrom_anchors` distinct flanking genes, inside their envelope: from the first to the
-last of them, widened on each side by
-[`dispersed_envelope_margin_genes`](#dispersed_envelope_margin_genes--dispersed_envelope_margin).
-Where the neighbourhood is conserved, the gene lies next to its anchors and the pass adds nothing. A
-hit within the GOI margin of an anchor is left to the blocks; when that anchor's block was filtered
-or capped, no path uses it, and the limit counts give it as `dead_zone`. A hit that passes the
-quality tests but not the place is listed in the report under
-`rejected_candidates` ([`report_nonsyntenic_candidates`](#report_nonsyntenic_candidates)). `false`
-switches the pass off.
+A strong GOI hit of the genome-wide search that lies outside the GOI zone of every block (block ±
+the GOI margin) is in no search. The blocks are built first; with this pass, a hit that reaches the
+identity, E-value and length below and lies outside every GOI zone seeds a block of its own, which
+is then searched and modelled like any other, when it lies on a sequence that holds the anchors
+(the best hit of each flanking gene in the genome) of at least `dispersed_min_chrom_anchors`
+distinct flanking genes, inside their envelope: from the first to the last of them, widened on each
+side by [`dispersed_envelope_margin_genes`](#dispersed_envelope_margin_genes--dispersed_envelope_margin).
+On a sequence with fewer anchors, it seeds a block when it lies within the GOI margin of one of
+them: a single neighbour forms no block of its own. A hit inside a GOI zone is left to that block.
+The pass does not look at the gene order. Where the neighbourhood is conserved, the gene lies in the
+zone of its block and the pass adds nothing. A model found only through the pass carries
+`DispersedRescue=1` and the rule that seeded it. When a block whose zone held such a hit is dropped
+by the cap, the limit counts give the hit as `dead_zone`. A hit that passes the quality tests but
+not the place is listed in the report under `rejected_candidates`, and a hit outside every searched
+GOI zone that fails them under `rejected_candidates.dropped`
+([`report_nonsyntenic_candidates`](#report_nonsyntenic_candidates)). `false` switches the pass
+off.
 
 ### `dispersed_goi_min_identity` / `dispersed_goi_max_evalue` / `dispersed_goi_min_alnlen` / `dispersed_min_chrom_anchors`
 **Defaults:** `40.0` (%) / `1e-10` / `50` (aa) / `3` · modules B1 and C1 set `dispersed_goi_min_alnlen`
@@ -1987,9 +1994,12 @@ in the task's log (`.command.log` in the work folder), for debugging.
 
 Keeps the GOI hits that pass the identity, E-value and length tests of the dispersed-GOI rescue
 ([§ 13](#enable_dispersed_goi_rescue)) but fail its tests of place, with the test that refused each
-and the nearest flanking gene. The report lists them under `rejected_candidates`, and a genome with
-such a hit and no call reads `goi_found_but_not_syntenic` instead of looking like a genome without
-a hit. They are not calls.
+and the nearest flanking gene. The report lists them under `rejected_candidates`, row by row and
+merged into places, and a genome with such a place that no counted call of the run covers, and no
+call, reads `goi_found_but_not_syntenic` instead of looking like a genome without a hit. They are
+not calls. The same table keeps the GOI hits outside every searched GOI zone that failed the
+rescue's quality tests (`rejected_candidates.dropped`, the strongest 200 per genome search, with the
+test each failed).
 
 ---
 

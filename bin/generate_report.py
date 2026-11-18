@@ -13,6 +13,7 @@ from sequence_utils import parse_gff_attributes as _parse_gff_attrs  # noqa: E40
 from sequence_utils import clopper_pearson  # noqa: E402
 from query_features import completeness_coverage  # noqa: E402
 import synvoy_label  # noqa: E402
+from synvoy_evalue import PLACE_MERGE_BP  # noqa: E402
 import synvoy_settings  # noqa: E402
 import synvoy_specificity  # noqa: E402
 
@@ -328,6 +329,13 @@ def _process_gffs_unified(gff_files):
                             # --report_copies_in_slot (preset plan PR-6): "" otherwise.
                             "copies_in_slot": (attrs.get("CopiesInSlot", "") or "").strip(),
                             "slot_rank": (attrs.get("SlotRank", "") or "").strip(),
+                            # A model found only because the dispersed-GOI rescue made the
+                            # search look there (DispersedRescue=1), with the rescue's rule, the
+                            # anchors on the hit's sequence and the nearest one's distance.
+                            "dispersed_rescue": (attrs.get("DispersedRescue", "") or "").strip() == "1",
+                            "rescue_rule": (attrs.get("RescueRule", "") or "").strip(),
+                            "rescue_anchors": (attrs.get("RescueAnchors", "") or "").strip(),
+                            "rescue_anchor_bp": (attrs.get("RescueAnchorBp", "") or "").strip(),
                         })
 
                     elif role == "flanking" and confidence == "HIGH":
@@ -715,7 +723,52 @@ def collect_not_searched(paths):
     return out
 
 
-def collect_nonsyntenic_candidates(paths):
+NONSYNTENIC_REFUSAL_NOTE = (
+    "GOI hits that passed the identity/e-value/alignment-length bar but were refused by a "
+    "synteny gate. Not orthology calls: at long divergences a translocated ortholog and a "
+    "paralog are indistinguishable by gene order. Listed so a genome with a strong "
+    "unplaceable hit is not read as a genome with no hit. `places` merges the rows of one "
+    "home locus that lie within 5 kb of each other; a place that a counted call of the run "
+    "overlaps (`modelled_in_run`) is left out of `goi_found_but_not_syntenic`.")
+NONSYNTENIC_DROPPED_NOTE = (
+    "GOI hits of the genome-wide search outside every searched GOI zone that the dispersed-GOI "
+    "rescue dropped, with the test each failed (`rejected_by`: dispersed_identity, "
+    "dispersed_evalue or dispersed_alnlen; dead_zone: the hit lay in the GOI zone of a block "
+    "that was not searched). The strongest 200 per genome search; `hits` counts them all. "
+    "Diagnostics, not candidates.")
+
+
+def _optional_int(value):
+    """An int, or None for a missing or empty field (a table written before the column)."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value):
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nonsyntenic_locus(path, raw_genome):
+    """The home locus of a nonsyntenic table without a locus column: the file-name prefix
+    before ``<genome>.nonsyntenic.tsv`` (iterative_search_runner names it
+    ``<locus>_<genome>.nonsyntenic.tsv``); '' when it cannot be read."""
+    base = os.path.basename(path)
+    stem = base[:-len(NONSYNTENIC_SUFFIX)] if base.endswith(NONSYNTENIC_SUFFIX) else base
+    if raw_genome and stem.endswith(raw_genome):
+        return stem[:-len(raw_genome)].rstrip("_")
+    return ""
+
+
+def collect_nonsyntenic_candidates(paths, dropped_out=None):
     """§1x: load the GOI hits that cleared the quality bar and were then refused by a
     synteny gate.
 
@@ -727,8 +780,15 @@ def collect_nonsyntenic_candidates(paths):
     `goi_found_but_not_syntenic` are scientifically opposite claims and must not share
     a field.
 
-    Returns (records, per_genome_map). Malformed or unreadable files are skipped rather
-    than failing the report — this is diagnostic output, never a reason to lose a run.
+    The same tables list the GOI hits the rescue dropped (column ``outcome`` = dropped:
+    below its quality bar, or in the GOI zone of a block that was not searched, outside every
+    searched GOI zone); they are appended to ``dropped_out`` when it is a list, and are never
+    refused candidates. A table without the column (before 2026-11-16) holds refused hits
+    only; one without a ``locus`` column takes the locus from its file name.
+
+    Returns (records, per_genome_map) of the refused hits. Malformed or unreadable files are
+    skipped rather than failing the report — this is diagnostic output, never a reason to lose
+    a run.
     """
     records, per_genome = [], {}
     for path in sorted(paths):
@@ -737,14 +797,20 @@ def collect_nonsyntenic_candidates(paths):
                 for row in csv.DictReader(fh, delimiter="\t"):
                     if not row.get("chrom"):
                         continue
+                    raw_genome = row.get("genome") or ""
                     genome = canonical_genome_id(
-                        row.get("genome") or os.path.basename(path).split(NONSYNTENIC_SUFFIX)[0])
+                        raw_genome or os.path.basename(path).split(NONSYNTENIC_SUFFIX)[0])
                     rec = {
                         "genome": genome,
+                        "locus": row.get("locus") or _nonsyntenic_locus(path, raw_genome),
                         "query": row.get("query", ""),
                         "chrom": row.get("chrom", ""),
                         "start": _safe_int(row.get("start")),
                         "end": _safe_int(row.get("end")),
+                        "strand": row.get("strand", "") or "",
+                        "qstart": _optional_int(row.get("qstart")),
+                        "qend": _optional_int(row.get("qend")),
+                        "bits": _optional_float(row.get("bits")),
                         "identity": _safe_float(row.get("identity")),
                         "evalue": row.get("evalue", ""),
                         "alnlen": _safe_int(row.get("alnlen")),
@@ -756,42 +822,195 @@ def collect_nonsyntenic_candidates(paths):
                                               if str(row.get("nearest_anchor_bp", "")).strip() else None),
                         "nearest_anchor_same_chrom":
                             str(row.get("nearest_anchor_same_chrom", "")).lower() == "true",
+                        "envelope": row.get("envelope", "") or "",
+                        "anchors_on_sequence": _optional_int(row.get("anchors_on_sequence")),
+                        "genes_on_sequence": _optional_int(row.get("genes_on_sequence")),
+                        "modelled_here": row.get("modelled_here", "") or "",
+                        "modelled_by": row.get("modelled_by", "") or "",
                     }
+                    if (row.get("outcome") or "refused") != "refused":
+                        if dropped_out is not None:
+                            dropped_out.append(rec)
+                        continue
                     records.append(rec)
                     per_genome.setdefault(genome, []).append(rec)
         except (OSError, csv.Error):
             continue
     records.sort(key=lambda r: (-r["identity"], r["genome"], r["chrom"], r["start"]))
+    if dropped_out is not None:
+        dropped_out.sort(key=lambda r: (r["genome"], r["locus"], -(r["bits"] or 0.0),
+                                        _safe_float(r["evalue"], float("inf")), r["chrom"],
+                                        r["start"], r["end"], r["query"]))
     return records, per_genome
 
 
-def summarize_nonsyntenic_candidates(records, per_genome):
+def _row_strength(r):
+    """Best first: most bits, then the smallest E, the highest identity, the query, the start."""
+    return (-(r.get("bits") or 0.0), _safe_float(r.get("evalue"), float("inf")),
+            -(r.get("identity") or 0.0), r.get("query", ""), r.get("start", 0))
+
+
+def nonsyntenic_places(records, merge_bp=PLACE_MERGE_BP):
+    """The refused hits of one home locus, genome and sequence that overlap or lie within
+    ``merge_bp`` of each other, as one place (several GOI queries, such as the home protein,
+    its exons and earlier genomes' models, hit one place, one row each). A place: its span
+    (0-based, end exclusive), the strand, identity, E and bits of its best row (most bits,
+    then smallest E), the nearest flanking anchor of that row, its rows (``n_rows``), queries
+    and tests (``rejected_by``), and ``modelled_here``, the best label of a model of the same
+    search that overlaps one of its rows (with ``modelled_by``)."""
+    groups = defaultdict(list)
+    for r in records:
+        groups[(r["genome"], r.get("locus", ""), r["chrom"])].append(r)
+    places = []
+    for (genome, locus, chrom), rows in sorted(groups.items()):
+        rows = sorted(rows, key=lambda r: (r["start"], r["end"], r.get("query", "")))
+        runs, current, run_end = [], [], None
+        for r in rows:
+            if current and r["start"] - run_end <= merge_bp:
+                current.append(r)
+                run_end = max(run_end, r["end"])
+            else:
+                if current:
+                    runs.append(current)
+                current, run_end = [r], r["end"]
+        if current:
+            runs.append(current)
+        for run in runs:
+            best = min(run, key=_row_strength)
+            modelled = [r for r in run if r.get("modelled_here")]
+            top_model = (min(modelled, key=lambda r: (-synvoy_label.LABEL_RANK.get(r["modelled_here"], 0),
+                                                      r.get("modelled_by", "")))
+                         if modelled else None)
+            places.append({
+                "genome": genome, "locus": locus, "chrom": chrom,
+                "start": min(r["start"] for r in run), "end": max(r["end"] for r in run),
+                "strand": best.get("strand", ""), "identity": best.get("identity"),
+                "evalue": best.get("evalue", ""), "bits": best.get("bits"),
+                "nearest_anchor_gene": best.get("nearest_anchor_gene", ""),
+                "nearest_anchor_bp": best.get("nearest_anchor_bp"),
+                "nearest_anchor_same_chrom": best.get("nearest_anchor_same_chrom", False),
+                "n_rows": len(run),
+                "queries": sorted({r.get("query", "") for r in run}),
+                "rejected_by": sorted({r.get("rejected_by", "") for r in run}),
+                "modelled_here": top_model["modelled_here"] if top_model else "",
+                "modelled_by": top_model.get("modelled_by", "") if top_model else "",
+                "_rows": run,
+            })
+    return places
+
+
+def annotate_place_calls(places, counted_records):
+    """``modelled_in_run`` on each place: the first counted record (``counted_records`` in the
+    report's order; HIGH or MEDIUM, not demoted) of the same genome and sequence that overlaps
+    it, with its model id, label, home loci (``provenance``) and ``other_locus`` (the place's
+    home locus is not among them; null when the place has no locus), else null. Record spans
+    are 1-based and inclusive, place spans 0-based and half-open."""
+    by_key = defaultdict(list)
+    for rec in counted_records or ():
+        by_key[(rec.get("genome"), rec.get("chrom"))].append(rec)
+    for p in places:
+        hit = next((rec for rec in by_key.get((p["genome"], p["chrom"]), ())
+                    if int(rec.get("start", 0)) - 1 < p["end"] and p["start"] < int(rec.get("end", 0))), None)
+        if hit is None:
+            p["modelled_in_run"] = None
+            continue
+        provenance = list(hit.get("provenance") or [])
+        p["modelled_in_run"] = {"mrna_id": hit.get("mrna_id", ""), "confidence": hit.get("confidence", ""),
+                                "provenance": provenance,
+                                "other_locus": (p["locus"] not in provenance) if p.get("locus") else None}
+    return places
+
+
+def summarize_nonsyntenic_candidates(records, per_genome, counted_records=None, dropped=None,
+                                     dropped_hits=None):
     """Report block for §1x. `best_per_genome` is what a reader should look at: the
-    strongest hit we found and declined to call, per genome."""
+    strongest hit we found and declined to call, per genome, among the places no counted call
+    of the run overlaps (``counted_records``: the HIGH and MEDIUM records that are not
+    demoted). ``dropped``: the rows the rescue dropped (collect_nonsyntenic_candidates'
+    dropped_out), listed under ``dropped`` with ``dropped_hits``, how many there were before the
+    search's per-genome cap (None when no table says)."""
     by_gate = {}
     for r in records:
         by_gate[r["rejected_by"]] = by_gate.get(r["rejected_by"], 0) + 1
+    places = annotate_place_calls(nonsyntenic_places(records), counted_records)
+    unmodelled = [p for p in places if not p.get("modelled_in_run")]
     best = {}
-    for genome, recs in per_genome.items():
-        top = max(recs, key=lambda r: r["identity"])
-        best[genome] = {
-            "chrom": top["chrom"], "start": top["start"], "end": top["end"],
-            "identity": top["identity"], "rejected_by": top["rejected_by"],
-            "nearest_anchor_bp": top["nearest_anchor_bp"],
-            "nearest_anchor_same_chrom": top["nearest_anchor_same_chrom"],
-        }
-    return {
+    for p in unmodelled:
+        top = max(p["_rows"], key=lambda r: r["identity"])
+        old = best.get(p["genome"])
+        if old is None or top["identity"] > old["identity"]:
+            best[p["genome"]] = {
+                "chrom": top["chrom"], "start": top["start"], "end": top["end"],
+                "identity": top["identity"], "rejected_by": top["rejected_by"],
+                "nearest_anchor_bp": top["nearest_anchor_bp"],
+                "nearest_anchor_same_chrom": top["nearest_anchor_same_chrom"],
+            }
+    for p in places:
+        p.pop("_rows", None)
+    block = {
         "total": len(records),
         "genomes": sorted(per_genome),
         "by_gate": by_gate,
-        "best_per_genome": best,
-        "note": ("GOI hits that passed the identity/e-value/alignment-length bar but "
-                 "were refused by a synteny gate. Not orthology calls: at long "
-                 "divergences a translocated ortholog and a paralog are "
-                 "indistinguishable by gene order. Listed so a genome with a strong "
-                 "unplaceable hit is not read as a genome with no hit."),
+        "best_per_genome": {g: best[g] for g in sorted(best)},
+        "note": NONSYNTENIC_REFUSAL_NOTE,
         "candidates": records,
+        "places": places,
+        "place_count": len(places),
+        "unmodelled_place_count": len(unmodelled),
+        "unmodelled_genomes": sorted({p["genome"] for p in unmodelled}),
     }
+    if dropped is not None:
+        by_test = {}
+        for r in dropped:
+            by_test[r["rejected_by"]] = by_test.get(r["rejected_by"], 0) + 1
+        block["dropped"] = {
+            "total": len(dropped),
+            "hits": dropped_hits,
+            "by_test": {k: by_test[k] for k in sorted(by_test)},
+            "genomes": sorted({r["genome"] for r in dropped}),
+            "note": NONSYNTENIC_DROPPED_NOTE,
+            "candidates": dropped,
+        }
+    return block
+
+
+def sum_target_policy_column(paths, column):
+    """The sum of one column over every target-policy row (one per home locus and searched
+    genome); None when no row carries it (a run before the column)."""
+    total, seen = 0, False
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if column not in row:
+                        continue
+                    seen = True
+                    total += int(float(row.get(column) or 0))
+        except (OSError, csv.Error, ValueError):
+            continue
+    return total if seen else None
+
+
+def genomes_without_flanking_hits(paths):
+    """The genomes where a search found no hit of any flanking gene and still searched blocks
+    (target-policy rows with n_flanking_genes 0 and blocks_searched > 0): their blocks were
+    seeded by the GOI's own hits, with no neighbour test (RescueRule=no_flanking_hits)."""
+    out = set()
+    for path in sorted(paths):
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    try:
+                        no_flanking = int(float(row.get("n_flanking_genes") or 0)) == 0
+                        searched = int(float(row.get("blocks_searched") or 0)) > 0
+                    except ValueError:
+                        continue
+                    if no_flanking and searched:
+                        out.add(canonical_genome_id(
+                            row.get("genome") or os.path.basename(path).split(TARGET_POLICY_SUFFIX)[0]))
+        except (OSError, csv.Error):
+            continue
+    return sorted(out)
 
 
 GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched window, from the genome-wide "
@@ -1250,6 +1469,11 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Only in a run with --report_copies_in_slot (preset plan PR-6).
                 **({"copies_in_slot": rep["copies_in_slot"], "slot_rank": rep.get("slot_rank", "")}
                    if rep.get("copies_in_slot") else {}),
+                # Only on a model the dispersed-GOI rescue alone made the search find.
+                **({"dispersed_rescue": True, "rescue_rule": rep.get("rescue_rule", ""),
+                    "rescue_anchors": rep.get("rescue_anchors", ""),
+                    "rescue_anchor_bp": rep.get("rescue_anchor_bp", "")}
+                   if rep.get("dispersed_rescue") else {}),
             })
 
     records.sort(key=lambda r: (_record_rank(r), r["genome"], r["chrom"]))
@@ -2175,10 +2399,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     score_files = scores_scan["scores"]
     hit_files = hits_scan["hits"]
     nonsyntenic_files = hits_scan["nonsyntenic"]
+    nonsyntenic_dropped = []
     nonsyntenic_records, nonsyntenic_by_genome = collect_nonsyntenic_candidates(
-        nonsyntenic_files)
-    nonsyntenic_block = summarize_nonsyntenic_candidates(
-        nonsyntenic_records, nonsyntenic_by_genome)
+        nonsyntenic_files, dropped_out=nonsyntenic_dropped)
 
     staging_diagnostics = build_staging_diagnostics(
         results_dir,
@@ -2309,6 +2532,17 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                      if r.get("confidence") == "HIGH" and r.get("goi_class") not in _DEMOTED_CLASSES)
     dedup_medium = sum(1 for r in _own_recs
                        if r.get("confidence") == "MEDIUM" and r.get("goi_class") not in _DEMOTED_CLASSES)
+    _counted_recs = [r for r in _own_recs if r.get("confidence") in ("HIGH", "MEDIUM")
+                     and r.get("goi_class") not in _DEMOTED_CLASSES]
+    # §1x: the refused hits per place; a place that a counted call of the run overlaps (from any
+    # home locus or rescue pass) is "modelled", not "found, not syntenic".
+    nonsyntenic_block = summarize_nonsyntenic_candidates(
+        nonsyntenic_records, nonsyntenic_by_genome, counted_records=_counted_recs,
+        dropped=nonsyntenic_dropped,
+        dropped_hits=sum_target_policy_column(hits_scan["target_policy"], "rescue_dropped_outside_zones"))
+    # Calls found only because the dispersed-GOI rescue made the search look there.
+    dispersed_rescue_by_rule = dict(sorted(Counter(
+        r.get("rescue_rule") or "unknown" for r in _counted_recs if r.get("dispersed_rescue")).items()))
     # AMBIGUOUS calls: shown as "needs curation", never counted, split by why (Basis). One that
     # ownership gave to another home gene (paralog_not_goi) is that gene's call, named apart.
     _curation = [r for r in _own_recs if r.get("confidence") == "AMBIGUOUS"
@@ -2359,6 +2593,15 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     for rec in goi_dedup.get("records", []):
         if rec.get("genome") in low_quality_ids:
             rec["low_quality_assembly"] = True
+    # Genomes where a search found no flanking gene at all: the GOI's own hits seeded every
+    # block there, with no neighbour test.
+    no_flanking_genomes = genomes_without_flanking_hits(hits_scan["target_policy"])
+    if no_flanking_genomes:
+        warnings.append(
+            f"{len(no_flanking_genomes)} genome(s) had no hit of any flanking gene in at least one "
+            f"home locus's search: {', '.join(no_flanking_genomes)}. Every cluster of GOI hits there "
+            "seeded a block of its own, so a call there rests on the protein match alone "
+            "(DispersedRescue=1, RescueRule=no_flanking_hits; summary.genomes_without_flanking_hits).")
     genome_wide_records = collect_genome_wide_places(hits_scan["genome_wide"])
     genome_wide_modelled = sum(1 for r in genome_wide_records if r["decision"] == "modelled")
     if genome_wide_modelled:
@@ -2459,11 +2702,20 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "goi_absent_genomes": sorted(
                 g for g in annotation_summary["genomes_without_goi"]
                 if g not in nonsyntenic_by_genome),
+            # A refused place that a counted call of the run overlaps (another home locus's,
+            # a rescue pass's) is modelled: only genomes with a place no counted call covers.
             "goi_found_but_not_syntenic": sorted(
-                set(nonsyntenic_by_genome) - {
+                set(nonsyntenic_block["unmodelled_genomes"]) - {
                     row["genome"] for row in annotation_summary["per_genome"]
                     if row.get("goi_annotations", 0) > 0}),
             "nonsyntenic_candidate_count": nonsyntenic_block["total"],
+            "nonsyntenic_place_count": nonsyntenic_block["place_count"],
+            "nonsyntenic_unmodelled_place_count": nonsyntenic_block["unmodelled_place_count"],
+            # Counted calls (HIGH or MEDIUM, not demoted) found only because the dispersed-GOI
+            # rescue made the search look there (DispersedRescue=1), and by its rule.
+            "dispersed_rescue_goi": sum(dispersed_rescue_by_rule.values()),
+            "dispersed_rescue_by_rule": dispersed_rescue_by_rule,
+            "genomes_without_flanking_hits": no_flanking_genomes,
             # Genomes the search skipped (e.g. MMseqs resource failure): no result at all.
             "genomes_not_searched": {g: r for g, r in sorted(not_searched.items())},
             # Genomes without a counted call, by what the search saw there

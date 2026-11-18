@@ -673,10 +673,12 @@ passes `--genome_axis`). Under `--modules legacy` the axis is off and
 again once from the 5 best places of each flanking gene, and the cap then cuts the
 rebuild as before if it still binds; where the cap does not bind, every place counts, as
 without the axis. The GOI's own home gene among the anchors (a GOI proxy) keeps every
-place and the rescued GOI hits (§7.11) stay seeds, so each seed of a GOI-seeded block is
-a seed of the rebuild too; the places counted for E_syn (§7.13) are taken from all hits
-before the blocks and do not change. A number the user gives is used for every genome.
-Each genome's value is logged (`genome axis: anchor_max_places N (source; ...)`), written
+place. The rescue of GOI hits far from their anchors (§7.11) is chosen again against the
+rebuilt blocks: a hit that a dropped block's GOI zone held becomes a seed if it passes the
+rescue's rules, and a hit that a rebuilt block's zone holds is left to it. The places
+counted for E_syn (§7.13) are taken from all hits before the blocks and do not change. A
+number the user gives is used for every genome. Each genome's value is logged
+(`genome axis: anchor_max_places N (source; ...)`), written
 to the search's table `hits/<locus>_<genome>.target_policy.tsv` (read into
 `synvoy_report.json` → `target_policy`) with its source (`default`, `genome_axis`,
 `user_set`) and the block counts before and after a rebuild, and to the result GFF
@@ -685,7 +687,11 @@ of `FORBIDDEN_FOR_MODULES`).
 
 Only hits of flanking genes are used to build blocks. GOI hits are not, with one
 exception ([§7.11](#711-goi-hits-far-from-their-anchors)). If no flanking gene has a
-hit, all hits are used.
+hit, all hits are used: every cluster of GOI hits then seeds a block of its own, with no
+neighbour test, and the search log warns. When the cap (§7.4) binds there, the blocks
+holding the strongest hits (bits) are kept. Their GOI models carry `DispersedRescue=1`
+with `RescueRule=no_flanking_hits`, and the report lists the genome under
+`summary.genomes_without_flanking_hits`.
 
 ### Distances in gene units
 
@@ -794,7 +800,8 @@ ranking off. Without home order no block has a collinear run, so no block is
 significant (E_syn ≥ 1): every GOI call is judged in the genome place, with no slot, no
 gene-order-only call and no positional tie-break. The blocks are then not sorted before
 the cap: those that pass the gene-count filter come in position order, and the GOI-seeded
-blocks kept below `min_block_genes` come after them, so the cap drops those first.
+blocks kept below `min_block_genes` come after them; the cap still keeps the GOI-seeded
+blocks first (§7.4).
 
 ### 7.4 Merging, filtering, capping
 
@@ -805,13 +812,20 @@ blocks kept below `min_block_genes` come after them, so the cap drops those firs
 2. **Filter.** Blocks with fewer than `min_block_genes` (2) flanking genes are
    dropped. A block is kept regardless when it was seeded by the GOI's own home gene,
    by a rescued GOI hit (§7.11) or by a GOI hit (blocks are seeded from GOI hits when no
-   flanking gene has a hit). If no block is left, all blocks are used.
-3. **Cap.** At most `max_blocks_per_genome` (80; 0: no cap) blocks are searched:
-   GOI-seeded blocks first, then by collinear run, then by gene count. Without home order
-   the blocks are not sorted: those that pass the filter come in position order and the
-   GOI-seeded blocks kept below `min_block_genes` after them, so the cap drops those first. On the genome axis (§7.1) a genome where the cap
-   binds is built again from the 5 best places of each flanking gene; the same steps
-   (`build_genome_blocks`) then filter, sort and cap the rebuild.
+   flanking gene has a hit). If no block is left, all blocks are used. When the rescue's
+   seeds are added (§7.11), the blocks are built again, and every block of the build
+   without them is kept as well, so a fallback to all blocks survives a seed elsewhere.
+3. **Cap.** At most `max_blocks_per_genome` (80; 0: no cap) blocks are searched. Blocks
+   are sorted GOI-seeded first, then by collinear run, then by gene count; without home
+   order they are not sorted (those that pass the filter in position order, the GOI-seeded
+   blocks kept below `min_block_genes` after them). When the cap binds, it keeps first the
+   GOI-seeded blocks and the blocks whose GOI zone holds a strong GOI hit that the rescue
+   left to them (§7.11), then the others in that order, and the kept blocks keep their
+   order, so no block number moves where the cap does not bind. In a genome without any
+   flanking hit it keeps the blocks holding the strongest GOI hits (§7.1). Each dropped
+   block is logged and counted (`blocks_capped`). On the genome axis (§7.1) a genome where
+   the cap binds is built again from the 5 best places of each flanking gene; the same
+   steps (`build_genome_blocks`, the rescue) then filter, sort and cap the rebuild.
 
 ### 7.5 Windows
 
@@ -1113,29 +1127,48 @@ GOI proxy), the locus gets a full GOI search instead.
 
 ### 7.11 GOI hits far from their anchors
 
-`select_dispersed_goi_seeds` (on by default) handles a rearranged neighbourhood. A
-genome-wide GOI hit with identity ≥ 40 %, E ≤ 1e-10 and an alignment of at least 50
+`select_dispersed_goi_seeds` (on by default) takes a strong GOI hit that lies outside the
+GOI zone of every block (block ± the GOI margin, the core of §7.5); it does not look at the
+gene order. The blocks are built without it first (`blocks_with_rescue`), and their GOI zones
+decide. A genome-wide GOI hit with identity ≥ 40 %, E ≤ 1e-10 and an alignment of at least 50
 residues (the `short_query` and `exon_structure` modules: min(50, max(10,
-round(0.6 × Lpiece))), Lpiece the shorter of the query and the home gene's longest exon)
-becomes a block of its own when:
+round(0.6 × Lpiece))), Lpiece the shorter of the query and the home gene's longest exon):
 
-- the best hits of at least 3 distinct flanking genes lie on its scaffold (one per flanking
-  gene: its hit with the highest bit score in the genome),
-- it lies between the outermost of those best hits, widened by the envelope margin
-  ([Distances](#distances-in-gene-units): 9 pitches), and
-- it is not already within the GOI margin of a flanking gene's best hit. Such a hit is left
-  to the blocks, which keep the GOI hits within the GOI margin of them. When that anchor lies
-  in no searched block, because its block was filtered or capped, neither path uses the hit,
-  and it is counted as `dead_zone` in the limit counts.
+- inside a GOI zone, is left to that block, whose own search looks for the gene there;
+- outside every zone, becomes a block of its own when the best hits of at least 3 distinct
+  flanking genes lie on its sequence (one per flanking gene: its hit with the highest bit
+  score in the genome) and it lies between the outermost of them, widened by the envelope
+  margin ([Distances](#distances-in-gene-units): 9 pitches) (rule `envelope`);
+- outside every zone, on a sequence that carries fewer such best hits, becomes a block of its
+  own when it lies within the GOI margin of one of them (rule `near_neighbour`): a single
+  neighbour forms no block of its own (a block needs `min_block_genes` genes), so no other
+  search looks beside it;
+- otherwise is refused: outside the envelope of its sequence (`outside_flanking_envelope`), far
+  from the best hits of a sequence that carries fewer than 3 (`chromosome_lacks_min_anchors`),
+  or in a genome where no sequence carries 3 (`no_flanking_envelope_in_genome`).
 
 Of the hits that pass, one per stretch of `region_padding` of a scaffold seeds the block: the
 home protein's hit first, then those of its exons, pieces and earlier genomes' models, then other
 GOI parents (seeded copies), decoys last; within one of these by the query id behind its `|` (a
-copy's parent cut), then by position, strand and bits.
+copy's parent cut), then by position, strand and bits. With seeds, the blocks are built again from
+the flanking hits and the seeds (§7.4), and a seed near a block merges into it as any seed hit
+does. A seeded block is searched and judged like every other. Its GOI models that lie outside
+every GOI zone of the blocks built without the rescue carry `DispersedRescue=1`, `RescueRule`
+(`envelope` or `near_neighbour`), `RescueAnchors` (the best hits of flanking genes on the
+sequence) and `RescueAnchorBp` (the distance to the nearest of them); the report counts the
+counted calls among them (`summary.dispersed_rescue_goi`). A hit that a GOI zone held but whose
+block the cap dropped is counted as `dead_zone` in the limit counts; the cap keeps such blocks
+first (§7.4).
 
-A strong GOI hit that fails the first two conditions is listed in the report under
-`rejected_candidates`, with the rule it failed and the nearest flanking gene, so the
-report can say "found, not syntenic" (`summary.goi_found_but_not_syntenic`).
+A refused GOI hit is listed in the report under `rejected_candidates`, with the rule it failed
+and the nearest flanking gene, and merged with the other rows of its place, so the report can
+say "found, not syntenic" (`summary.goi_found_but_not_syntenic`: genomes with a place that no
+counted call of the run overlaps). The hits outside every searched GOI zone that fail the
+quality bar, and the dead-zone hits, are listed under `rejected_candidates.dropped`, with the
+test each failed (the strongest 200 per genome search). Each flanking gene counts at its best
+hit in the genome only. As a measure, each refused row also gives the flanking genes with any
+hit on its sequence (`genes_on_sequence`), and `dispersed_refused_per_piece_pass` counts the
+refused hits that counting each gene on every sequence where it has a hit would have seeded.
 
 With `goi_genome_wide_path` (off by default) a GOI hit outside every searched window is
 modelled without these gates, in a genome that has at least one block at E_syn ≤ 0.1:

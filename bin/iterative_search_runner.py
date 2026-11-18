@@ -18,7 +18,7 @@ import time
 from bisect import bisect_right
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, NamedTuple
 from urllib.parse import unquote
 
 # Configure logging
@@ -1287,7 +1287,8 @@ def write_decoy_outputs(args, prefix, genome_name, lines) -> int:
     keys = ['Confidence', 'EvidenceType', 'Place', 'BlockEsyn', 'Eeff', 'EeffTblastn', 'Bits',
             'SpecMargin', 'RealCompetitor', 'Identity', 'QueryCoverage', 'SigBlocks', 'PlaceBp',
             'EPlace', 'EPlaceSlot', 'EPlaceCore', 'EPlaceWindow', 'EPlaceGenome',
-            'SearchQuery']      # <parent>~<kind>~rel: found by the decoy of the relative's query
+            'SearchQuery',      # <parent>~<kind>~rel: found by the decoy of the relative's query
+            'DispersedRescue', 'RescueRule']    # found only through the dispersed-GOI rescue
     n = 0
     with open(os.path.join(folder, f"{prefix}{genome_name}.decoy.tsv"), 'w') as fh:
         fh.write("genome\tparent\tdecoy\tmodel\tchrom\tstart\tend\t" + "\t".join(keys) + "\n")
@@ -4528,7 +4529,7 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
             args.genome_ctx.setdefault('block_context', {})[block_idx] = window_truncated
         args.genome_ctx.setdefault('windows', []).append((chrom, w_start, w_end))
     # Keep final GOI calls anchored near the flanking-defined block.
-    core_margin = getattr(args, 'goi_margin', None) or args.gap_search_window
+    core_margin = goi_core_margin(args)
     core_start = max(0, block['start'] - core_margin)
     core_end = min(slen, block['end'] + core_margin)
     if genome_wide:
@@ -5758,6 +5759,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
                     _pieces += [(int(e['qstart']), int(e['qend'])) for e in _c.get('model_exons') or []]
                 if spans_a_junction(_pieces, _junctions):
                     _c['gff'][0] += ";RetrocopyCandidate=1"
+    # A block the dispersed-GOI rescue seeded: its GOI models outside every GOI zone of the
+    # blocks built without the rescue carry DispersedRescue=1 (mark_dispersed_rescue), decoys
+    # too, so that decoy.tsv gives the false-call rate of such calls.
+    rescue_info = None if genome_wide else block.get('dispersed_rescue')
+    pre_rescue_zones = (getattr(args, 'genome_ctx', None) or {}).get('pre_rescue_zones') or []
+    if rescue_info:
+        mark_dispersed_rescue(raw_candidates, chrom, rescue_info, pre_rescue_zones)
+        mark_dispersed_rescue(decoy_candidates, chrom, rescue_info, pre_rescue_zones)
 
     def _judge_all(cands):
         """Every candidate judged (label rework, step 4) before the choice among them.
@@ -5803,6 +5812,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         joined = sink[0]
         joined['joined_hits'] = sorted(model.get('joined_hits', []) + [_hit_query_span(hit)])
         joined['gff'][0] += ";JoinedHits=" + ",".join(f"{a}-{b}" for a, b in joined['joined_hits'])
+        if rescue_info:
+            mark_dispersed_rescue([joined], chrom, rescue_info, pre_rescue_zones)
         _judge_all([joined])
         return joined
 
@@ -6220,25 +6231,30 @@ def _classify_goi_for_seed_and_tree(all_genes, feature_meta, is_goi_query_id_fn)
 # ---------------------------------------------------------------------------
 # §1o — dispersed-GOI rescue.
 #
-# Block seeding uses FLANKING hits only (see process_single_genome), then the GOI
-# is searched inside each flanking-seeded block. That silently discards a strong
-# GOI hit that dispersed away from its flanking anchors. Motivating case: Aedes
-# oskar hit at 45.3% id / e-2.8e-29 sat 62.8 Mb from its flanking anchors — which
-# are on the SAME chromosome (NC_035109.1) — so no block formed there and 0 GOI
-# models were emitted, even though the search had already found the real oskar.
+# Blocks are seeded from flanking hits only (process_single_genome), and the GOI is searched
+# in each block's GOI zone (block +- the GOI margin, goi_core_margin). A strong GOI hit
+# outside every GOI zone is in no search. Motivating case: Aedes oskar, hit at 45.3 %
+# identity and E 2.8e-29, 62.8 Mb from its flanking anchors on the same chromosome
+# (NC_035109.1): no block formed there, and no GOI model was made.
 #
-# The neighbourhood being SHATTERED is what licenses trusting a distant same-
-# chromosome GOI hit: if the flanking order is destroyed, "the GOI must be next to
-# its flanking" is no longer a valid constraint. In a collinear (well-conserved)
-# genome an isolated GOI hit far from flanking is still treated as a paralog
-# (strict), so close-relative benchmarks are untouched. These two pure helpers
-# encode that decision; process_single_genome adds the qualifying hits to the
-# block seed set so they get modelled by the normal machinery (as LOW fallback).
+# The rescue does not look at the gene order. The blocks are built without it first
+# (blocks_with_rescue). A GOI hit that clears the quality bar (dispersed_goi_min_identity,
+# dispersed_goi_max_evalue, dispersed_goi_min_alnlen) and lies outside every GOI zone of
+# those blocks seeds a block of its own when its sequence carries the best hits of at least
+# dispersed_min_chrom_anchors distinct flanking genes and it lies inside their envelope (the
+# first to the last of them, +- the envelope margin), or, on a sequence with fewer, when it
+# lies within the GOI margin of one of those best hits: a lone neighbour forms no block of its
+# own, so nothing else searches beside it. A hit inside a GOI zone is left to that block. A
+# rescued hit seeds a GOI-seeded block, searched and judged like any other; its models carry
+# DispersedRescue=1 (mark_dispersed_rescue). In a collinear genome the envelope is tight, so a
+# paralog far away lies outside it and is refused; refused and dropped hits are listed in
+# hits/<genome>.nonsyntenic.tsv. compute_rearrangement_score is logged only.
 # ---------------------------------------------------------------------------
 
 def _flanking_anchor_positions(flanking_hits):
     """Collapse the noisy raw hits to ONE canonical location per flanking gene
-    (its highest-scoring hit), grouped by chromosome. The raw m8 has many
+    (its highest-scoring hit; of equal ones the first in the input, whose order the search
+    fixes: parse_hits, resolve_anchor_hits), grouped by chromosome. The raw m8 has many
     partial/spurious flanking hits scattered genome-wide; the best hit per gene is
     its real anchor. Returns {chrom: [(gene, mid, start, end), ...]}."""
     best = {}
@@ -6254,6 +6270,73 @@ def _flanking_anchor_positions(flanking_hits):
         s, e = h.get('start', 0), h.get('end', 0)
         by_chrom[h.get('chrom')].append((g, (s + e) // 2, s, e))
     return by_chrom
+
+
+def _flanking_piece_positions(flanking_hits):
+    """Each flanking gene's best hit on every sequence where it has a hit (as in
+    _flanking_anchor_positions, per sequence), grouped by sequence:
+    {chrom: [(gene, mid, start, end), ...]}. The rescue counts a gene at its best hit in the
+    genome only (_flanking_anchor_positions); this is what counting it on each sequence would
+    see, measured only (dispersed_refused_per_piece_pass, the genes_on_sequence column)."""
+    best = {}
+    for h in flanking_hits:
+        q = h.get('query', '')
+        if not q or is_goi_query_id(q):
+            continue
+        key = (h.get('chrom'), extract_base_gene_id(q))
+        if key not in best or h.get('bits', 0) > best[key].get('bits', 0):
+            best[key] = h
+    by_chrom = defaultdict(list)
+    for (chrom, g), h in best.items():
+        s, e = h.get('start', 0), h.get('end', 0)
+        by_chrom[chrom].append((g, (s + e) // 2, s, e))
+    return by_chrom
+
+
+def _anchor_envelopes(by_chrom, min_chrom_anchors, envelope_margin):
+    """{chrom: (lo, hi)} of the sequences that carry at least ``min_chrom_anchors`` anchors
+    (by_chrom as _flanking_anchor_positions gives it): from the first to the last of them,
+    widened by ``envelope_margin`` on each side."""
+    return {c: (min(g[2] for g in genes) - envelope_margin, max(g[3] for g in genes) + envelope_margin)
+            for c, genes in by_chrom.items() if len(genes) >= min_chrom_anchors}
+
+
+RESCUE_SEED_RULES = ('envelope', 'near_neighbour')
+
+
+def neighbour_rule(chrom, hs, he, by_chrom, envelopes, near_radius) -> str:
+    """The neighbour rule of the dispersed-GOI rescue for a GOI hit [hs, he) on ``chrom``
+    that lies outside every GOI zone of the blocks; ``by_chrom`` the anchors, ``envelopes``
+    their envelopes (_anchor_envelopes). One of:
+
+      envelope                        the sequence has an envelope and the hit lies in it (a seed)
+      outside_flanking_envelope       the sequence has an envelope and the hit lies outside it
+      near_neighbour                  the sequence has no envelope, and the hit lies within
+                                      ``near_radius`` (> 0) of an anchor on it (a seed)
+      chromosome_lacks_min_anchors    otherwise, when some sequence of the genome has an envelope
+      no_flanking_envelope_in_genome  otherwise
+    """
+    env = envelopes.get(chrom)
+    if env:
+        lo, hi = env
+        return 'outside_flanking_envelope' if (he < lo or hs > hi) else 'envelope'
+    radius = int(near_radius or 0)
+    if radius > 0 and any(not (he < s - radius or hs > e + radius)
+                          for _g, _m, s, e in by_chrom.get(chrom, ())):
+        return 'near_neighbour'
+    return 'chromosome_lacks_min_anchors' if envelopes else 'no_flanking_envelope_in_genome'
+
+
+def _envelope_state(chrom, hs, he, envelopes) -> str:
+    """Where a hit lies relative to the envelopes: 'inside' or 'outside' the envelope of its
+    sequence, 'chromosome_without' (its sequence has none) or 'none_in_genome'."""
+    if not envelopes:
+        return 'none_in_genome'
+    env = envelopes.get(chrom)
+    if not env:
+        return 'chromosome_without'
+    lo, hi = env
+    return 'outside' if (he < lo or hs > hi) else 'inside'
 
 
 def compute_rearrangement_score(flanking_hits, min_genes=3):
@@ -6285,11 +6368,29 @@ def _nearest_anchor(chrom, hs, he, by_chrom):
     return best
 
 
+# hits/<locus>_<genome>.nonsyntenic.tsv: one row per GOI hit of the genome-wide search that the
+# dispersed-GOI rescue did not take (docs/OUTPUT.md, rejected_candidates). ``outcome``:
+#   refused  the hit cleared the quality bar and lies outside every GOI zone of the blocks,
+#            and the neighbour rule refused it (rejected_by: outside_flanking_envelope,
+#            chromosome_lacks_min_anchors, no_flanking_envelope_in_genome);
+#   dropped  the hit lies outside every searched GOI zone and failed the quality bar
+#            (rejected_by: dispersed_identity, dispersed_evalue, dispersed_alnlen), or it lay in
+#            the GOI zone of a block that was not searched (dead_zone). The strongest
+#            NONSYNTENIC_DROPPED_MAX_ROWS of them per genome search; how many there were is
+#            target_policy.tsv's rescue_dropped_outside_zones.
+# Coordinates 0-based, end exclusive; qstart/qend the query residues; alnlen as the search
+# engine gave it. envelope: inside / outside the envelope of the hit's sequence,
+# chromosome_without (it has none) or none_in_genome. anchors_on_sequence: the flanking genes
+# whose best hit in the genome lies on that sequence (what the rule counts);
+# genes_on_sequence: the flanking genes with any hit there. modelled_here / modelled_by: the
+# best label, and the id, of a GOI model of this search that overlaps the hit ('' when none).
 NONSYNTENIC_COLUMNS = [
-    'genome', 'query', 'chrom', 'start', 'end', 'identity', 'evalue', 'alnlen',
-    'rejected_by', 'nearest_anchor_gene', 'nearest_anchor_bp',
-    'nearest_anchor_same_chrom',
+    'genome', 'query', 'chrom', 'start', 'end', 'strand', 'qstart', 'qend', 'bits',
+    'identity', 'evalue', 'alnlen', 'rejected_by', 'nearest_anchor_gene', 'nearest_anchor_bp',
+    'nearest_anchor_same_chrom', 'outcome', 'envelope', 'anchors_on_sequence',
+    'genes_on_sequence', 'locus', 'modelled_here', 'modelled_by',
 ]
+NONSYNTENIC_DROPPED_MAX_ROWS = 200
 
 
 NOT_SEARCHED_COLUMNS = ['genome', 'reason', 'details']
@@ -6314,7 +6415,7 @@ def _write_not_searched(args, prefix, genome_name, reason, details=''):
 TARGET_POLICY_COLUMNS = ['genome', 'median_flank_identity', 'n_flanking_genes', 'blocks_searched',
                          'significant_blocks', 'best_block_esyn', 'best_block_context',
                          'truncated_blocks', 'genetic_code', 'sw_backend', 'sw_parasail_version',
-                         'sw_simd']
+                         'sw_simd', 'rescue_dropped_outside_zones']
 
 # The genome axis (profile stage 5). The preset modules run once per query and see only the
 # home side, so a setting that should differ per target genome is set here, in the search,
@@ -6381,10 +6482,12 @@ LIMIT_KEYS = [
     'goi_core_filter', 'regions_cap', 'regions_cap_rel', 'regions_cap_decoy',
     'fallback_refused', 'fallback_short_aln', 'fallback_short_bits', 'fallback_long_qcov',
     'fallback_long_aln', 'fallback_long_bits', 'fallback_span_cap', 'flanking_loci_cap',
-    # blocks and the dispersed-GOI rescue of the genome
+    # blocks and the dispersed-GOI rescue of the genome; dispersed_refused_per_piece_pass
+    # measures only: refused hits that counting each flanking gene on every sequence where it
+    # has a hit (not only at its best hit in the genome) would have seeded
     'blocks_capped', 'blocks_capped_goi_seeded', 'blocks_capped_without_home_order',
-    'dispersed_identity', 'dispersed_evalue', 'dispersed_alnlen', 'dispersed_near_anchor',
-    'dead_zone',
+    'dispersed_identity', 'dispersed_evalue', 'dispersed_alnlen', 'dispersed_in_goi_zone',
+    'dead_zone', 'dispersed_refused_per_piece_pass',
     # MMseqs2 after a memory failure (fix-phase d6): the genome search, and the windows, that ran
     # on a lower rung of the low-memory ladder (sensitivity 7.0 or 6.0, one thread, 2G split)
     'mmseqs_genome_lower_rung', 'mmseqs_window_lower_rung',
@@ -6446,13 +6549,42 @@ def overlaps_any(chrom: str, start: int, end: int, intervals) -> bool:
     return any(c == chrom and start < e and s < end for c, s, e in intervals)
 
 
+def intervals_by_chrom(intervals) -> Dict[Any, List[Tuple[int, int]]]:
+    """``intervals`` ((chrom, start, end), half-open) as {chrom: [(start, end), ...]}, for
+    overlaps_indexed: the rescue tests every GOI hit against the zones of every block."""
+    out: Dict[Any, List[Tuple[int, int]]] = defaultdict(list)
+    for c, s, e in intervals or ():
+        out[c].append((int(s), int(e)))
+    return out
+
+
+def overlaps_indexed(index, chrom, start: int, end: int) -> bool:
+    """overlaps_any on intervals_by_chrom's index."""
+    return any(start < e and s < end for s, e in index.get(chrom, ()))
+
+
+def goi_core_margin(args) -> int:
+    """The GOI margin in bp: a block keeps the GOI hits within it (the GOI core of
+    process_region_block, block +- this), and the dispersed-GOI rescue leaves the hits inside
+    those zones to their blocks and seeds the hits within it of a lone anchor."""
+    return int(getattr(args, 'goi_margin', None) or args.gap_search_window)
+
+
+def goi_zones(blocks, margin: int) -> List[Tuple[str, int, int]]:
+    """The GOI zone of each block, (chrom, start, end) half-open: block +- ``margin``, the GOI
+    core process_region_block keeps hits in (the end is not clipped at the sequence's end,
+    which no hit passes)."""
+    m = int(margin)
+    return [(b['chrom'], max(0, int(b['start']) - m), int(b['end']) + m) for b in blocks or ()]
+
+
 def log_capped_blocks(args, genome_name: str, dropped, first_rank: int, goi_seeded,
-                      proxy_parents, home_order: bool) -> None:
+                      proxy_parents, home_order: bool, ranks=None) -> None:
     """One INFO line per block the per-genome cap drops (max_blocks_per_genome) and its
-    counts. ``dropped`` in the order the cap read them, from rank ``first_rank`` on; without
-    the home order the blocks are not sorted, and the GOI-seeded ones, appended last by the
-    gene-count filter, are dropped first."""
-    for rank, b in enumerate(dropped, start=first_rank):
+    counts. ``ranks``: each dropped block's position in the list the cap read (by default
+    ``first_rank``, ``first_rank`` + 1, ...)."""
+    ranks = list(ranks) if ranks is not None else range(first_rank, first_rank + len(dropped))
+    for rank, b in zip(ranks, dropped):
         seeded = bool(goi_seeded(b))
         proxy = bool(set(b.get('genes', [])) & set(proxy_parents or ()))
         logger.info(f"[{genome_name}] block cap dropped block {rank} {b['chrom']}:{b['start']}-"
@@ -6465,13 +6597,16 @@ def log_capped_blocks(args, genome_name: str, dropped, first_rank: int, goi_seed
 
 
 def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene_gap,
-                        goi_seeded, proxy_parents, gw_any_genome, cap=True):
+                        goi_seeded, proxy_parents, gw_any_genome, cap=True, keep_spans=()):
     """The search blocks of one target genome from its seed hits: identify, merge, filter
-    (min_block_genes; a GOI-seeded block stays whatever its gene count), the fallback to the
-    unfiltered blocks, the sort (GOI-seeded first, then the most collinear; with the home
-    order only) and the per-genome cap (max_blocks_per_genome). In one place so that the
-    genome axis's rebuild (GENOME_AXIS_PLACES) runs the same code. ``bridge`` holds the
-    bridge_* options of identify_synteny_blocks.
+    (min_block_genes; a GOI-seeded block stays whatever its gene count, and so does a block
+    that overlaps one of ``keep_spans``), the fallback to the unfiltered blocks, the sort
+    (GOI-seeded first, then the most collinear; with the home order only) and the per-genome
+    cap (max_blocks_per_genome, cap_genome_blocks). In one place so that the rescue's second
+    pass and the genome axis's rebuild (GENOME_AXIS_PLACES) run the same code. ``bridge``
+    holds the bridge_* options of identify_synteny_blocks. ``keep_spans``: (chrom, start, end)
+    of the blocks a first pass kept (blocks_with_rescue), so that a block of that pass, also one
+    its fallback kept, is not filtered out once the rescue's seeds are added.
 
     Returns (blocks, n), n = the number of blocks the cap saw, or (None, 0) when no block was
     found and the genome-wide path does not search the genome (the caller ends it). cap=False
@@ -6524,6 +6659,8 @@ def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene
         pre_filter_count = len(synteny_blocks)
         filtered_blocks = []
         proxy_blocks = []
+        n_kept_spans = 0
+        keep_index = intervals_by_chrom(keep_spans)
         for _b in synteny_blocks:
             if _b.get('genes_count', 0) >= args.min_block_genes:
                 filtered_blocks.append(_b)
@@ -6531,11 +6668,16 @@ def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene
                 # A GOI proxy among the anchors, or §1o: a GOI-seeded (dispersed-rescue)
                 # block is single-gene by construction — keep it despite min_block_genes.
                 proxy_blocks.append(_b)
+            elif keep_index and overlaps_indexed(keep_index, _b['chrom'], int(_b['start']), int(_b['end'])):
+                # A block of the pass without the rescue's seeds (its fallback's too).
+                filtered_blocks.append(_b)
+                n_kept_spans += 1
         synteny_blocks = filtered_blocks + proxy_blocks
         logger.info(
             f"[{genome_name}] Block filter (min_block_genes={args.min_block_genes}): "
-            f"{len(filtered_blocks)} standard + {len(proxy_blocks)} GOI-proxy "
-            f"= {len(synteny_blocks)}/{pre_filter_count} retained."
+            f"{len(filtered_blocks) - n_kept_spans} standard + {len(proxy_blocks)} GOI-proxy "
+            + (f"+ {n_kept_spans} of the first pass " if keep_spans else "")
+            + f"= {len(synteny_blocks)}/{pre_filter_count} retained."
         )
 
     # Fallback: if filtering removed everything, still keep top blocks by score.
@@ -6571,48 +6713,143 @@ def build_genome_blocks(seed_hits, args, genome_name, *, home_rank, bridge, gene
     return synteny_blocks, n_blocks
 
 
-def cap_genome_blocks(synteny_blocks, args, genome_name, goi_seeded, proxy_parents, home_rank):
+def cap_genome_blocks(synteny_blocks, args, genome_name, goi_seeded, proxy_parents, home_rank,
+                      survivor_key=None):
     """The per-genome cap (max_blocks_per_genome, 0 = none) on blocks in build_genome_blocks'
-    order: the blocks beyond it are logged, counted and dropped."""
-    # Hard cap per genome to prevent pathological runtimes.
-    if args.max_blocks_per_genome > 0 and len(synteny_blocks) > args.max_blocks_per_genome:
+    order. The blocks it keeps are those with the smallest ``survivor_key`` (cap_survivor_key;
+    by default the GOI-seeded blocks first), then the earlier in that order; they keep the
+    build's order, so no block number moves where the cap does not bind. The blocks beyond it
+    are logged, counted and dropped."""
+    cap = int(args.max_blocks_per_genome)
+    if cap > 0 and len(synteny_blocks) > cap:
+        key = survivor_key or cap_survivor_key(goi_seeded)
+        order = sorted(range(len(synteny_blocks)), key=lambda i: (key(synteny_blocks[i]), i))
+        keep = set(order[:cap])
         logger.info(
             f"[{genome_name}] Capping blocks: {len(synteny_blocks)} -> "
-            f"{args.max_blocks_per_genome} (max_blocks_per_genome)."
+            f"{cap} (max_blocks_per_genome)."
         )
-        log_capped_blocks(args, genome_name, synteny_blocks[args.max_blocks_per_genome:],
-                          args.max_blocks_per_genome, goi_seeded,
-                          proxy_parents, bool(home_rank))
-        synteny_blocks = synteny_blocks[:args.max_blocks_per_genome]
+        dropped = [i for i in range(len(synteny_blocks)) if i not in keep]
+        log_capped_blocks(args, genome_name, [synteny_blocks[i] for i in dropped], cap,
+                          goi_seeded, proxy_parents, bool(home_rank), ranks=dropped)
+        synteny_blocks = [b for i, b in enumerate(synteny_blocks) if i in keep]
     return synteny_blocks
 
 
-def genome_axis_blocks(seed_hits, flanking_hits, rescue_seeds, args, genome_name, **block_opts):
-    """The blocks of one target genome (build_genome_blocks) and, with --genome_axis, its
-    genome-axis values (genome_axis_values; None without the axis). ``seed_hits`` are the seeds
-    as the search made them (flanking hits, limited when the user set anchor_max_places, plus
-    ``rescue_seeds``, the rescued GOI hits); ``flanking_hits`` all flanking hits.
+def cap_survivor_key(goi_seeded, in_zone_hits=(), margin: int = 0):
+    """The cap's order of survival (cap_genome_blocks): 0 for a GOI-seeded block and for a
+    block whose GOI zone (block +- ``margin``) holds one of ``in_zone_hits`` (GOI hits that
+    cleared the rescue's quality bar inside a GOI zone and were left to that block), 1 for
+    the others."""
+    spans = intervals_by_chrom((h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0)))
+                               for h in in_zone_hits or ())
+
+    def key(b):
+        if goi_seeded(b):
+            return 0
+        if spans and overlaps_indexed(spans, b['chrom'], int(b['start']) - margin, int(b['end']) + margin):
+            return 0
+        return 1
+    return key
+
+
+def strongest_seed_key(seed_hits):
+    """The cap's order of survival for blocks seeded by GOI hits alone, in a genome without any
+    flanking hit: the block holding the seed hit with the most bits first (its negative bit
+    score; ties keep the build's order)."""
+    by_chrom = defaultdict(list)
+    for h in seed_hits:
+        by_chrom[h.get('chrom')].append((int(h.get('start', 0)), int(h.get('end', 0)),
+                                         float(h.get('bits', 0) or 0)))
+
+    def key(b):
+        b0, b1 = int(b['start']), int(b['end'])
+        return -max((bits for s, e, bits in by_chrom.get(b['chrom'], ()) if s < b1 and b0 < e),
+                    default=0.0)
+    return key
+
+
+class RescueResult(NamedTuple):
+    """What the dispersed-GOI rescue chose against one build's blocks (rescue_selector)."""
+    seeds: List[Dict[str, Any]]                  # GOI hits that seed blocks (copies, with rescue_*)
+    rejected: Optional[List[Dict[str, Any]]]     # refusal records (None: not recorded)
+    drops: Dict[str, int]                        # limit counts (LIMIT_KEYS)
+    in_zone: List[Dict[str, Any]]                # passing GOI hits left to a block's GOI zone
+    dropped: Optional[List[Dict[str, Any]]]      # dropped-hit records (None: not recorded)
+    zones: List[Tuple[str, int, int]]            # the GOI zones of the blocks built without it
+
+
+def blocks_with_rescue(seed_hits, args, genome_name, select_rescue=None, **block_opts):
+    """The blocks of one build of a genome and the dispersed-GOI rescue chosen against them:
+
+    1. the blocks of ``seed_hits`` alone (build_genome_blocks, uncapped);
+    2. ``select_rescue(blocks)`` (rescue_selector) chooses the rescue's seeds against their
+       GOI zones; a passing GOI hit inside a zone is left to that block;
+    3. with seeds, the blocks of ``seed_hits`` + seeds, uncapped, keeping every block that
+       overlaps a block of step 1 (keep_spans): a seed far from them does not end step 1's
+       fallback.
+
+    Returns (blocks, n, rescue): the blocks (None when there are none and the genome-wide path
+    does not search the genome), their number, and the RescueResult (None without
+    ``select_rescue``)."""
+    blocks, n = build_genome_blocks(seed_hits, args, genome_name, cap=False, **block_opts)
+    if select_rescue is None:
+        return blocks, n, None
+    rescue = select_rescue(blocks or [])
+    if not rescue.seeds:
+        return blocks, n, rescue
+    logger.info(f"[{genome_name}] §1o dispersed-GOI rescue: building the blocks again with "
+                f"{len(rescue.seeds)} rescued GOI hit(s) as seeds.")
+    keep = [(b['chrom'], int(b['start']), int(b['end'])) for b in blocks or ()]
+    rebuilt, n_rebuilt = build_genome_blocks(list(seed_hits) + list(rescue.seeds), args, genome_name,
+                                             cap=False, keep_spans=keep, **block_opts)
+    return rebuilt, n_rebuilt, rescue
+
+
+def genome_axis_blocks(seed_hits, flanking_hits, args, genome_name, select_rescue=None,
+                       survivor_key=None, **block_opts):
+    """The blocks of one target genome (blocks_with_rescue: the blocks, the dispersed-GOI
+    rescue chosen against them, the blocks again with its seeds), capped, with --genome_axis
+    its genome-axis values (genome_axis_values; None without the axis), and the rescue
+    (RescueResult; None without ``select_rescue``). ``seed_hits`` are the seeds as the search
+    made them (flanking hits, limited when the user set anchor_max_places); ``flanking_hits``
+    all flanking hits.
 
     With the axis on and anchor_max_places 'auto' (None), a genome whose blocks exceed the cap
-    is built again once from the GENOME_AXIS_PLACES best places of each flanking gene; the first
-    build is then left uncapped (its cap would drop blocks the rebuild may keep), and the
-    rebuild is filtered, sorted and capped as any build. The GOI proxies (the GOI's own home
-    gene among the anchors) keep every place and the rescued GOI hits stay seeds, so each seed
-    of a GOI-seeded block is a seed of the rebuild too; the E-value terms
-    (genome_ctx['places']) are counted on all hits before and do not change. Where the cap does
-    not bind, the first build is the result, as without the axis. Returns (blocks, values), or
-    (None, None) when no block was found and the genome-wide path does not search the genome.
+    is built again once from the GENOME_AXIS_PLACES best places of each flanking gene: the
+    rebuild chooses the rescue again, against its own blocks (a hit that only a dropped block's
+    zone held goes to the neighbour rule, a hit a rebuilt block's zone holds is left to it), and
+    the first build's rescue is discarded. The GOI proxies (the GOI's own home gene among the
+    anchors) keep every place; the E-value terms (genome_ctx['places']) are counted on all hits
+    before and do not change. Where the cap does not bind, the first build is the result, as
+    without the axis.
+
+    The cap keeps first the blocks for which ``survivor_key`` is smallest: by default
+    (cap_survivor_key) the GOI-seeded blocks and those whose GOI zone holds a passing GOI hit
+    the rescue left to them. Returns (blocks, values, rescue), or (None, None, rescue) when no
+    block was found and the genome-wide path does not search the genome.
     """
     axis = bool(getattr(args, 'genome_axis', False))
     cap = int(args.max_blocks_per_genome)
     may_rebuild = (axis and getattr(args, 'anchor_max_places', None) is None
                    and bool(flanking_hits) and cap > 0)
-    blocks, n_blocks = build_genome_blocks(seed_hits, args, genome_name, cap=not may_rebuild,
-                                           **block_opts)
+
+    def capped(blocks, rescue):
+        key = survivor_key
+        if key is None:
+            in_zone = rescue.in_zone if rescue is not None else []
+            key = cap_survivor_key(block_opts['goi_seeded'], in_zone,
+                                   goi_core_margin(args) if in_zone else 0)
+        return cap_genome_blocks(blocks, args, genome_name, block_opts['goi_seeded'],
+                                 block_opts.get('proxy_parents'), block_opts.get('home_rank'),
+                                 survivor_key=key)
+
+    blocks, n_blocks, rescue = blocks_with_rescue(seed_hits, args, genome_name, select_rescue,
+                                                  **block_opts)
     if blocks is None:
-        return None, None
+        return None, None, rescue
     if not axis:
-        return blocks, None
+        return capped(blocks, rescue), None, rescue
     places = dict(genome_axis_values(args)['anchor_max_places'], blocks_before_cap=n_blocks)
     if may_rebuild and n_blocks > cap:
         limited = limit_anchor_places(flanking_hits, GENOME_AXIS_PLACES, block_opts.get('gene_gap'),
@@ -6621,37 +6858,39 @@ def genome_axis_blocks(seed_hits, flanking_hits, rescue_seeds, args, genome_name
             f"[{genome_name}] genome axis: the block cap ({cap}) bound at {n_blocks} blocks; "
             f"rebuilding them from the {GENOME_AXIS_PLACES} best places of each flanking gene "
             f"({len(limited)} of {len(flanking_hits)} flanking hits"
-            + (f", {len(rescue_seeds)} rescued GOI hit(s)" if rescue_seeds else "") + ").")
-        rebuilt, n_rebuilt = build_genome_blocks(list(limited) + list(rescue_seeds or []), args,
-                                                 genome_name, cap=True, **block_opts)
+            + (", the rescue chosen again" if select_rescue is not None else "") + ").")
+        rebuilt, n_rebuilt, rescue_rebuilt = blocks_with_rescue(list(limited), args, genome_name,
+                                                                select_rescue, **block_opts)
         if rebuilt is None:
             # Not expected (each flanking gene keeps its best place): cap the first build.
-            blocks = cap_genome_blocks(blocks, args, genome_name, block_opts['goi_seeded'],
-                                       block_opts.get('proxy_parents'), block_opts.get('home_rank'))
+            blocks = capped(blocks, rescue)
             note = "the rebuild found no block; the first build was capped"
         else:
-            blocks = rebuilt
+            blocks, rescue = capped(rebuilt, rescue_rebuilt), rescue_rebuilt
             places.update(value=GENOME_AXIS_PLACES, source='genome_axis', blocks_rebuilt=n_rebuilt)
             note = (f"the cap of {cap} bound at {n_blocks} blocks; rebuilt from the "
                     f"{GENOME_AXIS_PLACES} best places: {n_rebuilt} blocks"
                     + (f", capped to {cap}" if n_rebuilt > cap else ""))
-    elif places['source'] == 'user_set':
-        note = f"set by the user, for every genome: {n_blocks} blocks"
-    elif not flanking_hits:
-        note = f"every place: no flanking anchors, so no places to limit; {n_blocks} blocks"
-    elif cap <= 0:
-        note = f"every place: {n_blocks} blocks, no block cap"
     else:
-        note = f"every place: {n_blocks} blocks, the cap of {cap} not reached"
+        blocks = capped(blocks, rescue)
+        if places['source'] == 'user_set':
+            note = f"set by the user, for every genome: {n_blocks} blocks"
+        elif not flanking_hits:
+            note = f"every place: no flanking anchors, so no places to limit; {n_blocks} blocks"
+        elif cap <= 0:
+            note = f"every place: {n_blocks} blocks, no block cap"
+        else:
+            note = f"every place: {n_blocks} blocks, the cap of {cap} not reached"
     logger.info(f"[{genome_name}] genome axis: anchor_max_places {places['value']} "
                 f"({places['source']}; {note}).")
-    return blocks, {'anchor_max_places': places}
+    return blocks, {'anchor_max_places': places}, rescue
 
 
 def log_genome_limits(args, genome_name: str) -> None:
     """At a genome's end: add the miniprot counts of this worker task and the dead zone (the
-    near-anchor GOI hits the dispersed rescue skipped that lie in no searched GOI core) to
-    the genome's counts, and log the counts that are not 0 in one INFO line."""
+    GOI hits the dispersed rescue left to a GOI zone, ``genome_ctx['in_zone_hits']``, that lie
+    in no searched GOI core: their block was not searched) to the genome's counts, and log the
+    counts that are not 0 in one INFO line."""
     ctx = getattr(args, 'genome_ctx', None)
     if ctx is None:
         return
@@ -6661,7 +6900,7 @@ def log_genome_limits(args, genome_name: str) -> None:
     _age.LIMIT_COUNTS.clear()
     cores = ctx.get('goi_cores') or []
     count_limit(args, 'dead_zone', sum(
-        1 for h in ctx.get('near_anchor_hits') or []
+        1 for h in ctx.get('in_zone_hits') or []
         if not overlaps_any(h.get('chrom'), int(h.get('start', 0)), int(h.get('end', 0)), cores)))
     limits = ctx.get('limits') or {}
     shown = [f"{k} {limits[k]}" for k in LIMIT_KEYS if limits.get(k)]
@@ -6676,9 +6915,12 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
     (E_syn <= 0.1), the best block's E_syn and whether its window ran past a scaffold end
     (left/right/both, '' = complete), and how many windows did. Written as soon as the
     median is known and again when the genome is done, so it exists for every genome the
-    search reached, also one without a model. The limit_* columns (LIMIT_KEYS) count what
-    each limit dropped (0 until the genome's end). With --genome_axis the GENOME_AXIS_COLUMNS
-    follow: this genome's genome-axis values and their sources."""
+    search reached, also one without a model. rescue_dropped_outside_zones: the GOI hits the
+    dispersed-GOI rescue dropped that lie outside every searched GOI zone, all of them, while
+    nonsyntenic.tsv lists the strongest NONSYNTENIC_DROPPED_MAX_ROWS (0 until the genome's
+    end). The limit_* columns (LIMIT_KEYS) count what each limit dropped (0 until the
+    genome's end). With --genome_axis the GENOME_AXIS_COLUMNS follow: this genome's
+    genome-axis values and their sources."""
     path = os.path.join(args.output_dir, 'hits', f"{prefix}{genome_name}.target_policy.tsv")
     ctx = ctx or {}
     esyn = ctx.get('block_esyn') or {}
@@ -6699,7 +6941,8 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
     # backend_info): the report shows it under run_settings.smith_waterman.
     sw = getattr(args, 'sw_record', None) or {}
     row.update({'sw_backend': sw.get('backend', ''), 'sw_parasail_version': sw.get('parasail_version', ''),
-                'sw_simd': sw.get('simd', '')})
+                'sw_simd': sw.get('simd', ''),
+                'rescue_dropped_outside_zones': int(ctx.get('rescue_dropped_outside_zones', 0) or 0)})
     columns = list(TARGET_POLICY_COLUMNS)
     if getattr(args, 'genome_axis', False):
         row.update(genome_axis_columns(genome_axis_values(args)))
@@ -6726,7 +6969,7 @@ def _write_target_policy(args, prefix, genome_name, median, n_flanking, ctx=None
 BLOCK_TABLE_COLUMNS = ['genome', 'block', 'chrom', 'start', 'end', 'hood_start', 'hood_end',
                        'flanking_support', 'collinear_support', 'esyn', 'significant', 'goi_seeded',
                        'context', 'best_call', 'best_call_id', 'n_high', 'n_medium', 'n_ambiguous',
-                       'n_low']
+                       'n_low', 'dispersed_rescue']
 BLOCK_TABLE_COUNTS = {'HIGH': 'n_high', 'MEDIUM': 'n_medium', 'AMBIGUOUS': 'n_ambiguous', 'LOW': 'n_low'}
 
 
@@ -6757,7 +7000,8 @@ def record_block_row(args, block_idx, block, hood_start, hood_end, flanking_supp
         'chrom': block['chrom'], 'start': int(block['start']), 'end': int(block['end']),
         'hood_start': int(hood_start), 'hood_end': int(hood_end),
         'flanking_support': int(flanking_support or 0), 'collinear_support': collinear_support,
-        'genes': list(block.get('genes', []))}
+        'genes': list(block.get('genes', [])),
+        'dispersed_rescue': (block.get('dispersed_rescue') or {}).get('rule', '')}
 
 
 def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_seeded=None):
@@ -6778,6 +7022,9 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
       context              left / right / both: the window ran past a scaffold end there
       best_call(_id)       the block's best GOI row by the judge's order (synvoy_label.rank_key)
       n_high ... n_low     its GOI rows per label
+      dispersed_rescue     the rule of the rescued GOI hit that seeded the block (envelope,
+                           near_neighbour, or no_flanking_hits in a genome without a flanking
+                           hit; mark_rescue_blocks); '' for any other block
 
     Labels are the final ones of the genome (after relabel_goi_lines), before the report: a
     gene_order_only call that the report drops in a genome with a counted call (and
@@ -6826,7 +7073,8 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
                'esyn': repr(e), 'significant': int(e <= synvoy_evalue.SIGNIFICANT_BLOCK_ESYN),
                'goi_seeded': '' if goi_seeded is None else int(bool(goi_seeded(r))),
                'context': context.get(b) or '',
-               'best_call': found[0][1] if found else '', 'best_call_id': found[0][2] if found else ''}
+               'best_call': found[0][1] if found else '', 'best_call_id': found[0][2] if found else '',
+               'dispersed_rescue': r.get('dispersed_rescue', '')}
         for label, column in BLOCK_TABLE_COUNTS.items():
             row[column] = sum(1 for _key, conf, _id in found if conf == label)
         rows.append(row)
@@ -6840,27 +7088,111 @@ def _write_block_table(args, prefix, genome_name, gff_lines=None, ctx=None, goi_
         logger.warning(f"[{genome_name}] could not write the block table: {exc}")
 
 
-def _write_nonsyntenic_candidates(args, prefix, genome_name, records):
-    """§1x: write the refused-but-strong GOI candidates next to the raw hits.
+def _goi_models_by_chrom(gff_lines) -> Dict[str, List[Tuple[int, int, int, str, str]]]:
+    """{chrom: [(start, end, label rank, id, confidence), ...]} of the GOI mRNA and gene rows
+    (SynVoyRole=goi) among ``gff_lines``; start and end 1-based, inclusive."""
+    out: Dict[str, List[Tuple[int, int, int, str, str]]] = defaultdict(list)
+    for line in gff_lines or []:
+        cols = line.split('\t')
+        if len(cols) < 9 or cols[2] not in ('mRNA', 'gene') or 'SynVoyRole=goi' not in cols[8]:
+            continue
+        a = _parse_gff_attr_string(cols[8])
+        if a.get('SynVoyRole') != 'goi':
+            continue
+        try:
+            gs, ge = int(cols[3]), int(cols[4])
+        except ValueError:
+            continue
+        conf = a.get('Confidence', '')
+        out[cols[0]].append((gs, ge, synvoy_label.LABEL_RANK.get(conf, 0), a.get('ID', ''), conf))
+    return out
+
+
+def model_over_hit(models, chrom, start, end) -> Tuple[str, str]:
+    """(confidence, id) of the best GOI model among ``models`` (_goi_models_by_chrom) that
+    overlaps the hit [start, end), 0-based and half-open: best label, then the first by
+    position, then by id; ('', '') when none does."""
+    found = [(-rank, gs, ge, mid, conf) for gs, ge, rank, mid, conf in models.get(chrom, ())
+             if gs - 1 < end and start < ge]
+    if not found:
+        return '', ''
+    best = min(found)
+    return best[4], best[3]
+
+
+def _float_or_inf(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float('inf')
+
+
+def rescue_table_rows(ctx, cores, max_dropped: int = NONSYNTENIC_DROPPED_MAX_ROWS):
+    """The rows of hits/<genome>.nonsyntenic.tsv at this point of a genome's search
+    (genome_ctx: rescue_refused, rescue_dropped; apply_rescue): every refused hit, then the
+    dropped hits that lie outside every GOI zone in ``cores`` (searched, or about to be): the
+    hits that failed the quality bar, and the hits left to a GOI zone whose block was not
+    searched (dispersed_in_goi_zone, written as dead_zone). The dropped rows come strongest
+    first (bits, then E, position, query, strand), at most ``max_dropped``. Returns
+    (rows, n_dropped), n_dropped counted before that cap."""
+    refused = list(ctx.get('rescue_refused') or [])
+    searched = intervals_by_chrom(cores)
+    dropped = []
+    for r in ctx.get('rescue_dropped') or []:
+        if overlaps_indexed(searched, r.get('chrom'), int(r.get('start', 0)), int(r.get('end', 0))):
+            continue
+        dropped.append(dict(r, rejected_by='dead_zone')
+                       if r.get('rejected_by') == 'dispersed_in_goi_zone' else r)
+    dropped.sort(key=lambda r: (-_float_or_inf(r.get('bits') or 0), _float_or_inf(r.get('evalue')),
+                                str(r.get('chrom', '')), int(r.get('start', 0)), int(r.get('end', 0)),
+                                str(r.get('query', '')), str(r.get('strand', ''))))
+    return refused + dropped[:max(0, int(max_dropped))], len(dropped)
+
+
+def _write_nonsyntenic_candidates(args, prefix, genome_name, records, gff_lines=None, n_dropped=None):
+    """§1x: hits/<locus>_<genome>.nonsyntenic.tsv, the GOI hits the dispersed-GOI rescue did
+    not take (NONSYNTENIC_COLUMNS; rescue_table_rows). ``locus`` is this search's home locus
+    (--prefix). With ``gff_lines`` (the genome's final GOI rows) each row gets
+    modelled_here and modelled_by: the best label, and the id, of a GOI model of this search
+    that overlaps it. Written as soon as the blocks are known (no gff_lines: empty), so a
+    genome that ends early keeps it, and again at the genome's end; a table that is left
+    without rows is removed.
 
     Written INTO `hits/`, from which `modules/generate_report.nf` stages each table the
     report reads by name (`-name '*.nonsyntenic.tsv'`). That means the report picks these up
     with no new Nextflow channel and no edit to `main.nf`'s `workflow {}` — which matters,
     because that method body is at the JVM 64 kB limit (CLAUDE.md §17).
     """
-    if not records:
-        return
     path = os.path.join(args.output_dir, 'hits',
                         f"{prefix}{genome_name}.nonsyntenic.tsv")
+    if not records:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as exc:
+                logger.warning(f"[{genome_name}] §1x could not remove {path}: {exc}")
+        return
+    locus = str(getattr(args, 'prefix', '') or '')
+    models = _goi_models_by_chrom(gff_lines) if gff_lines is not None else {}
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', newline='') as fh:
             w = csv.DictWriter(fh, fieldnames=NONSYNTENIC_COLUMNS, delimiter='\t')
             w.writeheader()
             for r in records:
-                w.writerow({k: r.get(k, '') for k in NONSYNTENIC_COLUMNS})
-        logger.info(f"[{genome_name}] §1x wrote {len(records)} non-syntenic GOI "
-                    f"candidate(s) to {os.path.basename(path)}")
+                row = {k: r.get(k, '') for k in NONSYNTENIC_COLUMNS}
+                row['locus'] = locus
+                if gff_lines is not None:
+                    row['modelled_here'], row['modelled_by'] = model_over_hit(
+                        models, r.get('chrom'), int(r.get('start', 0)), int(r.get('end', 0)))
+                w.writerow(row)
+        n_refused = sum(1 for r in records if r.get('outcome') == 'refused')
+        n_listed = len(records) - n_refused
+        logger.info(f"[{genome_name}] §1x wrote {n_refused} refused GOI candidate(s) and {n_listed} "
+                    f"dropped GOI hit(s)"
+                    + (f" (of {n_dropped} outside every searched GOI zone)"
+                       if n_dropped is not None and n_dropped > n_listed else "")
+                    + f" to {os.path.basename(path)}")
     except OSError as exc:
         logger.warning(f"[{genome_name}] §1x could not write {path}: {exc}")
 
@@ -6874,69 +7206,72 @@ def _dispersed_seed_key(h) -> Tuple[Any, ...]:
     return (kind, tail, h.get('start', 0), h.get('end', 0), h.get('strand', ''), -float(h.get('bits', 0) or 0))
 
 
-def select_dispersed_goi_seeds(hits, flanking_hits, *,
+def select_dispersed_goi_seeds(hits, flanking_hits, *, goi_zones=(), near_radius=0,
                                min_identity=40.0, max_evalue=1e-10,
                                min_alnlen=50, min_chrom_anchors=3,
                                region_padding=50000, envelope_margin=200000,
-                               rejected_out=None, genome_name="", drops=None, near_out=None,
-                               skip_radius=None):
-    """Rescue a strong GOI hit that dispersed WITHIN the flanking ENVELOPE of its
-    chromosome, so it can seed its own block.
+                               rejected_out=None, genome_name="", drops=None,
+                               in_zone_out=None, dropped_out=None):
+    """The dispersed-GOI rescue (§1o): the GOI hits of the genome-wide search that seed blocks
+    of their own, chosen against the GOI zones of the blocks built without them
+    (blocks_with_rescue). The anchors are one hit per flanking gene, its best in the genome
+    (_flanking_anchor_positions). Per GOI hit, in the order of ``hits``:
 
-    The envelope — [min .. max] anchor position on a chromosome carrying
-    >= `min_chrom_anchors` distinct flanking genes — IS the data-driven,
-    per-target 'how far to trust a GOI hit' distance the flanking spacing implies:
-      * conserved target  -> tight envelope; a real GOI is right next to its
-        flanking (within region_padding), so the normal path already models it and
-        this is a NO-OP; a paralog Mb away is OUTSIDE the tight envelope -> rejected.
-      * rearranged target -> wide envelope (the Aedes oskar case: 11 anchors span
-        15-243 Mb on NC_035109.1); a dispersed-but-syntenic GOI inside it is
-        recovered.
-    A strong hit on a chromosome with too few anchors, or outside the envelope, is
-    rejected as a probable paralog / fold-analogue (the biglycan-on-chrX and
-    structdisc cases have no such envelope). Hits already within ``skip_radius`` of an
-    anchor are skipped (handled by the normal block path). The search passes its GOI
-    margin (profile constraint C2): a block keeps only the GOI hits within the GOI margin of
-    it, so a wider radius (it was ``region_padding``, the window margin, up to 7 gene
-    pitches) left the hits between the two to neither path, the dead zone. Without
-    ``skip_radius`` the radius is ``region_padding``, as before.
+      1. the quality bar: identity >= ``min_identity`` and E <= ``max_evalue`` (counted as
+         dispersed_identity or dispersed_evalue, identity first), then alnlen >= ``min_alnlen``
+         (dispersed_alnlen);
+      2. a hit that overlaps one of ``goi_zones`` (block +- the GOI margin, goi_zones) is left
+         to that block: counted as dispersed_in_goi_zone and appended to ``in_zone_out``;
+      3. the neighbour rule (neighbour_rule): a seed when the hit lies inside the envelope of a
+         sequence with at least ``min_chrom_anchors`` anchors (rule envelope; the envelope runs
+         from the first to the last of them, widened by ``envelope_margin``), or, on a sequence
+         with fewer, within ``near_radius`` of an anchor (rule near_neighbour: a lone anchor
+         forms no block of its own); otherwise refused.
 
-    Returns a list of GOI hit dicts to add to the block seed set.
+    A conserved target has a tight envelope, and a paralog far away lies outside it; in a
+    rearranged one a dispersed ortholog inside a wide envelope is taken (the Aedes oskar case:
+    11 anchors over 15-243 Mb of NC_035109.1). A far hit on a sequence with fewer anchors stays
+    refused (the biglycan-on-chrX case has no envelope). Of the seeds, one per stretch of
+    ``region_padding`` of a sequence (_dispersed_seed_key); each is a copy of its hit with
+    rescue_rule, rescue_anchors (the anchors on its sequence) and rescue_anchor_bp (the
+    distance to the nearest of them). Returns the seeds.
 
-    §1x — `rejected_out`: when a list is passed, every hit that CLEARS the quality bar
-    (identity / e-value / alignment length) but is then refused by a SYNTENY gate is
-    appended to it as a record. Refusing such a hit is correct — at long divergences a
-    translocated ortholog is genuinely indistinguishable from a paralog by synteny alone
-    — but refusing it *silently* is not: the run reports "no ortholog" while holding a
-    54-72 % hit inside the real gene (the Anopheles defensin case). The caller writes
-    these to `hits/<genome>.nonsyntenic.tsv` so the report can say "found, not syntenic"
-    instead of "absent".
-
-    Stage 2 (counts only): ``drops``, a dict, gets the GOI hits stopped by each test in the
-    order of the tests (dispersed_identity, dispersed_evalue, dispersed_alnlen,
-    dispersed_near_anchor); ``near_out``, a list, the near-anchor hits themselves, so the
-    search can count those that no searched GOI core holds (the dead zone).
+    Records (dicts of NONSYNTENIC_COLUMNS; the writer adds locus and modelled_*):
+      ``rejected_out``  every refused hit (outcome refused; rejected_by the rule's verdict).
+                        Refusing such a hit is correct, as a translocated ortholog and a
+                        paralog look alike by synteny at long divergences, but refusing it
+                        silently is not: the report lists it under rejected_candidates (the
+                        Anopheles defensin case).
+      ``dropped_out``   every hit stopped by step 1 (rejected_by its counter) or step 2
+                        (dispersed_in_goi_zone), outcome dropped: rescue_table_rows keeps
+                        those that no searched GOI zone holds.
+    ``drops`` gets the counts, and dispersed_refused_per_piece_pass: refused hits that the
+    neighbour rule would seed if each flanking gene counted at its best hit on every sequence
+    (_flanking_piece_positions) rather than at its best hit in the genome; a measure only.
     """
     by_chrom = _flanking_anchor_positions(flanking_hits)
-    radius = region_padding if skip_radius is None else skip_radius
+    envelopes = _anchor_envelopes(by_chrom, min_chrom_anchors, envelope_margin)
+    per_piece = _flanking_piece_positions(flanking_hits)
+    piece_envelopes = _anchor_envelopes(per_piece, min_chrom_anchors, envelope_margin)
+    zones = intervals_by_chrom(goi_zones)
 
-    def _drop(key, h=None):
+    def _count(key):
         if drops is not None:
             drops[key] = drops.get(key, 0) + 1
-        if h is not None and near_out is not None:
-            near_out.append(h)
 
-    def _reject(h, gate):
-        if rejected_out is None:
-            return
-        hs, he = h.get('start', 0), h.get('end', 0)
-        dist, anchor, same = _nearest_anchor(h.get('chrom'), hs, he, by_chrom)
-        rejected_out.append({
+    def _record(h, gate, outcome):
+        chrom, hs, he = h.get('chrom'), h.get('start', 0), h.get('end', 0)
+        dist, anchor, same = _nearest_anchor(chrom, hs, he, by_chrom)
+        return {
             'genome': genome_name,
             'query': h.get('query', ''),
             'chrom': h.get('chrom', ''),
             'start': hs,
             'end': he,
+            'strand': h.get('strand', ''),
+            'qstart': h.get('qstart', ''),
+            'qend': h.get('qend', ''),
+            'bits': h.get('bits', ''),
             'identity': round(float(h.get('pident', 0.0) or 0.0), 2),
             'evalue': h.get('evalue', ''),
             'alnlen': h.get('alnlen', 0),
@@ -6944,71 +7279,165 @@ def select_dispersed_goi_seeds(hits, flanking_hits, *,
             'nearest_anchor_gene': anchor,
             'nearest_anchor_bp': dist if dist is not None else '',
             'nearest_anchor_same_chrom': bool(same),
-        })
-        logger.info(
-            f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({gate}): "
-            f"{h.get('chrom')}:{hs}-{he} id={h.get('pident', 0):.1f}% "
-            f"e={h.get('evalue')} aln={h.get('alnlen')} — nearest flanking anchor "
-            + (f"{anchor} at {dist:,} bp" if dist is not None
-               else "none on this chromosome" if by_chrom else "none in this genome"))
+            'outcome': outcome,
+            'envelope': _envelope_state(chrom, hs, he, envelopes),
+            'anchors_on_sequence': len(by_chrom.get(chrom, ())),
+            'genes_on_sequence': len(per_piece.get(chrom, ())),
+        }
 
-    def _clears_quality(h):
-        return (is_goi_query_id(h.get('query', ''))
-                and h.get('pident', 0.0) >= min_identity
-                and h.get('evalue', 1.0) <= max_evalue
-                and h.get('alnlen', 0) >= min_alnlen)
+    def _drop(key, h):
+        _count(key)
+        if dropped_out is not None:
+            dropped_out.append(_record(h, key, 'dropped'))
 
-    envelopes = {}
-    for c, genes in by_chrom.items():
-        if len(genes) >= min_chrom_anchors:
-            lo = min(g[2] for g in genes) - envelope_margin
-            hi = max(g[3] for g in genes) + envelope_margin
-            envelopes[c] = (lo, hi, genes)
-    if not envelopes:
-        # No chromosome carries enough anchors to define an envelope anywhere. Strong
-        # GOI hits still deserve reporting — this is the "we could not judge synteny at
-        # all" case, which is different again from "judged and refused".
-        for h in hits:
-            if _clears_quality(h):
-                _reject(h, 'no_flanking_envelope_in_genome')
-        return []
-
-    seeds, seen, bins = [], set(), {}
+    seeds, bins = [], {}
     for h in hits:
         if not is_goi_query_id(h.get('query', '')):
             continue
         if h.get('pident', 0.0) < min_identity or h.get('evalue', 1.0) > max_evalue:
-            _drop('dispersed_identity' if h.get('pident', 0.0) < min_identity else 'dispersed_evalue')
+            _drop('dispersed_identity' if h.get('pident', 0.0) < min_identity else 'dispersed_evalue', h)
             continue
         if h.get('alnlen', 0) < min_alnlen:
-            _drop('dispersed_alnlen')
+            _drop('dispersed_alnlen', h)
             continue
-        env = envelopes.get(h.get('chrom'))
-        if not env:                              # chromosome doesn't carry the neighbourhood
-            _reject(h, 'chromosome_lacks_min_anchors')
+        chrom, hs, he = h.get('chrom'), h.get('start', 0), h.get('end', 0)
+        if overlaps_indexed(zones, chrom, hs, he):     # left to that block's GOI search
+            _drop('dispersed_in_goi_zone', h)
+            if in_zone_out is not None:
+                in_zone_out.append(h)
             continue
-        lo, hi, genes = env
-        hs, he = h.get('start', 0), h.get('end', 0)
-        if he < lo or hs > hi:                   # outside the flanking envelope
-            _reject(h, 'outside_flanking_envelope')
+        rule = neighbour_rule(chrom, hs, he, by_chrom, envelopes, near_radius)
+        if rule not in RESCUE_SEED_RULES:
+            if neighbour_rule(chrom, hs, he, per_piece, piece_envelopes, near_radius) in RESCUE_SEED_RULES:
+                _count('dispersed_refused_per_piece_pass')
+            if rejected_out is not None:
+                rejected_out.append(_record(h, rule, 'refused'))
             continue
-        near_anchor = any(
-            not (he < s - radius or hs > e + radius)
-            for _g, _m, s, e in genes)
-        if near_anchor:                          # already covered by a flanking block
-            _drop('dispersed_near_anchor', h)
-            continue
-        key = (h.get('chrom'), hs // max(1, region_padding))
-        if key not in seen:
-            seen.add(key)
-            seeds.append([])
-            bins[key] = seeds[-1]
-        bins[key].append(h)
+        dist = _nearest_anchor(chrom, hs, he, by_chrom)[0]
+        seed = dict(h, rescue_rule=rule, rescue_anchors=len(by_chrom.get(chrom, ())),
+                    rescue_anchor_bp=dist if dist is not None else '')
+        key = (chrom, hs // max(1, region_padding))
+        if key not in bins:
+            bins[key] = []
+            seeds.append(bins[key])
+        bins[key].append(seed)
     # One seed per bin, chosen without the GOI's name (fix item 27b): the first hit in query order
     # was taken, so the name decided between the home protein's hit and a tandem copy's. The home
     # protein first, then its exons, pieces and models, then other GOI parents (copies), decoys
     # last; then the query id behind its base (a copy's parent cut), position, strand, bits.
     return [min(b, key=_dispersed_seed_key) for b in seeds]
+
+
+def rescue_selector(hits, flanking_hits, args, genome_name, record=True):
+    """The dispersed-GOI rescue of one genome as a function of the blocks built without it
+    (blocks_with_rescue calls it for each build): ``select(blocks)`` -> RescueResult, chosen
+    against the blocks' GOI zones (goi_zones; block +- goi_core_margin), with the same margin
+    as the near-neighbour radius and the rescue's settings from ``args``. Its counts and
+    records stay in the result, since genome_axis_blocks may build twice and only the build
+    it keeps is recorded (apply_rescue). ``record``: whether refused and dropped hits are
+    recorded (report_nonsyntenic_candidates)."""
+    margin = goi_core_margin(args)
+
+    def select(blocks):
+        zones = goi_zones(blocks, margin)
+        drops: Dict[str, int] = {}
+        in_zone: List[Dict[str, Any]] = []
+        rejected = [] if record else None
+        dropped = [] if record else None
+        seeds = select_dispersed_goi_seeds(
+            hits, flanking_hits, goi_zones=zones, near_radius=margin,
+            min_identity=getattr(args, 'dispersed_goi_min_identity', 40.0),
+            max_evalue=getattr(args, 'dispersed_goi_max_evalue', 1e-10),
+            min_alnlen=getattr(args, 'dispersed_goi_min_alnlen', 50),
+            min_chrom_anchors=getattr(args, 'dispersed_min_chrom_anchors', 3),
+            region_padding=args.region_padding,
+            envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000),
+            rejected_out=rejected, genome_name=genome_name, drops=drops,
+            in_zone_out=in_zone, dropped_out=dropped)
+        return RescueResult(seeds, rejected, drops, in_zone, dropped, zones)
+    return select
+
+
+def mark_rescue_blocks(blocks, seeds) -> int:
+    """Set ``dispersed_rescue`` ({'rule', 'anchors', 'anchor_bp'}) on each block that holds a
+    rescued GOI hit, from the first such seed by position; returns the number of blocks
+    marked. process_region_block flags the block's GOI models from it (mark_dispersed_rescue)
+    and the block table writes its rule."""
+    n = 0
+    for b in blocks or ():
+        b0, b1 = int(b['start']), int(b['end'])
+        inside = [s for s in seeds or () if s.get('chrom') == b['chrom']
+                  and int(s.get('start', 0)) < b1 and b0 < int(s.get('end', 0))]
+        if not inside:
+            continue
+        s = min(inside, key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0))) + _dispersed_seed_key(x))
+        b['dispersed_rescue'] = {'rule': s.get('rescue_rule', ''), 'anchors': s.get('rescue_anchors', ''),
+                                 'anchor_bp': s.get('rescue_anchor_bp', '')}
+        n += 1
+    return n
+
+
+NO_FLANKING_RESCUE = {'rule': 'no_flanking_hits', 'anchors': 0, 'anchor_bp': ''}
+
+
+def mark_dispersed_rescue(candidates, chrom, rescue, pre_zones) -> int:
+    """Flag the GOI candidates of a block the rescue seeded (``rescue``: the block's
+    dispersed_rescue) that lie outside every GOI zone of the blocks built without the rescue
+    (``pre_zones``): the models found only because the rescue made the search look there. The
+    candidate's feature row (its first GFF row; the CDS rows are left as they are) gets
+    ``DispersedRescue=1;RescueRule=<rule>;RescueAnchors=<n>`` and, when known,
+    ``RescueAnchorBp=<bp>``. A candidate whose span [start - 1, end) overlaps a zone is left
+    unflagged. Returns how many were flagged."""
+    if not rescue:
+        return 0
+    tag = f";DispersedRescue=1;RescueRule={rescue.get('rule', '')}"
+    if rescue.get('anchors', '') != '':
+        tag += f";RescueAnchors={rescue.get('anchors')}"
+    if rescue.get('anchor_bp', '') not in ('', None):
+        tag += f";RescueAnchorBp={rescue.get('anchor_bp')}"
+    zones = intervals_by_chrom(pre_zones)
+    n = 0
+    for c in candidates or ():
+        if not c.get('gff') or 'SynVoyRole=goi' not in c['gff'][0]:
+            continue
+        if overlaps_indexed(zones, chrom, int(c['start']) - 1, int(c['end'])):
+            continue
+        c['gff'][0] += tag
+        n += 1
+    return n
+
+
+def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
+    """Record the dispersed-GOI rescue of the build the search keeps (genome_axis_blocks):
+    its counts (count_limit), the hits it left to GOI zones (genome_ctx['in_zone_hits'], for
+    the dead zone), the GOI zones of the blocks built without it (pre_rescue_zones, for
+    DispersedRescue), its refused and dropped records (rescue_refused, rescue_dropped, for
+    nonsyntenic.tsv); mark the blocks it seeded (mark_rescue_blocks); log each refused hit and
+    one summary line (``scatter``, compute_rearrangement_score, is logged only)."""
+    ctx = args.genome_ctx
+    for key in sorted(rescue.drops):
+        count_limit(args, key, rescue.drops[key])
+    ctx['in_zone_hits'] = list(rescue.in_zone)
+    ctx['pre_rescue_zones'] = list(rescue.zones)
+    ctx['rescue_refused'] = list(rescue.rejected or [])
+    ctx['rescue_dropped'] = list(rescue.dropped or [])
+    n_blocks = mark_rescue_blocks(blocks, rescue.seeds)
+    for r in ctx['rescue_refused']:
+        bp = r.get('nearest_anchor_bp')
+        logger.info(
+            f"[{genome_name}] §1x non-syntenic GOI candidate REJECTED ({r.get('rejected_by')}): "
+            f"{r.get('chrom')}:{r.get('start')}-{r.get('end')} id={float(r.get('identity') or 0):.1f}% "
+            f"e={r.get('evalue')} aln={r.get('alnlen')} — nearest flanking anchor "
+            + (f"{r.get('nearest_anchor_gene')} at {int(bp):,} bp" if bp not in ('', None)
+               else "none on this sequence"))
+    rules = [s.get('rescue_rule', '') for s in rescue.seeds]
+    logger.info(
+        f"[{genome_name}] §1o dispersed-GOI rescue: {len(rescue.seeds)} seed(s) (envelope "
+        f"{rules.count('envelope')}, near_neighbour {rules.count('near_neighbour')}) in "
+        f"{n_blocks} block(s); {len(rescue.in_zone)} passing GOI hit(s) left to the GOI zones "
+        f"of the blocks"
+        + (f"; {len(ctx['rescue_refused'])} refused" if rescue.rejected is not None else "")
+        + (f" (scatter={scatter:.2f}, logged only)" if scatter is not None else "") + ".")
 
 
 # ---------------------------------------------------------------------------
@@ -7440,8 +7869,6 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         seed_hits = flanking_seed_hits if flanking_seed_hits else hits
         if flanking_seed_hits:
             logger.info(f"[{genome_name}] Using {len(flanking_seed_hits)} flanking-anchor hits for block seeding.")
-        else:
-            logger.info(f"[{genome_name}] No flanking anchors found; falling back to GOI/mixed hits for block seeding.")
 
         # From here on `args` holds this genome's distances in base pairs.
         args = genome_scale_args(args, flanking_seed_hits, genome_path, genome_name,
@@ -7472,47 +7899,24 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 f"[{genome_name}] Anchor places: blocks are seeded from {len(seed_hits)} of "
                 f"{len(flanking_seed_hits)} flanking hits (the {_max_places} best places of each gene).")
 
-        # §1o: rescue a strong GOI hit that dispersed away from its flanking
-        # anchors (same-chromosome macro-synteny) by adding it as a block seed, so
-        # the normal machinery models it. No-op unless the neighbourhood is
-        # shattered (rearrangement gate) — protects well-conserved benchmarks.
-        rescue_goi_genes = set()
-        _disp_seeds = []
-        # §1x: collect the strong-but-non-syntenic candidates the gate refuses, so the
-        # run can distinguish "no ortholog here" from "found one, could not place it".
-        _nonsyntenic = [] if getattr(args, 'report_nonsyntenic_candidates', True) else None
-        if getattr(args, 'enable_dispersed_goi_rescue', True) and flanking_seed_hits:
-            _rscore = compute_rearrangement_score(flanking_seed_hits)
-            _disp_seeds = select_dispersed_goi_seeds(
-                hits, flanking_seed_hits,
-                min_identity=getattr(args, 'dispersed_goi_min_identity', 40.0),
-                max_evalue=getattr(args, 'dispersed_goi_max_evalue', 1e-10),
-                min_alnlen=getattr(args, 'dispersed_goi_min_alnlen', 50),
-                min_chrom_anchors=getattr(args, 'dispersed_min_chrom_anchors', 3),
-                region_padding=args.region_padding,
-                envelope_margin=getattr(args, 'dispersed_envelope_margin', 200000),
-                rejected_out=_nonsyntenic, genome_name=genome_name,
-                drops=args.genome_ctx.setdefault('limits', {}),
-                near_out=args.genome_ctx.setdefault('near_anchor_hits', []),
-                skip_radius=getattr(args, 'goi_margin', None) or args.gap_search_window)
-            _write_nonsyntenic_candidates(args, prefix, genome_name, _nonsyntenic)
-            if _disp_seeds:
-                seed_hits = seed_hits + _disp_seeds
-                rescue_goi_genes = {extract_base_gene_id(h.get('query', ''))
-                                    for h in _disp_seeds}
-                logger.info(
-                    f"[{genome_name}] §1o dispersed-GOI rescue: added "
-                    f"{len(_disp_seeds)} strong GOI hit(s) inside the flanking "
-                    f"envelope as rescue seed(s) (scatter={_rscore:.2f}, "
-                    f"id>={getattr(args, 'dispersed_goi_min_identity', 40.0)}).")
+        # §1o: the dispersed-GOI rescue (rescue_selector) is chosen against the GOI zones of
+        # the blocks built without it (genome_axis_blocks -> blocks_with_rescue): a strong GOI
+        # hit inside a zone is left to that block, one outside every zone seeds a block of its
+        # own inside the envelope of >= dispersed_min_chrom_anchors anchors on its sequence, or
+        # within the GOI margin of an anchor on a sequence with fewer. Without any flanking hit
+        # the GOI's own hits seed the blocks instead (no_flanking_hits, below).
+        _select_rescue = (rescue_selector(hits, flanking_seed_hits, args, genome_name,
+                                          record=getattr(args, 'report_nonsyntenic_candidates', True))
+                          if getattr(args, 'enable_dispersed_goi_rescue', True) and flanking_seed_hits
+                          else None)
 
         def _goi_seeded(b):
             """A GOI-seeded block (ALGORITHM.md §7.4): among its seeds the GOI's own home gene
-            (a GOI proxy among the anchors), a rescued GOI hit (§1o) or a GOI hit. The filter
-            keeps it whatever its gene count, the cap takes it first; goi_seeded in blocks.tsv."""
+            (a GOI proxy among the anchors) or a GOI hit (a rescued one, or every seed of a genome
+            without a flanking hit). The filter keeps it whatever its gene count, the cap keeps it
+            first; goi_seeded in blocks.tsv."""
             genes = set(b.get('genes', []))
             return (bool(genes & goi_proxy_flanking_parents)
-                    or bool(genes & rescue_goi_genes)
                     or any(is_goi_query_id(g) for g in genes))
 
         # The target's distance from the home genome, as the median identity of its
@@ -7530,8 +7934,30 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         _block_opts = dict(home_rank=home_rank, bridge=_bridge, gene_gap=_gene_gap,
                            goi_seeded=_goi_seeded, proxy_parents=goi_proxy_flanking_parents,
                            gw_any_genome=_gw_any_genome)
-        synteny_blocks, _axis_values = genome_axis_blocks(seed_hits, flanking_seed_hits, _disp_seeds,
-                                                          args, genome_name, **_block_opts)
+        synteny_blocks, _axis_values, _rescue = genome_axis_blocks(
+            seed_hits, flanking_seed_hits, args, genome_name, select_rescue=_select_rescue,
+            survivor_key=None if flanking_seed_hits else strongest_seed_key(seed_hits),
+            **_block_opts)
+        if _rescue is not None:
+            apply_rescue(args, genome_name, _rescue, synteny_blocks,
+                         scatter=compute_rearrangement_score(flanking_seed_hits))
+        elif not flanking_seed_hits:
+            # No flanking gene has a hit in this genome: the GOI's own hits seeded every block,
+            # with no neighbour test (the cap keeps the blocks of the strongest hits). Each GOI
+            # model there carries DispersedRescue=1;RescueRule=no_flanking_hits.
+            for _b in synteny_blocks or ():
+                _b['dispersed_rescue'] = dict(NO_FLANKING_RESCUE)
+            args.genome_ctx['pre_rescue_zones'] = []
+            logger.warning(
+                f"[{genome_name}] No flanking gene was found in this genome: every cluster of GOI "
+                f"hits seeds a block ({len(synteny_blocks or [])} searched), so the calls there rest "
+                "on the protein match alone (DispersedRescue=1, RescueRule=no_flanking_hits).")
+        # The GOI hits the rescue did not take (nonsyntenic.tsv), against the GOI zones of the
+        # blocks about to be searched; written again at the genome's end, with the searched
+        # zones and the models.
+        _rows, _n_dropped = rescue_table_rows(args.genome_ctx,
+                                              goi_zones(synteny_blocks or [], goi_core_margin(args)))
+        _write_nonsyntenic_candidates(args, prefix, genome_name, _rows, n_dropped=_n_dropped)
         if synteny_blocks is None:
             return genome_name, [], [], None
         if _axis_values is not None:
@@ -8034,6 +8460,10 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 _decoy_lines, home_goi_parents(args) if args.genome_ctx.get('block_context') else [])
             logger.info(f"[{genome_name}] Decoy mode: {n_decoy} decoy model(s) written to decoys/.")
         log_genome_limits(args, genome_name)
+        _rows, _n_dropped = rescue_table_rows(args.genome_ctx, args.genome_ctx.get('goi_cores') or [])
+        args.genome_ctx['rescue_dropped_outside_zones'] = _n_dropped
+        _write_nonsyntenic_candidates(args, prefix, genome_name, _rows, gff_lines=all_gff_lines,
+                                      n_dropped=_n_dropped)
         _write_target_policy(args, prefix, genome_name, _flank_median, _flank_n, args.genome_ctx)
         _write_block_table(args, prefix, genome_name, all_gff_lines, args.genome_ctx, _goi_seeded)
 
@@ -8979,14 +9409,16 @@ def main():
     parser.add_argument("--home_paralog_panel", default=None,
                         help="Optional home-paralog panel FASTA for discovery guard 3 (RBH). "
                              "When absent, guard 3 is skipped and guards 1/2/4 still apply.")
-    # §1o — dispersed-GOI rescue: recover a strong GOI hit that drifted away from
-    # its flanking anchors (same-chromosome macro-synteny) in a shattered
-    # neighbourhood. Gated by rearrangement score so it is a no-op on well-
-    # conserved targets (the melittin/LY6/TP53 benchmarks).
+    # §1o — dispersed-GOI rescue (select_dispersed_goi_seeds): a strong GOI hit outside every
+    # GOI zone of the blocks seeds a block of its own inside the envelope of the anchors on its
+    # sequence, or beside a lone anchor; there is no rearrangement test.
     parser.add_argument("--enable_dispersed_goi_rescue", type=str2bool, default=True,
-                        help="§1o: seed a block from a strong GOI hit that dispersed away "
-                             "from flanking but shares a chromosome with an anchor, when the "
-                             "neighbourhood is rearranged (default on)")
+                        help="§1o: seed a block from a strong GOI hit that lies outside every "
+                             "GOI zone of the blocks (block +- the GOI margin), when it lies "
+                             "inside the envelope of the best hits of >= "
+                             "--dispersed_min_chrom_anchors flanking genes on its sequence, or "
+                             "within the GOI margin of such a hit on a sequence with fewer "
+                             "(default on)")
     parser.add_argument("--dispersed_goi_min_identity", type=float, default=40.0,
                         help="§1o: minimum %%identity for a dispersed GOI hit to be rescued")
     parser.add_argument("--dispersed_goi_max_evalue", type=float, default=1e-10,

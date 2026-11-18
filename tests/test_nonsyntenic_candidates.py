@@ -160,7 +160,7 @@ class TestReportSurfacesRejections(unittest.TestCase):
                "nearest_anchor_same_chrom": "True"}
         with open(path, "w") as fh:
             fh.write("\t".join(cols) + "\n")
-            fh.write("\t".join(str(row[c]) for c in cols) + "\n")
+            fh.write("\t".join(str(row.get(c, "")) for c in cols) + "\n")
         return path
 
     def test_loader_reads_the_tsv(self):
@@ -222,6 +222,137 @@ class TestReportSurfacesRejections(unittest.TestCase):
         self.assertEqual(block["by_gate"]["chromosome_lacks_min_anchors"], 1)
         # and it must survive a JSON round-trip
         json.loads(json.dumps(report))
+
+
+def _row(genome, chrom, start, query="GOI_Def", identity=60.0, bits=200.0, locus="locus_1", **kw):
+    row = {"genome": genome, "query": query, "chrom": chrom, "start": start, "end": start + 300,
+           "strand": "+", "qstart": 1, "qend": 100, "bits": bits, "identity": identity, "evalue": 1e-30,
+           "alnlen": 300, "rejected_by": "chromosome_lacks_min_anchors", "nearest_anchor_gene": "gene-A",
+           "nearest_anchor_bp": 2_000_000, "nearest_anchor_same_chrom": True, "outcome": "refused",
+           "envelope": "chromosome_without", "anchors_on_sequence": 1, "genes_on_sequence": 2,
+           "locus": locus, "modelled_here": "", "modelled_by": ""}
+    row.update(kw)
+    return row
+
+
+def _write_table(directory, name, rows, cols=None):
+    cols = cols or isr.NONSYNTENIC_COLUMNS
+    path = os.path.join(directory, "hits", f"{name}{gr.NONSYNTENIC_SUFFIX}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(row.get(c, "")) for c in cols) + "\n")
+    return path
+
+
+class TestRefusedRowsAndPlaces(unittest.TestCase):
+    """Bug list item 11 (2026-11-16): each row carries strand, query span and bits; the report
+    sums rows to places, and a place that a counted call of the run overlaps (another home
+    locus's, a rescue pass's) is modelled, not "found, not syntenic"."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        for sub in ("regions", "hits", "scores"):
+            os.makedirs(os.path.join(self.dir, sub), exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_record_carries_the_hit(self):
+        hits, flanking = _anopheles_case()
+        hits[-1].update(qstart=12, qend=75, bits=81.5, strand="-")
+        rejected = []
+        isr.select_dispersed_goi_seeds(hits, flanking, rejected_out=rejected, genome_name="ag")
+        r = rejected[0]
+        self.assertEqual((r["strand"], r["qstart"], r["qend"], r["bits"]), ("-", 12, 75, 81.5))
+        self.assertEqual((r["outcome"], r["envelope"], r["anchors_on_sequence"], r["genes_on_sequence"]),
+                         ("refused", "chromosome_without", 2, 2))
+        self.assertEqual(isr.NONSYNTENIC_COLUMNS[:9], ["genome", "query", "chrom", "start", "end", "strand",
+                                                       "qstart", "qend", "bits"])
+
+    def test_rows_of_one_place_are_one_place(self):
+        rows = [_row("G.fna", "c1", 1_000), _row("G.fna", "c1", 1_100, query="GOI_Def|exon_1", bits=90.0),
+                _row("G.fna", "c1", 4_000, query="GOI_Def|G2_fna_b0_l1", bits=150.0),
+                _row("G.fna", "c1", 900_000)]
+        path = _write_table(self.dir, "locus_1_G.fna", rows)
+        recs, per_genome = gr.collect_nonsyntenic_candidates([path])
+        places = gr.nonsyntenic_places(recs)
+        self.assertEqual([(p["start"], p["end"], p["n_rows"]) for p in places], [(1_000, 4_300, 3), (900_000, 900_300, 1)])
+        self.assertEqual(places[0]["queries"], ["GOI_Def", "GOI_Def|G2_fna_b0_l1", "GOI_Def|exon_1"])
+        self.assertEqual((places[0]["bits"], places[0]["strand"]), (200.0, "+"))
+        # another home locus is another place
+        self.assertEqual(len(gr.nonsyntenic_places(recs + [dict(recs[0], locus="locus_2")])), 3)
+
+    def test_a_place_with_a_counted_call_of_another_locus_is_modelled(self):
+        _write_table(self.dir, "locus_1_G.fna", [_row("G.fna", "c1", 1_000)])
+        _write_table(self.dir, "locus_1_H.fna", [_row("H.fna", "c1", 1_000)])
+        gff = ("##gff-version 3\n"
+               "c1\tx\tmRNA\t901\t1500\t.\t+\t.\tID=GOI_Def|G_fna_b0_l1;SynVoy_Parent=GOI_Def;SynVoyRole=goi;"
+               "Confidence=MEDIUM;GOIClass=probable_goi;EvidenceType=exon_annotation;Identity=70;QueryCoverage=0.9\n")
+        with open(os.path.join(self.dir, "regions", "locus_2__G.fna.gff"), "w") as fh:
+            fh.write(gff)
+        report = gr.build_report(self.dir)
+        block, summary = report["rejected_candidates"], report["summary"]
+        places = {p["genome"]: p for p in block["places"]}
+        self.assertEqual(places["G"]["modelled_in_run"]["provenance"], ["locus_2"])
+        self.assertIs(places["G"]["modelled_in_run"]["other_locus"], True)
+        self.assertIsNone(places["H"]["modelled_in_run"])
+        self.assertEqual((summary["nonsyntenic_place_count"], summary["nonsyntenic_unmodelled_place_count"]), (2, 1))
+        self.assertEqual(summary["goi_found_but_not_syntenic"], ["H"])
+        self.assertEqual(summary["nonsyntenic_candidate_count"], 2)        # rows, as before
+        self.assertEqual(sorted(block["best_per_genome"]), ["H"])
+
+    def test_a_demoted_call_does_not_model_the_place(self):
+        """Only a counted call (HIGH or MEDIUM, not demoted) models a place: a MEDIUM call that the
+        coverage rule demotes (identity_coverage_decoupled) leaves it unmodelled, as a call that
+        ownership gives to another home gene (paralog_not_goi) does."""
+        _write_table(self.dir, "locus_1_G.fna", [_row("G.fna", "c1", 1_000)])
+        gff = ("##gff-version 3\n"
+               "c1\tx\tmRNA\t901\t1500\t.\t+\t.\tID=GOI_Def|G_fna_b0_l1;SynVoy_Parent=GOI_Def;SynVoyRole=goi;"
+               "Confidence=MEDIUM;GOIClass=probable_goi;EvidenceType=exon_annotation;Identity=90;QueryCoverage=0.2\n")
+        with open(os.path.join(self.dir, "regions", "locus_2__G.fna.gff"), "w") as fh:
+            fh.write(gff)
+        report = gr.build_report(self.dir)
+        self.assertEqual(report["goi_dedup"]["records"][0]["goi_class"], "identity_coverage_decoupled")
+        place = report["rejected_candidates"]["places"][0]
+        self.assertIsNone(place["modelled_in_run"])
+        self.assertEqual(report["summary"]["nonsyntenic_unmodelled_place_count"], 1)
+        self.assertEqual(sorted(report["rejected_candidates"]["best_per_genome"]), ["G"])
+        counted = dict(report["goi_dedup"]["records"][0], goi_class="probable_goi")
+        recs, per_genome = gr.collect_nonsyntenic_candidates(
+            [os.path.join(self.dir, "hits", f"locus_1_G.fna{gr.NONSYNTENIC_SUFFIX}")])
+        block = gr.summarize_nonsyntenic_candidates(recs, per_genome, counted_records=[counted])
+        self.assertEqual(block["unmodelled_place_count"], 0)
+        self.assertIs(block["places"][0]["modelled_in_run"]["other_locus"], True)
+
+    def test_a_table_of_the_old_format_still_loads(self):
+        old = ["genome", "query", "chrom", "start", "end", "identity", "evalue", "alnlen", "rejected_by",
+               "nearest_anchor_gene", "nearest_anchor_bp", "nearest_anchor_same_chrom"]
+        path = _write_table(self.dir, "locus_3_G.fna", [_row("G.fna", "c1", 1_000)], cols=old)
+        recs, per_genome = gr.collect_nonsyntenic_candidates([path])
+        self.assertEqual(len(recs), 1)
+        r = recs[0]
+        self.assertEqual((r["locus"], r["strand"], r["qstart"], r["bits"], r["modelled_here"]),
+                         ("locus_3", "", None, None, ""))
+        self.assertEqual(gr.nonsyntenic_places(recs)[0]["n_rows"], 1)
+
+    def test_dropped_rows_are_no_candidates(self):
+        rows = [_row("G.fna", "c1", 1_000),
+                _row("K.fna", "c1", 5_000, outcome="dropped", rejected_by="dispersed_identity", identity=30.0),
+                _row("K.fna", "c2", 5_000, outcome="dropped", rejected_by="dead_zone")]
+        _write_table(self.dir, "locus_1_mixed.fna", rows)
+        with open(os.path.join(self.dir, "hits", "locus_1_K.fna.target_policy.tsv"), "w") as fh:
+            fh.write("genome\tn_flanking_genes\tblocks_searched\trescue_dropped_outside_zones\n"
+                     "K.fna\t9\t2\t417\n")
+        report = gr.build_report(self.dir)
+        block, summary = report["rejected_candidates"], report["summary"]
+        self.assertEqual(block["total"], 1)
+        self.assertEqual(summary["goi_found_but_not_syntenic"], ["G"])
+        self.assertNotIn("K", summary["goi_absent_genomes"] + summary["goi_found_but_not_syntenic"])
+        dropped = block["dropped"]
+        self.assertEqual((dropped["total"], dropped["hits"], dropped["genomes"]), (2, 417, ["K"]))
+        self.assertEqual(dropped["by_test"], {"dead_zone": 1, "dispersed_identity": 1})
 
 
 if __name__ == "__main__":

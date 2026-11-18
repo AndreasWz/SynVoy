@@ -100,23 +100,63 @@ class TestSelectDispersedGoiSeeds(unittest.TestCase):
         self.assertEqual(seeds, [])
 
     def test_conserved_genome_is_a_noop(self):
-        # Tight neighbourhood (all anchors within ~40 kb) + the real GOI right
-        # next to them: the only strong hit is within region_padding of an anchor,
-        # so nothing new is seeded (the normal block path already models it).
+        # Tight neighbourhood (all anchors within ~40 kb, one block) + the real GOI right
+        # next to them: the only strong hit lies in that block's GOI zone, so nothing new
+        # is seeded (the block's own search models it).
         tight = [_flank(f"CG{i}", "chr1", 1_000_000 + i * 8000, 1_000_000 + i * 8000 + 500)
                  for i in range(5)]
         goi_near = {"query": "GOI_x", "chrom": "chr1", "start": 1_020_000,
                     "end": 1_020_459, "pident": 90.0, "evalue": 1e-50,
                     "alnlen": 400, "strand": "+", "bits": 800.0}
+        zones = isr.goi_zones([{"chrom": "chr1", "start": 1_000_000, "end": 1_032_500}], 20_000)
+        drops, in_zone = {}, []
         seeds = isr.select_dispersed_goi_seeds(
-            tight + [goi_near], tight, region_padding=50000)
+            tight + [goi_near], tight, goi_zones=zones, region_padding=50000,
+            drops=drops, in_zone_out=in_zone)
         self.assertEqual(seeds, [])
+        self.assertEqual(drops, {"dispersed_in_goi_zone": 1})
+        self.assertEqual(in_zone, [goi_near])
 
     def test_skips_hit_already_next_to_an_anchor(self):
+        # The anchors CG11968 and CG11963 form a block: a hit beside them lies in its GOI
+        # zone and is left to that block.
         near = dict(AEDES_OSKAR_HIT, start=121_360_000, end=121_360_459)
+        zones = isr.goi_zones([{"chrom": "NC_035109.1", "start": 121_344_000, "end": 121_405_000}],
+                              50_000)
         seeds = isr.select_dispersed_goi_seeds(
-            AEDES_FLANKING + [near], AEDES_FLANKING, region_padding=50000)
+            AEDES_FLANKING + [near], AEDES_FLANKING, goi_zones=zones, region_padding=50000)
         self.assertEqual(seeds, [])
+
+    def test_seeds_are_copies_that_name_their_rule(self):
+        seeds = isr.select_dispersed_goi_seeds(
+            AEDES_FLANKING + [AEDES_OSKAR_HIT], AEDES_FLANKING)
+        self.assertEqual(seeds[0]["rescue_rule"], "envelope")
+        self.assertEqual(seeds[0]["rescue_anchors"], 5)
+        self.assertEqual(seeds[0]["rescue_anchor_bp"], 203_400_000 - 184_154_285)   # CG8379
+        self.assertNotIn("rescue_rule", AEDES_OSKAR_HIT)
+
+
+class TestRescueTextDescribesTheRealRule(unittest.TestCase):
+    """The rescue has no rearrangement gate and no LOW fallback (bug list item 14): its rescued
+    hits seed blocks that are searched and judged like any other."""
+
+    def test_no_rearrangement_gate_in_the_code_or_the_config(self):
+        for rel in ("bin/iterative_search_runner.py", "nextflow.config"):
+            with open(os.path.join(REPO_ROOT, rel)) as fh:
+                text = fh.read()
+            self.assertNotIn("rearrangement gate", text, rel)
+            self.assertNotIn("as LOW fallback", text, rel)
+            self.assertNotIn("neighbourhood is rearranged", text, rel)
+
+    def test_the_help_names_the_envelope(self):
+        import subprocess
+        out = subprocess.run([sys.executable, os.path.join(REPO_ROOT, "bin", "iterative_search_runner.py"),
+                              "--help"], capture_output=True, text=True).stdout
+        flat = " ".join(out.split())
+        start = flat.rindex("--enable_dispersed_goi_rescue")      # its entry, not the usage line
+        help_text = flat[start:flat.index("--dispersed_goi_min_identity", start)]
+        self.assertIn("envelope", help_text)
+        self.assertIn("GOI zone", help_text)
 
     def test_dedupes_multiple_hits_in_same_window(self):
         h2 = dict(AEDES_OSKAR_HIT, start=184_153_900, end=184_154_200)
