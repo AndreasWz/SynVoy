@@ -355,5 +355,56 @@ class TestRefusedRowsAndPlaces(unittest.TestCase):
         self.assertEqual(dropped["by_test"], {"dead_zone": 1, "dispersed_identity": 1})
 
 
+
+def _goi_gff_row(chrom, start, end, conf, goi_class, identity=70, qcov=0.9, basis="", mid="GOI_Def|G_fna_b0_l1_m1"):
+    return ("\t".join([chrom, "x", "mRNA", str(start), str(end), ".", "+", ".",
+                       f"ID={mid};SynVoy_Parent=GOI_Def;SynVoyRole=goi;Confidence={conf};"
+                       f"GOIClass={goi_class};EvidenceType=exon_annotation;Identity={identity};"
+                       f"QueryCoverage={qcov}" + (f";Basis={basis}" if basis else "")]) + "\n")
+
+
+class TestFoundButNotSyntenicCountsCalls(unittest.TestCase):
+    """Bug list item 12: the list subtracted every genome with any GOI row, a LOW one too, so a
+    genome with a refused hit and only uncounted models was in neither goi_absent_genomes nor
+    goi_found_but_not_syntenic. Only a counted call (HIGH or MEDIUM, not demoted) takes a genome
+    out of it now."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        for sub in ("regions", "hits", "scores"):
+            os.makedirs(os.path.join(self.dir, sub), exist_ok=True)
+        # The refused hit lies on c1 at 1,000 bp; the models below lie elsewhere on c9.
+        _write_table(self.dir, "locus_1_G.fna", [_row("G.fna", "c1", 1_000, identity=70.0)])
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _gff(self, *rows):
+        with open(os.path.join(self.dir, "regions", "locus_1__G.fna.gff"), "w") as fh:
+            fh.write("##gff-version 3\n" + "".join(rows))
+        return gr.build_report(self.dir)["summary"]
+
+    def test_only_a_low_model(self):
+        summary = self._gff(_goi_gff_row("c9", 50_001, 50_600, "LOW", "ambiguous_goi_family_member",
+                                         identity=30, basis="not_significant"))
+        self.assertEqual(summary["goi_found_but_not_syntenic"], ["G"])
+        self.assertNotIn("G", summary["goi_absent_genomes"])
+
+    def test_only_an_ambiguous_record(self):
+        summary = self._gff(_goi_gff_row("c9", 50_001, 50_600, "AMBIGUOUS", "syntenic_candidate_unconfirmed",
+                                         basis="not_specific"))
+        self.assertEqual(summary["goi_found_but_not_syntenic"], ["G"])
+
+    def test_a_demoted_call(self):
+        summary = self._gff(_goi_gff_row("c9", 50_001, 50_600, "HIGH", "confident_goi", identity=60, qcov=0.2))
+        self.assertEqual(summary["coverage_demoted_calls"], 1)
+        self.assertEqual(summary["goi_found_but_not_syntenic"], ["G"])
+
+    def test_a_counted_call_elsewhere(self):
+        summary = self._gff(_goi_gff_row("c9", 50_001, 50_600, "MEDIUM", "probable_goi"))
+        self.assertEqual(summary["goi_found_but_not_syntenic"], [])
+        self.assertNotIn("G", summary["goi_absent_genomes"])
+
+
 if __name__ == "__main__":
     unittest.main()

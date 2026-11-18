@@ -90,10 +90,24 @@ class TestRescueDecision(unittest.TestCase):
 
 
 class TestEndToEndRescue(unittest.TestCase):
-    """Drive cluster_grs.py on an Aedes-topology m8 and confirm the dispersed
-    oskar region is emitted as a MEDIUM goi_dispersed_macrosynteny call."""
+    """Drive cluster_grs.py on an Aedes-topology m8: the dispersed oskar region is a MEDIUM
+    goi_dispersed_macrosynteny region where the search modelled the gene there as HIGH or
+    MEDIUM, and a goi_hit_no_call region where it did not (the region step places no gene)."""
 
-    def _run(self, tmp, extra=None):
+    @staticmethod
+    def _gff(tmp, confidence, goi_class="probable_goi"):
+        """One GOI model at the dispersed hit; its id carries no _b<N>_ block tag, so the
+        region is not widened to a search block."""
+        path = os.path.join(tmp, "target.gff")
+        with open(path, "w") as fh:
+            fh.write("##gff-version 3\n")
+            fh.write("\t".join(["chr1", "SynVoy", "mRNA", "184000001", "184000459", "45.3", "+", ".",
+                                f"ID=GOI_osk|g_exon_ann;SynVoy_Parent=GOI_osk;SynVoyRole=goi;"
+                                f"Confidence={confidence};GOIClass={goi_class};"
+                                "EvidenceType=exon_annotation;Identity=45.3"]) + "\n")
+        return path
+
+    def _run(self, tmp, extra=None, gff=None, bed_out=None):
         # home order: f0 f1 GOI_osk f2 f3 f4 f5
         bed = os.path.join(tmp, "syn.bed")
         with open(bed, "w") as fh:
@@ -119,27 +133,83 @@ class TestEndToEndRescue(unittest.TestCase):
         cmd = [sys.executable, os.path.join(REPO_ROOT, "bin", "cluster_grs.py"),
                "--hits", m8, "--synteny_bed", bed,
                "--output", out, "--scores_output", scores,
-               "--flanking_count", "6"] + (extra or [])
+               "--flanking_count", "6"] + (["--target_gff", gff] if gff else []) + (extra or [])
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         with open(scores) as fh:
             header = fh.readline().rstrip("\n").split("\t")
             rows_out = [dict(zip(header, ln.rstrip("\n").split("\t"))) for ln in fh]
+        if bed_out is not None:
+            with open(out) as fh:
+                bed_out.extend(ln.split("\t")[:3] for ln in fh)
         return rows_out
 
     def test_dispersed_oskar_is_rescued(self):
         import tempfile
-        rows = self._run(tempfile.mkdtemp())
+        tmp = tempfile.mkdtemp()
+        rows = self._run(tmp, gff=self._gff(tmp, "MEDIUM"))
         disp = [r for r in rows if r["region_class"] == "goi_dispersed_macrosynteny"]
         self.assertEqual(len(disp), 1, f"expected one rescued region, got {rows}")
         r = disp[0]
         self.assertEqual(r["chrom"], "chr1")
         self.assertEqual(r["confidence"], "MEDIUM")
         self.assertEqual(r["selection_reason"], "distant_macrosynteny_rescue")
+        self.assertEqual(r["goi_model_confidence"], "MEDIUM")
+        self.assertEqual(r["goi_model_class"], "probable_goi")
+        self.assertIn("_DISP_", r["region_name"])
+
+    def test_hit_without_model_is_no_call(self):
+        """No target GFF: the raw GOI hit makes the region gene-bearing, the search placed
+        nothing there, so the region is a hit without a call (same score and label)."""
+        import tempfile
+        rows = self._run(tempfile.mkdtemp())
+        self.assertEqual([r for r in rows if r["region_class"] == "goi_dispersed_macrosynteny"], [])
+        r = next(r for r in rows if r["region_class"] == "goi_hit_no_call")
+        self.assertEqual(r["selection_reason"], "distant_hit_no_call")
+        self.assertEqual(float(r["score"]), 0.45)
+        self.assertEqual(r["confidence"], "MEDIUM")
+        self.assertEqual(r["goi_model_confidence"], "")
+        self.assertEqual(float(r["goi_hit_best_identity"]), 45.3)
+        self.assertEqual(float(r["goi_hit_best_evalue"]), 2.77e-29)
+        self.assertIn("_NOCALL_", r["region_name"])
+
+    def test_ambiguous_model_or_genome_wide_answer_is_no_call(self):
+        import tempfile
+        for conf, goi_class in (("AMBIGUOUS", "syntenic_candidate_unconfirmed"),
+                                ("MEDIUM", "genome_wide_strong_hit")):
+            tmp = tempfile.mkdtemp()
+            rows = self._run(tmp, gff=self._gff(tmp, conf, goi_class))
+            r = next(r for r in rows if r["region_class"] == "goi_hit_no_call")
+            self.assertEqual(r["goi_model_confidence"], conf)
+            self.assertEqual(r["goi_model_class"], goi_class)
+            self.assertEqual(r["selection_reason"], "distant_hit_no_call")
+
+    def test_low_model_makes_no_gene_bearing_region(self):
+        """A target GFF whose only GOI model there is LOW: the raw GOI hits are no GOI
+        intervals beside a model of any label, and a LOW model is none, so the place is no
+        gene-bearing region at all."""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        rows = self._run(tmp, gff=self._gff(tmp, "LOW", "ambiguous_goi_family_member"))
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["goi_overlap"], "False")
+            self.assertNotIn(r["region_class"], ("goi_hit_no_call", "goi_dispersed_macrosynteny"))
+
+    def test_selection_is_the_same_with_and_without_a_model(self):
+        import tempfile
+        beds = []
+        for conf in (None, "MEDIUM", "AMBIGUOUS"):
+            tmp = tempfile.mkdtemp()
+            bed = []
+            self._run(tmp, gff=self._gff(tmp, conf) if conf else None, bed_out=bed)
+            beds.append(bed)
+        self.assertEqual(beds[0], beds[1])
+        self.assertEqual(beds[0], beds[2])
 
     def test_kill_switch_disables_rescue(self):
         import tempfile
         rows = self._run(tempfile.mkdtemp(), extra=["--disable_distant_synteny_rescue"])
-        disp = [r for r in rows if r["region_class"] == "goi_dispersed_macrosynteny"]
+        disp = [r for r in rows if r["region_class"] in ("goi_dispersed_macrosynteny", "goi_hit_no_call")]
         self.assertEqual(disp, [])
 
 

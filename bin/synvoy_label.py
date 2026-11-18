@@ -44,12 +44,6 @@ EVALUE_TIE = 1e-10          # E-values below this are equal for ranking
 GENOME_WIDE_CLASS = "genome_wide_strong_hit"
 
 LABEL_RANK = {"HIGH": 4, "MEDIUM": 3, "AMBIGUOUS": 2, "LOW": 1}
-BASIS_TEXT = {
-    "significant_specific": "ortholog",
-    "not_specific": "needs curation: another home gene fits as well",
-    "gene_order_only": "needs curation: weak match where the gene should be",
-    "not_significant": "no significant match",
-}
 
 
 def is_specific(margin: Optional[float], real_competitor: Optional[bool], place: str,

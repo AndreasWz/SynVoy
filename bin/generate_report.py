@@ -165,20 +165,6 @@ def summarize_fasta_outputs(fasta_files):
     return genes_added_per_genome
 
 
-def summarize_hits(hit_files):
-    hits_per_genome = {}
-    for hit_path in hit_files:
-        genome = canonical_genome_id(hit_path)
-        count = 0
-        try:
-            with open(hit_path) as hit_fh:
-                count = sum(1 for line in hit_fh if line.strip())
-        except Exception:
-            count = 0
-        hits_per_genome[genome] = hits_per_genome.get(genome, 0) + count
-    return hits_per_genome
-
-
 def _process_gffs_unified(gff_files):
     """Single read-pass over every per-locus region GFF that simultaneously produces
     the three outputs build_report needs: the annotation summary, the per-row GOI
@@ -230,19 +216,23 @@ def _process_gffs_unified(gff_files):
 
         try:
             with open(gff_path) as fh:
+                # NB: rstrip("\n") matches the collect_goi_annotations behaviour
+                # which trimmed only the newline (not surrounding whitespace).
+                # summarize_annotations used .strip() but parts of the GFF aren't
+                # whitespace-sensitive past the 9-tab field split, so the looser
+                # rstrip preserves identical semantics for the line.split("\t")
+                # downstream.
+                rows = [line.rstrip("\n").split("\t") for line in fh
+                        if line.strip() and not line.startswith("#")]
+                # One model is one row: an mRNA row, or a gene row that is no mRNA's parent.
+                # The rescue passes write a gene row and an mRNA row per model (the CDS rows
+                # hang on the mRNA); the search writes one row per model (a tandem copy is a
+                # lone gene row).
+                mrna_parents = {p for parts in rows if len(parts) >= 9 and parts[2] == "mRNA"
+                                for p in (_parse_gff_attrs(parts[8]).get("Parent", "") or "").split(",") if p}
                 cds_of_model = defaultdict(list)
                 frames_of_model = defaultdict(list)   # the genomic frame of each CDS row (_same_orf)
-                for line in fh:
-                    # NB: rstrip("\n") matches the collect_goi_annotations behaviour
-                    # which trimmed only the newline (not surrounding whitespace).
-                    # summarize_annotations used .strip() but parts of the GFF aren't
-                    # whitespace-sensitive past the 9-tab field split, so the looser
-                    # rstrip preserves identical semantics for the line.split("\t")
-                    # downstream.
-                    line = line.rstrip("\n")
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split("\t")
+                for parts in rows:
                     if len(parts) >= 9 and parts[2] == "CDS":
                         # A model's coding rows, for the dedup's test of a piece (_is_piece_of).
                         parent = _parse_gff_attrs(parts[8]).get("Parent", "")
@@ -258,6 +248,8 @@ def _process_gffs_unified(gff_files):
                         continue
                     attrs = _parse_gff_attrs(parts[8])
                     model_id = attrs.get("ID", "")
+                    if parts[2] == "gene" and model_id in mrna_parents:
+                        continue
                     role = (attrs.get("SynVoyRole") or "").strip().lower()
                     if not role:
                         role = "goi" if model_id.startswith("GOI_") or attrs.get("SynVoy_Parent", "").startswith("GOI_") else "flanking"
@@ -279,9 +271,10 @@ def _process_gffs_unified(gff_files):
                         if model_status:
                             ann_stats["model_status_counts"][model_status] += 1
                             model_status_counts[model_status] += 1
-                        ann_stats["goi_confidence_counts"][confidence] += 1 if role == "goi" else 0
-                        if role == "goi" and goi_class:
-                            ann_stats["goi_class_counts"][goi_class] += 1
+                        if role == "goi":
+                            ann_stats["goi_confidence_counts"][confidence] += 1
+                            if goi_class:
+                                ann_stats["goi_class_counts"][goi_class] += 1
 
                         total_annotations += 1
                         role_counts[role] += 1
@@ -360,6 +353,14 @@ def _process_gffs_unified(gff_files):
                             "retrocopy_candidate": (attrs.get("RetrocopyCandidate", "") or "").strip(),
                             "neighbour_median_identity": (attrs.get("NeighbourMedianIdentity", "") or "").strip(),
                             "near_block": (attrs.get("NearBlock", "") or "").strip(),
+                            # A model of a tandem-copy lineage (SynVoy_Parent=GOI_copy_<n>): its
+                            # Identity, QueryCoverage and Bits refer to the copy; these to the
+                            # home protein ("" when not written).
+                            "copy_lineage": (attrs.get("SynVoy_Parent", "")
+                                             if attrs.get("SynVoy_Parent", "").startswith("GOI_copy_") else ""),
+                            "home_identity": (attrs.get("HomeIdentity", "") or "").strip(),
+                            "home_query_cov": (attrs.get("HomeQueryCoverage", "") or "").strip(),
+                            "home_bits": (attrs.get("HomeBits", "") or "").strip(),
                         })
 
                     elif role == "flanking" and confidence == "HIGH":
@@ -374,6 +375,7 @@ def _process_gffs_unified(gff_files):
     per_genome_list = []
     genomes_without_goi = []
     genomes_with_only_ambiguous_goi = []
+    genomes_with_only_low_goi = []
     for genome in sorted(per_genome_ann):
         stats = per_genome_ann[genome]
         row = {
@@ -395,6 +397,11 @@ def _process_gffs_unified(gff_files):
             genomes_without_goi.append(genome)
         elif stats["resolved_goi_annotations"] == 0:
             genomes_with_only_ambiguous_goi.append(genome)
+        # Every GOI model of the genome LOW by its label (an answer of the genome-wide path is
+        # a MEDIUM model).
+        if (stats["goi_annotations"] and set(stats["goi_confidence_counts"]) == {"LOW"}
+                and not stats["genome_wide_answer_annotations"]):
+            genomes_with_only_low_goi.append(genome)
 
     annotation_summary = {
         "per_genome": per_genome_list,
@@ -407,7 +414,10 @@ def _process_gffs_unified(gff_files):
         "model_status_counts": dict(model_status_counts),
         "fallback_goi_annotations": fallback_goi_annotations,
         "genomes_without_goi": genomes_without_goi,
+        # Class-based (ambiguous_goi_family_member, the LOW class): deprecated, use
+        # genomes_with_only_low_goi.
         "genomes_with_only_ambiguous_goi": genomes_with_only_ambiguous_goi,
+        "genomes_with_only_low_goi": genomes_with_only_low_goi,
         **({"genome_wide_answer_rows": genome_wide_answer_rows} if genome_wide_answer_rows else {}),
     }
     flanking_per_locus = {key: len(genes) for key, genes in flanking_seen.items()}
@@ -485,6 +495,136 @@ def summarize_region_scores(score_files):
         "selection_reason_counts": dict(selection_reason_counts),
         "goi_anchor_regions": goi_anchor_regions,
     }
+
+
+def _staging_locus(path_or_name):
+    """The ``locus_N`` staging tag of a staged file, '' without one."""
+    m = _STAGING_PREFIX_RE.match(os.path.basename(path_or_name or ""))
+    return m.group(1) if m and m.group(1).startswith("locus_") else ""
+
+
+def collect_region_rows(score_files):
+    """Every row of every region scores TSV (cluster_grs.py), as dicts: genome, locus (the
+    staging tag, '' without one), region_name, region_class, chrom, start, end (the BED's 0-based,
+    end-exclusive span), confidence (upper case), score, goi_overlap, and the columns that name
+    what the region holds (goi_model_confidence, goi_model_class, goi_hit_best_identity,
+    goi_hit_best_evalue; '' or None for a table written without them). Unreadable files are
+    skipped."""
+    rows = []
+    for path in sorted(score_files):
+        genome, locus = canonical_genome_id(path), _staging_locus(path)
+        try:
+            with open(path, newline="") as fh:
+                for row in csv.DictReader(fh, delimiter="\t"):
+                    if not row or not row.get("chrom"):
+                        continue
+                    rows.append({
+                        "genome": genome, "locus": locus,
+                        "region_name": row.get("region_name", "") or "",
+                        "region_class": row.get("region_class", "") or "",
+                        "chrom": row["chrom"],
+                        "start": _safe_int(row.get("start")), "end": _safe_int(row.get("end")),
+                        "confidence": (row.get("confidence") or "").upper(),
+                        "score": _optional_float(row.get("score")),
+                        "goi_overlap": _is_true(row.get("goi_overlap")) or _is_true(row.get("is_goi_anchor")),
+                        "goi_model_confidence": (row.get("goi_model_confidence") or "").upper(),
+                        "goi_model_class": row.get("goi_model_class", "") or "",
+                        "goi_hit_best_identity": _optional_float(row.get("goi_hit_best_identity")),
+                        "goi_hit_best_evalue": _optional_float(row.get("goi_hit_best_evalue")),
+                    })
+        except (OSError, csv.Error):
+            continue
+    return rows
+
+
+# Why a gene-bearing region of MEDIUM or better holds no counted call (goi_regions_without_call).
+REGION_NO_CALL_REASONS = (
+    "call_not_counted",          # a HIGH or MEDIUM model the report does not count (ownership gave
+                                 # it to another home gene, the coverage rule, or an answer of the
+                                 # genome-wide path)
+    "model_not_counted",         # only AMBIGUOUS or LOW models
+    "refused_by_synteny_gate",   # no model; the search refused the hit (rejected_by names the gate)
+    "dropped_by_rescue",         # no model; the rescue dropped the hit (rejected_by names the test)
+    "no_record",                 # no model, no record of the hit
+)
+
+
+def goi_regions_without_call(region_rows, goi_annotations, records, refused, dropped,
+                             demoted_classes, pad=20000):
+    """The gene-bearing regions (goi_overlap: within ``pad`` of a GOI model of the search, or of a
+    raw GOI hit where the search wrote no GOI model) labelled HIGH or MEDIUM, or of the class
+    goi_hit_no_call, that hold no counted call: no counted record (_is_counted, after ownership,
+    the coverage rule and the drops; of any home locus) of the same genome and sequence within
+    ``pad`` of the region. ``pad`` is cluster_grs's default --goi_padding. Each entry names the
+    best uncounted model there (``model``: a record first, else a LOW row of
+    ``goi_annotations``), the strongest record of the hit the search kept (``refused_hit``: a
+    refused hit of ``refused``, else a dropped one of ``dropped``, overlapping the region, of the
+    same genome and, when both name one, the same home locus) and the first of
+    REGION_NO_CALL_REASONS that applies. Sorted by genome, locus, sequence, start, end, name."""
+    def near(rec, row):
+        return int(rec["start"]) - 1 < row["end"] + pad and row["start"] - pad < int(rec["end"])
+
+    recs_by_gc = defaultdict(list)
+    for r in records or ():
+        recs_by_gc[(r.get("genome"), r.get("chrom"))].append(r)
+    low_by_gc = defaultdict(list)
+    for a in goi_annotations or ():
+        if a.get("confidence") == "LOW":
+            low_by_gc[(a.get("genome"), a.get("chrom"))].append(a)
+    hits_by_gc = defaultdict(list)
+    for outcome, rows in (("refused", refused), ("dropped", dropped)):
+        for h in rows or ():
+            hits_by_gc[(h.get("genome"), h.get("chrom"))].append((outcome, h))
+
+    out = []
+    for row in region_rows or ():
+        if not row.get("goi_overlap"):
+            continue
+        if row["confidence"] not in ("HIGH", "MEDIUM") and row["region_class"] != "goi_hit_no_call":
+            continue
+        key = (row["genome"], row["chrom"])
+        here = [r for r in recs_by_gc.get(key, ()) if near(r, row)]
+        if any(_is_counted(r, demoted_classes) for r in here):
+            continue
+        order = lambda m: (_record_rank(m), int(m["start"]), m.get("mrna_id", ""))  # noqa: E731
+        model = min(here, key=order) if here else None
+        if model is None:
+            lows = [a for a in low_by_gc.get(key, ()) if near(a, row)]
+            model = min(lows, key=order) if lows else None
+        hits = [(o, h) for o, h in hits_by_gc.get(key, ())
+                if h["start"] < row["end"] and row["start"] < h["end"]
+                and not (row["locus"] and h.get("locus") and h["locus"] != row["locus"])]
+        hit = (min(hits, key=lambda t: (t[0] != "refused", -(t[1].get("identity") or 0.0),
+                                        -(t[1].get("bits") or 0.0), t[1]["start"], t[1].get("query", "")))
+               if hits else None)
+        if model is not None and model.get("confidence") in ("HIGH", "MEDIUM"):
+            reason = "call_not_counted"
+        elif model is not None:
+            reason = "model_not_counted"
+        elif hit is not None:
+            reason = "refused_by_synteny_gate" if hit[0] == "refused" else "dropped_by_rescue"
+        else:
+            reason = "no_record"
+        out.append({
+            "genome": row["genome"], "locus": row["locus"], "region_name": row["region_name"],
+            "region_class": row["region_class"], "chrom": row["chrom"],
+            "start": row["start"], "end": row["end"],
+            "region_confidence": row["confidence"], "score": row["score"],
+            "goi_model_confidence": row["goi_model_confidence"],
+            "goi_hit_best_identity": row["goi_hit_best_identity"],
+            "goi_hit_best_evalue": row["goi_hit_best_evalue"],
+            "model": ({"confidence": model.get("confidence", ""), "goi_class": model.get("goi_class", ""),
+                       "mrna_id": model.get("mrna_id", ""), "start": model["start"], "end": model["end"]}
+                      if model is not None else None),
+            "refused_hit": ({"outcome": hit[0], "identity": hit[1].get("identity"),
+                             "evalue": hit[1].get("evalue", ""), "bits": hit[1].get("bits"),
+                             "rejected_by": hit[1].get("rejected_by", ""), "query": hit[1].get("query", ""),
+                             "start": hit[1]["start"], "end": hit[1]["end"]}
+                            if hit is not None else None),
+            "reason": reason,
+        })
+    out.sort(key=lambda e: (e["genome"], e["locus"], e["chrom"], e["start"], e["end"], e["region_name"]))
+    return out
 
 
 def scan_dir_by_suffix(dir_path, suffix_buckets):
@@ -727,7 +867,7 @@ def genome_absence_categories(records, target_policy, demoted_classes):
     The first is a property of the calls, the others of the search; a genome can be
     nearest_paralog_only (read on the records other than the answers) and one of the others. A
     genome with an answer is not absent and is in none of the three absent lists."""
-    counted = {r.get("genome") for r in records if _is_counted(r, demoted_classes)}
+    counted = counted_genomes(records, demoted_classes)
     answered = {}
     for r in genome_wide_answer_records(records, demoted_classes):
         answered.setdefault(r.get("genome"), r)
@@ -1564,6 +1704,11 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 # Only in a run with --report_copies_in_slot (preset plan PR-6).
                 **({"copies_in_slot": rep["copies_in_slot"], "slot_rank": rep.get("slot_rank", "")}
                    if rep.get("copies_in_slot") else {}),
+                # Only on a model of a tandem-copy lineage: the copy it was found with, and its
+                # identity, coverage and bits against the home protein.
+                **({"copy_lineage": rep["copy_lineage"], "home_identity": rep.get("home_identity", ""),
+                    "home_query_cov": rep.get("home_query_cov", ""), "home_bits": rep.get("home_bits", "")}
+                   if rep.get("copy_lineage") else {}),
                 # Only on a model the dispersed-GOI rescue alone made the search find.
                 **({"dispersed_rescue": True, "rescue_rule": rep.get("rescue_rule", ""),
                     "rescue_anchors": rep.get("rescue_anchors", ""),
@@ -1602,6 +1747,11 @@ def _is_counted(r, demoted_classes):
             and not r.get("genome_wide_strong_hit"))
 
 
+def counted_genomes(records, demoted_classes):
+    """The genomes that hold a counted call (_is_counted) among ``records``."""
+    return {r.get("genome") for r in records or () if _is_counted(r, demoted_classes)}
+
+
 def dedupe_goi_records(annotations):
     """dedupe_goi_annotations of the GOI rows, the answers of the genome-wide path
     (GOIClass=genome_wide_strong_hit) apart: they are deduped among themselves, marked
@@ -1638,7 +1788,7 @@ def drop_genome_wide_strong_hits(goi_dedup, demoted_classes):
     listed (``genome_wide_strong_hits_dropped_records``); apply_report_drops.py leaves their rows
     out of the figures. Mutates ``goi_dedup``; returns the dropped records."""
     records = goi_dedup.get("records", [])
-    counted = {r["genome"] for r in records if _is_counted(r, demoted_classes)}
+    counted = counted_genomes(records, demoted_classes)
     others = defaultdict(list)
     for r in records:
         if not r.get("genome_wide_strong_hit") and r.get("confidence") in ("HIGH", "MEDIUM", "AMBIGUOUS"):
@@ -1683,7 +1833,7 @@ def drop_gene_order_only(goi_dedup, demoted_classes):
     (``gene_order_only_dropped_records``): the per-genome GFFs and the figures drop the same
     rows (bin/apply_report_drops.py). Mutates ``goi_dedup``; returns the dropped records."""
     records = goi_dedup.get("records", [])
-    counted = {r["genome"] for r in records if _is_counted(r, demoted_classes)}
+    counted = counted_genomes(records, demoted_classes)
     dropped = [r for r in records if r.get("basis") == "gene_order_only" and r["genome"] in counted]
     keep = {id(r) for r in records} - {id(r) for r in dropped}
     goi_dedup["records"] = [r for r in records if id(r) in keep]
@@ -1696,6 +1846,80 @@ def drop_gene_order_only(goi_dedup, demoted_classes):
     goi_dedup["ambiguous_goi_deduped"] = sum(1 for r in main if r.get("confidence") == "AMBIGUOUS")
     goi_dedup["post_dedup_records"] = len(main)
     return dropped
+
+
+GOI_LOW_RECORDS_NOTE = ("LOW models: not orthology calls, counted nowhere in this report; one entry per "
+                        "distinct model over all home loci and rescue passes. basis '' = not judged "
+                        "(the strong-synteny rescue's models, rows the judge could not label).")
+
+
+def goi_low_records(goi_annotations, records, demoted_classes, ownership_rows=()):
+    """The LOW GOI models of the run, one entry per distinct model: rows of the same genome,
+    sequence, start, end and strand (one model found from several home loci or rescue passes)
+    are one entry; its representative is the row with CDS rows, else the first by (source, model
+    id), and ``provenance`` lists the sources. Each entry names the best record of ``records``
+    (the report's records after ownership, the coverage rule and the drops) on the same sequence
+    that overlaps it (``overlapping_record``, null when none), whether its genome holds a counted
+    call (``genome_has_counted_call``) and, when an ownership row (reciprocal overlap above 0.5,
+    best by bit score, then overlap) covers it, the ownership check's best panel entry, its score
+    and the gap to the second (raw Smith-Waterman scores). No count, flag or label reads them."""
+    groups = defaultdict(list)
+    for a in goi_annotations or ():
+        if a.get("confidence") == "LOW":
+            groups[(a["genome"], a["chrom"], a["start"], a["end"], a.get("strand", ""))].append(a)
+    counted = counted_genomes(records, demoted_classes)
+    recs_by_gc = defaultdict(list)
+    for r in records or ():
+        recs_by_gc[(r.get("genome"), r.get("chrom"))].append(r)
+    own_by_gc = defaultdict(list)
+    for row in ownership_rows or ():
+        own_by_gc[(canonical_genome_id(row.get("genome", "")), row.get("chrom", ""))].append(row)
+    out = []
+    for key in sorted(groups):
+        genome, chrom, start, end, strand = key
+        members = groups[key]
+        rep = min(members, key=lambda a: (0 if a.get("cds") else 1, a.get("source", ""), a.get("mrna_id", "")))
+        sources = sorted({m.get("source", "") for m in members})
+        over = [r for r in recs_by_gc.get((genome, chrom), ())
+                if int(r["start"]) <= end and start <= int(r["end"])]
+        best = min(over, key=lambda r: (_record_rank(r), int(r["start"]), r.get("mrna_id", ""))) if over else None
+        entry = {
+            "genome": genome, "chrom": chrom, "start": start, "end": end, "strand": strand,
+            "confidence": "LOW",
+            "basis": rep.get("basis", ""),
+            "eeff": rep.get("eeff", ""),
+            "place": rep.get("place", ""),
+            "block_esyn": rep.get("block_esyn", ""),
+            "bits": rep.get("bits", ""),
+            "identity": rep.get("identity", ""),
+            "query_cov": rep.get("query_cov", ""),
+            **({"core_cov": rep["core_cov"]} if rep.get("core_cov") else {}),
+            "evidence": rep.get("evidence", ""),
+            "goi_class": rep.get("goi_class", ""),
+            "model_status": rep.get("model_status", ""),
+            "mrna_id": rep.get("mrna_id", ""),
+            "cds": [[cs, ce] for cs, ce in sorted(rep.get("cds") or ())],
+            "provenance": sources,
+            "n_source_loci": len(sources),
+            "target_gene": rep.get("target_gene", ""),
+            "overlapping_record": ({"confidence": best.get("confidence", ""), "goi_class": best.get("goi_class", ""),
+                                    "start": best["start"], "end": best["end"],
+                                    "counted": _is_counted(best, demoted_classes)}
+                                   if best is not None else None),
+            "genome_has_counted_call": genome in counted,
+        }
+        scored = []
+        for row in own_by_gc.get((genome, chrom), ()):
+            ov = _reciprocal_overlap({"start": start, "end": end}, {"start": row["start_i"], "end": row["end_i"]})
+            if ov > 0.5:
+                scored.append((row["best_bit_f"], ov, row))
+        if scored:
+            row = max(scored, key=lambda t: (t[0], t[1]))[2]
+            entry["ownership_best_paralog"] = row.get("best_paralog", "")
+            entry["ownership_bit"] = row["best_bit_f"]
+            entry["ownership_gap"] = row["gap_f"]
+        out.append(entry)
+    return {"note": GOI_LOW_RECORDS_NOTE, "count": len(out), "records": out}
 
 
 def _panel_scores(field):
@@ -1858,28 +2082,41 @@ def count_home_loci(gff_files):
     return len(tags)
 
 
-def build_gene_family_advisory(goi_class_counts, n_home_loci=0,
-                               family_ratio=0.4, family_min_ambiguous=5,
-                               family_min_loci=3):
-    """Detect a gene-family / multi-paralog query and advise honest interpretation
-    (docs/TODO.md §1.1). Purely data-driven from signals the report already has —
-    no search-side change. SynVoy is validated for divergent LOW-COPY genes via
-    conserved flanking synteny; inside a large paralog family ortholog-vs-paralog
-    assignment is unreliable, so we say so instead of asserting the GOI name.
+def explained_by_other_home_gene(rec):
+    """A record that another home gene explains at least as well: the paralog check gave it to
+    another home gene (``paralog_not_goi``), or the judge found another home protein within the
+    specificity margin (AMBIGUOUS, Basis=not_specific)."""
+    return (rec.get("goi_class") == "paralog_not_goi"
+            or (rec.get("confidence") == "AMBIGUOUS" and rec.get("basis") == "not_specific"))
 
-    Triggers (either):
-      - a large share of GOI calls are ``ambiguous_goi_family_member`` (the class the
-        classifier already uses for "this is in the family but I can't pin the ortholog"), or
+
+def build_gene_family_advisory(records, n_home_loci=0,
+                               family_ratio=0.4, family_min_records=5,
+                               family_min_loci=3):
+    """Detect a gene-family / multi-paralog query and advise honest interpretation.
+    Purely data-driven from signals the report already has — no search-side change.
+    SynVoy is validated for divergent LOW-COPY genes via conserved flanking synteny; inside
+    a large paralog family ortholog-vs-paralog assignment is unreliable, so we say so
+    instead of asserting the GOI name.
+
+    ``records``: the GOI records after the dedup, ownership, the coverage rule and the drops
+    (the answers of the genome-wide path are left out). Triggers (either):
+      - at least ``family_min_records`` records, and at least ``family_ratio`` of them, are
+        explained by another home gene at least as well (explained_by_other_home_gene: the
+        paralog check, or specificity), or
       - the query fanned out to many home loci (paralog cluster in the home genome).
+    LOW rows are no records and do not count: a LOW model is a hit without a significant
+    match, which says nothing about a family.
     """
-    counts = goi_class_counts or {}
-    ambiguous = counts.get("ambiguous_goi_family_member", 0)
-    total = sum(counts.values())
+    recs = [r for r in records or () if not r.get("genome_wide_strong_hit")]
+    other = sum(1 for r in recs if explained_by_other_home_gene(r))
+    total = len(recs)
     reasons = []
-    if total and ambiguous >= family_min_ambiguous and ambiguous >= family_ratio * total:
-        pct = round(100 * ambiguous / total)
+    if total and other >= family_min_records and other >= family_ratio * total:
+        pct = round(100 * other / total)
         reasons.append(
-            f"{ambiguous}/{total} GOI calls ({pct}%) are ambiguous family members")
+            f"{other} of {total} GOI records ({pct}%) are explained by another home gene at "
+            "least as well (paralog check or specificity)")
     if n_home_loci >= family_min_loci:
         reasons.append(f"the query resolved to {n_home_loci} home loci (paralog cluster)")
     is_family = bool(reasons)
@@ -2568,9 +2805,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     })
     scores_scan = scan_dir_by_suffix(scores_dir, {"scores": (".scores.tsv",)})
     # The search's per-genome tables ride along in hits/, so they need no channel of their
-    # own; generate_report.nf stages each by name (every suffix below but .m8).
+    # own; generate_report.nf stages each by name (the raw search hits are not staged).
     hits_scan = scan_dir_by_suffix(
-        hits_dir, {"hits": (".m8",), "nonsyntenic": (NONSYNTENIC_SUFFIX,),
+        hits_dir, {"nonsyntenic": (NONSYNTENIC_SUFFIX,),
                    "not_searched": (NOT_SEARCHED_SUFFIX,),
                    "target_policy": (TARGET_POLICY_SUFFIX,),
                    "genome_wide": (GENOME_WIDE_SUFFIX,)})
@@ -2579,7 +2816,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     fasta_files = regions_scan["fasta"]
     gff_files = regions_scan["gff"]
     score_files = scores_scan["scores"]
-    hit_files = hits_scan["hits"]
     nonsyntenic_files = hits_scan["nonsyntenic"]
     nonsyntenic_dropped = []
     nonsyntenic_records, nonsyntenic_by_genome = collect_nonsyntenic_candidates(
@@ -2591,18 +2827,15 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "regions_fasta": (regions_dir, ["*.faa", "*.fna"]),
             "regions_gff": (regions_dir, ["*.gff", "*.gff3"]),
             "scores": (scores_dir, ["*.scores.tsv"]),
-            "hits": (hits_dir, ["*.m8"]),
         },
         match_counts={
             "fasta_files": len(fasta_files),
             "gff_files": len(gff_files),
             "score_files": len(score_files),
-            "hit_files": len(hit_files),
         },
     )
 
     genes_added_per_genome = summarize_fasta_outputs(fasta_files)
-    hits_per_genome = summarize_hits(hit_files)
     # One read-pass over every GFF instead of three (docs/TODO.md §1c). The three
     # public functions (summarize_annotations / collect_goi_annotations /
     # collect_high_flanking_per_locus) still work for tests + external callers; they
@@ -2610,7 +2843,7 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     annotation_summary, goi_annotations, flanking_per_locus = _process_gffs_unified(gff_files)
     region_summary = summarize_region_scores(score_files)
 
-    downstream_genomes = set(genes_added_per_genome) | set(hits_per_genome)
+    downstream_genomes = set(genes_added_per_genome)
     downstream_genomes |= {row["genome"] for row in annotation_summary["per_genome"]}
     downstream_genomes |= {row["genome"] for row in region_summary["per_genome"]}
 
@@ -2620,10 +2853,8 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         if genome in downstream_genomes:
             failed_downstream.append(genome)
 
-    # GOI ortholog headline metrics — what a user actually wants to read. The historical
-    # total_hits/genomes_with_hits counted raw .m8 search hits staged under hits/, which is
-    # frequently 0 even on successful runs (annotations come from the region GFFs, not the
-    # m8 staging) and was being misread as "the run found nothing". See docs/TODO.md §1k.
+    # GOI ortholog headline metrics, from the GOI models of the region GFFs (one row per
+    # model). The raw search hits do not reach the report.
     goi_conf = annotation_summary.get("goi_confidence_counts", {})
     goi_high = goi_conf.get("HIGH", 0)
     goi_medium = goi_conf.get("MEDIUM", 0)
@@ -2714,6 +2945,13 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     dedup_high_pre_ownership, dedup_medium_pre_ownership = dedup_high, dedup_medium
     _own_recs = goi_dedup.get("records", [])
     _counted_recs = [r for r in _own_recs if _is_counted(r, _DEMOTED_CLASSES)]
+    # The LOW models, listed apart (never counted): one entry per distinct model.
+    low_block = goi_low_records(goi_annotations, _own_recs, _DEMOTED_CLASSES, ownership_rows)
+    # Gene-bearing regions of MEDIUM or better (and goi_hit_no_call regions) without a counted
+    # call, with what they hold and why.
+    region_summary["goi_regions_without_call"] = goi_regions_without_call(
+        collect_region_rows(score_files), goi_annotations, _own_recs, nonsyntenic_records,
+        nonsyntenic_dropped, _DEMOTED_CLASSES)
     dedup_high = sum(1 for r in _counted_recs if r.get("confidence") == "HIGH")
     dedup_medium = sum(1 for r in _counted_recs if r.get("confidence") == "MEDIUM")
     # The answers of the genome-wide path the report keeps (a reading of their own, never
@@ -2760,11 +2998,12 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         core_completeness=core_completeness,
     )
 
-    # §1.1 honesty: detect a gene-family / multi-paralog query and advise treating GOI
-    # calls as candidates (SynVoy is validated for divergent low-copy genes, not large
-    # paralog families). Report-only, driven by the ambiguous-call share + home-locus count.
+    # Detect a gene-family / multi-paralog query and advise treating GOI calls as
+    # candidates (SynVoy is validated for divergent low-copy genes, not large paralog
+    # families). Report-only, driven by the share of records another home gene explains as
+    # well and by the home-locus count.
     gene_family_advisory = build_gene_family_advisory(
-        annotation_summary.get("goi_class_counts", {}),
+        goi_dedup.get("records", []),
         n_home_loci=count_home_loci(gff_files),
     )
 
@@ -2815,11 +3054,12 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
         "gene_family_advisory": gene_family_advisory,
         "synteny_results": {
             "genes_discovered": genes_added_per_genome,
-            "synteny_hits_count": hits_per_genome,
         },
         "annotations": annotation_summary,
         "regions": region_summary,
         "goi_dedup": goi_dedup,
+        # The LOW models (not orthology calls, counted nowhere), one entry per distinct model.
+        "goi_low_records": low_block,
         # §1x — the run's known false negatives: strong GOI hits it refused on synteny
         # grounds and used to discard in silence.
         "rejected_candidates": nonsyntenic_block,
@@ -2889,15 +3129,22 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "gene_family_query": gene_family_advisory["is_gene_family_query"],
             "low_confidence_goi": goi_low,
             "confident_goi_annotations": confident_goi,
+            # Class-based, deprecated (kept for this release): GOI rows of every class but the
+            # LOW class ambiguous_goi_family_member, counted before the dedup and ownership.
             "resolved_goi_annotations": resolved_goi,
             "genomes_with_goi_annotations": genomes_with_goi,
             "total_new_genes": sum(genes_added_per_genome.values()),
             "genomes_with_annotations": len(annotation_summary["per_genome"]),
             "total_annotations": annotation_summary["total_annotations"],
             "total_goi_annotations": annotation_summary["role_counts"].get("goi", 0),
+            # Class-based, deprecated (kept for this release): the rows of the LOW class
+            # ambiguous_goi_family_member; low_confidence_goi counts LOW rows by label.
             "ambiguous_goi_annotations": annotation_summary["goi_class_counts"].get("ambiguous_goi_family_member", 0),
             "fallback_goi_annotations": annotation_summary["fallback_goi_annotations"],
             "low_confidence_regions": region_summary["confidence_counts"].get("LOW", 0),
+            # Gene-bearing regions of MEDIUM or better without a counted call
+            # (regions.goi_regions_without_call, with the reason for each).
+            "goi_regions_without_call": len(region_summary["goi_regions_without_call"]),
             # §1x: "we found nothing" and "we found something and could not place it"
             # are opposite claims. goi_absent_genomes is now the former ONLY; a genome
             # holding a strong-but-unplaceable hit moves to goi_found_but_not_syntenic.
@@ -2909,13 +3156,14 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
                 g for g in annotation_summary["genomes_without_goi"]
                 if g not in nonsyntenic_by_genome
                 and g not in {r["genome"] for r in _answers}),
-            # A refused place that a counted call of the run overlaps (another home locus's,
-            # a rescue pass's) is modelled: only genomes with a place no counted call covers.
-            # A genome holding a kept answer of the genome-wide path is in the strong_hit lists.
+            # Genomes without a counted call (records after ownership, the coverage rule and
+            # the drops above) that hold a refused place no counted call of the run overlaps
+            # (another home locus's, a rescue pass's). Such a genome may hold LOW or AMBIGUOUS
+            # models, or a call ownership gave to another home gene. A genome holding a kept
+            # answer of the genome-wide path is in the strong_hit lists.
             "goi_found_but_not_syntenic": sorted(
-                set(nonsyntenic_block["unmodelled_genomes"]) - {
-                    row["genome"] for row in annotation_summary["per_genome"]
-                    if row.get("goi_annotations", 0) > 0} - {r["genome"] for r in _answers}),
+                set(nonsyntenic_block["unmodelled_genomes"])
+                - counted_genomes(_own_recs, _DEMOTED_CLASSES) - {r["genome"] for r in _answers}),
             "nonsyntenic_candidate_count": nonsyntenic_block["total"],
             "nonsyntenic_place_count": nonsyntenic_block["place_count"],
             "nonsyntenic_unmodelled_place_count": nonsyntenic_block["unmodelled_place_count"],
@@ -2928,6 +3176,9 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             # significant (RefusalLifted; they never seed and never reach the tree).
             "counted_fragment_calls": sum(1 for r in _counted_recs if r.get("model_status") == "fragment"),
             "refusal_lifted_calls": sum(1 for r in _counted_recs if r.get("refusal_lifted")),
+            # Counted calls of a tandem-copy lineage (record field copy_lineage): their identity
+            # and coverage refer to the copy; home_identity / home_query_cov to the home protein.
+            "counted_copy_lineage_calls": sum(1 for r in _counted_recs if r.get("copy_lineage")),
             "genomes_without_flanking_hits": no_flanking_genomes,
             # Genomes the search skipped (e.g. MMseqs resource failure): no result at all.
             "genomes_not_searched": {g: r for g, r in sorted(not_searched.items())},
@@ -2942,16 +3193,13 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "strong_hit_near_block": absence["strong_hit_near_block"],
             "nearest_paralog_only": absence["nearest_paralog_only"],
             "nearest_paralog_only_genomes": len(absence["nearest_paralog_only"]),
+            # Class-based count of the LOW class (deprecated; kept for this release):
+            # goi_low_only_genomes is the same reading by label.
             "goi_ambiguous_only_genomes": annotation_summary["genomes_with_only_ambiguous_goi"],
+            "goi_low_only_genomes": annotation_summary["genomes_with_only_low_goi"],
             "failed_qc_genomes_with_downstream_results": sorted(set(failed_downstream)),
             "low_quality_genomes_searched": low_quality_ids,
             "staging_empty": staging_diagnostics["empty"],
-            # --- Low-level diagnostic (NOT the result count) ---
-            # Raw MMseqs/BLAST .m8 hits staged under hits/; often 0 even when annotations
-            # were produced. Renamed from total_hits/genomes_with_hits so it stops reading
-            # as "the run found nothing" (docs/TODO.md §1k).
-            "total_raw_search_hits": sum(hits_per_genome.values()),
-            "genomes_with_raw_search_hits": len(hits_per_genome),
         },
     }
     # Decoy mode (the low_complexity module or --decoy_mode): the run's decoy rate.

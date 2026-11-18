@@ -136,7 +136,9 @@ class TestMultiLocusStagingDiagnostics(unittest.TestCase):
         self.assertEqual(diag["match_counts"]["gff_files"], 9)
         self.assertEqual(diag["match_counts"]["score_files"], 9)
         self.assertEqual(diag["match_counts"]["fasta_files"], 3)
-        self.assertEqual(diag["match_counts"]["hit_files"], 3)
+        # The raw search hits are not read: no hit count in the diagnostics.
+        self.assertNotIn("hit_files", diag["match_counts"])
+        self.assertNotIn("hits", diag["dirs"])
         self.assertTrue(diag["dirs"]["regions_gff"]["exists"])
         self.assertGreaterEqual(diag["dirs"]["regions_gff"]["entry_count"], 9)
         self.assertGreater(len(diag["dirs"]["regions_gff"]["sample_matches"]), 0)
@@ -167,13 +169,15 @@ class TestMultiLocusStagingDiagnostics(unittest.TestCase):
                 )
         # Deliberately write NO hits/*.m8 — this is the §1k scenario.
 
-        summary = build_report(self.test_dir)["summary"]
+        report = build_report(self.test_dir)
+        summary = report["summary"]
+        self.assertEqual(set(report["synteny_results"]), {"genes_discovered"})
 
-        # The misleading raw-hit keys are gone, renamed to be unambiguous.
+        # No raw-hit count: the raw search hits do not reach the report.
         self.assertNotIn("total_hits", summary)
         self.assertNotIn("genomes_with_hits", summary)
-        self.assertEqual(summary["total_raw_search_hits"], 0)
-        self.assertEqual(summary["genomes_with_raw_search_hits"], 0)
+        self.assertNotIn("total_raw_search_hits", summary)
+        self.assertNotIn("genomes_with_raw_search_hits", summary)
 
         # The headline reflects the actual GOI yield, not the empty m8 staging.
         self.assertGreater(summary["high_confidence_goi"], 0)

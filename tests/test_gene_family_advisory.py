@@ -1,4 +1,4 @@
-"""Tests for the §1.1 gene-family detect-and-warn advisory in generate_report.
+"""Tests for the gene-family detect-and-warn advisory in generate_report.
 
 SynVoy is validated for divergent LOW-COPY genes via conserved flanking synteny; it is
 not a general ortholog finder for large paralog families. The advisory says so honestly
@@ -14,49 +14,66 @@ gr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gr)
 
 
+def _rec(confidence="HIGH", goi_class="confident_goi", basis="significant_specific", **kw):
+    return {"genome": kw.pop("genome", "G1"), "chrom": "c1", "start": 1, "end": 2,
+            "confidence": confidence, "goi_class": goi_class, "basis": basis, **kw}
+
+
 def test_single_copy_query_does_not_fire():
-    adv = gr.build_gene_family_advisory(
-        {"confident_goi": 1, "probable_goi": 3}, n_home_loci=1)
+    adv = gr.build_gene_family_advisory([_rec(), _rec("MEDIUM", "probable_goi")] * 2, n_home_loci=1)
     assert adv["is_gene_family_query"] is False
     assert adv["reasons"] == []
     assert adv["advice"] == ""
 
 
-def test_low_copy_toxin_with_some_ambiguous_does_not_fire():
-    # Melittin-like: 1 home locus, ambiguous share below the ratio floor → NOT a family.
-    counts = {"probable_goi": 11, "tandem_goi_copy": 47,
-              "ambiguous_goi_family_member": 29, "confident_goi": 1}
-    adv = gr.build_gene_family_advisory(counts, n_home_loci=1)
-    assert adv["is_gene_family_query"] is False
-
-
 def test_many_home_loci_fires():
     # Decorin/SLRP-like: query fanned out to a paralog cluster of home loci.
-    adv = gr.build_gene_family_advisory(
-        {"confident_goi": 1, "probable_goi": 4}, n_home_loci=5)
+    adv = gr.build_gene_family_advisory([_rec(), _rec("MEDIUM", "probable_goi")], n_home_loci=5)
     assert adv["is_gene_family_query"] is True
     assert any("home loci" in r for r in adv["reasons"])
     assert "candidates" in adv["advice"].lower()
 
 
-def test_high_ambiguous_share_fires():
-    counts = {"ambiguous_goi_family_member": 29, "probable_goi": 5, "confident_goi": 1}
-    adv = gr.build_gene_family_advisory(counts, n_home_loci=1)
+def test_records_another_home_gene_explains_fire():
+    """5 of 10 records given to another home gene (paralog check): the family trigger fires,
+    with the reason in records."""
+    recs = [_rec(goi_class="paralog_not_goi") for _ in range(5)] + [_rec() for _ in range(5)]
+    adv = gr.build_gene_family_advisory(recs, n_home_loci=1)
     assert adv["is_gene_family_query"] is True
-    assert any("ambiguous" in r for r in adv["reasons"])
+    assert adv["reasons"] == ["5 of 10 GOI records (50%) are explained by another home gene at least as "
+                              "well (paralog check or specificity)"]
 
 
-def test_ratio_needs_both_floor_and_share():
-    # 4 ambiguous of 5 total = 80% share but below the absolute floor (5) → no fire,
-    # so a tiny run with one stray ambiguous call isn't mislabeled a family query.
-    adv = gr.build_gene_family_advisory(
-        {"ambiguous_goi_family_member": 4, "confident_goi": 1}, n_home_loci=1)
+def test_the_floor_of_five_records():
+    # 4 of 5 = 80 % but below the absolute floor (5): a small run is no family query.
+    recs = [_rec(goi_class="paralog_not_goi") for _ in range(4)] + [_rec()]
+    assert gr.build_gene_family_advisory(recs, n_home_loci=1)["is_gene_family_query"] is False
+
+
+def test_the_share_of_forty_percent():
+    recs = [_rec(goi_class="paralog_not_goi") for _ in range(5)] + [_rec() for _ in range(8)]
+    assert gr.build_gene_family_advisory(recs, n_home_loci=1)["is_gene_family_query"] is False
+
+
+def test_not_specific_counts_gene_order_only_does_not():
+    not_specific = [_rec("AMBIGUOUS", "syntenic_candidate_unconfirmed", "not_specific") for _ in range(5)]
+    adv = gr.build_gene_family_advisory(not_specific, n_home_loci=1)
+    assert adv["is_gene_family_query"] is True
+    gene_order = [_rec("AMBIGUOUS", "syntenic_candidate_unconfirmed", "gene_order_only") for _ in range(5)]
+    assert gr.build_gene_family_advisory(gene_order, n_home_loci=1)["is_gene_family_query"] is False
+
+
+def test_answers_of_the_genome_wide_path_are_left_out():
+    recs = [_rec(goi_class="paralog_not_goi") for _ in range(5)]
+    recs += [_rec("MEDIUM", "genome_wide_strong_hit", genome_wide_strong_hit=True) for _ in range(20)]
+    adv = gr.build_gene_family_advisory(recs, n_home_loci=1)
+    assert adv["reasons"][0].startswith("5 of 5 GOI records")
+
+
+def test_empty_records_safe():
+    adv = gr.build_gene_family_advisory([], n_home_loci=0)
     assert adv["is_gene_family_query"] is False
-
-
-def test_empty_counts_safe():
-    adv = gr.build_gene_family_advisory({}, n_home_loci=0)
-    assert adv["is_gene_family_query"] is False
+    assert gr.build_gene_family_advisory(None)["is_gene_family_query"] is False
 
 
 def _staged_region(path, genome, chroms, goi=True):
@@ -95,3 +112,24 @@ def test_count_home_loci_reads_only_locus_tags():
              "G3.fna.gff", "7__G4.fna.gff"]
     assert gr.count_home_loci(files) == 2
     assert gr.count_home_loci([]) == 0
+
+
+def test_low_rows_of_a_single_copy_query_do_not_fire(tmp_path):
+    """Six LOW rows and one HIGH call of a one-locus query: the old trigger counted the LOW class
+    ambiguous_goi_family_member and fired ("6/7 GOI calls ... are ambiguous family members")."""
+    for d in ("regions", "hits", "scores"):
+        (tmp_path / d).mkdir()
+    rows = ["##gff-version 3"]
+    for k in range(6):
+        rows.append("\t".join(["c1", "x", "mRNA", str(10000 + 1000 * k), str(10500 + 1000 * k), "30", "+", ".",
+                               f"ID=GOI_q|G1_b0_l1_m{k};SynVoy_Parent=GOI_q;SynVoyRole=goi;Confidence=LOW;"
+                               "GOIClass=ambiguous_goi_family_member;EvidenceType=fallback_hit_span;Identity=30;"
+                               "Basis=not_significant"]))
+    rows.append("\t".join(["c1", "x", "mRNA", "5000", "6000", "90", "+", ".",
+                           "ID=GOI_q|G1_b0_l1_exon_ann;SynVoy_Parent=GOI_q;SynVoyRole=goi;Confidence=HIGH;"
+                           "GOIClass=confident_goi;EvidenceType=exon_annotation;Identity=90;QueryCoverage=0.95"]))
+    (tmp_path / "regions" / "locus_1__G1.fna.gff").write_text("\n".join(rows) + "\n")
+    report = gr.build_report(str(tmp_path))
+    assert report["gene_family_advisory"]["is_gene_family_query"] is False
+    assert report["summary"]["gene_family_query"] is False
+    assert report["summary"]["low_confidence_goi"] == 6

@@ -164,92 +164,11 @@ run_paralog() {
 }
 
 parse_calls() {
-    # Parse a results dir into benchmark_results/<tool>/calls.tsv using the
-    # same logic as scripts/benchmark/run_synvoy.sh (the melittin runner).
+    # Parse a results dir into benchmark_results/<tool>/calls.tsv from the report's records
+    # (scripts/benchmark/synvoy_calls.py, as scripts/benchmark/run_synvoy.sh does).
     local results_dir="$1"
     local calls_path="$2"
-    mkdir -p "$(dirname "${calls_path}")"
-    python3 - "${results_dir}" "${calls_path}" <<'PY'
-import json, re, sys
-from pathlib import Path
-
-results_dir = Path(sys.argv[1])
-calls_path = Path(sys.argv[2])
-
-report = None
-for cand in (results_dir / "synvoy_report.json",
-             results_dir / "logs" / "GENERATE_REPORT__synvoy_report.json"):
-    if cand.is_file():
-        report = json.loads(cand.read_text())
-        break
-if report is None:
-    print(f"WARNING: synvoy_report.json not found under {results_dir}", file=sys.stderr)
-    report = {}
-
-def canon(name):
-    return re.sub(r"\.f(n)?a(\.gz)?$", "", name)
-
-ann_per = {canon(e["genome"]): e for e in (report.get("annotations", {}).get("per_genome") or [])}
-reg_per = {canon(e["genome"]): e for e in (report.get("regions", {}).get("per_genome") or [])}
-
-top_region = {}
-regions_dir = results_dir / "regions"
-if regions_dir.exists():
-    for bed in regions_dir.glob("*.regions.bed"):
-        sp = re.sub(r"\.f(n)?a(\.gz)?\.regions\.bed$", "", bed.name)
-        best = None
-        for line in bed.read_text().splitlines():
-            fields = line.split("\t")
-            if len(fields) < 6:
-                continue
-            chrom, start, end, name, score, strand = fields[:6]
-            m = re.search(r"_C([A-Z]+)_S([0-9.]+)", name)
-            conf = m.group(1) if m else "?"
-            sc = float(m.group(2)) if m else float(score or 0)
-            rank = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}.get(conf, 0)
-            if best is None or (rank, sc) > (best[5], best[6]):
-                best = (chrom, start, end, strand, conf, rank, sc)
-        if best:
-            top_region[sp] = best
-
-species_seen = set(ann_per) | set(reg_per) | set(top_region)
-lines = ["species\taccession\tcalled_status\tlocus_chrom\tlocus_start\tlocus_end\tstrand\tconfidence\textra"]
-for sp in sorted(species_seen):
-    a = ann_per.get(sp, {})
-    r = reg_per.get(sp, {})
-    tr = top_region.get(sp)
-    resolved = a.get("resolved_goi_annotations", 0)
-    ambiguous = a.get("ambiguous_goi_annotations", 0)
-    total = a.get("goi_annotations", 0)
-    hm = (r.get("confidence_counts", {}).get("HIGH", 0) +
-          r.get("confidence_counts", {}).get("MEDIUM", 0))
-    score = (tr[6] if tr else 0.0)
-    conf = (tr[4] if tr else "-")
-    has_hm = (conf in ("HIGH", "MEDIUM")) or hm >= 1
-    if resolved >= 1 and has_hm and score >= 0.30:
-        status = "PRESENT"
-    elif resolved >= 1 or ambiguous >= 1 or total >= 1:
-        status = "AMBIGUOUS"
-    else:
-        status = "ABSENT"
-    if tr:
-        chrom, start, end, strand, conf_label, _, score = tr
-    else:
-        chrom = start = end = strand = "-"
-        conf_label = "-"
-        score = 0.0
-    extra = []
-    if a:
-        extra += [f"goi={total}", f"resolved={resolved}"]
-        if ambiguous: extra.append(f"ambig={ambiguous}")
-    if r:
-        extra.append(f"regs={r.get('total_regions', 0)}")
-        if score: extra.append(f"best_score={score:.2f}")
-    lines.append(f"{sp}\t-\t{status}\t{chrom}\t{start}\t{end}\t{strand}\t{conf_label}\t{';'.join(extra) or '-'}")
-
-calls_path.write_text("\n".join(lines) + "\n")
-print(f"wrote {calls_path}")
-PY
+    python3 scripts/benchmark/synvoy_calls.py "${results_dir}" "${calls_path}"
 }
 
 score_runs() {

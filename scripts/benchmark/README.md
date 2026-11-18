@@ -101,6 +101,17 @@ columns (TSV, header required):
 `score_benchmark.py` joins these against `melittin_orthologs.tsv` and emits
 TP/FP/FN/TN per tool and per phylogenetic tier.
 
+SynVoy's `calls.tsv` is written by `synvoy_calls.py` (called by `run_synvoy.sh` and
+`run_tp53.sh`) from the report's records (`goi_dedup.records`). `PRESENT`: a record labelled
+HIGH or MEDIUM that the report counts (its `goi_class` is not `paralog_not_goi` or
+`identity_coverage_decoupled`, and it is no answer of the genome-wide path). `AMBIGUOUS`: else a
+record labelled AMBIGUOUS that needs curation (not `paralog_not_goi`). `ABSENT`: neither. LOW
+models (class `ambiguous_goi_family_member`) and regions set no status. The locus is the first
+such record's span, 1-based; `extra` gives the counts and the top region for information. A
+`calls.tsv` written before 16 November 2026 read the per-genome class counts and the region names
+(LOW rows gave `AMBIGUOUS`, uncounted rows and region labels gave `PRESENT`, and the locus was the
+top region's 0-based start), so it is not comparable with one written now.
+
 ## Running the full benchmark
 
 ```bash

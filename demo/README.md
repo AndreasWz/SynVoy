@@ -68,8 +68,7 @@ the launcher stops rather than search without Smith-Waterman.
    rows = species, columns = genes, and the STE2 column filled across all four.
 2. `results/demo_ste2/synvoy_report.json`: read `summary.headline` and the records
    under `goi_dedup.records`; `target_gene` names the gene of the target's own
-   annotation that each call lies on. Do not read `total_raw_search_hits`: it is always
-   0 in this version, because the report does not receive the raw search hits.
+   annotation that each call lies on.
 3. If the search bridged a gap between flanking genes in some genome, its log says so:
    `grep -r "collinearity: bridged" results/demo_ste2/logs/`. That is the
    gap-bridging slide happening live.

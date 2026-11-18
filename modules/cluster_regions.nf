@@ -61,6 +61,8 @@ process CLUSTER_REGIONS {
         --adaptive_max_regions ${settings.adaptive_max_regions} \\
         --adaptive_unique_gene_floor ${settings.adaptive_unique_gene_floor} \\
         --strong_synteny_min_flanking ${FlankingCounts.value(params, 'strong_synteny_min_flanking')} \\
+        --distant_synteny_min_identity ${params.dispersed_goi_min_identity} \\
+        --distant_synteny_max_evalue ${params.dispersed_goi_max_evalue} \\
         ${distant_rescue_arg} \\
         ${legacy_strand_arg} \\
         ${species_arg}

@@ -1299,8 +1299,10 @@ hit at a place where no gene model lies (`EvidenceType=tandem_copy`).
   parent is the query it was found with. Once it seeds, `GOI_copy_<n>` is a gene of interest of its
   own in the later waves: the models it finds are judged against the copy, not against the home
   protein, and their identity and coverage (in the GFF, the report and the figures) are to the
-  copy. The anchor grid's legend text says how many such models it draws with a number, and its
-  source table names the reference of every value (`identity_to`).
+  copy. Such a model also carries its identity, coverage and bits against the home protein
+  (`HomeIdentity`, `HomeQueryCoverage`, `HomeBits`; the report's `copy_lineage` and `home_*`
+  fields), which no label reads. The anchor grid's legend text says how many such models it draws
+  with a number, and its source table names the reference of every value (`identity_to`).
 - `home`: the copy is recorded under the home gene (`<parent>|<genome>_b<block>_l<locus>_tc<n>`),
   so it can become that gene's relative query, and every model it finds is reported and judged
   against the home protein.
@@ -1450,19 +1452,20 @@ so the region's permutation p-value tests `synteny_score` without it; the region
 
 The label of a region (`confidence` in the region table, `C<label>` in the region names): HIGH from
 this score, MEDIUM from half of it, LOW below; a strong-synteny region without a GOI model
-(`goi_missing_but_strong_synteny`) and a distant-macrosynteny region (`goi_dispersed_macrosynteny`)
-are at least MEDIUM. It decides no search, no rescue and no call.
+(`goi_missing_but_strong_synteny`) and a distant-macrosynteny region where the search modelled the
+gene as HIGH or MEDIUM (`goi_dispersed_macrosynteny`) are at least MEDIUM. It decides no search, no
+rescue and no call: a region's label rates the neighbourhood, and the report lists the gene-bearing
+regions of MEDIUM or better that hold no counted call (`regions.goi_regions_without_call`).
 
 ### `max_regions`
 **Default:** `0` (the adaptive selection)
 
 How many candidate regions the scorer keeps per genome and home locus. The regions are ordered with
 those near such a GOI model or GOI hit first ([`synteny_goi_overlap_bonus`](#synteny_goi_overlap_bonus)),
-then by the flanking support of the search block, then by score. With `0` they are kept from the
-top while their score reaches max(`adaptive_score_floor_abs`, the score of the first region ×
-`adaptive_score_floor_frac`) or they hold at least
-`adaptive_unique_gene_floor` distinct flanking genes, at least one and at most
-`adaptive_max_regions`. A number N keeps the first N. Either way, up to two strong-synteny regions
+then by the flanking support of the search block, then by score. With `0` every region in this order
+whose score reaches max(`adaptive_score_floor_abs`, the best score of all regions ×
+`adaptive_score_floor_frac`), or that holds at least `adaptive_unique_gene_floor` distinct flanking
+genes, is kept, at most `adaptive_max_regions`; when none does, the first is kept. A number N keeps the first N. Either way, up to two strong-synteny regions
 without a GOI model are added beyond the cap ([`strong_synteny_min_flanking`](#strong_synteny_min_flanking)).
 
 ### `adaptive_score_floor_frac` / `adaptive_score_floor_abs` / `adaptive_max_regions` / `adaptive_unique_gene_floor`
@@ -1491,12 +1494,16 @@ The report gives the value a run used (`self_consistency.thresholds.strong_flank
 ### `disable_distant_synteny_rescue`
 **Default:** `false`
 
-A region that overlaps a GOI model but holds at most one flanking gene scores low. When its GOI hit
-is strong (identity of at least 40 % and E ≤ 1e-10), a flanking gene lies on the same scaffold, and
-the genome is visibly rearranged (rearrangement score of at least 0.5,
-[ALGORITHM.md § 8](ALGORITHM.md#8-region-scores)), the region gets a score of at least 0.45 and the
-class `goi_dispersed_macrosynteny` instead. These numbers are fixed. A region with strong flanking
-support never takes this route. `true` switches it off. It changes regions only, not calls.
+A gene-bearing region that holds at most one flanking gene scores low. When its GOI hit reaches the
+dispersed-GOI rescue's bar ([`dispersed_goi_min_identity` / `dispersed_goi_max_evalue`](#dispersed_goi_min_identity--dispersed_goi_max_evalue--dispersed_goi_min_alnlen--dispersed_min_chrom_anchors),
+40 % and 1e-10), a flanking gene lies on the same scaffold, and the genome is visibly rearranged
+(rearrangement score of at least 0.5, [ALGORITHM.md § 8](ALGORITHM.md#8-region-scores)), the region
+gets a score of at least 0.45. Its class says what the search made of the gene there:
+`goi_dispersed_macrosynteny` where it modelled it as HIGH or MEDIUM (the region is then at least
+MEDIUM), `goi_hit_no_call` where it did not (no model, an AMBIGUOUS or LOW one, or an answer of the
+genome-wide path; the label comes from the score). The rearrangement bar is fixed. A region with
+strong flanking support never takes this route. `true` switches it off. It changes regions only,
+not calls.
 
 ---
 
@@ -1541,6 +1548,8 @@ of the gene seed blocks; the sequence and envelope tests keep a paralog elsewher
 out. A hit of a short query, or of a gene with short exons, cannot reach 50 aligned residues, hence
 the module rule. The length is the hit's aligned query residues (qend − qstart + 1); the
 `alnlen` that `rejected_candidates` lists is MMseqs2's own column, the target span in nucleotides.
+The region step uses the same identity and E-value for its distant-macrosynteny regions
+([`disable_distant_synteny_rescue`](#disable_distant_synteny_rescue)).
 
 ### `goi_genome_wide_path`
 **Default:** `false`

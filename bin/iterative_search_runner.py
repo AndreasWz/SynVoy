@@ -1807,8 +1807,50 @@ def context_truncation(block_start: int, block_end: int, pad: int, scaffold_len:
     return 'both' if left and right else 'left' if left else 'right' if right else ''
 
 
+_HOME_TERMS_FAILED = [False]    # logged once per process that the copy-lineage terms are unavailable
+
+
+def copy_lineage_home_terms(cand, by_parent, home_parents) -> List[str]:
+    """``HomeIdentity``, ``HomeQueryCoverage`` and ``HomeBits`` of a model of a tandem-copy lineage
+    (``SynVoy_Parent=GOI_copy_<n>``, --tandem_copy_parent seed): its Identity, QueryCoverage and
+    Bits refer to the copy that found it; these three refer to the home protein. Identity and
+    coverage come from aligning the model's protein to the home protein (as
+    rebase_relative_candidates measures a relative's model), the bits from the proteins the
+    candidate's Bits was computed on (score_goi_candidates). With several home GOIs the one of
+    most bits is used and named (``HomeQuery``). No label reads them. [] for any other candidate,
+    a decoy, or without an aligner (logged once)."""
+    gff = cand.get('gff') or []
+    cols = gff[0].split('\t') if gff else []
+    if len(cols) < 9:
+        return []
+    parent = _parse_gff_attr_string(cols[8]).get('SynVoy_Parent', '')
+    if not parent.startswith('GOI_copy_') or is_decoy_parent(parent):
+        return []
+    record = (cand.get('record') or {}).get('seq', '') or ''
+    subjects = cand.get('label_subjects') or ([record] if record else [])
+    homes = [hp for hp in home_parents if (by_parent.get(hp) or {}).get('seq')]
+    if not record or not homes:
+        return []
+    try:
+        scored = [(first_best_subject(by_parent[hp]['seq'], subjects)[0], hp) for hp in homes]
+        bits = max(b for b, _ in scored)
+        hp = next(h for b, h in scored if b == bits)      # equal bits: the first home GOI by id
+        aln = sw_align_span(by_parent[hp]['seq'], record)
+    except RuntimeError as exc:
+        if not _HOME_TERMS_FAILED[0]:
+            _HOME_TERMS_FAILED[0] = True
+            logger.warning(f"{exc}: models of tandem-copy lineages get no HomeIdentity, "
+                           "HomeQueryCoverage or HomeBits")
+        return []
+    terms = [f"HomeIdentity={aln['identity']:.1f}", f"HomeQueryCoverage={aln['query_cov']:.3f}",
+             f"HomeBits={bits:.1f}"]
+    if len(homes) > 1:
+        terms.append(f"HomeQuery={hp}")
+    return terms
+
+
 def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], truncated: str,
-                          low_complexity: bool = False) -> None:
+                          low_complexity: bool = False, home_parents=()) -> None:
     """Advisory attributes of the GOI candidates of a window; no label reads them (preset
     plan of 2026-10-15, PR-2; LowComplexity PR-8):
 
@@ -1820,6 +1862,9 @@ def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], trun
       LowComplexity     with ``low_complexity`` (--report_low_complexity): share of the
                         candidate's protein in low-complexity windows (the query feature
                         seg_frac, sequence_utils.low_complexity_mask)
+      HomeIdentity, HomeQueryCoverage, HomeBits (HomeQuery)
+                        models of a tandem-copy lineage only: against the home GOI of
+                        ``home_parents`` (copy_lineage_home_terms)
     """
     for cand in candidates:
         gff = cand.get('gff') or []
@@ -1849,6 +1894,8 @@ def annotate_model_extras(candidates, by_parent, home_exons: Optional[int], trun
             protein = protein.replace('*', '')
             if protein:
                 extra.append(f"LowComplexity={sum(low_complexity_mask(protein)) / len(protein):.3f}")
+        if home_parents:
+            extra.extend(copy_lineage_home_terms(cand, by_parent, home_parents))
         if extra:
             cols[8] = cols[8] + ';' + ';'.join(extra)
             gff[0] = '\t'.join(cols)
@@ -5984,7 +6031,8 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         annotate_place_evalues(cands, goi_query_by_parent, hits_by_gene, place_terms,
                                subseq, w_start, tblastn_raw)
         annotate_model_extras(cands, goi_query_by_parent, getattr(args, 'home_goi_exons', None),
-                              window_truncated, getattr(args, 'report_low_complexity', False))
+                              window_truncated, getattr(args, 'report_low_complexity', False),
+                              home_parents=home_goi_parents(args))
         annotate_goi_specificity([c for c in cands if _place_evalue(c) <= synvoy_label.GENE_ORDER_EVALUE],
                                  goi_query_by_parent, args)
         judge_candidates(cands)

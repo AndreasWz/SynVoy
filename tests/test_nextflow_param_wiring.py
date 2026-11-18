@@ -277,6 +277,16 @@ def test_documented_switches_reach_their_script(param, module, flag, script):
     assert f"params.{param}" in text and flag in text, f"{module} does not wire {param}"
 
 
+def test_the_region_step_uses_the_search_rescue_bar():
+    """One rule for a dispersed GOI hit: the region step's distant-macrosynteny bar is the
+    search's dispersed-GOI bar (identity and E-value), passed by the module."""
+    text = (ROOT / "modules" / "cluster_regions.nf").read_text()
+    assert "--distant_synteny_min_identity ${params.dispersed_goi_min_identity}" in text
+    assert "--distant_synteny_max_evalue ${params.dispersed_goi_max_evalue}" in text
+    for param in ("dispersed_goi_min_identity", "dispersed_goi_max_evalue"):
+        assert param in _declared_params()
+
+
 def test_plot_extra_args_passthrough_is_wired():
     assert _declared_params().get("plot_extra_args") in ("''", '""')
     text = (ROOT / "modules" / "plot_synteny.nf").read_text()

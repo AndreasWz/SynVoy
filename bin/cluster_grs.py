@@ -11,6 +11,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_utils import parse_gff_attributes as parse_gff_attrs  # noqa: E402,F401
 from sequence_utils import longest_collinear_run, block_index_of  # noqa: E402
+import synvoy_label  # noqa: E402
 import synvoy_scale  # noqa: E402
 
 # No BioPython needed - we parse FASTA manually for genome length
@@ -98,13 +99,15 @@ def parse_args():
              "'goi_missing_but_strong_synteny' region at MEDIUM confidence rather than "
              "being dropped (docs/TODO.md §1e). Set 0 to disable.",
     )
-    # Distant-macrosynteny rescue: recover a strong GOI hit that landed far from
-    # its flanking anchors because the neighbourhood dispersed (the Aedes oskar
-    # case — the ortholog hit at 45% id / e-29 but scored ~0 for lack of LOCAL
-    # flanking and was dropped). Gated on the target's rearrangement so a
-    # collinear genome stays strict; gated on identity+evalue and same-chromosome
-    # synteny so paralogs / fold-analogues (biglycan, the structdisc lipase) are
-    # still rejected. See target_rearrangement_score / qualifies_distant_macrosynteny_rescue.
+    # Distant-macrosynteny regions: keep the region of a strong GOI hit that landed far from
+    # its flanking anchors because the neighbourhood dispersed (the Aedes oskar case: the
+    # ortholog hit at 45% id / e-29 scored ~0 for lack of LOCAL flanking). Gated on the
+    # target's rearrangement so a collinear genome stays strict; gated on identity+evalue and
+    # same-chromosome synteny so paralogs / fold-analogues (biglycan, the structdisc lipase)
+    # are still rejected. The region is a region, not a call: it is
+    # goi_dispersed_macrosynteny only where the search modelled the gene there as HIGH or
+    # MEDIUM, else goi_hit_no_call. See target_rearrangement_score /
+    # qualifies_distant_macrosynteny_rescue.
     parser.add_argument("--legacy_strand_score", action="store_true",
                         help="F2: revert strand_consistency to the pre-2026-07-26 "
                              "measure (fraction of hits on the cluster's own majority "
@@ -112,15 +115,20 @@ def parse_args():
                              "so scores a fully inverted neighbourhood as perfectly "
                              "conserved. Only for reproducing old numbers.")
     parser.add_argument("--disable_distant_synteny_rescue", action="store_true",
-                        help="Disable the distant-macrosynteny GOI rescue (kill switch).")
+                        help="Disable the distant-macrosynteny region floor (kill switch).")
     parser.add_argument("--distant_synteny_min_identity", type=float, default=40.0,
-                        help="Min %%identity of the GOI hit to qualify for distant rescue.")
+                        help="Min %%identity of the GOI hit for a distant-macrosynteny region "
+                             "(the pipeline passes the search's dispersed_goi_min_identity).")
     parser.add_argument("--distant_synteny_max_evalue", type=float, default=1e-10,
-                        help="Max e-value of the GOI hit to qualify for distant rescue.")
+                        help="Max e-value of the GOI hit for a distant-macrosynteny region "
+                             "(the pipeline passes the search's dispersed_goi_max_evalue).")
     parser.add_argument("--distant_synteny_min_rearrangement", type=float, default=0.5,
                         help="Min target rearrangement score (0-1) before distant rescue fires.")
     parser.add_argument("--distant_synteny_rescue_score", type=float, default=0.45,
-                        help="Score floor a rescued region is promoted to (MEDIUM band).")
+                        help="Score floor of a distant-macrosynteny region. It is a "
+                             "goi_dispersed_macrosynteny region (label at least MEDIUM) only where "
+                             "the search modelled the gene there as HIGH or MEDIUM; elsewhere it is "
+                             "a goi_hit_no_call region, labelled from its score.")
     parser.add_argument(
         "--species_map",
         default=None,
@@ -396,6 +404,60 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
         )
 
     return merge_intervals(goi_intervals)
+
+
+def load_goi_model_labels_from_gff(gff_file):
+    """Every GOI model row of the search's target GFF, every label (LOW too), unpadded:
+    ``{chrom, start, end, confidence, goi_class, counted}``. Rows are recognised as in
+    load_goi_intervals_from_gff (GOI_ in Name/ID/SynVoy_Parent/Parent). ``counted``: HIGH or
+    MEDIUM and no answer of the genome-wide path (``genome_wide_strong_hit``, never counted);
+    the report's ownership and coverage demotions are not known here."""
+    if not gff_file or not os.path.exists(gff_file):
+        return []
+    accepted_types = {"mRNA", "gene", "tandem_copy", "transcript", "mrna"}
+    models = []
+    try:
+        with open(gff_file) as fh:
+            for line in fh:
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 9 or parts[2] not in accepted_types:
+                    continue
+                attrs = parse_gff_attrs(parts[8])
+                marker = "|".join(attrs.get(k, "") for k in ("Name", "ID", "SynVoy_Parent", "Parent"))
+                if "GOI_" not in marker:
+                    continue
+                try:
+                    s, e = int(parts[3]), int(parts[4])
+                except ValueError:
+                    continue
+                if e < s:
+                    s, e = e, s
+                confidence = (attrs.get("Confidence") or "").strip().upper()
+                goi_class = (attrs.get("GOIClass") or "").strip()
+                models.append({
+                    "chrom": parts[0], "start": s, "end": e, "confidence": confidence,
+                    "goi_class": goi_class,
+                    "counted": (confidence in ("HIGH", "MEDIUM")
+                                and goi_class != synvoy_label.GENOME_WIDE_CLASS),
+                })
+    except Exception as exc:
+        print(f"WARNING: Could not parse GOI models from target GFF: {exc}", file=sys.stderr)
+        return []
+    return models
+
+
+def best_goi_model(models, chrom, start, end, padding_bp=0):
+    """The best GOI model of ``models`` (load_goi_model_labels_from_gff) on ``chrom`` that
+    overlaps [start - padding_bp, end + padding_bp]: a counted one first, then by label
+    (synvoy_label.LABEL_RANK), then position. None when there is none."""
+    lo, hi = start - max(0, int(padding_bp)), end + max(0, int(padding_bp))
+    over = [m for m in models if m["chrom"] == chrom and m["start"] <= hi and lo <= m["end"]]
+    if not over:
+        return None
+    return min(over, key=lambda m: (not m["counted"], -synvoy_label.LABEL_RANK.get(m["confidence"], 0),
+                                    m["start"], m["end"], m["goi_class"]))
 
 
 _BLOCK_ID_RE = re.compile(r"_b(\d+)_")
@@ -810,22 +872,65 @@ def cluster_hits_proximity(hits, gene_map, max_dist):
     
     clusters = []
     current_cluster = [hits[0]]
+    current_end = hits[0]['end']
     
     for i in range(1, len(hits)):
         h = hits[i]
         prev = current_cluster[-1]
         
-        # Check if same chrom and close enough
-        dist = h['start'] - prev['end']
+        # Same chrom and closer than max_dist to the cluster's furthest end so far (a hit
+        # inside a long earlier hit does not end the cluster's reach).
+        dist = h['start'] - current_end
         
         if h['chrom'] == prev['chrom'] and dist < max_dist:
             current_cluster.append(h)
+            current_end = max(current_end, h['end'])
         else:
             clusters.append(current_cluster)
             current_cluster = [h]
+            current_end = h['end']
             
     clusters.append(current_cluster)
     return clusters
+
+
+def max_region_span(search_distances):
+    """The longest region: two home-neighbourhood spans times the target's expansion
+    (``2 x home_span_bp x expansion`` of the search's ``##synvoy-distances`` record, the hull
+    rescue's largest hull). None without the record (no cap)."""
+    span = (search_distances or {}).get("home_span_bp")
+    if not span:
+        return None
+    return int(2 * float(span) * float((search_distances or {}).get("expansion") or 1.0))
+
+
+def split_long_clusters(clusters, max_span):
+    """Split each cluster (hits in cluster_hits_proximity's order) whose span exceeds
+    ``max_span`` at its largest internal gap (measured from the furthest end of the hits
+    before it; the first of equal gaps), again and again until every piece fits or has no
+    gap left. Pieces keep their order. ``max_span`` None or <= 0: unchanged."""
+    if not max_span or max_span <= 0:
+        return clusters
+    out = []
+    for cl in clusters:
+        stack = [cl]
+        while stack:
+            piece = stack.pop()
+            if len(piece) < 2 or max(h['end'] for h in piece) - min(h['start'] for h in piece) <= max_span:
+                out.append(piece)
+                continue
+            best_gap, best_i, reach = None, None, piece[0]['end']
+            for i in range(1, len(piece)):
+                gap = piece[i]['start'] - reach
+                if best_gap is None or gap > best_gap:
+                    best_gap, best_i = gap, i
+                reach = max(reach, piece[i]['end'])
+            if best_gap is None or best_gap <= 0:
+                out.append(piece)
+                continue
+            stack.append(piece[best_i:])
+            stack.append(piece[:best_i])
+    return out
 
 def score_flexible_synteny(cluster, gene_map, home_strands=None):
     """
@@ -1048,8 +1153,17 @@ def main():
     # from all depend on it.
     hits.sort(key=hit_sort_key)
 
+    # The search's GOI models, every label: what a region holds (goi_model_confidence) and
+    # whether a distant-macrosynteny region holds a counted model.
+    goi_models = load_goi_model_labels_from_gff(args.target_gff)
+    goi_models_by_chrom = defaultdict(list)
+    for m in goi_models:
+        goi_models_by_chrom[m["chrom"]].append(m)
     goi_intervals_gff = load_goi_intervals_from_gff(args.target_gff, padding_bp=args.goi_padding)
-    goi_intervals_hits = load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding)
+    # Raw GOI hits stand in for GOI models only where the search wrote no GOI model of any
+    # label: beside a model they would bring back the places whose model is LOW.
+    goi_intervals_hits = ([] if goi_models
+                          else load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding))
     goi_intervals = merge_intervals(goi_intervals_gff + goi_intervals_hits)
 
     # Reuse the SEARCH's block structure (incl. §18 gap-bridging) for region scoring,
@@ -1063,14 +1177,16 @@ def main():
             f"(max HIGH-flanking={max(a['flanking_support'] for a in goi_block_anchors)}).",
             file=sys.stderr,
         )
-    if goi_intervals_hits and not goi_intervals_gff:
+    if goi_intervals_hits:
         print(
-            f"INFO: Derived {len(goi_intervals_hits)} GOI interval(s) from hit file (no GOI GFF intervals).",
+            f"INFO: Derived {len(goi_intervals_hits)} GOI interval(s) from hit file "
+            f"(the target GFF holds no GOI model).",
             file=sys.stderr,
         )
-    elif goi_intervals_hits:
+    elif goi_models and any(_is_goi_query_name(h.get("query", "")) for h in hits):
         print(
-            f"INFO: Added GOI support from hits ({len(goi_intervals_hits)} interval(s)) on top of GFF GOI intervals.",
+            f"INFO: GOI hits are not used as GOI intervals: the target GFF holds "
+            f"{len(goi_models)} GOI model row(s).",
             file=sys.stderr,
         )
 
@@ -1098,8 +1214,16 @@ def main():
         args.cluster_distance = int(float(args.cluster_distance))
     near_bp = int((search_distances or {}).get("synteny_bridge_max_gap") or 2_000_000)
 
-    # Cluster
+    # Cluster, then cut a chain of hits longer than the largest neighbourhood the search
+    # considers (no cap without its distances).
     clusters = cluster_hits_proximity(hits, gene_map, args.cluster_distance)
+    max_region_bp = max_region_span(search_distances)
+    if max_region_bp:
+        n_chains = len(clusters)
+        clusters = split_long_clusters(clusters, max_region_bp)
+        if len(clusters) > n_chains:
+            print(f"INFO: split {len(clusters) - n_chains} time(s) a hit chain longer than "
+                  f"{max_region_bp} bp (2 x home neighbourhood x expansion).", file=sys.stderr)
     
     genome_len = get_genome_length(args.genome) if args.genome else 1
 
@@ -1193,27 +1317,35 @@ def main():
             # Additive bonus capped at 0.15 to avoid GOI signal dominating synteny evidence
             final_score += min(0.15, max(0.0, float(args.goi_overlap_bonus)))
 
-        # Distant-macrosynteny rescue: a strong GOI hit isolated from its local
-        # flanking (effective_unique <= 1) but on a chromosome that carries an
-        # anchor, in a rearranged genome, is a dispersed ortholog — promote it
-        # rather than let it die at the score floor. Rejects paralogs/fold-analogues
-        # via the identity/evalue + same-chromosome gates (see the helper).
+        # What the region holds: the search's best GOI model within goi_padding, and the
+        # cluster's own GOI hits.
+        goi_model = best_goi_model(goi_models_by_chrom.get(cluster_chrom, ()), cluster_chrom,
+                                   cluster_start, cluster_end, args.goi_padding)
+        goi_hits_in = [h for h in cl if _is_goi_query_name(h.get("query", ""))]
+        best_goi_id = max((h.get("identity", 0.0) for h in goi_hits_in), default=None)
+        best_goi_e = min((h.get("evalue", 1.0) for h in goi_hits_in), default=None)
+
+        # Distant macrosynteny: a strong GOI hit isolated from its local flanking
+        # (effective_unique <= 1) but on a chromosome that carries an anchor, in a rearranged
+        # genome, keeps its region rather than let it die at the score floor. Rejects
+        # paralogs/fold-analogues via the identity/evalue + same-chromosome gates (see the
+        # helper). The region step places no gene: the region is goi_dispersed_macrosynteny
+        # only where the search modelled the gene there as HIGH or MEDIUM (a counted model),
+        # else goi_hit_no_call (no model, or only an AMBIGUOUS or LOW one).
         distant_rescue = False
+        hit_no_call = False
         if (goi_overlap and not args.disable_distant_synteny_rescue
-                and not strong_synteny and effective_unique <= 1):
-            goi_hits_in = [h for h in cl if _is_goi_query_name(h.get("query", ""))]
-            if goi_hits_in:
-                best_goi_id = max(h.get("identity", 0.0) for h in goi_hits_in)
-                best_goi_e = min(h.get("evalue", 1.0) for h in goi_hits_in)
-                if qualifies_distant_macrosynteny_rescue(
-                        best_goi_id, best_goi_e, cluster_chrom, flanking_chroms,
-                        rearrangement,
-                        min_identity=args.distant_synteny_min_identity,
-                        max_evalue=args.distant_synteny_max_evalue,
-                        min_rearrangement=args.distant_synteny_min_rearrangement):
-                    distant_rescue = True
-                    goi_identity = max(goi_identity, best_goi_id)
-                    final_score = max(final_score, args.distant_synteny_rescue_score)
+                and not strong_synteny and effective_unique <= 1 and goi_hits_in):
+            if qualifies_distant_macrosynteny_rescue(
+                    best_goi_id, best_goi_e, cluster_chrom, flanking_chroms,
+                    rearrangement,
+                    min_identity=args.distant_synteny_min_identity,
+                    max_evalue=args.distant_synteny_max_evalue,
+                    min_rearrangement=args.distant_synteny_min_rearrangement):
+                distant_rescue = bool(goi_model and goi_model["counted"])
+                hit_no_call = not distant_rescue
+                goi_identity = max(goi_identity, best_goi_id)
+                final_score = max(final_score, args.distant_synteny_rescue_score)
 
         # Test `synteny_score`, NOT `final_score`. The null re-scores shuffled labels
         # through `quality * coverage` and can never produce the +0.15 GOI-overlap
@@ -1254,6 +1386,9 @@ def main():
             'goi_block_flanking': goi_block_flanking,
             'goi_identity': goi_identity,
             'distant_rescue': distant_rescue,
+            'hit_no_call': hit_no_call,
+            'goi_hit_best_identity': best_goi_id,
+            'goi_hit_best_evalue': best_goi_e,
         })
 
     # Sort: block synteny support desc (true ortholog block beats a compact paralog
@@ -1290,28 +1425,26 @@ def main():
             print(f"INFO: No synteny clusters could be formed for this genome.", file=sys.stderr)
         else:
             # Case 2: Clusters found — adaptive region selection
+            best_score = max(cl['score'] for cl in ordered_clusters)
             if args.max_regions > 0:
                 # User-specified hard cap
-                num_to_output = min(args.max_regions, len(ordered_clusters))
+                selected_indices = list(range(min(args.max_regions, len(ordered_clusters))))
                 score_floor = max(args.adaptive_score_floor_abs, 0.0)
             else:
-                best_score = ordered_clusters[0]['score'] if ordered_clusters else 0
+                # Every cluster that passes a floor, in the order above (GOI regions first), up
+                # to the cap; the floor is relative to the best score of all clusters. Only the
+                # first cluster is written when none passes (adaptive_backstop).
                 score_floor = max(args.adaptive_score_floor_abs,
                                   best_score * args.adaptive_score_floor_frac)
-                num_to_output = 0
-                for cl in ordered_clusters:
-                    if (cl['score'] >= score_floor
-                            or cl.get('unique', 0) >= args.adaptive_unique_gene_floor):
-                        num_to_output += 1
-                    else:
-                        break  # clusters are sorted by score desc
-                num_to_output = max(1, min(num_to_output, args.adaptive_max_regions))
+                passing = [idx for idx, cl in enumerate(ordered_clusters)
+                           if cl['score'] >= score_floor
+                           or cl.get('unique', 0) >= args.adaptive_unique_gene_floor]
+                selected_indices = passing[:args.adaptive_max_regions] or [0]
 
             # §1e: never drop a strong-synteny neighbourhood (>=N HIGH flanking genes, no
             # GOI model) just because weak GOI-fallback regions — which get a score bonus —
             # filled the adaptive cap. Guarantee the top such block(s) a slot beyond the
             # cap so "candidate ortholog locus, no GOI model" is surfaced, not silently lost.
-            selected_indices = list(range(num_to_output))
             if args.strong_synteny_min_flanking > 0:
                 STRONG_SYNTENY_KEEP = 2
                 already = set(selected_indices)
@@ -1354,7 +1487,7 @@ def main():
 
             print(
                 f"INFO: Emitting {len(selected_indices)}/{len(ordered_clusters)} regions "
-                f"(adaptive selection, best_score={ordered_clusters[0]['score']:.2f}).",
+                f"(adaptive selection, best_score={best_score:.2f}).",
                 file=sys.stderr,
             )
 
@@ -1381,10 +1514,13 @@ def main():
                 if goi_missing_strong and _CONF_RANK.get(confidence, 0) < _CONF_RANK["MEDIUM"]:
                     confidence = "MEDIUM"
 
-                # Distant-macrosynteny rescue: a dispersed ortholog is a MEDIUM call
-                # (real hit, but no LOCAL synteny to make it HIGH). Never downgrade a
-                # region that already scored HIGH on its own.
+                # Distant macrosynteny with a counted model of the search (HIGH or MEDIUM) in
+                # the region: at least MEDIUM (a modelled gene, but no LOCAL synteny to make the
+                # region HIGH). Never downgrade a region that already scored HIGH on its own. A
+                # region with such a hit and no counted model (hit_no_call) is labelled from
+                # its score.
                 distant_rescue = bool(best.get("distant_rescue"))
+                hit_no_call = bool(best.get("hit_no_call"))
                 if distant_rescue and _CONF_RANK.get(confidence, 0) < _CONF_RANK["MEDIUM"]:
                     confidence = "MEDIUM"
 
@@ -1405,6 +1541,9 @@ def main():
                 elif distant_rescue:
                     region_class = "goi_dispersed_macrosynteny"
                     core_name = f"Reg{i+1}_DISP_C{confidence}_S{best['score']:.2f}"
+                elif hit_no_call:
+                    region_class = "goi_hit_no_call"
+                    core_name = f"Reg{i+1}_NOCALL_C{confidence}_S{best['score']:.2f}"
                 elif best.get("goi_overlap"):
                     region_class = "goi_overlap"
                     core_name = f"Reg{i+1}_G{best['unique']}_C{confidence}_S{best['score']:.2f}"
@@ -1417,6 +1556,8 @@ def main():
                     selected_reason = "flanking_only_no_goi_call"
                 elif distant_rescue:
                     selected_reason = "distant_macrosynteny_rescue"
+                elif hit_no_call:
+                    selected_reason = "distant_hit_no_call"
                 elif args.max_regions > 0:
                     selected_reason = "user_cap"
                 elif best['score'] >= score_floor:
@@ -1427,6 +1568,12 @@ def main():
                     selected_reason = "adaptive_backstop"
                 
                 f_out.write(f"{best['chrom']}\t{best['start']}\t{best['end']}\t{name}\t{best['score']:.2f}\t{region_strand}\n")
+
+                # The search's best GOI model within goi_padding of the region ('' when none),
+                # and the best identity and E of the region's own GOI hits ('' when none).
+                region_model = best_goi_model(goi_models_by_chrom.get(best["chrom"], ()), best["chrom"],
+                                              best["start"], best["end"], args.goi_padding)
+                hit_id, hit_e = best.get("goi_hit_best_identity"), best.get("goi_hit_best_evalue")
 
                 selected_rows.append({
                     "region_rank": i + 1,
@@ -1461,6 +1608,10 @@ def main():
                     "goi_missing": goi_missing_strong,
                     "confidence": confidence,
                     "selection_reason": selected_reason,
+                    "goi_model_confidence": region_model["confidence"] if region_model else "",
+                    "goi_model_class": region_model["goi_class"] if region_model else "",
+                    "goi_hit_best_identity": "" if hit_id is None else hit_id,
+                    "goi_hit_best_evalue": "" if hit_e is None else hit_e,
                 })
 
                 # Emit compact summary to stdout for testability and quick diagnostics.
@@ -1506,6 +1657,10 @@ def main():
             "goi_missing",
             "confidence",
             "selection_reason",
+            "goi_model_confidence",
+            "goi_model_class",
+            "goi_hit_best_identity",
+            "goi_hit_best_evalue",
         ]
         with open(args.scores_output, "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")

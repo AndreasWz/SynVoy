@@ -75,17 +75,16 @@ def test_unified_pass_matches_legacy_wrappers(tmp_path: Path) -> None:
     assert gr.collect_high_flanking_per_locus(gff_paths) == flank_unified
 
     # Sanity-check counts so a future refactor that quietly loses GFF rows trips here.
-    # Each fixture file has 4 mRNA/gene rows: a (gene, mRNA) pair for flanking + a
-    # (gene, mRNA) pair for the GOI. The parser counts gene and mRNA rows
-    # independently (dedup happens downstream in dedupe_goi_annotations).
-    assert ann_unified["total_annotations"] == 4 * 30
-    assert sum(row["goi_annotations"] for row in ann_unified["per_genome"]) == 2 * 30
-    assert len(goi_unified) == 2 * 30
+    # Each fixture file has 2 models, each a (gene, mRNA) pair: one model is one row, the
+    # mRNA row (a gene row that is an mRNA's parent is not counted again).
+    assert ann_unified["total_annotations"] == 2 * 30
+    assert sum(row["goi_annotations"] for row in ann_unified["per_genome"]) == 30
+    assert len(goi_unified) == 30
+    assert {g["mrna_id"] for g in goi_unified} == {f"GOI_mRNA_{locus * 1000 + genome}" for locus in range(5) for genome in range(6)}
     # Flanking-per-locus is keyed by (genome, locus, chrom) → set of distinct gene
-    # names. The fixture's gene row uses Name=FLANK_<i>; the mRNA row falls through
-    # to ID=mRNA-flanking-<i>, so the set holds 2 entries per file.
+    # names: the mRNA row falls through to ID=mRNA-flanking-<i>, one entry per file.
     assert len(flank_unified) == 30  # one (genome, locus, chrom) per file
-    assert all(count == 2 for count in flank_unified.values())
+    assert all(count == 1 for count in flank_unified.values())
 
 
 def test_scan_dir_by_suffix_classifies_correctly(tmp_path: Path) -> None:
@@ -136,8 +135,9 @@ def test_unified_pass_handles_1000_gffs_under_budget(tmp_path: Path) -> None:
     # at ~1.5–3s of file I/O on the same hardware) or a quadratic accumulator.
     assert elapsed < 5.0, f"unified pass took {elapsed:.2f}s on 1000 GFFs"
 
-    # And the outputs are well-formed (4 mRNA/gene rows per file → 2 GOI, 2 flanking).
-    assert ann["total_annotations"] == 4 * 1000
-    assert len(goi) == 2 * 1000
+    # And the outputs are well-formed (2 models per file, each a gene + mRNA pair → 1 GOI,
+    # 1 flanking).
+    assert ann["total_annotations"] == 2 * 1000
+    assert len(goi) == 1000
     assert len(flank) == 1000  # one (genome, locus, chrom) bucket per file
-    assert all(count == 2 for count in flank.values())
+    assert all(count == 1 for count in flank.values())

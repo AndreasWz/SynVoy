@@ -1211,8 +1211,9 @@ first (§7.4).
 
 A refused GOI hit is listed in the report under `rejected_candidates`, with the rule it failed
 and the nearest flanking gene, and merged with the other rows of its place, so the report can
-say "found, not syntenic" (`summary.goi_found_but_not_syntenic`: genomes with a place that no
-counted call of the run overlaps). The hits outside every searched GOI zone that fail the
+say "found, not syntenic" (`summary.goi_found_but_not_syntenic`: genomes without a counted call
+that hold a place no counted call of the run overlaps; LOW or AMBIGUOUS models there do not take a
+genome out). The hits outside every searched GOI zone that fail the
 quality bar, and the dead-zone hits, are listed under `rejected_candidates.dropped`, with the
 test each failed (the strongest 200 per genome search). Each flanking gene counts at its best
 hit in the genome only. As a measure, each refused row also gives the flanking genes with any
@@ -1318,7 +1319,9 @@ tree-only. So is an answer of the genome-wide path (`GenomeWide=1`, §7.11): lat
 as they would without it, and a MEDIUM call of the main search in the same genome seeds by the
 rule above. A seeded tandem copy is, by default
 (`tandem_copy_parent seed`), recorded as `GOI_copy_<n>` and therefore a gene of its own in
-the following waves, judged against the seed; with `--tandem_copy_parent home` it is a
+the following waves, judged against the seed; a model found with it carries its identity,
+coverage and bits against the home protein as well (`HomeIdentity`, `HomeQueryCoverage`,
+`HomeBits`; no label reads them). With `--tandem_copy_parent home` it is a
 model of the home gene and can be its relative query. Its record id ends with the query it
 was found with (`GOI_copy_<n>|<genome>_b<k>_l<j>_by_<parent>`): `n` is counted per parent,
 block and locus, so copies of two parents never share an id.
@@ -1408,8 +1411,17 @@ part, hidden from view); a genome without its block table keeps the regions.
 
 **Clusters.** The genome-wide hits are put into one fixed order and clustered: a hit
 joins the cluster when it starts less than the block gap of the search for this
-genome after the previous hit ends (read from the result GFF; 150 kb for a GFF
-without the record).
+genome after the furthest end of the cluster's hits so far (read from the result GFF;
+150 kb for a GFF without the record). A cluster longer than twice the home neighbourhood
+times the genome's expansion (`2 × home_span_bp × expansion` of the search's distance record,
+the largest hull of §9) is split at its largest gaps until every piece fits; without the
+record there is no such limit.
+
+**GOI models and GOI hits.** A cluster is gene-bearing when it lies within 20 kb of a GOI
+model of the search that is not LOW. Raw GOI hits of the genome-wide search stand in for
+models only where the search wrote no GOI model of any label (no target GFF): beside a model,
+LOW included, they are not used, so a place whose only model is LOW does not come back
+through its hits. "GOI model or GOI hit" below means this.
 
 **Score.** With `N` flanking genes at home:
 
@@ -1442,10 +1454,11 @@ and `synteny_score` is recomputed each time. `p = (count(null ≥ observed) + 1)
 Clusters near a GOI model or GOI hit (as for the bonus) are placed first. When no cluster
 lies near a GOI model or hit, each GOI model (not LOW, ± 20 kb) that no cluster touches is
 put first as a region of its own (`goi_anchor`), with a score of 0.60 for a HIGH model and
-0.40 otherwise. With `max_regions = 0`, regions are written from the top until one has
-both a score below the floor (`max(0.03, 0.30 × the score of the first region)`) and
-max(U, B) below 3 (`adaptive_unique_gene_floor`); at least one and at most 6 are written
-(`adaptive_max_regions`; the `dispersed_family` module: floors 0.45 and 0.08, at most 4).
+0.40 otherwise. With `max_regions = 0`, every cluster with a score at or above the floor
+(`max(0.03, 0.30 × the best score of all clusters)`) or with max(U, B) at least 3
+(`adaptive_unique_gene_floor`) is written, in this order, at most 6
+(`adaptive_max_regions`; the `dispersed_family` module: floors 0.45 and 0.08, at most 4);
+when none passes, the first cluster is written.
 
 **Strong synteny without a gene.** A cluster holding at least
 `strong_synteny_min_flanking` (⌈`n_flanking_genes`/2⌉ = 5) HIGH flanking models, with no GOI
@@ -1454,10 +1467,14 @@ model (not LOW) and no GOI hit of the genome-wide search within 20 kb of it, is 
 unless they lie inside a selected GOI region.
 
 **Dispersed hit.** A GOI-overlapping cluster with max(U, B) ≤ 1 that is not a
-strong-synteny cluster gets a score of at least 0.45 (`goi_dispersed_macrosynteny`) when
-its GOI hits reach identity ≥ 40 % and E ≤ 1e-10 (the best of each over its GOI hits), at
-least one flanking gene lies on the same scaffold, and the genome's rearrangement score is
-at least 0.5. That score (`target_rearrangement_score`) is the mean of two fractions:
+strong-synteny cluster gets a score of at least 0.45 when its GOI hits reach the dispersed
+rescue's bar of §7.11 (identity ≥ `dispersed_goi_min_identity` 40 % and E ≤
+`dispersed_goi_max_evalue` 1e-10, the best of each over its GOI hits), at least one flanking
+gene lies on the same scaffold, and the genome's rearrangement score is at least 0.5. The
+region step places no gene: such a region is `goi_dispersed_macrosynteny` only where the
+search modelled the gene there (within 20 kb) as HIGH or MEDIUM, not as an answer of the
+genome-wide path; elsewhere it is `goi_hit_no_call` (no model, or only an AMBIGUOUS or LOW
+one). Both keep the score, so the regions chosen do not depend on the class. That score (`target_rearrangement_score`) is the mean of two fractions:
 flanking genes off the main scaffold, and pairs of home-adjacent flanking genes that are
 not within the search's bridge limit (§7.3; 2 Mb for a GFF without the record) of each
 other in the target, each gene placed by its best hit (0 with fewer than two genes
@@ -1465,8 +1482,11 @@ placed).
 
 Region confidence: HIGH from `min_synteny_score` (0.6), MEDIUM from half of it, else
 LOW; a region with strong synteny and no GOI model or GOI hit near it
-(`goi_missing_but_strong_synteny`) and
-a distant-macrosynteny rescue region are at least MEDIUM.
+(`goi_missing_but_strong_synteny`) and a `goi_dispersed_macrosynteny` region are at least
+MEDIUM; a `goi_hit_no_call` region takes the label of its score. A region's label rates the
+neighbourhood, not a gene: the report lists every gene-bearing region of MEDIUM or better
+(and every `goi_hit_no_call` region) without a counted call, with the reason
+(`regions.goi_regions_without_call`).
 
 ## 9. Rescue passes
 
