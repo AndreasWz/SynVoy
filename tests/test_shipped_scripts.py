@@ -1,5 +1,4 @@
-"""The run hints install.sh prints at its end, and the launcher's own usage text (item 33 of the
-bug list of 16 Nov 2026).
+"""The run hints install.sh prints at its end, and the launcher's own usage text.
 
 install.sh ended with `nextflow run main.nf ... -profile standard` for the human gene LY6E (a
 vertebrate gene, which needs about 32 GB of memory), past the launcher's checks and its

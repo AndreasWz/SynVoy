@@ -1,4 +1,4 @@
-"""Bug list item 43 (the copy-lineage field): with --tandem_copy_parent seed, a model found with a
+"""The copy-lineage field: with --tandem_copy_parent seed, a model found with a
 seeded tandem copy (SynVoy_Parent=GOI_copy_<n>) has Identity, QueryCoverage and Bits against that
 copy. HomeIdentity, HomeQueryCoverage and HomeBits give the same against the home protein; no
 label reads them, and the report carries them (copy_lineage, home_*)."""

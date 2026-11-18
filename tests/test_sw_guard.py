@@ -376,7 +376,7 @@ def test_a_child_killed_for_memory_says_so(tmp_path, monkeypatch, rc, stderr, wh
 
 
 def test_a_backend_that_cannot_run_stops_the_search_at_its_start():
-    """Every search needs parasail (item 21 of the bug list of 16 Nov 2026): the check is on parasail
+    """Every search needs parasail: the check is on parasail
     itself and stops the search before the backend is recorded, whatever --sw_method and
     --enable_smith_waterman say; with parasail installed every --sw_method runs in parasail."""
     src = open(isr.__file__).read()

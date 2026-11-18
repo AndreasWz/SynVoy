@@ -436,12 +436,12 @@ DEAD_SETTINGS_OF_2026_11_16 = ("discovery_paralog_margin", "structural_max_lengt
 
 
 def test_the_settings_of_2026_11_16_are_removed():
-    """Item 27 of the bug list of 16 Nov 2026: four settings changed nothing. The structural
+    """Four settings changed nothing. The structural
     discovery's paralog margin acts only with a home-relative panel, which no step gives the
     search; structural_max_length was read only on code paths that are switched off; the
     reciprocal-best paralog check (disable_paralog_check, paralog_confusion_min_gap) always got one
     query sequence and could flag nothing, so its step went with them. Each warns when still set.
-    Item 21: allow_missing_smith_waterman let the search start without parasail, which every
+    allow_missing_smith_waterman let the search start without parasail, which every
     search needs (offOnly: true stops, false warns). No module, config or script passes or reads
     any of them, and resolve_effective_params.py has no --user_override (no module passed it)."""
     main_nf = (ROOT / "main.nf").read_text()
@@ -467,7 +467,7 @@ def test_the_settings_of_2026_11_16_are_removed():
 
 
 def test_the_plm_thresholds_label_the_discovery_models():
-    """Item 27 of the bug list of 16 Nov 2026: plm_medium_threshold and plm_high_threshold lifted
+    """plm_medium_threshold and plm_high_threshold lifted
     only rows the judge did not label, and every row of the search carries its label, so in
     practice they did nothing. The structural discovery labels its models from the TM-score
     thresholds and from embedding thresholds that defaulted to the same 0.7 / 0.85: the two params

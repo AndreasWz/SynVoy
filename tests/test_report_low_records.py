@@ -1,4 +1,4 @@
-"""Bug list item 17: the report exported no LOW models (only counts of them). It lists them apart
+"""The report exported no LOW models (only counts of them). It lists them apart
 now (goi_low_records): one entry per distinct model, over all home loci and rescue passes, with
 what overlaps it; no count, label or flag reads them."""
 import importlib.util

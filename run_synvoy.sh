@@ -60,7 +60,8 @@ echo "${BOLD}========================================================${RST}"
 # ── 2. stale-code guard (network-free, the anti-OOM gate) ────────────────────
 # These two markers are the OOM-critical fixes. If the checkout predates them,
 # a gene-family query (luciferase, LY6, MRJP) fans out to dozens of loci and
-# OOMs the machine. Refuse to run rather than crash hours later.
+# OOMs the machine. Warn loudly and wait 5 s (Ctrl-C aborts) rather than crash
+# hours later.
 STALE=0
 grep -q -- '--max_loci' modules/split_loci.nf 2>/dev/null || STALE=1
 grep -q 'skip_tree'      nextflow.config       2>/dev/null || STALE=1

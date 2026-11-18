@@ -1,5 +1,4 @@
-"""A GOI hit chain that the fallback gate refuses is written in a significant block (bug list
-item 7, 2026-11-16).
+"""A GOI hit chain that the fallback gate refuses is written in a significant block.
 
 Where miniprot finds no model, the window's GOI hits are chained, and the chain was refused when
 it was short or covered little of the query (fallback_refusal): a small or hidden fragment at the

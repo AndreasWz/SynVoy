@@ -1249,8 +1249,11 @@ GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched GOI zone and ever
                     "genome/3) is <= 1e-6, its HSPs at E <= 1 cover >= 0.7 of the query and no "
                     "other home protein is a real competitor within 10 bits; per home GOI the places "
                     "are tried best first until one gives an answer: a model the judge labels HIGH "
-                    "in the genome place, with no exon across a home exon junction (no retrocopy), "
-                    "not frame-broken without an intron, overlapping no row. An answer is written as "
+                    "in the genome place, with no exon across a home exon junction (no retrocopy; an "
+                    "exon >= 30 nt per spanned junction longer than 3 x its aligned query span holds "
+                    "an intron read as coding and does not count, also when the excess is one "
+                    "read-through intron of >= 60 nt next to a lost one), not frame-broken without an "
+                    "intron, overlapping no row. An answer is written as "
                     "MEDIUM, GOIClass=genome_wide_strong_hit, GenomeWide=1; it never seeds and is "
                     "never counted; the report keeps one per genome, only in a genome without a "
                     "counted call (summary.genome_wide_strong_hits; one inside a block's window is "
@@ -3397,23 +3400,30 @@ def figure_marks(goi_annotations, records, locus, demoted_classes, dropped=()):
     one, and the other home loci that found a record drawn there.
 
     A record is drawn by one model in each home locus whose search modelled it, its shown member
-    (_shown_member, the rule of the trees). Outcomes: 'merged' (the record's other models of this
-    locus: a second model of the same gene, a wider model that a compact one replaced, the other
-    half of one reading frame, a piece of the whole gene that holds the record), 'dropped' (a model
-    of a record the report dropped, ``dropped``: (record, why) pairs of drop_genome_wide_strong_hits
-    and drop_gene_order_only); for a shown member whose record the report does not count:
-    'overruled_piece' (the record is a whole gene and the shown member its piece), the record's
-    demoted class (``demoted_classes``: paralog_not_goi, identity_coverage_decoupled),
-    'genome_wide_strong_hit' (a kept answer of the genome-wide path); 'not_in_report' for a model no
-    record holds. The figures leave out 'merged' and 'dropped' (bin/plot_synteny.py, REPORT_LEFT_OUT)
-    and draw the others by their label. Returns {'models': [{'genome', 'model', 'outcome',
-    'record'}], 'also_found_from': [{'genome', 'model', 'loci'}]}, each sorted by genome and model
-    id; ``record`` is the span ('chrom:start-end') of the model's record, '' for not_in_report."""
-    ids = defaultdict(set)
+    (_shown_member, the rule of the trees), taken among the record's models of that locus that are
+    no fragment (ModelStatus=fragment, which the default figures hide) where it has one: a counted
+    record whose representative is a fragment inside a wider model of the same gene would
+    otherwise be in no default figure, its other models merged and the fragment hidden.
+    Outcomes: 'merged' (the record's other models of this locus: a second model of the same gene,
+    a wider model that a compact one replaced, the other half of one reading frame, a piece of the
+    whole gene that holds the record), 'dropped' (a model of a record the report dropped,
+    ``dropped``: (record, why) pairs of drop_genome_wide_strong_hits and drop_gene_order_only); for
+    a shown member whose record the report does not count: 'overruled_piece' (the record is a
+    whole gene and the shown member its piece), the record's demoted class (``demoted_classes``:
+    paralog_not_goi, identity_coverage_decoupled), 'genome_wide_strong_hit' (a kept answer of the
+    genome-wide path); 'not_in_report' for a model no record holds. The figures leave out 'merged'
+    and 'dropped' (bin/plot_synteny.py, REPORT_LEFT_OUT) and draw the others by their label.
+    Returns {'models': [{'genome', 'model', 'outcome', 'record', 'drawn_by'}], 'also_found_from':
+    [{'genome', 'model', 'loci'}]}, each sorted by genome and model id; ``record`` is the span
+    ('chrom:start-end') of the model's record, '' for not_in_report; ``drawn_by`` is the model that
+    draws the record of a merged model (its shown member), '' for every other outcome."""
+    ids, fragments = defaultdict(set), defaultdict(set)
     for a in goi_annotations or ():
         if (a.get("source") == locus and a.get("mrna_id") and not a.get("rescue_pass")
                 and a.get("confidence") in FIGURE_RECORD_LABELS):
             ids[a["genome"]].add(a["mrna_id"])
+            if (a.get("model_status") or "").strip().lower() == "fragment":
+                fragments[a["genome"]].add(a["mrna_id"])
 
     def span(r):
         return f"{r['chrom']}:{r['start']}-{r['end']}"
@@ -3421,17 +3431,18 @@ def figure_marks(goi_annotations, records, locus, demoted_classes, dropped=()):
     for r, _why in dropped or ():
         for m in r.get("_members") or ():
             if m[0] == locus and m[1] in ids.get(r["genome"], ()):
-                marks[(r["genome"], m[1])] = ("dropped", span(r))
+                marks[(r["genome"], m[1])] = ("dropped", span(r), "")
                 held.add((r["genome"], m[1]))
     for r in records or ():
         mine = ids.get(r["genome"], set())
         held |= {(r["genome"], m[1]) for m in r.get("_members") or () if m[0] == locus and m[1] in mine}
-        shown = _shown_member(r, locus, mine)
+        shown = (_shown_member(r, locus, mine - fragments.get(r["genome"], set()))
+                 or _shown_member(r, locus, mine))
         if shown is None:
             continue
         for m in r.get("_members") or ():
             if m[0] == locus and m[1] in mine and m[1] != shown:
-                marks[(r["genome"], m[1])] = ("merged", span(r))
+                marks[(r["genome"], m[1])] = ("merged", span(r), shown)
         if (locus, shown) in {tuple(p) for p in r.get("_overruled") or ()}:
             outcome = "overruled_piece"
         elif r.get("genome_wide_strong_hit") and r.get("goi_class") not in demoted_classes:
@@ -3441,16 +3452,16 @@ def figure_marks(goi_annotations, records, locus, demoted_classes, dropped=()):
         else:
             outcome = ""
         if outcome:
-            marks[(r["genome"], shown)] = (outcome, span(r))
+            marks[(r["genome"], shown)] = (outcome, span(r), "")
         others = sorted(set(r.get("provenance") or ()) - {locus})
         if others:
             also.append({"genome": r["genome"], "model": shown, "loci": others})
     for genome in ids:
         for mid in ids[genome]:
             if (genome, mid) not in held:
-                marks[(genome, mid)] = ("not_in_report", "")
-    return {"models": [{"genome": g, "model": mid, "outcome": o, "record": where}
-                       for (g, mid), (o, where) in sorted(marks.items())],
+                marks[(genome, mid)] = ("not_in_report", "", "")
+    return {"models": [{"genome": g, "model": mid, "outcome": o, "record": where, "drawn_by": by}
+                       for (g, mid), (o, where, by) in sorted(marks.items())],
             "also_found_from": sorted(also, key=lambda e: (e["genome"], e["model"]))}
 
 

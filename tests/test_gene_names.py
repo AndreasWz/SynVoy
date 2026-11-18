@@ -560,7 +560,7 @@ def test_long_column_labels_get_a_taller_header():
     assert ps._rotated_header_height(long_, 17, 55) > 150 > ps._rotated_header_height(short, 17, 55)
 
 
-# ---- descriptions that are no product name (freeze item 40) --------------------------
+# ---- descriptions that are no product name -------------------------------------------
 
 CGD_NOTE = "ORF in Assemblies 19, 20 and 21"
 

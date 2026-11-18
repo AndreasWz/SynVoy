@@ -7,20 +7,26 @@ elsewhere it drops the record and lists it (``goi_dedup.gene_order_only_dropped_
 keeps an answer of the genome-wide path (GOIClass=genome_wide_strong_hit) only as the best one of
 a genome without a counted call and without another record at its place, and lists the others
 (``goi_dedup.genome_wide_strong_hits_dropped_records``). This script copies the per-genome GFFs
-of one home locus into the plot-input folder without those rows: a GOI model of the rule's kind
-(Basis=gene_order_only, or GOIClass=genome_wide_strong_hit) that overlaps a dropped record of the
-same genome, and every row below it (Parent=). The published GFFs (plot_inputs_*/) and every
-figure drawn from them then show what the report shows (review fix RF-3). Without a report
-(the NO_REPORT sentinel, or a report from before these rules) the GFFs are copied unchanged.
+of one home locus into the plot-input folder without those rows, and every row below them
+(Parent=). The published GFFs (plot_inputs_*/) and every figure drawn from them then show what
+the report shows (review fix RF-3). Without a report (the NO_REPORT sentinel, or a report from
+before these rules) the GFFs are copied unchanged.
 
-With ``--locus``, it also marks the GOI models of that home locus with the report's outcome
-(``figures.<locus>`` of the report, generate_report.figure_marks): ``ReportOutcome`` (merged,
-dropped, overruled_piece, paralog_not_goi, identity_coverage_decoupled, genome_wide_strong_hit,
-not_in_report) and ``ReportRecord`` (the span of the model's record) on the model's row,
+With ``--locus`` and the report's ``figures.<locus>`` block (generate_report.figure_marks), the
+rows left out are the models that block marks ``dropped``, by their ids: the members of the
+dropped records that this locus's search modelled. Without the block, they are the GOI models of
+a rule's kind (Basis=gene_order_only, or GOIClass=genome_wide_strong_hit) that overlap a dropped
+record of the same genome; that rule also takes a kept record's model of the same kind, such as a
+kept answer that overlaps an answer the report dropped at another home locus.
+
+With ``--locus``, it also marks the GOI models of that home locus with the report's outcome:
+``ReportOutcome`` (merged, overruled_piece, paralog_not_goi, identity_coverage_decoupled,
+genome_wide_strong_hit, not_in_report) and ``ReportRecord`` (the span of the model's record) on
+the model's row, ``ReportDrawnBy`` (the model that draws the record) on a merged model,
 ``AlsoFoundFrom`` (the other home loci) on the model that draws a record found from several, and
-the header line ``##synvoy-report-marks <locus>`` after ``##gff-version``. No row is removed for a
-mark: the figures leave out the models marked merged or dropped, so each record is drawn once,
-and the header tells them that the report's marks are applied (a GFF without it, from a report
+the header line ``##synvoy-report-marks <locus>`` after ``##gff-version``. No row is removed for
+these marks: the figures leave out the models marked merged, so each record is drawn once, and
+the header tells them that the report's marks are applied (a GFF without it, from a report
 without the block, is drawn by the figures' own overlap rule).
 
     apply_report_drops.py --report synvoy_report.json --locus synteny_block_locus_1 \\
@@ -47,7 +53,7 @@ DROP_LISTS = (("gene_order_only_dropped_records", "gene_order_only"),
               ("genome_wide_strong_hits_dropped_records", GENOME_WIDE_CLASS))
 # The header line that says the report's marks are applied to a GFF, and the attributes of a mark.
 MARKS_HEADER = "##synvoy-report-marks"
-MARK_KEYS = ("ReportOutcome", "ReportRecord", "AlsoFoundFrom")
+MARK_KEYS = ("ReportOutcome", "ReportRecord", "ReportDrawnBy", "AlsoFoundFrom")
 
 
 def _load_report(report_path):
@@ -106,6 +112,8 @@ def report_marks(report, locus):
         marks[e["genome"]].setdefault(e["model"], {})["ReportOutcome"] = e["outcome"]
         if e.get("record"):
             marks[e["genome"]][e["model"]]["ReportRecord"] = e["record"]
+        if e.get("drawn_by"):
+            marks[e["genome"]][e["model"]]["ReportDrawnBy"] = e["drawn_by"]
     for e in block.get("also_found_from") or ():
         if e.get("loci"):
             marks[e["genome"]].setdefault(e["model"], {})["AlsoFoundFrom"] = ",".join(e["loci"])
@@ -142,6 +150,19 @@ def _drop_rows(lines, spans):
         s, e = int(f[3]), int(f[4])
         if any(c == f[0] and s <= ce and cs <= e and _is_dropped_kind(a, rule) for c, cs, ce, rule in spans):
             drop.add(a.get("ID", ""))
+    return _without_models(lines, rows, drop)
+
+
+def drop_models(lines, model_ids):
+    """``lines`` without the rows of the models ``model_ids`` and the rows below them; and the ids
+    of the models left out (those of ``model_ids`` the lines hold)."""
+    rows, wanted = _rows(lines), set(model_ids)
+    return _without_models(lines, rows, {a.get("ID", "") for a in rows
+                                         if a is not None and a.get("ID") in wanted})
+
+
+def _without_models(lines, rows, drop):
+    drop = set(drop)
     drop.discard("")
     models = sorted(drop)
     changed = True
@@ -205,7 +226,9 @@ def main():
     ap.add_argument("--locus", default="",
                     help="the home locus of the GFFs (locus_1, or the home BED's name "
                          "synteny_block_locus_1): marks their GOI models with the report's outcome "
-                         "(figures.<locus>); without it no model is marked")
+                         "(figures.<locus>) and leaves out the models that block marks dropped; "
+                         "without it no model is marked, and the dropped records' spans decide "
+                         "what is left out")
     ap.add_argument("--out_dir", required=True, help="folder the GFFs are written to")
     ap.add_argument("gffs", nargs="*", help="per-genome GFFs of one home locus")
     args = ap.parse_args()
@@ -223,10 +246,17 @@ def main():
             continue
         with open(path) as fh:
             lines = fh.readlines()
-        lines, left_out = _drop_rows(lines, genome_spans)
         marked = {}
         if marks is not None:
-            lines, marked = mark_lines(lines, marks.get(genome, {}), locus)
+            # The block names the models of the dropped records: those, not every model of the
+            # dropped kind that overlaps a dropped record (a kept answer beside an answer dropped
+            # at another home locus, say).
+            genome_marks = marks.get(genome, {})
+            lines, left_out = drop_models(lines, [mid for mid, m in genome_marks.items()
+                                                  if m.get("ReportOutcome") == "dropped"])
+            lines, marked = mark_lines(lines, genome_marks, locus)
+        else:
+            lines, left_out = _drop_rows(lines, genome_spans)
         with open(out_path, "w") as out:
             out.writelines(lines)
         if left_out:

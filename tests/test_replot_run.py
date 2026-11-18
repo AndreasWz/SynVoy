@@ -165,7 +165,8 @@ def test_a_run_in_todays_format_is_drawn_from_the_run_itself(tmp_path):
     run = _current_run(tmp_path / "run")
     proc = _redraw(REPLOT_RUN, run)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "older run format" not in proc.stdout and "earlier label rule" not in proc.stdout
+    # The old-label marks as replot_run.sh prints them: on stdout the date, in REDRAWN.txt the rule.
+    assert "older run format" not in proc.stdout and "before 15 Oct 2026" not in proc.stdout
     (out,) = run.glob("figures_redrawn_*")
     rows, ribbons = _figures(out)
     assert _goi_states(rows) == ["placed"] and ribbons == 5

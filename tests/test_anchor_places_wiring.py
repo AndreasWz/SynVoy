@@ -1,4 +1,4 @@
-"""The genome-wide places of each anchor are counted with the gene's own gap limit (item 58).
+"""The genome-wide places of each anchor are counted with the gene's own gap limit.
 
 process_single_genome hands synvoy_evalue.places_per_gene every flanking hit and the gap limit of
 one occurrence of the gene in this target (_gene_limit: 1.5 x the gene's home span x the expansion,

@@ -79,7 +79,7 @@ def test_the_paleness_legend_names_the_tier_it_applies_to(style):
 def test_with_numbers_the_fill_says_the_confidence():
     res = sg.render(ps, *_tracks(), {}, SimpleNamespace(), sg.style_for(numbers=True))
     assert not any("paler" in t for _, rows in res["legend_groups"] for _, t in rows)
-    # Review of item 37: AMBIGUOUS is drawn paler than LOW though it ranks above it, so the text
+    # AMBIGUOUS is drawn paler than LOW though it ranks above it, so the text
     # says what cell_style draws, not "paler the lower the confidence".
     assert ("Colour: the home gene the ortholog belongs to; the fill follows the label, high "
             "confidence darkest, then medium and low, ambiguous palest. Number: protein identity "

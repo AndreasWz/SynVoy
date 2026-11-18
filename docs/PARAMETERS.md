@@ -1484,7 +1484,10 @@ region's hits, without looking at the home strands. Only to compare region score
 **Default:** `0.15` (at most 0.15)
 
 Added to the ranking score of a region that lies within 20 kb of a GOI model of the search that is
-not LOW, or of any GOI hit of the genome-wide search, so the region that holds the gene stays ahead of an equally syntenic region without it.
+not LOW and no answer of the genome-wide path (which has no synteny, so the regions are those of a
+run without the path), or, where the search wrote no GOI model other than an answer, of a GOI hit of
+the genome-wide search, so the region that holds the gene stays ahead of an equally syntenic region
+without it.
 Values above 0.15 act as 0.15. The bonus is prior knowledge, not evidence from the neighbourhood,
 so the region's permutation p-value tests `synteny_score` without it; the region table gives both.
 
@@ -1506,10 +1509,11 @@ those near such a GOI model or GOI hit first ([`synteny_goi_overlap_bonus`](#syn
 then by the flanking support of the search block, then by score. With `0` a region that holds a
 counted GOI model of the search within 20 kb (HIGH or MEDIUM, not an answer of the genome-wide path;
 the model its `goi_model_confidence` names) and every region put in for a GOI model that no cluster
-touches (`goi_anchor`, made only when no cluster lies near any GOI model) are kept whatever their
-score and the cap. A counted model more than 20 kb from every cluster gets no region of its own
-when a cluster lies near another GOI model, and the calls of the rescue passes are not read here
-(they run after the search). Then every region in this order whose score reaches
+touches (`goi_anchor`, made only when no cluster lies near any GOI model labelled HIGH, MEDIUM or
+AMBIGUOUS; LOW models and answers of the genome-wide path take no part in this rule) are kept
+whatever their score and the cap. A counted model more than 20 kb from every cluster gets no region
+of its own when a cluster lies near another GOI model labelled HIGH, MEDIUM or AMBIGUOUS, and the
+calls of the rescue passes are not read here (they run after the search). Then every region in this order whose score reaches
 max(`adaptive_score_floor_abs`, the
 best score of all regions × `adaptive_score_floor_frac`), or that holds at least
 `adaptive_unique_gene_floor` distinct flanking genes, is added until `adaptive_max_regions` regions
@@ -1528,8 +1532,9 @@ per genome; the `dispersed_family` module and `preset_paralog_discrimination` se
 ### `strong_synteny_min_flanking`
 **Default:** `auto` (half of `n_flanking_genes`, rounded up: 5) · `0` switches it off
 
-A region that holds at least this many HIGH flanking models, with no GOI model (not LOW) within 20 kb
-of it and, where the search wrote no GOI model of any label, no raw GOI hit there either, is written
+A region that holds at least this many HIGH flanking models, with no GOI model (not LOW, no answer
+of the genome-wide path) within 20 kb of it and, where the search wrote no GOI model of any label but
+an answer, no raw GOI hit there either, is written
 as `goi_missing_but_strong_synteny`: the neighbourhood is there, but no model of the gene was built.
 Up to two such regions are kept beyond the region cap, unless they lie inside a GOI region already
 kept, and the strong-synteny rescue searches them ([§ 13](#disable_strong_synteny_rescue)). `0`
@@ -1626,9 +1631,11 @@ is the answer when the judge labels it HIGH there, no exon of its gene model run
 junction of the annotated home gene (≥ 2 exons) with 10 residues on each side (`RetrocopyCandidate=1`:
 the target would encode both exons without an intron, as a retrocopy does; the model's exons are
 tested, not the hits, whose ends can run into an intron; an exon that is at least 30 nt per
-junction longer than 3 × its aligned query span holds a short in-frame intron that miniprot read as
-coding, and does not count), it is not frame-broken without an intron (a frameshifted copy split into
-two pieces a few bp apart), and it overlaps no model the search wrote before.
+junction longer than 3 × its aligned query span is taken to hold a short in-frame intron at each
+that miniprot read as coding, and does not count; the excess is counted, not located, so one
+read-through intron of 60 nt or more next to a lost intron does not count either), it is not
+frame-broken without an intron (a frameshifted copy split into two pieces a few bp apart), and it
+overlaps no model the search wrote before.
 
 An answer is written as MEDIUM, `GOIClass=genome_wide_strong_hit`, with `GenomeWide=1`,
 `GenomeWideCoverage`, `NeighbourMedianIdentity` (the genome's median flanking identity, recorded

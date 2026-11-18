@@ -1,4 +1,4 @@
-"""The GOI hits the dispersed-GOI rescue dropped leave a record (bug list item 10, 2026-11-16).
+"""The GOI hits the dispersed-GOI rescue dropped leave a record.
 
 Before, a GOI hit that failed the rescue's quality bar was only counted, and in a genome without any
 flanking envelope not even that: the outputs could not say which test a hit failed, or whether it was

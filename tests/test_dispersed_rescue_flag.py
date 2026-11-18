@@ -1,4 +1,4 @@
-"""Calls found through the dispersed-GOI rescue carry a flag (bug list items 13 and 8, 2026-11-16).
+"""Calls found through the dispersed-GOI rescue carry a flag.
 
 A GOI model of a block the rescue seeded that lies outside every GOI zone of the blocks built
 without the rescue is a model only the rescue made the search find: its feature row carries

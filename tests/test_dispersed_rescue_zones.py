@@ -1,6 +1,5 @@
-"""The dispersed-GOI rescue is chosen against the GOI zones of the blocks built without it (bug list
-item 1, 2026-11-16; iterative_search_runner.blocks_with_rescue, rescue_selector,
-select_dispersed_goi_seeds).
+"""The dispersed-GOI rescue is chosen against the GOI zones of the blocks built without it
+(iterative_search_runner.blocks_with_rescue, rescue_selector, select_dispersed_goi_seeds).
 
 Before, the rescue ran before any block existed and skipped every strong GOI hit within the GOI
 margin of an anchor, "already covered by a flanking block". A lone anchor forms no block (a block
@@ -9,7 +8,7 @@ with fewer than 3 anchors it was refused for "too few neighbours", on one with 3
 into the dead zone. Now the blocks are built first; a passing hit inside one of their GOI zones is
 left to that block, and every other passing hit is a seed inside the envelope of a sequence with
 >= 3 anchors, or within the GOI margin of an anchor on a sequence with fewer. Far hits keep the
-3-anchor envelope, the 9-pitch reach and min_block_genes = 2 ("Not to do").
+3-anchor envelope, the 9-pitch reach and min_block_genes = 2.
 
 Distances as genome_scale_args gives them for a gene pitch of 3 kb: block gap and window margin
 21 kb, GOI margin 6 kb, envelope margin 27 kb. Synthetic ids only.
@@ -219,8 +218,9 @@ def test_the_cap_keeps_the_build_order_and_does_nothing_below_the_cap():
 
 
 def test_a_genome_without_flanking_hits_keeps_the_blocks_of_its_strongest_hits():
-    """Item 8: the GOI's own hits seed every block; when the cap binds, the blocks holding the
-    strongest hits survive (not the first ones by sequence name), in the build's order."""
+    """In a genome without a flanking hit the GOI's own hits seed every block; when the cap binds,
+    the blocks holding the strongest hits survive (not the first ones by sequence name), in the
+    build's order."""
     hits = [goi(f"chr{i:03d}", 10_000, bits=100.0 + i) for i in range(82)]
     a = make_args(min_block_genes=2)
     blocks, _values, rescue = isr.genome_axis_blocks(hits, [], a, "g", select_rescue=None,
@@ -235,7 +235,7 @@ def test_a_genome_without_flanking_hits_keeps_the_blocks_of_its_strongest_hits()
 
 
 def test_a_neighbour_counted_on_each_sequence_is_measured_only():
-    """Item 5: gene-C's best hit is a paralog on chrY; its true copy on chrX (150 bits) does not
+    """gene-C's best hit is a paralog on chrY; its true copy on chrX (150 bits) does not
     count, so chrX carries two anchors and the strong hit between them is refused. The record says
     so (2 anchors, 3 genes with a hit on chrX), and the counter counts the refusal that counting
     each gene on every sequence would turn into a seed; no call changes."""

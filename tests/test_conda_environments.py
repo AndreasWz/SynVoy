@@ -1,6 +1,6 @@
-"""The conda environment of the steps (items 24 and 26 of the bug list of 16 Nov 2026).
+"""The conda environment of the steps.
 
-Item 24: the packages of the language-model and structure search steps (environment-ml.yml) did not
+The packages of the language-model and structure search steps (environment-ml.yml) did not
 reach the steps under the conda profiles. Every conda profile set process.conda to environment.yml,
 and the header of environment-ml.yml said to install it into synvoy_env, an environment no step runs
 in. Now environment-ml.yml holds environment.yml's packages (same versions) and the ML packages, and
@@ -8,13 +8,13 @@ one closure in nextflow.config gives the search (ITERATIVE_SEARCH, the only step
 layers) environment-ml.yml when --enable_plm_search or --enable_structural_search is on; a
 process.conda of the user's own (-c) still wins, for every step.
 
-Review of the series (fix round 1): the closure first gave environment-ml.yml to every step, so
+A first version of the closure gave environment-ml.yml to every step, so
 switching a layer on or off under -resume rebuilt every step's environment and reran every step; and
 a comment edit of environment.yml changed its text, which names the environment (Nextflow hashes the
 file's whole text), so every conda run would have built a new environment and rerun every step.
 Every step but the search keeps environment.yml, and environment.yml keeps its text.
 
-Item 26: conda.useMamba was fixed to true, so a machine without mamba stopped the first run with
+conda.useMamba was fixed to true, so a machine without mamba stopped the first run with
 "mamba: command not found". It is true now only when an executable mamba is on the PATH of the
 machine that runs Nextflow; otherwise conda builds the environment.
 

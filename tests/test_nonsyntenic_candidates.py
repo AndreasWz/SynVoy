@@ -247,7 +247,7 @@ def _write_table(directory, name, rows, cols=None):
 
 
 class TestRefusedRowsAndPlaces(unittest.TestCase):
-    """Bug list item 11 (2026-11-16): each row carries strand, query span and bits; the report
+    """Each row carries strand, query span and bits; the report
     sums rows to places, and a place that a counted call of the run overlaps (another home
     locus's, a rescue pass's) is modelled, not "found, not syntenic"."""
 
@@ -364,7 +364,7 @@ def _goi_gff_row(chrom, start, end, conf, goi_class, identity=70, qcov=0.9, basi
 
 
 class TestFoundButNotSyntenicCountsCalls(unittest.TestCase):
-    """Bug list item 12: the list subtracted every genome with any GOI row, a LOW one too, so a
+    """The found-but-not-syntenic list subtracted every genome with any GOI row, a LOW one too, so a
     genome with a refused hit and only uncounted models was in neither goi_absent_genomes nor
     goi_found_but_not_syntenic. Only a counted call (HIGH or MEDIUM, not demoted) takes a genome
     out of it now."""

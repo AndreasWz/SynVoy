@@ -81,7 +81,7 @@ def test_the_ribbon_plot_names_the_goi_as_the_other_figures(state, monkeypatch):
     assert gene["name"] == "gene-NB1" and text == "★ NB1"
 
 
-# ---- review of item 42: the Gene names table and <locus>_gene_names.tsv -------------------
+# ---- the Gene names table and <locus>_gene_names.tsv --------------------------------------
 
 def _own_name_state(monkeypatch, home):
     ps.set_goi_names(home, HITS, [])

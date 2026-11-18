@@ -22,8 +22,8 @@ def _read(rel):
 
 
 def test_the_ownership_file_carries_the_locus():
-    # RECIPROCAL_BEST_PARALOG, which wrote <locus>__<genome>.paralog_check.tsv, went with item 27 of
-    # the bug list of 16 Nov 2026: it always received one query sequence and could flag nothing.
+    # RECIPROCAL_BEST_PARALOG, which wrote <locus>__<genome>.paralog_check.tsv, is gone: it
+    # always received one query sequence and could flag nothing.
     own = _read("modules/assign_locus_ownership.nf")
     assert 'path("${locus_id}__${genome_name}.locus_ownership.tsv")' in own
 

@@ -223,7 +223,7 @@ def test_a_window_that_cannot_fit_stops_the_search_with_the_settings(tmp_path, m
     assert "--mmseqs_split_memory_limit" in str(stop.value) and "--iterative_search_memory" in str(stop.value)
 
 
-# --------------------------------------------------------------------------- both streams (review round 2)
+# --------------------------------------------------------------------------- both streams
 
 def test_both_streams_reach_the_details_and_the_kind():
     """MMseqs2 names the cause on stderr and the step on stdout: both are in the details, and
@@ -256,7 +256,7 @@ MEM_ALIGN_ERR = "mem_align could not allocate memory.\n\x00"
 
 
 def test_a_memory_message_with_a_nul_byte_records_the_genome_without_it(tmp_path, monkeypatch):
-    """Review round 3: "mem_align could not allocate memory." stopped the run after one attempt
+    """MMseqs2's "mem_align could not allocate memory." stopped the run after one attempt
     (no listed message, stderr not empty). It takes the three rungs now and the genome is recorded
     as not searched, and the NUL byte that ends the message is not written to the record: Python
     3.10's csv reader refuses a line that holds one, and the report would then leave the genome out

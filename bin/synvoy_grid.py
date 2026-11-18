@@ -19,8 +19,9 @@ the locus. The exon structure of every copy is drawn on a line of its own,
 5'->3', in a panel right of the grid, under the same number. When no genome
 (the home genome included) has two copies there is no panel: the model is drawn
 in the GOI column itself, in its genomic orientation. The calls are the report's
-records: a model the report merged into the call drawn for its gene, or dropped,
-is not drawn (plot_synteny.parse_target_gff) and has a row of the source data.
+records: a model the report merged into the call drawn for its gene is not drawn
+(plot_synteny.parse_target_gff) and has a row of the source data where that call
+is listed (plot_synteny._report_left_out_models).
 
     result = render(plot_synteny_module, tracks, gene_colours, home_products, args, style_for())
 
@@ -361,7 +362,9 @@ def split_calls(tmap, span_bp, outside=()):
     capped next to a drawn tandem array is at the locus, one on another scaffold after '//'.
     `best`, the call the copy rule names, is the best call of the genome, `outside` included.
     An answer of the genome-wide path (plot_synteny._is_genome_wide_answer) is listed by the
-    same test, but is never `best`, no copy, and does not place the locus.
+    same test, but is never `best` and no copy. No model of the path places the locus
+    (plot_synteny._places_no_locus): one that the report gave another outcome is drawn by its
+    label, at the locus or after '//' like the others.
     """
     ps = _PS
     genes = (tmap.get(GOI_KEY) or {}).get("genes", [])
@@ -372,8 +375,8 @@ def split_calls(tmap, span_bp, outside=()):
     best_of = ps._goi_best_call
     best = best_of(genes + outside)
     placed = [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
-              for e in tmap.values() if not ps._is_genome_wide_answer(e["best"])]
-    calls_in_view = [g for g in genes if not ps._is_genome_wide_answer(g)]
+              for e in tmap.values() if not ps._places_no_locus(e["best"])]
+    calls_in_view = [g for g in genes if not ps._places_no_locus(g)]
     if calls_in_view:
         here = best_of(calls_in_view)
         _, lo, hi, _ = ps._dominant_chrom_span(placed, here.get("chrom", ""))
@@ -730,9 +733,11 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
     # merged into another call or dropped (not drawn), the calls drawn that it does not count, by
     # outcome, and the calls whose record other home loci found too.
     n_report_left_out = sum(len(rows[ri].get("goi_report_left_out") or ()) for ri in range(1, n_rows))
+    # An answer of the genome-wide path has a sentence of its own; a model of the path that the
+    # report gave another outcome (paralog_not_goi) is no answer and is counted here.
     not_counted = Counter(g["report_outcome"] for rc in calls[1:] for g, _, _ in rc
                           if g.get("report_outcome") and g["report_outcome"] not in ps.REPORT_LEFT_OUT
-                          and not ps._is_genome_wide_answer(g))   # answers: their own sentence
+                          and not ps._is_genome_wide_answer(g))
     n_also_found = sum(1 for rc in calls[1:] for g, _, _ in rc if g.get("also_found_from"))
     n_copies = [sum(1 for _, _, c in rc if c) for rc in calls]
     in_column = max(n_copies + [0]) <= 1     # no genome has two: the model goes in the column
@@ -824,18 +829,11 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
             mids = [(a["start"] + a["end"]) / 2.0 for a in anchors if a["start"]]
             chrom = next((a["chrom"] for a in anchors if a.get("chrom")), "")
             return ps._span_gutter_label(chrom, min(mids) if mids else 0, max(mids) if mids else 0, 0)
-        items, goi_chrom = [], ""
-        for a in anchors:
-            entry = tmaps[ri].get(a["key"])
-            if not entry:
-                continue
-            ch = entry["best"].get("chrom", "")
-            items.append((ch, (entry["best"]["start"] + entry["best"]["end"]) / 2.0))
-            if a["is_goi"] and ch:
-                goi_chrom = ch
-        if not items:               # searched, and nothing of the neighbourhood was placed
-            return NOTHING_PLACED
-        return ps._span_gutter_label(*ps._dominant_chrom_span(items, goi_chrom))
+        # the columns drawn; a model of the genome-wide path places no locus (ps._row_place)
+        drawn = {a["key"]: tmaps[ri][a["key"]] for a in anchors if a["key"] in tmaps[ri]}
+        if all(ps._places_no_locus(e["best"]) for e in drawn.values()):
+            return NOTHING_PLACED   # searched, and nothing of the neighbourhood was placed
+        return ps._span_gutter_label(*ps._row_place(drawn, GOI_KEY))
     spans = [span_text(ri) for ri in range(n_rows)] if st.full else []
 
     # A dagger marks a genome that failed the assembly quality check (see plot_synteny).
@@ -1430,9 +1428,13 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         # at the locus or after //, by where they lie)
         "goi_calls_outside_view": n_outside_view,
         # answers of the genome-wide path listed (outlined): strong hits without synteny, not
-        # counted, no copies
+        # counted, no copies; and those of them inside a block's searched window (NearBlock),
+        # which the report counts apart (summary.near_block_strong_hits)
         "goi_strong_hits": sum(1 for rc in calls[1:] for g, _, _ in rc
                                if ps._is_genome_wide_answer(g)),
+        "goi_strong_hits_near_block": sum(1 for rc in calls[1:] for g, _, _ in rc
+                                          if ps._is_genome_wide_answer(g)
+                                          and str(g.get("near_block") or "").strip()),
         # GOI models drawn with a number that is the identity to a seeded tandem copy
         "copy_lineage_models": n_copy_lineage,
         # the report's outcomes (ReportOutcome): models it merged into the call drawn for their
@@ -1902,11 +1904,18 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                          "identity_to).")
     n_strong = info.get("goi_strong_hits", 0)
     if n_strong:
+        # The report counts an answer inside a block's searched window apart.
+        n_near = min(info.get("goi_strong_hits_near_block", 0), n_strong)
+        keys = [k for k, n in (("summary.genome_wide_strong_hits", n_strong - n_near),
+                               ("summary.near_block_strong_hits", n_near)) if n]
+        near = (f", {n_near} of them inside a block's searched window, outside its GOI zone"
+                if 0 < n_near < n_strong else
+                ", inside a block's searched window, outside its GOI zone" if n_near else "")
         s.append(f"An outlined arrow in the {goi} column is a strong hit without synteny "
                  "(--goi_genome_wide_path): a match that meets the terms of a high-confidence call "
                  "where no block of the neighbouring genes placed the gene. It is not counted and "
-                 f"is no copy ({n_strong} in this figure; synvoy_report.json, "
-                 "genome_wide_strong_hits).")
+                 f"is no copy ({n_strong} in this figure{near}; synvoy_report.json, "
+                 + " and ".join(keys) + ").")
     # What the report did with the GOI models (the ReportOutcome marks of the per-genome GFFs).
     n_left = info.get("goi_models_left_out_by_report", 0)
     if n_left:
@@ -1952,10 +1961,12 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
 # call, the seeded tandem copy (GOI_copy_<n>) for a model found from one (copy_lineage), "home
 # gene" for a flanking ortholog; empty for the home row and a cell where nothing was placed.
 # model_id: the model's ID in the per-genome GFF. report, report_record, also_found_from (GOI
-# rows): the report's outcome (ReportOutcome; empty for a call it counts, for an AMBIGUOUS or LOW
-# call by its label, and in a GFF without the report's marks), the span of the model's record, and
-# the other home loci that found that record. A model the report merged into another call or
-# dropped has a row of its own, drawn_as 'not drawn'.
+# rows): the report's outcome (ReportOutcome; empty on the model that draws a record the report
+# counts, on the AMBIGUOUS model that draws a record the report keeps without relabelling it, on
+# a LOW model, and in a GFF without the report's marks), the span of the model's record, and the
+# other home loci that found that record. A model the report merged into the call drawn for its
+# gene has a row of its own, drawn_as 'not drawn', when the model that draws its record
+# (ReportDrawnBy) is listed too.
 SOURCE_COLUMNS = ("row", "species", "genome_id", "column", "home_gene_id", "state", "drawn_as",
                   "copy_number", "position", "identity_pct", "query_coverage_pct", "identity_to",
                   "confidence", "copies", "strand_drawn", "scaffold", "start", "end", "exons",

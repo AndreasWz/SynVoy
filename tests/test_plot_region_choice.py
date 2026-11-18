@@ -18,7 +18,7 @@ Now the strong neighbourhoods are drawn, every region left out is named on the c
 sequence that holds a neighbour placed nowhere else is kept, and the counted calls outside the
 view are listed in the anchor grid and counted in the ribbon plot ('+N elsewhere'). In the grid
 they are placed as the calls in view are: at the locus when they lie within reach of it (a copy of
-a tandem array beyond the cap), after '//' on another scaffold or farther away (review of item 55),
+a tandem array beyond the cap), after '//' on another scaffold or farther away,
 and a scaffold drawn reversed mirrors them with it.
 """
 import contextlib
@@ -80,7 +80,7 @@ def _homeolog(region2_name):
     return rows, regions
 
 
-# ------------------------------------------------- item 48: regions without a GOI model ----
+# ---------------------------------------------------------- regions without a GOI model ----
 
 def test_a_strong_neighbourhood_without_a_goi_model_is_drawn(tmp_path, monkeypatch):
     rows, regions = _homeolog("Apis_x|Reg2_FLANKonly5_CMEDIUM_S0.40")
@@ -130,7 +130,7 @@ def test_the_strong_neighbourhood_name_is_the_region_scorers(name, strong):
     assert ps._is_strong_no_goi_region(("c", 0, 1, built))
 
 
-# ------------------------------------- item 55a: neighbours on sequences of their own ----
+# ----------------------------------------------- neighbours on sequences of their own ----
 
 def test_a_fragmented_neighbourhood_keeps_every_contig_with_a_neighbour(tmp_path, monkeypatch):
     rows = [_goi("ctg1", 5000, 6000), _flank("ctg1", 1000, 1900, "gene-F3"),
@@ -164,7 +164,7 @@ def test_more_than_twenty_sequences_are_drawn_unfiltered_as_before(tmp_path, mon
     assert len(drawn) == 21 and "dropped" not in log
 
 
-# ------------------------------------ items 55b/c: counted calls outside the view ----
+# ------------------------------------------------- counted calls outside the view ----
 
 def _capped_rows():
     """Ten HIGH copies at the locus on chr1 and two MEDIUM calls in a second neighbourhood."""
@@ -338,11 +338,11 @@ def test_a_counted_call_outside_the_view_reaches_the_figures(tmp_path):
         tmp_path / "synteny_block_locus_1_anchor_grid_print.legend.txt").read_text())
 
 
-# ---------------------------------------------- review of items 48 and 55 (round 1) ----
+# ------------------------------ what is named left out, and where off-view calls go ----
 
 def test_a_region_drawn_through_a_kept_one_is_not_named_left_out(tmp_path, monkeypatch):
     """cluster_grs widens a GOI region to its search block, so a weaker region can lie inside
-    it: its models are drawn, and the log named it left out with them (review of item 48)."""
+    it: its models are drawn, and the log named it left out with them."""
     rows = [_goi("chr1", 50_000, 52_000)] + [_flank("chr1", 10_000 * k, 10_000 * k + 900, f"gene-F{k}")
                                              for k in range(1, 9)]
     regions = [("chr1", 0, 100_000, "Reg1_G9_CHIGH_S0.9"), ("chr1", 65_000, 95_000, "Reg2_G3_CLOW_S0.2")]
@@ -359,7 +359,7 @@ def test_a_region_drawn_through_a_kept_one_is_not_named_left_out(tmp_path, monke
 def test_a_capped_copy_beside_the_drawn_array_is_listed_at_the_locus(tmp_path, monkeypatch):
     """Twelve copies at the end of a neighbourhood with the GOI cap at 10: the two weakest lie
     3 kb past the last copy drawn. They were drawn after '//', listed as 'elsewhere', and the
-    legend said they lie on another scaffold or farther away (review of item 55)."""
+    legend said they lie on another scaffold or farther away."""
     rows = [_flank("chr1", 10_000 * k, 10_000 * k + 900, f"gene-F{k}") for k in range(0, 3)]
     rows += [_goi("chr1", 40_000 + 3000 * k, 41_000 + 3000 * k, ident=90.0 - k,
                   conf="HIGH" if k < 10 else "MEDIUM") for k in range(12)]

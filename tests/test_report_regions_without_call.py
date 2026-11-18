@@ -1,4 +1,4 @@
-"""Bug list item 9: the region tables said "dispersed macrosynteny, MEDIUM" where no gene was
+"""The region tables said "dispersed macrosynteny, MEDIUM" where no gene was
 modelled. The report lists every gene-bearing region of MEDIUM or better (and every
 goi_hit_no_call region) that holds no counted call, with what it holds and why
 (regions.goi_regions_without_call, summary.goi_regions_without_call)."""
@@ -171,7 +171,7 @@ def test_the_order_is_fixed_and_the_count_matches(run):
     assert gr.build_report(str(run))["regions"]["goi_regions_without_call"] == listed
 
 
-# ---------------------------------------------------------------- a record the report dropped (review round 2)
+# ---------------------------------------------------------------- a record the report dropped
 
 def test_a_region_whose_only_model_the_report_dropped_names_it(run):
     """The genome has a counted call on c9; the AMBIGUOUS gene-order-only model inside the MEDIUM

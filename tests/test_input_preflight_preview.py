@@ -1,19 +1,19 @@
-"""What the start of a run checks before any task (bug list of 16 Nov 2026).
+"""What the start of a run checks before any task.
 
 Runs ``nextflow run main.nf -preview`` (builds the DAG, runs no task), about 8 s per run; skipped
 without Nextflow on PATH (CI has none). The checks:
 
-* item 31 / F4a: a query FASTA with fewer sequence characters than --min_query_length stops the
+* a query FASTA with fewer sequence characters than --min_query_length stops the
   run at its start (NORMALIZE_QUERY would stop it for certain: it reads the first record and a DNA
   query translates to at most a third of its length). It warned with a fixed "30 aa minimum".
-* item 31 / F4b: the warning for --max_genomes 1 or 2 says what fewer targets change; it described
+* the warning for --max_genomes 1 or 2 says what fewer targets change; it described
   a classifier that no longer exists.
-* F3: easy mode with --home_genome, --home_gff or --target_genomes stops with the hint to add
+* easy mode with --home_genome, --home_gff or --target_genomes stops with the hint to add
   --mode pro; it downloaded other genomes and ignored them without a word.
-* item 39b: a listed target genome or annotation that matches nothing stops the run; it was left
+* a listed target genome or annotation that matches nothing stops the run; it was left
   out without a word.
-* item 22: --max_flanking_distance is checked as a number (from the command line it is text).
-* items 21 and 27: the removed settings stop or warn (main.nf removedParams()).
+* --max_flanking_distance is checked as a number (from the command line it is text).
+* the removed settings stop or warn (main.nf removedParams()).
 """
 from __future__ import annotations
 

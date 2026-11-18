@@ -1,4 +1,4 @@
-"""Every length floor of the search counts aligned query residues (bug list item 6, 2026-11-16).
+"""Every length floor of the search counts aligned query residues.
 
 MMseqs2's translated search, run without a backtrace as the search runs it, writes the target
 span in nucleotides in its alignment-length column; tblastn and Smith-Waterman write alignment

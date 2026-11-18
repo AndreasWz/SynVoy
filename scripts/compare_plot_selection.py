@@ -154,7 +154,10 @@ def compare_genome(run, locus, gff, regions_by_genome, max_regions, call_labels=
                      "drawn_by": "today" if mid in today else "blocks",
                      "why": "region_only" if mid in today else chosen[mid][0],
                      "region": region_of(g) if mid in today else ""})
-    calls = [g for g in genes_all if ps._is_goi_target_gene(g) and g["confidence"] in COUNTED]
+    # A model of the genome-wide path is labelled MEDIUM but never counted, and the figures
+    # choose a row's view without it: it is no counted call here either.
+    calls = [g for g in genes_all if ps._is_goi_target_gene(g) and g["confidence"] in COUNTED
+             and not ps._places_no_locus(g)]
     missing = [g for g in calls if g["gff_id"] not in today]
     whys = defaultdict(int)
     for w in drawn.values():

@@ -542,7 +542,7 @@ def validateNumericParams(validationErrors, validationWarnings) {
     }
     def mmseqsSensitivity = num.call('mmseqs_sensitivity', params.mmseqs_sensitivity, 7)
     if (mmseqsSensitivity < 1 || mmseqsSensitivity > 12) {
-        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}). Typical range is 1-9.5."
+        validationWarnings << "Unusual --mmseqs_sensitivity (${params.mmseqs_sensitivity}): outside 1-12. Values from about 7 to 9.5 are usual."
     }
     if (!(params.mmseqs_max_seqs.toString() ==~ /[1-9][0-9]*/)) {
         validationErrors << "Invalid --mmseqs_max_seqs (${params.mmseqs_max_seqs}). Must be a whole number >= 1."

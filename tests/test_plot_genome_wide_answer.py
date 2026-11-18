@@ -1,4 +1,4 @@
-"""An answer of the genome-wide path in the figures (review round 3, 2026-11-17).
+"""An answer of the genome-wide path in the figures.
 
 With --goi_genome_wide_path a genome without a counted call can keep one answer: a strong hit
 without synteny, written MEDIUM with GOIClass=genome_wide_strong_hit, which the report never
@@ -131,12 +131,31 @@ def test_the_grid_lists_an_answer_outside_the_view_outlined_and_counts_it_nowher
 
 
 def test_an_answer_in_the_view_is_drawn_outlined_in_the_grid(tmp_path):
-    """An answer next to the neighbourhood (inside a block's window, outside its GOI zone) is in
-    the view: the grid draws it outlined at the locus; the LOW model stays the best call."""
-    gff = _gff(tmp_path, answer_at=30_000)
+    """An answer between the neighbourhood's models is in the view chosen without it: the grid
+    draws it outlined at the locus; the LOW model stays the best call."""
+    gff = _gff(tmp_path, answer_at=12_000)
     genes = _view(gff)
+    assert [g["start"] for g in genes if ps._is_genome_wide_answer(g)] == [12_000]
     assert ps._strong_hits_outside_view(gff, genes) == []
     tracks = [_home(), _target(genes)]
+    svg, legend, source, info = ps.render_anchor_grid_print(tracks, COLOURS, {}, SimpleNamespace())
+    rows = {r["start"]: r for r in source if r["row"] == 2 and r["column"] == "T"}
+    assert (rows[12_000]["position"], rows[12_000]["drawn_as"]) == ("locus", "outline")
+    assert rows[15_000]["drawn_as"] == "model"
+    assert info["goi_strong_hits"] == 1 and OUTLINE in svg
+
+
+def test_an_answer_beside_the_view_is_listed_at_the_locus(tmp_path):
+    """An answer just beyond the neighbourhood's last model (inside a block's window, outside its
+    GOI zone) is no part of the view, which is chosen without it and ends at that model: the
+    ribbon plot and the gene-position map leave it out, and the grid lists it outlined at the
+    locus (within the neighbourhood's length of it)."""
+    gff = _gff(tmp_path, answer_at=30_000)
+    genes = _view(gff)
+    assert not any(ps._is_genome_wide_answer(g) for g in genes)
+    strong = ps._strong_hits_outside_view(gff, genes)
+    assert [g["start"] for g in strong] == [30_000]
+    tracks = [_home(), _target(genes, strong=strong)]
     svg, legend, source, info = ps.render_anchor_grid_print(tracks, COLOURS, {}, SimpleNamespace())
     rows = {r["start"]: r for r in source if r["row"] == 2 and r["column"] == "T"}
     assert (rows[30_000]["position"], rows[30_000]["drawn_as"]) == ("locus", "outline")
@@ -146,7 +165,7 @@ def test_an_answer_in_the_view_is_drawn_outlined_in_the_grid(tmp_path):
 
 # ------------------------------------------------------------------------- the ribbon plot
 def test_the_ribbon_plot_draws_an_answer_outlined_with_its_status_and_no_goi_ribbon(tmp_path):
-    gff = _gff(tmp_path, answer_at=30_000)
+    gff = _gff(tmp_path, answer_at=12_000)
     genes = [g for g in _view(gff) if not (ps._is_goi_target_gene(g) and g["confidence"] == "LOW")]
     tracks = [_home(), _target(genes)]
     assert tracks[1]["goi_status"] == "strong_hit"
@@ -169,7 +188,7 @@ def test_the_ribbon_plot_draws_an_answer_outlined_with_its_status_and_no_goi_rib
 
 # ------------------------------------------------------------------------- the gene-position map
 def test_the_gene_position_map_draws_an_answer_alone_outlined(tmp_path):
-    gff = _gff(tmp_path, answer_at=30_000)
+    gff = _gff(tmp_path, answer_at=12_000)
     genes = [g for g in _view(gff) if not (ps._is_goi_target_gene(g) and g["confidence"] == "LOW")]
     html = ps.render_anchor_grid_positional([_home(), _target(genes)], COLOURS, {}, {}, SimpleNamespace())
     assert f'fill="#ffffff" stroke="{ps.GOI_BORDER}" stroke-width="1.3"' in html

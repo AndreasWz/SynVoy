@@ -253,15 +253,14 @@ function genomeTable(result, fileUrl) {
         el("td", { class: "where", text: where(call) })));
     });
   }
+  // Listed under the table: the calls set aside as not the gene, and apart from them the
+  // strong hits without synteny (answers of the genome-wide path), counted by neither.
   const aside = [];
+  const strong = [];
   for (const genome of result.genomes) {
     for (const call of genome.calls.filter((c) => c.label === "set_aside")) {
-      const reason = call.reason === "related_gene"
-        ? "matches " + (call.related_gene ? "the related gene " + call.related_gene : "a related gene") + " better than the query"
-        : call.reason === "strong_hit"
-          ? "a strong match where no neighbourhood places the gene; not counted"
-          : "matches only a short piece of the query";
-      aside.push(el("li", {}, species(genome.species), ", ", where(call), ": ", reason,
+      (call.reason === "strong_hit" ? strong : aside).push(el("li", {},
+        species(genome.species), ", ", where(call), ": ", words.setAsideReason(call),
         call.identity === null ? "" : " (" + words.percent(call.identity) + " identical)", "."));
     }
   }
@@ -284,8 +283,12 @@ function genomeTable(result, fileUrl) {
           el("th", { scope: "col", text: "Where in the genome, or what was seen" }))),
         el("tbody", {}, rows))),
     aside.length ? el("div", { class: "stack-s" },
-      el("h3", { text: "Set aside: " + aside.length + " " + words.plural(aside.length, "call that is not the gene", "calls that are not the gene") }),
+      el("h3", { text: words.setAsideHeading(aside.length) }),
       el("ul", { class: "small" }, aside)) : null,
+    strong.length ? el("div", { class: "stack-s" },
+      el("h3", { text: words.strongHitHeading(strong.length) }),
+      el("p", { class: "small muted", text: words.STRONG_HIT_MEANS }),
+      el("ul", { class: "small" }, strong)) : null,
     table ? el("p", { class: "small" }, el("a", { href: fileUrl(table.file), download: "genome_by_genome.tsv", text: "This table as a file" }), " (TSV, opens in a spreadsheet).") : null);
 }
 
@@ -358,7 +361,7 @@ function specialists(result) {
       fact("Home genome", [h.species, h.assembly].filter(Boolean).join(", ")),
       fact(words.plural((result.loci || []).length, "Place in the home genome", "Places in the home genome"), loci),
       fact("Calls counted as the gene", s.copies + " (" + s.copies_clear + " high, " + s.copies_probable + " medium confidence)"),
-      fact("Candidates, set aside", s.candidates + " ambiguous, " + s.set_aside + " set aside"),
+      fact("Candidates, set aside", words.asideFact(s)),
       fact("Weak matches not listed as calls", String(s.weak_leads) + " low-confidence " + words.plural(s.weak_leads, "model", "models") + " (in the report file)"),
       fact("Steps that failed", String(s.failed_tasks || 0)),
       fact("Finished", result.timing && result.timing.finished_at ? result.timing.finished_at.replace("T", " ").replace("Z", " UTC") : "")),

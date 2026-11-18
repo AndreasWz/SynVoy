@@ -6916,11 +6916,12 @@ MMSEQS_SENSITIVITY_TYPICAL = (1.0, 12.0)
 
 def mmseqs_sensitivity_warning(sensitivity: float) -> Optional[str]:
     """The search log's warning for an MMseqs2 sensitivity outside MMSEQS_SENSITIVITY_TYPICAL
-    (the start's text); None inside the bounds."""
+    (the start's text, which names the same bounds); None inside the bounds."""
     lo, hi = MMSEQS_SENSITIVITY_TYPICAL
     if lo <= float(sensitivity) <= hi:
         return None
-    return f"Unusual MMseqs sensitivity {sensitivity}. Typical range is 1-9.5."
+    return (f"Unusual MMseqs sensitivity {sensitivity}: outside {lo:g}-{hi:g}. "
+            "Values from about 7 to 9.5 are usual.")
 
 
 @contextlib.contextmanager
@@ -7907,7 +7908,8 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
 #   - a candidate of such a window is an answer (genome_wide_keep) when the judge labels it HIGH,
 #     no exon of its own gene model runs across an exon junction of an annotated multi-exon home
 #     gene (RetrocopyCandidate; RETROCOPY_JUNCTION_FLANK_AA residues on each side) without holding
-#     an intron there that miniprot read as coding (READTHROUGH_INTRON_MIN_NT), it is not
+#     an intron there that miniprot read as coding (READTHROUGH_INTRON_MIN_NT per spanned
+#     junction, counted over the exon, not located), it is not
 #     frame-broken without an intron, and it overlaps no row written before; the best one per window
 #     is kept and labelled MEDIUM, GOIClass=genome_wide_strong_hit (synvoy_label.
 #     genome_wide_answer). It never seeds the next wave and never reaches the tree; the report
@@ -8072,8 +8074,12 @@ RETROCOPY_JUNCTION_FLANK_AA = 10
 # counted as spanning them. 30 nt lies below the shortest introns of most
 # eukaryotes (some protists, ciliates such as Paramecium among them, have shorter ones: there a
 # read-through intron still reads as a retrocopy) and well above what split codons and a stop
-# codon add (-2 to +3 nt measured on the same models). An insertion of 10 or more residues in
-# the target's exon reads the same, so a retrocopy with one is not flagged.
+# codon add (-2 to +3 nt measured on the same models). An insertion of 10 or more residues per
+# junction in the target's exon reads the same, so a retrocopy with one is not flagged. The
+# excess is counted, not located (the exons carry no alignment path): one read-through intron
+# of 60 nt (2 x 30) or more next to a lost intron excuses an exon across both junctions as
+# well, so such a gene (an intron loss next to a kept intron) gets RetrocopyCandidate=0; below
+# that it stays flagged.
 READTHROUGH_INTRON_MIN_NT = 30
 
 
@@ -8116,7 +8122,9 @@ def retrocopy_test_pieces(cand, junctions=()) -> Optional[List[Tuple[int, int]]]
     model (``model_exons``) built with the protein it is named after, so its query coordinates
     are that protein's. With ``junctions``, an exon whose CDS exceeds its query span by
     READTHROUGH_INTRON_MIN_NT or more for each junction it spans (readthrough_nt) is left out:
-    the target has an intron at each, which miniprot read as coding. None for a candidate the
+    the target is taken to have an intron at each, which miniprot read as coding. The excess
+    is not located, so one read-through intron of 2 x READTHROUGH_INTRON_MIN_NT nt or more
+    next to a lost intron leaves the exon out too. None for a candidate the
     test cannot read: a hit chain or a tandem copy (its pieces are local alignments, whose ends
     can run past an exon end into the intron) and a model of a relative's query rebased onto the
     home protein (its exons are in the relative's coordinates). The window's hits are never
@@ -9929,7 +9937,10 @@ def main():
                              "when the judge's HIGH terms hold in the genome place (E <= 1e-6 over the "
                              "genome, >= 0.7 of the query covered by its hits, no other home protein "
                              "within 10 bits) and its model is judged HIGH there, has no exon across "
-                             "a home exon junction (no retrocopy) and is not frame-broken without an "
+                             "a home exon junction (no retrocopy; an exon >= 30 nt per spanned "
+                             "junction longer than 3 x its aligned query span holds an intron read "
+                             "as coding and does not count, also when the excess is one read-through "
+                             "intron of >= 60 nt next to a lost one) and is not frame-broken without an "
                              "intron; written as MEDIUM, GOIClass=genome_wide_strong_hit, never a "
                              "seed, not counted by the report (its own reading); default %(default)s")
     parser.add_argument("--goi_join_leftover_hits", type=str2bool, default=False,
@@ -10213,7 +10224,8 @@ def main():
     _home_method, _home_lengths = read_home_exons(getattr(args, "goi_info", None))
     args.home_goi_exons, args.home_goi_structure = home_exon_terms(_home_method, _home_lengths)
     # The junctions of an annotated multi-exon home gene: a genome-wide gene model with one exon
-    # across one is a retrocopy candidate (RetrocopyCandidate=1), and no answer.
+    # across one is a retrocopy candidate (RetrocopyCandidate=1), and no answer, unless the exon
+    # is long enough to hold a read-through intron there (retrocopy_test_pieces).
     args.home_goi_junctions = home_exon_junctions(_home_lengths) if args.home_goi_structure else []
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)

@@ -97,7 +97,7 @@ def test_the_runners_call_it():
         assert "resolved_goi_annotations" not in text and "ambiguous_goi_annotations" not in text
 
 
-# --------------------------------------------------------------------------- genome names (review round 2)
+# --------------------------------------------------------------------------- genome names
 
 def _gr():
     spec = importlib.util.spec_from_file_location("generate_report", os.path.join(ROOT, "bin", "generate_report.py"))

@@ -1,9 +1,8 @@
-"""The GOI rows of each genome's genome-wide hit table are published (bug list item 10, point 4;
-review fix of 2026-11-17).
+"""The GOI rows of each genome's genome-wide hit table are published.
 
 hits/<genome>.m8, the genome-wide MMseqs2 table, sits inside the hits/ output folder and so never
 reaches the run folder: the hits behind a refusal or a drop of the dispersed-GOI rescue could not
-be read after the run (item 16 needs them). ITERATIVE_SEARCH now writes the rows whose query is a
+be read after the run. ITERATIVE_SEARCH now writes the rows whose query is a
 GOI query to goi_hits/<prefix><genome>.goi.m8.gz (sorted, gzipped with mtime 0) and publishes the
 folder. Synthetic ids only.
 """

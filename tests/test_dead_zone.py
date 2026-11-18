@@ -1,4 +1,4 @@
-"""The dead zone (profile handoff, constraint C2; bug list item 1, 2026-11-16): the dispersed-GOI
+"""The dead zone (profile handoff, constraint C2): the dispersed-GOI
 rescue leaves to a block only the GOI hits inside its GOI zone (block +- the GOI margin, the core a
 block keeps GOI hits in), and it decides that against the blocks themselves, built without it
 (iterative_search_runner.select_dispersed_goi_seeds, goi_zones). Until 2026-11-16 it skipped every

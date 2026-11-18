@@ -60,7 +60,7 @@ def test_labels_and_counts():
     assert summary == {
         "genomes": 8, "found": 3, "clear": 2, "candidate": 1, "none": 4, "not_searched": 0,
         "copies": 4, "copies_clear": 2, "copies_probable": 2, "candidates": 1, "set_aside": 2,
-        "weak_leads": 5, "identity_min": 55.9, "identity_max": 84.3}
+        "strong_hits": 0, "weak_leads": 5, "identity_min": 55.9, "identity_max": 84.3}
     assert check["agrees"] is True
 
 
@@ -81,10 +81,64 @@ def test_a_strong_hit_without_synteny_is_set_aside():
     assert [(c["label"], c["reason"]) for g in ("G1", "G2", "G3") for c in by_id[g]["calls"]] == [
         ("set_aside", "strong_hit"), ("set_aside", "strong_hit"), ("set_aside", "related_gene")]
     assert [by_id[g]["status"] for g in ("G1", "G2", "G3", "G4")] == ["none", "none", "none", "found"]
+    assert [by_id[g]["related_gene_only"] for g in ("G1", "G2", "G3")] == [False, False, True]
     assert (summary["copies"], summary["copies_probable"], summary["set_aside"]) == (1, 1, 3)
+    assert summary["strong_hits"] == 2
     assert check == {"agrees": True, "report_high": 0, "report_medium": 1}
     table = results.genome_table(genomes)
-    assert "strong match where no neighbourhood places the gene; not counted" in table
+    assert table.count("strong hit without synteny, not counted: a strong match where no "
+                       "neighbourhood places the gene") == 2
+
+
+ANSWER_MODEL = ("chr9\texon_annotation\tmRNA\t20001\t21500\t49.3\t+\t.\t"
+                "ID=GOI_chrH_1000|Gamma_delta_fna_b5000_l1m1;SynVoy_Parent=GOI_chrH_1000;"
+                "SynVoyRole=goi;Confidence=MEDIUM;GOIClass=genome_wide_strong_hit;GenomeWide=1;"
+                "Identity=49.3;QueryCoverage=0.772\n")
+
+
+def test_a_strong_hit_without_synteny_is_no_weak_match(tmp_path):
+    """An answer of the genome-wide path is a model of the gene itself (SynVoyRole=goi) in a
+    genome without a counted call. It was counted among the weak matches ('2 weak matches, the
+    best 49 % identical: not enough for a call'), the best of them being the answer itself.
+    Either mark leaves it out; the other models stay leads."""
+    gff = tmp_path / "G.fna.gff"
+    low = ("chr1\texon_annotation\tmRNA\t5001\t5090\t21.5\t+\t.\tID=GOI_x|G_fna_b0_l1_exon_ann5000;"
+           "SynVoy_Parent=GOI_x;SynVoyRole=goi;Confidence=LOW;Identity=21.5;QueryCoverage=0.430\n")
+    for answer in (ANSWER_MODEL,
+                   ANSWER_MODEL.replace("GOIClass=genome_wide_strong_hit;", ""),
+                   ANSWER_MODEL.replace("GenomeWide=1;", "")):
+        gff.write_text("##gff-version 3\n" + low + answer)
+        placed = results.placed_in_genome(gff)
+        assert (placed["leads"], placed["lead_identity"], placed["lead_coverage"]) == (1, 21.5, 0.43)
+    gff.write_text("##gff-version 3\n" + ANSWER_MODEL)
+    assert results.placed_in_genome(gff)["leads"] == 0
+
+
+def test_the_page_names_a_kept_answer_a_strong_hit_without_synteny(output, tmp_path):
+    """The genome without a call holds the report's kept answer: its row keeps the two weak
+    matches it had, and the answer is a set-aside call of its own, named as the report names it."""
+    with open(str(output / "plot_inputs_synteny_block_locus_1" / "Gamma_delta.fna.gff"), "a") as fh:
+        fh.write(ANSWER_MODEL)
+    path = output / "synvoy_report.json"
+    data = json.loads(path.read_text())
+    data["goi_dedup"]["records"].append(record(
+        "Gamma_delta", "MEDIUM", "genome_wide_strong_hit", "49.3", "0.772", chrom="chr9",
+        start=20001, end=21500, genome_wide_strong_hit=True))
+    data["summary"]["genome_wide_strong_hits"] = 1
+    path.write_text(json.dumps(data))
+    result = results.build_bundle(output, tmp_path / "bundle", META)
+    gamma = {g["id"]: g for g in result["genomes"]}["Gamma_delta"]
+    assert gamma["status"] == "none"
+    assert [(c["label"], c["reason"]) for c in gamma["calls"]] == [("set_aside", "strong_hit")]
+    assert gamma["leads"] == {"n": 2, "identity": 21.5, "coverage": 0.43}
+    assert (result["summary"]["strong_hits"], result["summary"]["set_aside"]) == (1, 1)
+    assert result["self_check"]["agrees"] is True
+    rows = [line.split("\t") for line in
+            (tmp_path / "bundle" / "files" / "genome_by_genome.tsv").read_text().splitlines()]
+    gamma_rows = [dict(zip(rows[0], r)) for r in rows[1:] if r[1] == "Gamma_delta"]
+    assert [(r["result"], r["weak_matches"], r["note"]) for r in gamma_rows] == [
+        ("set aside", "2", results.STRONG_HIT_NOTE)]
+    assert results.STRONG_HIT_NOTE.startswith("strong hit without synteny, not counted")
 
 
 def test_disagreement_with_the_report_is_flagged():
@@ -571,8 +625,10 @@ def test_pipeline_still_marks_the_gene_models_the_result_page_counts():
     search = read("bin", "iterative_search_runner.py")
     for marker in ('attrs["SynVoyRole"] = "flanking"', 'attrs["SynVoyRole"] = "goi"',
                    "'SynVoy_Parent': parent_id", "_b{block_idx}_fl{locus_idx}_flank_ann",
-                   "QueryCoverage", "Identity"):
+                   "QueryCoverage", "Identity", '";GenomeWide=1"'):
         assert marker in search, "the search no longer writes %r" % marker
+    # The class of an answer of the genome-wide path, which is no weak match.
+    assert 'GENOME_WIDE_CLASS = "%s"' % results._GENOME_WIDE_CLASS in read("bin", "synvoy_label.py")
     # ... and the genes that were searched as neighbours from the start database.
     start_db = read("modules", "prepare_initial_db.nf")
     assert "intermediate/initial_db" in start_db and "initial_db_${locus_id}.faa" in start_db

@@ -1275,14 +1275,20 @@ genome that has the home proteome, with or without a block, after its windows:
   model written before. A window keeps its best answer and writes nothing else, so the step
   adds no LOW row and no call that needs curation;
 - an exon across junctions whose CDS is at least 30 nt per junction longer than 3 × its aligned
-  query span holds an intron at each, read as coding, and does not count as crossing them:
-  miniprot aligns a short intron that is a multiple of 3 and free of stops as an insertion (on
-  synthetic genes every 45- and 60-bp such intron, and some of 90 bp, gave one exon across the
-  junction). The nt that the walk to the start and stop codon adds beyond the aligned span
+  query span is taken to hold an intron at each, read as coding, and does not count as crossing
+  them: miniprot aligns a short intron that is a multiple of 3 and free of stops as an insertion
+  (on synthetic genes every 45- and 60-bp such intron, and some of 90 bp, gave one exon across
+  the junction). The nt that the walk to the start and stop codon adds beyond the aligned span
   (§7.7, `refine_model_termini`) are not counted, and split codons and a stop codon add at most
   3 nt. Introns shorter than 30 nt are known from a few protists, ciliates such as *Paramecium*
-  among them; there a read-through intron still reads as a retrocopy. A target exon with an
-  insertion of 10 or more residues reads the same, so a retrocopy with one is not flagged.
+  among them; there a read-through intron still reads as a retrocopy. The excess is counted,
+  not located (the model's exons carry no alignment path): an exon across two junctions is
+  excused by 60 nt of excess wherever in the exon they lie, so one read-through intron of 60 nt
+  or more next to a junction whose intron was lost excuses it too, and the model gets
+  `RetrocopyCandidate=0` although the target has no intron at that junction (an intron loss
+  next to a kept intron, not a retrocopy of the whole gene); below 60 nt such an exon stays
+  flagged. A target exon with an insertion of 10 or more residues per junction reads the same,
+  so a retrocopy with one is not flagged.
 
 An answer is written as MEDIUM (no synteny supports it), `GOIClass=genome_wide_strong_hit`,
 `Basis=significant_specific`, with `GenomeWide=1`, `GenomeWideCoverage` (the place's union
@@ -1458,29 +1464,33 @@ the largest hull of §9) is split at its largest gaps until every piece fits; wi
 record there is no such limit.
 
 **GOI models and GOI hits.** A cluster is gene-bearing when it lies within 20 kb of a GOI
-model of the search that is not LOW. Raw GOI hits of the genome-wide search stand in for
-models only where the search wrote no GOI model of any label (the target GFF holds no GOI
-row, or there is none): beside a model, LOW included, they are not used, so a place whose
-only model is LOW does not come back through its hits. "GOI model or GOI hit" below means
-this.
+model of the search that is not LOW and no answer of the genome-wide path
+([§7.11](#711-goi-hits-far-from-their-anchors)): an answer has no synteny and is never
+counted, so the regions are those of a run without the path (the columns
+`goi_model_confidence` and `goi_model_class` still name it where it lies in a region). Raw
+GOI hits of the genome-wide search stand in for models only where the search wrote no GOI
+model of any label other than an answer (the target GFF holds no other GOI row, or there is
+none): beside a model, LOW included, they are not used, so a place whose only model is LOW
+does not come back through its hits. "GOI model or GOI hit" below means this.
 
 **Score.** With `N` flanking genes at home:
 
 ```
 C = max(U, B) / N        coverage: U = distinct flanking genes in the cluster,
-                          B = for a cluster within 20 kb of a GOI model (not LOW)
-                          or a GOI hit: the HIGH flanking models of a search block
-                          that holds a GOI model (not LOW) and whose models, ± 20 kb,
-                          the cluster touches (the block with most of them); else 0
+                          B = for a cluster within 20 kb of a GOI model (not LOW,
+                          no answer) or a GOI hit: the HIGH flanking models of a
+                          search block that holds such a GOI model and whose models,
+                          ± 20 kb, the cluster touches (the block with most of
+                          them); else 0
 K = L / k                order: L = longest collinear run of the k ranked hits
 S = max(a, d) / (a + d)  strand: a hits agree with the home strand, d disagree
 
 quality       = 0.4·C + 0.3·K + 0.3·S
 synteny_score = quality · C
 score         = synteny_score + 0.15     if the cluster lies within 20 kb of a GOI
-                                         model (not LOW) or of a GOI hit of the
-                                         genome-wide search (synteny_goi_overlap_bonus,
-                                         at most 0.15)
+                                         model (not LOW, no answer) or of a GOI hit
+                                         of the genome-wide search
+                                         (synteny_goi_overlap_bonus, at most 0.15)
 ```
 
 A cluster that takes `B` from a block also takes over the block's span. Identity is not
@@ -1493,9 +1503,9 @@ and `synteny_score` is recomputed each time. `p = (count(null ≥ observed) + 1)
 
 **Order and selection.** Clusters are sorted by `B` (descending), then score, then p.
 Clusters near a GOI model or GOI hit (as for the bonus) are placed first. When no cluster
-lies near a GOI model or hit, each GOI model (not LOW, ± 20 kb) that no cluster touches is
-put first as a region of its own (`goi_anchor`), with a score of 0.60 for a HIGH model and
-0.40 otherwise. With `max_regions = 0`, a region whose GOI model the search counted (the
+lies near a GOI model or hit, each GOI model (not LOW, no answer, ± 20 kb) that no cluster
+touches is put first as a region of its own (`goi_anchor`), with a score of 0.60 for a HIGH
+model and 0.40 otherwise. With `max_regions = 0`, a region whose GOI model the search counted (the
 best GOI model within 20 kb, as in `goi_model_confidence`, is HIGH or MEDIUM and no answer
 of the genome-wide path) and every `goi_anchor` region are written whatever the floors and
 the cap. Then every cluster with a score at or above the floor
@@ -1507,8 +1517,8 @@ With `max_regions` N > 0 the first N clusters in this order are written.
 
 **Strong synteny without a gene.** A cluster holding at least
 `strong_synteny_min_flanking` (⌈`n_flanking_genes`/2⌉ = 5) HIGH flanking models, with no GOI
-model (not LOW) within 20 kb of it and, where the search wrote no GOI model of any label, no raw
-GOI hit there either, is written as `goi_missing_but_strong_synteny`. Beside any GOI model of the
+model (not LOW, no answer) within 20 kb of it and, where the search wrote no GOI model of any
+label but an answer, no raw GOI hit there either, is written as `goi_missing_but_strong_synteny`. Beside any GOI model of the
 search (a LOW one too) a raw GOI hit does not prevent this, so such a region can hold one
 (`goi_hit_best_identity`). Up to two such regions are added beyond the cap,
 unless they lie inside a selected GOI region.
@@ -1674,10 +1684,11 @@ written.
 the models of [§7](#7-the-search-in-one-target-genome) and the regions of
 [§8](#8-region-scores). The figures are drawn after the report: `apply_report_drops.py`
 copies the per-genome GFFs into `plot_inputs_*` without the calls the report dropped
-([§10](#10-adjudication-and-the-report), steps 5 and 6), writes on each GOI model of the
-home locus what the report did with it (the report's `figures` block: `ReportOutcome`,
-`ReportRecord`, `AlsoFoundFrom`, under the header line `##synvoy-report-marks`), and the
-figures are drawn from those copies.
+([§10](#10-adjudication-and-the-report), steps 5 and 6; with the report's `figures` block,
+exactly the models it marks `dropped`), writes on each GOI model of the home locus what the
+report did with it (that block: `ReportOutcome`, `ReportRecord`, `ReportDrawnBy`,
+`AlsoFoundFrom`, under the header line `##synvoy-report-marks`), and the figures are drawn
+from those copies.
 
 - **Labels.** A GOI call is drawn as resolved when its label is HIGH or MEDIUM, whatever
   its class; AMBIGUOUS calls are drawn in the needs-curation style. The best GOI
@@ -1691,23 +1702,37 @@ figures are drawn from those copies.
 - **Records.** The GOI calls of a row are the report's records. A record is drawn once in
   each home locus whose search modelled it, by one model: its representative, else its
   model at the record's span, else the one that overlaps it most (the rule of the tree
-  page; the rescue passes' models are no figure input). The record's other models
-  (`ReportOutcome=merged`) and the models of a record the report dropped (`dropped`) are
-  not drawn; the anchor grid's source table lists them. The overlap dedup does not remove a
-  HIGH, MEDIUM or AMBIGUOUS call for another one, so two records that overlap are both
-  drawn; it still removes a LOW call or a flanking model under a call. A call the report
-  does not count (`paralog_not_goi`, `identity_coverage_decoupled`, an overruled piece) is drawn by its label, with the reason in its
-  tooltip, the source table and the legend text; an answer of the genome-wide path is
-  drawn outlined (next point), with the report's outcome in its tooltip. A GFF without the header line is deduped
-  by overlap alone (reciprocal overlap of at least 0.5), as before.
+  page; the rescue passes' models are no figure input), taken among the record's models
+  that are no fragment where the locus has one, as the default figures hide fragments. The
+  record's other models (`ReportOutcome=merged`, `ReportDrawnBy` the model that draws it)
+  are not drawn; the anchor grid's source table lists them where the model that draws their
+  record is drawn or listed in that figure. The models of a record the report dropped are
+  not in the plot inputs. The overlap dedup does not remove a HIGH, MEDIUM or AMBIGUOUS call
+  for another one, so two records that overlap are both drawn; it still removes a LOW call
+  or a flanking model under a call. A call the report does not count (`paralog_not_goi`,
+  `identity_coverage_decoupled`, an overruled piece) is drawn by its label, with the reason
+  in its tooltip, the source table and the legend text; so is an answer of the genome-wide
+  path that the ownership check gives to another home gene, which is no answer. An answer
+  the report kept is drawn outlined (next point), with the report's outcome in its tooltip.
+  A GFF without the header line is deduped by overlap alone (reciprocal overlap of at least
+  0.5), as before.
 - **A strong hit without synteny.** An answer of the genome-wide path that the report kept
-  (`GOIClass=genome_wide_strong_hit`, MEDIUM, [§7.11](#711-goi-hits-far-from-their-anchors))
-  is no counted call in the figures: it is no copy, never a row's best call, in none of the
-  counts of a row's label (`×N`, `+N weak`, `+N elsewhere`), places no locus, and draws no
-  block of the block choice. It is drawn outlined
-  where it lies, with no GOI ribbon; the anchor grid lists it also outside the stretch drawn
-  (at the locus or after `//`), its source table gives it its own state, and the ribbon plot
-  marks a row that holds one and no counted call ("Strong hit without synteny, not counted").
+  (`GOIClass=genome_wide_strong_hit`, MEDIUM, [§7.11](#711-goi-hits-far-from-their-anchors);
+  `ReportOutcome=genome_wide_strong_hit` in a GFF with the report's marks) is no counted call
+  in the figures: it is no copy, never a row's best call, in none of the counts of a row's
+  label (`×N`, `+N weak`, `+N elsewhere`), and draws no block of the block choice. No model
+  of the path places a locus: the regions ([§8](#8-region-scores)) and the stretch a row
+  shows (below) are chosen without it, and a row's scaffold and position (the anchor grid's
+  location column and the reach of a flanking copy, the gene-position map) are those of its
+  other models. It is drawn outlined where it lies inside the row's stretch, with no GOI
+  ribbon; the anchor grid lists it also outside that stretch (at the locus or after `//`),
+  its source table gives it its own state, the legend text names the report's counts
+  (`summary.genome_wide_strong_hits`, and `summary.near_block_strong_hits` for one inside a
+  block's searched window), and the ribbon plot marks a row that holds one and no counted
+  call ("Strong hit without synteny, not counted"). The gene-position map draws one GOI point
+  per row: an answer only when it is the row's only GOI call in view and lies at the row's
+  locus (the grid's test); otherwise the tooltip of the row's location names it, and one on
+  another scaffold counts in `(+N)`.
 - **GOI name.** The GOI column, the titles, the legends, the home row's label and the GOI's
   row of the Gene names table name the GOI after the annotated home gene on whose CDS the
   query hits fall. Without such a gene the name is the GOI's own, as its target models carry
@@ -1730,7 +1755,10 @@ figures are drawn from those copies.
   flanking genes is left out when another GOI scaffold has them, and the row keeps the GOI
   scaffolds, every scaffold with at least 3 flanking genes, and every scaffold that holds a
   flanking gene placed on none of those (most flanking genes first); when that would keep
-  fewer than 30 % of the models on more than 3 scaffolds, it keeps them all.
+  fewer than 30 % of the models on more than 3 scaffolds, it keeps them all. A model of the
+  genome-wide path takes part in none of these steps, so a row shows what it shows in a run
+  without the path; such a model is drawn where it lies inside that view (on a scaffold the
+  view shows, between its first and last model), and the anchor grid lists the others.
 - **Target rows.** A scaffold with at least 3 flanking genes is mirrored when at least
   70 % of them are on the opposite strand to home and their order does not contradict it,
   or when their order is clearly reversed and at least half of them are on the opposite
@@ -1860,15 +1888,18 @@ large family the extra queries fill the candidate regions.
 - The permutation test cannot produce the `max(U, B)` term, so p is too small when
   `B > U`. The p-value is reported and breaks ties in the region order; it does not
   select regions and does not enter any gene's confidence.
-- Region selection stops at the first region below both floors, but the list is not
-  sorted by score alone.
+- Region selection adds every region that passes a floor, in the order of §8, until the
+  cap. That order is not by score alone (regions near a GOI model or GOI hit first, then by
+  the block support `B`), so when the cap binds, a region with a higher score can be left
+  out behind them.
 
 **Reporting**
 
 - The figures and the tree are built from the search output. They do not include
   rescue models: a record made of rescue models alone is in no figure. The figures draw
   each record once, but a call that the report relabelled or does not count is drawn by
-  its label, with the reason in its tooltip (the tree page draws such leaves hollow).
+  its label (a kept answer of the genome-wide path outlined), with the reason in its
+  tooltip (the tree page draws such leaves hollow).
 - Locus ownership compares a call with proteins of the *home* genome. A paralog that
   exists only in the target lineage is not in that panel; the only check that can
   flag it is phylogenetic placement, which is advisory.

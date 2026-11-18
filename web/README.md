@@ -121,6 +121,11 @@ the result expires.
   of the gene itself were seen (`leads`). A genome without the gene is a result.
   The figures draw these genomes too, as the pipeline does by default
   (`hide_goi_absent_tracks`, `docs/OUTPUT.md`).
+- **A strong hit without synteny** (an answer of the genome-wide path that the report
+  kept, `genome_wide_strong_hit`) is no weak match: it is not among the `leads`, it is
+  listed under the table apart from the calls set aside as another gene, and like them
+  it is not counted (`summary.strong_hits`; the row of its genome and the headline say
+  so).
 - **Everything in one file**: `files/synvoy_<name>.zip` holds the figures, the gene
   models, the report, the table and a read-me. It is built with the result, so the
   examples have it as well.

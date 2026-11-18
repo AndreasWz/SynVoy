@@ -1,4 +1,4 @@
-"""The gene tree is reproducible by default (item 46 of the bug list of 16 Nov 2026).
+"""The gene tree is reproducible by default.
 
 IQ-TREE 3.1.2 gives the same tree on a rerun of the same alignment only in one thread; with more,
 branch lengths and supports can differ. compute_tree_cpus, which sets the tree step's threads, was 2

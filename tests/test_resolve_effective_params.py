@@ -193,7 +193,7 @@ def test_cli_missing_auto_preset_is_noop(tmp_path: Path):
 
 
 def test_the_user_override_option_is_gone(tmp_path: Path):
-    """--user_override (item 27 of the bug list of 16 Nov 2026) was passed by no module: a value
+    """--user_override was passed by no module: a value
     the user sets reaches the settings through --shipped_config (user_set). The script rejects it."""
     defaults_path = tmp_path / "defaults.json"
     defaults_path.write_text(json.dumps(DEFAULTS))

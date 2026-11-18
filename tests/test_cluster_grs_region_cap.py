@@ -228,7 +228,7 @@ def test_best_goi_model_prefers_a_counted_model():
 
 
 # --------------------------------------------------------------------------- the GOI region guarantee
-# (review round 2): a region whose GOI model the search counted (HIGH or MEDIUM, no answer of the
+# A region whose GOI model the search counted (HIGH or MEDIUM, no answer of the
 # genome-wide path) and an injected GOI-anchor region are kept whatever the floors; the cap is then
 # filled with the passing regions in order. Before, the floor came from the best score and the
 # counted region was dropped when a strong neighbourhood elsewhere raised it.

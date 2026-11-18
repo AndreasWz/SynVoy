@@ -1,4 +1,4 @@
-"""The GOI loci a window's cap cuts are logged with their positions (bug list item 15, 2026-11-16).
+"""The GOI loci a window's cap cuts are logged with their positions.
 
 cap_goi_parent_loci keeps the goi_candidate_regions_per_query strongest GOI loci of one query in a
 window (2; the local_family module: home copies + 1). The cut loci were counted (regions_cap,

@@ -91,6 +91,16 @@ def test_the_calls_block_first_then_the_blocks_by_esyn(tmp_path, monkeypatch, ca
             "3 significant, predicted places 2 (1 not drawn)") in line
 
 
+def test_an_answer_of_the_genome_wide_path_is_no_counted_call(tmp_path, monkeypatch, capsys):
+    """An answer (MEDIUM, GOIClass=genome_wide_strong_hit) far from every block: the figures
+    choose the view without it, and the summary does not count it as a call missing today."""
+    answer = _model("GOI_q|G_fna_gw1_l1m1", 4_000_001, 4_001_500, "goi", "MEDIUM",
+                    ";ModelStatus=complete;Bits=300;GOIClass=genome_wide_strong_hit;GenomeWide=1;"
+                    "Place=genome")
+    (line,), _rows = _compare(tmp_path, monkeypatch, capsys, *FIRST_RULE, models=(answer,))
+    assert "counted calls 2, missing today 1 (MEDIUM b1)" in line
+
+
 def test_the_cap_counts_the_call_blocks(tmp_path, monkeypatch, capsys):
     (line,), rows = _compare(tmp_path, monkeypatch, capsys, *FIRST_RULE, "--max_regions", "3")
     assert "gene-F4|G_fna_b3_fl1_flank_ann" not in rows
@@ -146,7 +156,8 @@ def test_today_is_the_figures_own_choice(tmp_path, monkeypatch):
 
 def test_the_figures_call_the_same_selection():
     src = open(os.path.join(ROOT, "bin", "plot_synteny.py")).read()
-    assert src.count("_cap_goi_genes(parse_target_gff(gff_file, cap=False)") == 1
+    # the view's models capped once, the models of the genome-wide path set apart
+    assert src.count("_cap_goi_genes([g for g in parsed if not _places_no_locus(g)],") == 1
     assert ("genes, candidate_regions = select_target_genes(\n"
             "                gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)") in src
     assert "genes, candidate_regions = select_target_genes_by_blocks(gff_file, genome_id, block_choice)" in src

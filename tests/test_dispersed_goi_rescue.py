@@ -137,7 +137,7 @@ class TestSelectDispersedGoiSeeds(unittest.TestCase):
 
 
 class TestRescueTextDescribesTheRealRule(unittest.TestCase):
-    """The rescue has no rearrangement gate and no LOW fallback (bug list item 14): its rescued
+    """The rescue has no rearrangement gate and no LOW fallback: its rescued
     hits seed blocks that are searched and judged like any other."""
 
     def test_no_rearrangement_gate_in_the_code_or_the_config(self):

@@ -1,5 +1,5 @@
-"""Decoy shuffles are seeded by the decoy kind and the protein sequence, not by the gene's name
-(bug list item 47): a renamed gene with the same protein got other ~shuf1/~shuf2 decoys, and the
+"""Decoy shuffles are seeded by the decoy kind and the protein sequence, not by the gene's name:
+a renamed gene with the same protein got other ~shuf1/~shuf2 decoys, and the
 relative's decoys were one fixed permutation per name applied to whatever relative a window had.
 Real calls never depended on it (decoys are written apart). All synthetic."""
 import os

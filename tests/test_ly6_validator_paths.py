@@ -1,5 +1,5 @@
-"""The LY6 ground-truth check takes its paths as arguments (freeze item 44;
-scripts/benchmark/run_ly6_ground_truth_check.py).
+"""The LY6 ground-truth check takes its paths as arguments
+(scripts/benchmark/run_ly6_ground_truth_check.py).
 
 It read the curated models from ground_truth/ly6_3ftx/Ly6, relative to the current directory
 (a folder that exists nowhere in the repository), wrote its reports into that truth folder, and

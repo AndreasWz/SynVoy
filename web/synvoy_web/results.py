@@ -16,9 +16,11 @@ The page says:
     probable    MEDIUM     counted as the gene
     candidate   AMBIGUOUS  right neighbourhood, sequence does not confirm it
     set_aside   class paralog_not_goi or identity_coverage_decoupled, or an answer of
-                the genome-wide path (genome_wide_strong_hit: a strong match where no
-                neighbourhood places the gene): the report itself leaves these out of
-                its headline
+                the genome-wide path (genome_wide_strong_hit, reason ``strong_hit``: a
+                strong hit without synteny, a strong match where no neighbourhood places
+                the gene). The report counts none of these; its headline names the
+                answers it kept apart, as not counted, and so does the page
+                (``summary.strong_hits``)
 
 ``self_check`` in the result compares the counts made here with the report's own
 headline numbers, so a new rule in the pipeline cannot silently change what the page
@@ -27,7 +29,9 @@ claims.
 A genome without a call is a result as well. For every genome the bundle says how many
 of the home gene's neighbours the search placed there (``neighbours``) and, where no
 call was made, how many weak matches of the gene itself it saw (``leads``). Both are
-counted from the gene models the search wrote (``plot_inputs_*/<genome>.gff``).
+counted from the gene models the search wrote (``plot_inputs_*/<genome>.gff``). An
+answer of the genome-wide path is no weak match: it is not among the leads, and the
+report's record of it is a set-aside call of its own.
 """
 
 import json
@@ -47,6 +51,7 @@ _SET_ASIDE = {"paralog_not_goi": "related_gene", "identity_coverage_decoupled": 
 _LABELS = {"HIGH": "found", "MEDIUM": "probable", "AMBIGUOUS": "candidate"}
 _LABEL_RANK = {"found": 0, "probable": 1, "candidate": 2, "set_aside": 3}
 _BLOCK_RE = re.compile(r"_b(\d+)_")            # the search block in a model's ID
+_GENOME_WIDE_CLASS = "genome_wide_strong_hit"   # GOIClass of an answer of the genome-wide path
 ALL_FILES_PREFIX = "synvoy_"                    # files/synvoy_<name>.zip: everything in one
 
 # Suffix after "synteny_block_locus_<N>_"  ->  key in result.json
@@ -208,8 +213,9 @@ def summarise(report, names=None, order=None):
             "common_name": (names.get(gid) or {}).get("common_name") or "",
             "status": genome_status(genome_calls) if searched else "not_searched",
             "low_quality": gid in low_quality or any(c["low_quality"] for c in genome_calls),
+            # Every call set aside as another gene (a strong hit without synteny is not one).
             "related_gene_only": bool(genome_calls) and all(
-                c["label"] == "set_aside" for c in genome_calls),
+                c["label"] == "set_aside" and c["reason"] != "strong_hit" for c in genome_calls),
             "size_mb": round((_number(entry.get("total_len")) or 0) / 1e6, 1) or None,
             "calls": genome_calls,
         })
@@ -230,6 +236,8 @@ def summarise(report, names=None, order=None):
         "copies_probable": sum(1 for c in counted if c["label"] == "probable"),
         "candidates": sum(1 for c in all_calls if c["label"] == "candidate"),
         "set_aside": sum(1 for c in all_calls if c["label"] == "set_aside"),
+        # Of the set-aside calls, the strong hits without synteny (not counted either).
+        "strong_hits": sum(1 for c in all_calls if c["reason"] == "strong_hit"),
         "weak_leads": int(_number(report_summary.get("low_confidence_goi")) or 0),
         "identity_min": min(identities) if identities else None,
         "identity_max": max(identities) if identities else None,
@@ -260,7 +268,9 @@ def placed_in_genome(gff_path):
     models it wrote. Neighbours (``SynVoyRole=flanking``) are counted as home genes:
     ``found`` anywhere in the genome, ``together`` in the best single place (a search
     block), ``places`` = blocks that hold any. ``leads`` are the models of the gene
-    itself (``SynVoyRole=goi``), whatever their confidence."""
+    itself (``SynVoyRole=goi``), whatever their confidence, except an answer of the
+    genome-wide path (``GenomeWide=1``, ``GOIClass=genome_wide_strong_hit``): a strong
+    hit without synteny is no weak match, and the page lists it from the report."""
     genes, by_place, leads, best = set(), {}, 0, None
     try:
         with open(str(gff_path), errors="replace") as fh:
@@ -281,6 +291,9 @@ def placed_in_genome(gff_path):
                     if block:
                         by_place.setdefault((fields[0], block.group(1)), set()).add(gene)
                 elif role == "goi":
+                    if (attributes.get("GenomeWide") == "1"
+                            or attributes.get("GOIClass") == _GENOME_WIDE_CLASS):
+                        continue
                     leads += 1
                     identity = _number(attributes.get("Identity"))
                     if identity is not None and (best is None or identity > best[0]):
@@ -398,6 +411,9 @@ def _gene_model_files(out_dir):
 
 _RESULT_WORD = {"found": "found", "probable": "probable", "candidate": "candidate",
                 "set_aside": "set aside"}
+# The note of a set-aside strong hit: the words of the report and the figures, then why.
+STRONG_HIT_NOTE = ("strong hit without synteny, not counted: a strong match where no "
+                   "neighbourhood places the gene")
 TABLE_COLUMNS = ("species", "genome", "result", "confidence", "identity_pct",
                  "query_coverage_pct", "scaffold", "start", "end",
                  "neighbours_side_by_side", "neighbours_anywhere", "neighbours_searched",
@@ -429,7 +445,7 @@ def genome_table(genomes):
             note = {"related_gene": "matches the related gene %s better" % call["related_gene"]
                     if call["related_gene"] else "matches a related gene better",
                     "short_match": "matches only a short piece of the query",
-                    "strong_hit": "strong match where no neighbourhood places the gene; not counted",
+                    "strong_hit": STRONG_HIT_NOTE,
                     }.get(call["reason"], "")
             rows.append(dict(
                 common, result=_RESULT_WORD[call["label"]], confidence=call["confidence"],

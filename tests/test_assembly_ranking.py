@@ -1,4 +1,4 @@
-"""Easy mode's choice of related genomes (item 57 of the bug list of 16 Nov 2026).
+"""Easy mode's choice of related genomes.
 
 The ranking began with NCBI's status (reference, representative, RefSeq, GenBank) and only then the
 assembly level, so within a species a scaffold-level RefSeq assembly beat a chromosome-level GenBank

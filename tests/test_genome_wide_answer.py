@@ -1,13 +1,13 @@
-"""The strong hit without synteny (bug list items 2 and 3, 2026-11-16): the genome-wide path
-(--goi_genome_wide_path) gives a GOI hit outside every searched GOI zone one answer when the
-judge's HIGH terms hold in the genome place -- E <= 1e-6 over the genome, >= 0.7 of the query
-covered by the hits' HSPs, no real competitor within 10 bits -- and the model there is judged
-HIGH, has no exon across a home exon junction (no retrocopy) and is not frame-broken without an
-intron. It
-is written as MEDIUM with its own class (genome_wide_strong_hit), never seeds, never enters the
-tree, and the report keeps it out of the counted calls: one per genome, only where nothing is
-counted. Its decoys are searched in the genome place in decoy mode. The switch
-goi_genome_wide_without_blocks is gone: the path runs in every searched genome. All synthetic."""
+"""The strong hit without synteny: the genome-wide path (--goi_genome_wide_path) gives a GOI
+hit outside every searched GOI zone one answer when the judge's HIGH terms hold in the genome
+place -- E <= 1e-6 over the genome, >= 0.7 of the query covered by the hits' HSPs, no real
+competitor within 10 bits -- and the model there is judged HIGH, has no exon across a home exon
+junction (no retrocopy; an exon long enough to hold a read-through intron there does not count)
+and is not frame-broken without an intron. It is written as MEDIUM with its own class
+(genome_wide_strong_hit), never seeds, never enters the tree, and the report keeps it out of the
+counted calls: one per genome, only where nothing is counted. Its decoys are searched in the
+genome place in decoy mode. The switch goi_genome_wide_without_blocks is gone: the path runs in
+every searched genome. All synthetic."""
 import json
 import logging
 import os
@@ -101,7 +101,7 @@ def test_coverage_is_the_union_of_the_significant_hsps(monkeypatch):
     # an HSP that chance alone gives once in the genome place does not cover anything
     p, _ = _evaluate(monkeypatch, [(1e-40, 200.0, 1, 150, 0), (5.0, 20.0, 151, 300, 0)])
     assert p["coverage"] == "0.500"
-    # the reversed control of the bug list: strong E over a sliver of the query
+    # the reversed control: strong E over a sliver of the query
     p, _ = _evaluate(monkeypatch, [(2e-94, 300.0, 10, 40, 0)])
     assert float(p["coverage"]) < 0.2 and isr.choose_genome_wide_places([p]) == []
 
@@ -517,7 +517,7 @@ def _retrocopy_flag(cand, junctions):
 
 
 def test_an_exon_that_holds_a_read_through_intron_spans_no_junction():
-    """Review round 3 (2026-11-17): miniprot reads a short intron that is a multiple of 3 and
+    """miniprot reads a short intron that is a multiple of 3 and
     free of stops as coding, so the ortholog's model has one exon across the home junction and
     was flagged as a retrocopy. Such an exon is READTHROUGH_INTRON_MIN_NT or more longer than 3 x
     its query span for each junction it spans, and then spans none."""
@@ -585,7 +585,7 @@ def _short_intron_gene(seed, exon_lengths, intron_nt, rate=0.15):
                     reason="miniprot not on PATH")
 @pytest.mark.parametrize("intron_nt, flagged", [(45, False), (60, False), (0, True)])
 def test_a_short_in_frame_intron_read_as_coding_is_no_retrocopy(tmp_path, monkeypatch, intron_nt, flagged):
-    """Review round 3 (2026-11-17), with the real miniprot: an ortholog of a two-exon home gene
+    """With the real miniprot: an ortholog of a two-exon home gene
     whose intron is 45 or 60 bp, a multiple of 3 and free of stops gets a one-exon model across
     the junction (the intron read as coding). It is no retrocopy candidate and is the window's
     answer. The same coding sequence without the intron stays a retrocopy candidate."""

@@ -1,4 +1,4 @@
-"""Bug list item 34: the report's model counts.
+"""The report's model counts.
 
 (a) the class-based counts keep their values for this release; goi_low_only_genomes is the same
     reading by label, and a genome's confidence counts hold no zero-valued labels of its flanking

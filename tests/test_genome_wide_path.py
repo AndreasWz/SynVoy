@@ -33,7 +33,7 @@ def test_places_are_the_goi_hits_outside_every_goi_zone_and_every_row():
 
 
 def test_a_hit_between_a_goi_zone_and_the_window_edge_is_a_place():
-    """Bug list item 4: the window is searched over block +- 7 gene steps, the GOI zone is block +-
+    """The window is searched over block +- 7 gene steps, the GOI zone is block +-
     2; a hit between the two was skipped as "inside a window" and is a place now."""
     zone, window = ("c1", 20000, 30000), ("c1", 5000, 45000)
     hits = [_hit("GOI_q", "c1", 38000, 38600)]
@@ -100,7 +100,7 @@ def test_the_pass_needs_the_home_proteome(monkeypatch, caplog):
 
 
 def test_no_place_outside_the_goi_zones_is_said_and_tabled(monkeypatch, tmp_path, caplog):
-    """Fix item 6: with every GOI hit inside a searched GOI zone the pass says so and writes the
+    """With every GOI hit inside a searched GOI zone the pass says so and writes the
     header-only table (a pass without a significant block runs as well)."""
     import logging
     args = types.SimpleNamespace(genome_ctx={"block_esyn": {0: 0.5}, "goi_cores": [("c1", 0, 1000)]},

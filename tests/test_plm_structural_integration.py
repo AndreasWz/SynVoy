@@ -10,8 +10,8 @@ These tests are numpy-only — they do NOT require torch, transformers, or
 foldseek, so they run in plain synvoy_env. The torch-dependent code paths
 (embedding, folding) are exercised separately on the cluster.
 
-Run with the synvoy_env interpreter (see CLAUDE.md):
-    /home/faw/miniforge3/envs/synvoy_env/bin/python3 -m pytest tests/test_plm_structural_integration.py -v
+Run with the python3 of the synvoy_env conda environment (it has parasail and the search tools):
+    python3 -m pytest tests/test_plm_structural_integration.py -v
 """
 import os
 import sys

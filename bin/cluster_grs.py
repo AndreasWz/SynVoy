@@ -340,6 +340,13 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
     2/9 flanking → 2x HIGH/S1.00 anchor regions outranking the real syntenic
     locus on contig_94 with 8/9 flanking). Honoring the upstream confidence
     label keeps the two pipeline stages consistent.
+
+    An answer of the genome-wide path (GOIClass=genome_wide_strong_hit) is skipped
+    too: the search found it outside every searched GOI zone, so it has no synteny,
+    and the report never counts it. As a GOI interval it took the GOI-overlap bonus,
+    went first, was injected as a goi_anchor region and raised the score floor of
+    the genome's other regions, so neighbourhoods the search placed fell out of the
+    figures. Skipped, the regions are those of a run without the path.
     """
     if not gff_file or not os.path.exists(gff_file):
         return []
@@ -347,6 +354,7 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
     goi_intervals = []
     accepted_types = {"mRNA", "gene", "tandem_copy", "transcript", "mrna"}
     skipped_low = 0
+    skipped_answers = 0
 
     try:
         with open(gff_file) as fh:
@@ -377,6 +385,9 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
                 if confidence == "LOW":
                     skipped_low += 1
                     continue
+                if (attrs.get("GOIClass") or "").strip() == synvoy_label.GENOME_WIDE_CLASS:
+                    skipped_answers += 1
+                    continue
 
                 try:
                     s = int(parts[3])
@@ -402,6 +413,13 @@ def load_goi_intervals_from_gff(gff_file, padding_bp=20000):
         print(
             f"INFO: Dropped {skipped_low} LOW-confidence GOI row(s) from anchor "
             f"candidates (upstream classifier flagged them as unlikely homologs).",
+            file=sys.stderr,
+        )
+    if skipped_answers:
+        print(
+            f"INFO: Left {skipped_answers} answer(s) of the genome-wide path "
+            f"({synvoy_label.GENOME_WIDE_CLASS}) out of the GOI intervals: no synteny, "
+            f"never counted, they place no region.",
             file=sys.stderr,
         )
 
@@ -499,7 +517,8 @@ def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000, genome_tag=None)
     iterative_search_runner tags every model ID with its search block (`_b<N>_`) and
     writes BlockFlankingSupport on each GOI model. Grouping GOI + flanking by that block
     id gives, per block: the full neighbourhood span (already reflecting §18 gap-bridging),
-    the count of HIGH flanking genes, and the best non-LOW GOI confidence/identity. A plot
+    the count of HIGH flanking genes, and the best non-LOW GOI confidence/identity (an answer of
+    the genome-wide path, which has no synteny, makes no block a GOI block). A plot
     region can then inherit its block's REAL synteny support rather than being scored on
     just the flanking that happen to fall in one 50 kb proximity fragment — so a true
     ortholog whose flanking are spread across a rearrangement gap (decorin: 17 flanking,
@@ -543,6 +562,8 @@ def load_goi_block_anchors_from_gff(gff_file, padding_bp=20000, genome_tag=None)
                 if role == "goi":
                     if conf == "LOW":
                         continue  # never anchor on a LOW GOI model
+                    if (attrs.get("GOIClass") or "").strip() == synvoy_label.GENOME_WIDE_CLASS:
+                        continue  # nor on an answer of the genome-wide path (no synteny)
                     b["has_goi"] = True
                     b["gstart"] = s if b["gstart"] is None else min(b["gstart"], s)
                     b["gend"] = e if b["gend"] is None else max(b["gend"], e)
@@ -1172,8 +1193,10 @@ def main():
         goi_models_by_chrom[m["chrom"]].append(m)
     goi_intervals_gff = load_goi_intervals_from_gff(args.target_gff, padding_bp=args.goi_padding)
     # Raw GOI hits stand in for GOI models only where the search wrote no GOI model of any
-    # label: beside a model they would bring back the places whose model is LOW.
-    goi_intervals_hits = ([] if goi_models
+    # label: beside a model they would bring back the places whose model is LOW. An answer of
+    # the genome-wide path is no such model: the regions are those of a run without the path.
+    searched_models = [m for m in goi_models if m["goi_class"] != synvoy_label.GENOME_WIDE_CLASS]
+    goi_intervals_hits = ([] if searched_models
                           else load_goi_intervals_from_hits(hits, padding_bp=args.goi_padding))
     goi_intervals = merge_intervals(goi_intervals_gff + goi_intervals_hits)
 
@@ -1191,13 +1214,14 @@ def main():
     if goi_intervals_hits:
         print(
             f"INFO: Derived {len(goi_intervals_hits)} GOI interval(s) from hit file "
-            f"(the target GFF holds no GOI model).",
+            f"(the target GFF holds no GOI model"
+            f"{' but answers of the genome-wide path' if goi_models else ''}).",
             file=sys.stderr,
         )
-    elif goi_models and any(_is_goi_query_name(h.get("query", "")) for h in hits):
+    elif searched_models and any(_is_goi_query_name(h.get("query", "")) for h in hits):
         print(
             f"INFO: GOI hits are not used as GOI intervals: the target GFF holds "
-            f"{len(goi_models)} GOI model row(s).",
+            f"{len(searched_models)} GOI model row(s).",
             file=sys.stderr,
         )
 
@@ -1446,9 +1470,10 @@ def main():
                 # Kept whatever the floors and the cap: a region that holds a counted GOI model
                 # of the search within goi_padding (region_holds_counted_goi_model) and an
                 # injected GOI-anchor region (made only when no cluster overlaps any GOI
-                # interval). A counted model farther than goi_padding from every cluster has no
-                # region when a cluster lies near another GOI model, and the rescue passes' calls
-                # are not read here. Then every cluster that passes a floor, in the order above
+                # interval: a GOI model labelled HIGH, MEDIUM or AMBIGUOUS that is no answer of the
+                # genome-wide path; LOW rows and answers are no GOI intervals). A counted model
+                # farther than goi_padding from every cluster has no region when a cluster lies
+                # near another GOI interval, and the rescue passes' calls are not read here. Then every cluster that passes a floor, in the order above
                 # (GOI regions first), until the cap is reached; the floor is relative to the best
                 # score of all clusters. Only the first cluster is written when nothing is kept
                 # (adaptive_backstop).

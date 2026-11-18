@@ -28,7 +28,7 @@ isr = _load("iterative_search_runner", "iterative_search_runner.py")
 
 
 # ── parasail_requirement_error: every search needs parasail ─────────────────
-# Item 21 of the bug list of 16 Nov 2026: --allow_missing_smith_waterman let the search start
+# --allow_missing_smith_waterman let the search start
 # without parasail, but the labels' bit scores and specificity terms, the hull rescue and the
 # ownership panel need it too, so such a run lost them and stopped at the panel after the whole
 # search. The option is gone (main.nf removedParams, offOnly), and the search stops at its start.

@@ -1,4 +1,4 @@
-"""Item 36 (bug list of 16 Nov 2026): the anchor grids drew what the report merged.
+"""The anchor grids drew what the report merged.
 
 The figures deduped the GOI models with a rule of their own (reciprocal overlap >= 0.5), while
 the report makes one record of two models that overlap by more than 80 %, that lie one at least
@@ -111,7 +111,8 @@ def test_a_superseded_wide_model_is_not_drawn_beside_its_compact_model(tmp_path)
     (rec,) = report["goi_dedup"]["records"]
     assert rec["mrna_id"] == ID2 and rec["superseded_wide_model"]
     assert report["figures"] == {"locus_1": {
-        "models": [{"genome": "G", "model": ID1, "outcome": "merged", "record": "chr1:5000-7600"}],
+        "models": [{"genome": "G", "model": ID1, "outcome": "merged", "record": "chr1:5000-7600",
+                    "drawn_by": ID2}],
         "also_found_from": []}}
     assert "trees" not in report                      # written without a tree
     gff = _search_gff(tmp_path, WIDE + COMPACT)
@@ -477,3 +478,342 @@ def test_report_marks_reach_the_figures(tmp_path):
         goi = [r for r in csv.DictReader(fh, delimiter="\t")
                if r["genome_id"] == "GCA_000000009.1" and r["column"] == "QRY1"]
     assert sorted(r["drawn_as"] for r in goi) == ["model", "model"]
+
+
+# ----------------------------------------- review round 4: the drawing model, answers, drops ----
+# A record is drawn by a model that is no fragment where the locus has one; a merged model is
+# listed only with the model that draws its record (ReportDrawnBy); with the report's block the
+# plot inputs leave out exactly the models it marks dropped; and the marks and the answers of the
+# genome-wide path agree (a kept answer: its own sentence and glyph; one the report relabelled: a
+# call it does not count, drawn by its label).
+
+def test_a_fragment_does_not_draw_a_record_that_has_a_wider_model(tmp_path):
+    """A MEDIUM fragment (qcov 0.35) inside a MEDIUM partial model of the same gene that is 2.5 x
+    longer (qcov 0.45): the report keeps the fragment as the record. The figures drew the record by
+    it (the trees' rule) and merged the wider model, and the default figures, which hide fragments,
+    then drew nothing for a counted call. The wider model draws it now."""
+    wide = _model(ID1, 5000, 10000, "MEDIUM", 0.45, [(5000, 5600), (9400, 10000)], status="partial")
+    frag = _model(ID2, 5000, 7000, "MEDIUM", 0.35, [(5000, 5600), (6400, 7000)], status="fragment")
+    report, path = _report(tmp_path, {"locus_1__G.fna.gff": wide + frag})
+    (rec,) = report["goi_dedup"]["records"]
+    assert rec["mrna_id"] == ID2 and rec["model_status"] == "fragment"
+    models = report["figures"]["locus_1"]["models"]
+    assert [(m["model"], m["outcome"]) for m in models] == [(ID2, "merged")]     # before: (ID1, merged)
+    assert models[0]["drawn_by"] == ID1
+    gff = _search_gff(tmp_path, wide + frag)
+    _apply(tmp_path, path, [gff])
+    assert _copies(tmp_path / "plot_inputs" / "G.fna.gff")[0] == [(ID1, True)]
+    # the rule in the marks: the trees keep the representative, the figures take the wider model
+    rows = [_row("W", 1000, 6000, conf="MEDIUM", status="partial"), _row("F", 1000, 3000, conf="MEDIUM",
+                                                                         status="fragment")]
+    rec = _rec(("locus_1", "F"), 1000, 3000, conf="MEDIUM",
+               members=[("locus_1", "F", 1000, 3000), ("locus_1", "W", 1000, 6000)])
+    assert gr._shown_member(rec, "locus_1", {"W", "F"}) == "F"
+    out = gr.figure_marks(rows, [rec], "locus_1", DEMOTED)
+    assert [(m["model"], m["outcome"], m["drawn_by"]) for m in out["models"]] == [("F", "merged", "W")]
+    # a record whose only models at this locus are fragments is drawn by one of them, as before
+    rows = [_row("F", 2000, 2600, conf="MEDIUM", status="fragment"), _row("F2", 2010, 2590, status="fragment")]
+    only = _rec(("locus_1", "F"), 2000, 2600, conf="MEDIUM",
+                members=[("locus_1", "F", 2000, 2600), ("locus_1", "F2", 2010, 2590)])
+    out = gr.figure_marks(rows, [only], "locus_1", DEMOTED)
+    assert [(m["model"], m["outcome"], m["drawn_by"]) for m in out["models"]] == [("F2", "merged", "F")]
+
+
+def test_a_merged_model_is_listed_only_with_the_model_that_draws_its_record(tmp_path):
+    """An AMBIGUOUS record on a scaffold without flanking genes, outside the view, and its merged
+    twin: the source data listed the twin as merged 'into the call drawn for its gene', and the
+    legend counted it, although the record was in no figure."""
+    a = _model("GOI_X|G_fna_b8_l1m2_exon_ann", 801000, 802000, "AMBIGUOUS", 0.9, [(801000, 802000)], chrom="chr8")
+    b = _model("GOI_X|G_fna_b8_l1m3_exon_ann", 801010, 801990, "AMBIGUOUS", 0.88, [(801010, 801990)], chrom="chr8")
+    report, path = _report(tmp_path, {"locus_1__G.fna.gff": a + b})
+    ((twin, by),) = [(m["model"], m["drawn_by"]) for m in report["figures"]["locus_1"]["models"]]
+    assert {twin, by} == {a[0].split("ID=")[1].split(";")[0], b[0].split("ID=")[1].split(";")[0]}
+    _apply(tmp_path, path, [_search_gff(tmp_path, a + b)])
+    marked = tmp_path / "plot_inputs" / "G.fna.gff"
+    row = next(ln for ln in marked.read_text().splitlines() if f"ID={twin};" in ln)
+    assert row.endswith(f";ReportOutcome=merged;ReportRecord={report['goi_dedup']['records'][0]['chrom']}:"
+                        f"{report['goi_dedup']['records'][0]['start']}-{report['goi_dedup']['records'][0]['end']}"
+                        f";ReportDrawnBy={by}")
+    listed = lambda ids: [g["gff_id"] for g in ps._report_left_out_models(str(marked), ids)]  # noqa: E731
+    assert listed({by}) == [twin]          # the record's model is drawn or listed: so is the twin
+    assert listed(set()) == []             # the record is in no figure: nor is its twin
+    assert listed(None) == [twin]          # without the figure's ids: every merged model
+
+
+def test_a_kept_answer_beside_an_answer_dropped_at_another_locus_stays(tmp_path):
+    """Two home loci; locus_1's answer is kept, locus_2's answer overlaps it in another frame and is
+    dropped (not_best_in_genome). The span rule of apply_report_drops.py left out every answer of
+    the genome that overlaps a dropped one, so the kept answer was deleted from locus_1's plot
+    inputs. With the report's block the models it marks dropped go, by id."""
+    def answer(mid, s, e, bits):
+        return [f"c9\tminiprot\tmRNA\t{s}\t{e}\t80.0\t+\t.\tID={mid};Name=GOI_X;SynVoy_Parent=GOI_X;"
+                f"Identity=80.0;Confidence=MEDIUM;GOIClass=genome_wide_strong_hit;SynVoyRole=goi;"
+                f"EvidenceType=exon_annotation;ModelStatus=complete;QueryCoverage=0.95;Bits={bits};"
+                f"Eeff=1e-40;Basis=significant_specific;Exons=1;GenomeWide=1;Place=genome",
+                f"c9\tminiprot\tCDS\t{s}\t{e}\t.\t+\t0\tID={mid}_CDS1;Parent={mid}"]
+    a1 = answer("GOI_X|G_fna_b5003_l1_exon_ann", 3_000_000, 3_001_000, 900)
+    a2 = answer("GOI_X|G_fna_b6001_l1_exon_ann", 3_000_601, 3_001_600, 800)
+    report, path = _report(tmp_path, {"locus_1__G.fna.gff": a1, "locus_2__G.fna.gff": a2})
+    assert [r["mrna_id"] for r in report["goi_dedup"]["genome_wide_strong_hits_dropped_records"]] == [
+        "GOI_X|G_fna_b6001_l1_exon_ann"]
+    g1 = _search_gff(tmp_path, a1)
+    log = _apply(tmp_path, path, [g1])
+    rows = (tmp_path / "plot_inputs" / "G.fna.gff").read_text().splitlines()
+    assert any(r.startswith("c9\tminiprot\tmRNA\t3000000") and r.endswith(
+        ";ReportOutcome=genome_wide_strong_hit;ReportRecord=c9:3000000-3001000") for r in rows)
+    assert "left out" not in log
+    (tmp_path / "l2").mkdir()
+    (tmp_path / "l2" / "G.fna.gff").write_text("##gff-version 3\n" + "\n".join(a2) + "\n")
+    log = _apply(tmp_path, path, [tmp_path / "l2" / "G.fna.gff"], locus="synteny_block_locus_2", out="pi2")
+    assert "left out 1 model(s) the report dropped" in log and "b6001" in log
+    assert not [r for r in (tmp_path / "pi2" / "G.fna.gff").read_text().splitlines() if "\tCDS\t" in r]
+    # without the block (an older report, or no --locus) the span rule applies, as before
+    subprocess.run([sys.executable, os.path.join(BIN, "apply_report_drops.py"), "--report", str(path),
+                    "--out_dir", str(tmp_path / "no_locus"), str(g1)], check=True, capture_output=True)
+    assert "\tmRNA\t" not in (tmp_path / "no_locus" / "G.fna.gff").read_text()
+
+
+def _answer_tracks(outcome="", also=()):
+    """The home locus and one target with four flanking genes and one GOI call: a model of the
+    genome-wide path between them (GOIClass=genome_wide_strong_hit, MEDIUM), with the report's
+    outcome ``outcome`` ('' = a GFF without the marks) and the other home loci ``also``."""
+    tracks, colours = _tracks()
+    target = tracks[1]
+    target["genes"] = [g for g in target["genes"] if not ps._is_goi_target_gene(g)]
+    answer = {"chrom": "c1", "start": 4700, "end": 5000, "start_plot": 4700, "end_plot": 5000,
+              "name": "GOI_T", "gff_id": "GOI_T|G_fna_b5003_l1_exon_ann", "strand": "+", "role": "goi",
+              "home_gene_id": "GOI_T", "confidence": "MEDIUM", "goi_class": ps.GENOME_WIDE_CLASS,
+              "identity": 70.0, "query_coverage": 0.95, "evidence_type": "exon_annotation",
+              "exon_coords": [(4700, 5000)], "report_outcome": outcome,
+              "report_record": "c1:4700-5000" if outcome else "", "also_found_from": list(also)}
+    target["genes"].append(answer)
+    target["goi_report_left_out"] = []
+    target["goi_status"] = ps._track_goi_status(target)
+    return tracks, colours, answer
+
+
+def _figure_texts(tracks, colours):
+    _svg, legend, source, info = ps.render_anchor_grid_print(tracks, colours, {}, SimpleNamespace())
+    goi = [r for r in source if r["row"] == 2 and r["column"] == "T"]
+    pos = html.unescape(ps.render_anchor_grid_positional(tracks, colours, {}, {}, SimpleNamespace()))
+    tip = next(t for t in __import__("re").findall(r"<title>([^<]*)</title>", pos) if t.startswith("T — "))
+    return legend, goi, info, tip
+
+
+def test_a_kept_answer_with_the_report_marks():
+    """A kept answer (ReportOutcome=genome_wide_strong_hit) found from two home loci: the grid gives
+    it its own sentence, not the sentence of the calls the report does not count; the
+    gene-position map's tooltip says once what it is and names the other locus; the ribbon
+    plot's tooltip carries the report's row."""
+    tracks, colours, answer = _answer_tracks("genome_wide_strong_hit", also=["locus_2"])
+    assert tracks[1]["goi_status"] == "strong_hit" and ps._is_genome_wide_answer(answer)
+    legend, goi, info, tip = _figure_texts(tracks, colours)
+    assert (info["goi_strong_hits"], info["goi_calls_not_counted_by_report"], info["goi_calls_also_found_from"]) == (
+        1, {}, 1)
+    assert "An outlined arrow in the T column is a strong hit without synteny" in legend
+    assert "not counted by the report" not in legend
+    assert [(r["state"], r["drawn_as"], r["report"], r["also_found_from"]) for r in goi] == [
+        (ps.STRONG_HIT_NOTE, "outline", "genome_wide_strong_hit", "locus_2")]
+    assert tip == (f"T — identity 70%, MEDIUM ({ps.STRONG_HIT_NOTE}); also found from locus_2: one record "
+                   "of the report")
+    data = json.loads(html.unescape(ps._build_tooltip_json(answer, tracks[1], {})))
+    assert (data["report"], data["goiTag"], data["alsoFound"]) == (
+        "not counted: a strong hit without synteny (genome_wide_strong_hit)", ps.STRONG_HIT_NOTE,
+        "locus_2 (one record of the report)")
+
+
+def test_an_answer_the_ownership_check_relabelled_is_no_answer():
+    """The same model, given to another home gene by the ownership check (ReportOutcome=
+    paralog_not_goi): the record is no answer. The figures still drew it as a kept strong hit
+    (outlined, in the strong-hit sentence) and left it out of the calls the report does not
+    count; the gene-position tooltip dropped the report's note. It is a call the report does not
+    count now, drawn by its label like every such call."""
+    tracks, colours, answer = _answer_tracks("paralog_not_goi")
+    assert not ps._is_genome_wide_answer(answer) and ps._places_no_locus(answer)
+    assert tracks[1]["goi_status"] != "strong_hit"
+    legend, goi, info, tip = _figure_texts(tracks, colours)
+    assert (info["goi_strong_hits"], info["goi_calls_not_counted_by_report"]) == (0, {"paralog_not_goi": 1})
+    assert ("1 T call in the T column is not counted by the report: another home gene's call "
+            "(paralog_not_goi, 1)") in legend
+    assert "An outlined arrow" not in legend
+    assert [(r["state"], r["drawn_as"], r["report"]) for r in goi] == [("placed", "model", "paralog_not_goi")]
+    assert tip == "T — identity 70%, MEDIUM; not counted by the report: another home gene's call (paralog_not_goi)"
+    data = json.loads(html.unescape(ps._build_tooltip_json(answer, tracks[1], {})))
+    assert (data["report"], data["goiTag"]) == ("not counted: another home gene's call (paralog_not_goi)", "GOI")
+
+
+def test_an_answer_without_the_report_marks():
+    tracks, colours, answer = _answer_tracks("")
+    assert tracks[1]["goi_status"] == "strong_hit" and ps._is_genome_wide_answer(answer)
+    legend, goi, info, tip = _figure_texts(tracks, colours)
+    assert (info["goi_strong_hits"], info["goi_calls_not_counted_by_report"]) == (1, {})
+    assert [(r["state"], r["drawn_as"], r["report"]) for r in goi] == [(ps.STRONG_HIT_NOTE, "outline", "")]
+    assert tip == f"T — identity 70%, MEDIUM ({ps.STRONG_HIT_NOTE})"
+    data = json.loads(html.unescape(ps._build_tooltip_json(answer, tracks[1], {})))
+    assert "report" not in data and data["goiTag"] == ps.STRONG_HIT_NOTE
+
+
+E2E_CLASS = dict(CLASS, MEDIUM="probable_goi")
+
+
+def _e2e_goi(tag, chrom, mid, s, e, conf, qcov, cds, block=1, cls=None, extra="", ident="80.0",
+             eeff="1e-20", basis="significant_specific", bits="300.0", status="complete"):
+    full = f"GOI_QRY1|{tag}_b{block}_{mid}_exon_ann"
+    rows = [f"{chrom}\tminiprot\tmRNA\t{s}\t{e}\t{ident}\t+\t.\tID={full};Name=GOI_QRY1;SynVoy_Parent=GOI_QRY1;"
+            f"Identity={ident};Confidence={conf};GOIClass={cls or E2E_CLASS[conf]};SynVoyRole=goi;"
+            f"EvidenceType=exon_annotation;ModelStatus={status};QueryCoverage={qcov};Bits={bits};Eeff={eeff};"
+            f"BlockEsyn=1e-5;Basis={basis};Exons={len(cds)}{extra}"]
+    rows += [f"{chrom}\tminiprot\tCDS\t{cs}\t{ce}\t.\t+\t0\tID={full}_CDS{i};Parent={full}"
+             for i, (cs, ce) in enumerate(cds, 1)]
+    return full, rows
+
+
+def _e2e_flanks(tag):
+    return [f"tchr5\tflanking_miniprot\tmRNA\t{s + 500_000}\t{e + 500_000}\t80.0\t+\t.\t"
+            f"ID=gene-{g}|{tag}_b1_{s}_flank_ann;Name=gene-{g};SynVoy_Parent=gene-{g};Identity=80.0;"
+            f"Confidence=HIGH;SynVoyRole=flanking;EvidenceType=flanking_miniprot" for g, s, e in HOME if g != "QRY1"]
+
+
+def test_answers_and_marks_end_to_end(tmp_path):
+    """build_report, apply_report_drops.py --locus and plot_synteny.py, with and without the marks,
+    on six genomes of home locus_1 (locus_2 only feeds the report): G1 a wide model the report
+    merged into a compact one at the locus and an answer it dropped (a counted call is there); G2
+    a kept answer beside an answer dropped at locus_2; G3 a LOW call at the locus and a counted call
+    with its merged twin on a scaffold without flanking genes (outside the view); G4 a kept answer
+    found from both loci; G6 a HIGH call at the locus and an AMBIGUOUS record with its merged twin
+    outside the view; G7 an answer the ownership check gives to another home gene."""
+    answer = ";GenomeWide=1;Place=genome"
+    gw = dict(block=5003, cls="genome_wide_strong_hit", extra=answer, eeff="1e-40", bits="900")
+    loci = {"locus_1": {}, "locus_2": {}}
+    ids = {}
+    tag = "GCA_000000001_1_fna"
+    w, r1 = _e2e_goi(tag, "tchr5", "l1", 501000, 512400, "HIGH", 0.988, [(501000, 501500), (505000, 505600),
+                                                                          (512000, 512400)])
+    c, r2 = _e2e_goi(tag, "tchr5", "l1m2", 505000, 507600, "MEDIUM", 0.904, [(505000, 505600), (507000, 507600)])
+    a, r3 = _e2e_goi(tag, "tchr9", "l1", 3_000_000, 3_001_000, "MEDIUM", 0.95, [(3_000_000, 3_001_000)], **gw)
+    loci["locus_1"]["GCA_000000001.1"] = _e2e_flanks(tag) + r1 + r2 + r3
+    ids["G1"] = dict(wide=w, compact=c, answer=a)
+    tag = "GCA_000000002_1_fna"
+    a1, r1 = _e2e_goi(tag, "tchr9", "l1", 3_000_000, 3_001_000, "MEDIUM", 0.95, [(3_000_000, 3_001_000)], **gw)
+    a2, r2 = _e2e_goi(tag, "tchr9", "l1", 3_000_601, 3_001_600, "MEDIUM", 0.95, [(3_000_601, 3_001_600)],
+                      **dict(gw, block=6001, bits="800"))      # another frame: a record of its own
+    loci["locus_1"]["GCA_000000002.1"] = _e2e_flanks(tag) + r1
+    loci["locus_2"]["GCA_000000002.1"] = _e2e_flanks(tag) + r2
+    ids["G2"] = dict(kept=a1, dropped=a2)
+    tag = "GCA_000000003_1_fna"
+    low, r0 = _e2e_goi(tag, "tchr5", "l1m3", 505050, 505950, "LOW", 0.3, [(505050, 505950)], eeff="5",
+                       basis="not_significant")
+    w, r1 = _e2e_goi(tag, "tchr7", "l1", 901000, 912400, "HIGH", 0.988, [(901000, 901500), (905000, 905600),
+                                                                         (912000, 912400)], block=7)
+    c, r2 = _e2e_goi(tag, "tchr7", "l1m2", 905000, 907600, "MEDIUM", 0.904, [(905000, 905600), (907000, 907600)],
+                     block=7)
+    loci["locus_1"]["GCA_000000003.1"] = _e2e_flanks(tag) + r0 + r1 + r2
+    ids["G3"] = dict(low=low, wide=w, compact=c)
+    tag = "GCA_000000004_1_fna"
+    a4, r1 = _e2e_goi(tag, "tchr9", "l1", 3_000_000, 3_001_000, "MEDIUM", 0.95, [(3_000_000, 3_001_000)], **gw)
+    _a, r2 = _e2e_goi(tag, "tchr9", "l1", 3_000_000, 3_001_000, "MEDIUM", 0.95, [(3_000_000, 3_001_000)],
+                      **dict(gw, block=6003))
+    loci["locus_1"]["GCA_000000004.1"] = _e2e_flanks(tag) + r1
+    loci["locus_2"]["GCA_000000004.1"] = _e2e_flanks(tag) + r2
+    ids["G4"] = dict(answer=a4)
+    tag = "GCA_000000006_1_fna"
+    h, r1 = _e2e_goi(tag, "tchr5", "l1", 505000, 507600, "HIGH", 0.95, [(505000, 505600), (507000, 507600)])
+    amb, r2 = _e2e_goi(tag, "tchr8", "l1m2", 801000, 802000, "AMBIGUOUS", 0.9, [(801000, 802000)], block=8,
+                       basis="not_specific", eeff="1e-5", bits="200")
+    amb2, r3 = _e2e_goi(tag, "tchr8", "l1m3", 801010, 801990, "AMBIGUOUS", 0.88, [(801010, 801990)], block=8,
+                        basis="not_specific", eeff="1e-5", bits="190")
+    loci["locus_1"]["GCA_000000006.1"] = _e2e_flanks(tag) + r1 + r2 + r3
+    ids["G6"] = dict(high=h, amb=amb, amb2=amb2)
+    tag = "GCA_000000007_1_fna"
+    a7, r1 = _e2e_goi(tag, "tchr9", "l1", 3_000_000, 3_001_000, "MEDIUM", 0.95, [(3_000_000, 3_001_000)], **gw)
+    loci["locus_1"]["GCA_000000007.1"] = _e2e_flanks(tag) + r1
+    ids["G7"] = dict(answer=a7)
+
+    rep = tmp_path / "rep"
+    for d in ("regions", "hits", "scores", "locus_ownership"):
+        (rep / d).mkdir(parents=True)
+    search = {lc: tmp_path / "search" / lc for lc in loci}
+    for lc, genomes in loci.items():
+        search[lc].mkdir(parents=True)
+        for g, rows in genomes.items():
+            text = "##gff-version 3\n" + "\n".join(rows) + "\n"
+            (rep / "regions" / f"{lc}__{g}.fna.gff").write_text(text)
+            (search[lc] / f"{g}.fna.gff").write_text(text)
+    (rep / "locus_ownership" / "locus_1__GCA_000000007.1.locus_ownership.tsv").write_text(
+        "genome\tchrom\tstart\tend\tmodel_id\tbest_paralog\tbest_bit\tsecond_paralog\tsecond_bit\t"
+        "bitscore_gap\tpanel_scores\n"
+        f"GCA_000000007.1\ttchr9\t3000000\t3001000\t{a7}\thome_gene-PAR|gene-PAR\t500\tlocus_1|gene-QRY1\t300\t"
+        "200\thome_gene-PAR|gene-PAR=500;locus_1|gene-QRY1=300\n")
+    (rep / "locus_ownership" / "home_paralog_panel.faa.meta.tsv").write_text(
+        "panel_id\tlocus_id\tgene\tchrom\tis_goi_gene\tgoi_found_by\n"
+        "locus_1|gene-QRY1\tlocus_1\tgene-QRY1\thchr1\t1\tgoi_info\n"
+        "home_gene-PAR|gene-PAR\thome_gene-PAR\tgene-PAR\thchr2\t0\t\n")
+    report = gr.build_report(str(rep))
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report))
+    records = {(r["genome"], r["mrna_id"]): r for r in report["goi_dedup"]["records"]}
+    assert records[("GCA_000000007.1", a7)]["goi_class"] == "paralog_not_goi"
+    assert {r["mrna_id"] for r in report["goi_dedup"]["genome_wide_strong_hits_dropped_records"]} == {
+        ids["G1"]["answer"], ids["G2"]["dropped"]}
+    marks = {(m["genome"], m["model"]): (m["outcome"], m["drawn_by"]) for m in report["figures"]["locus_1"]["models"]}
+    assert marks[("GCA_000000001.1", ids["G1"]["wide"])] == ("merged", ids["G1"]["compact"])
+    assert marks[("GCA_000000007.1", a7)] == ("paralog_not_goi", "")
+
+    (tmp_path / "synteny_block_locus_1.bed").write_text("".join(
+        f"hchr1\t{s - 1}\t{e}\tgene-{g}\t.\t+\t{g}\n" for g, s, e in HOME if g != "QRY1"))
+    (tmp_path / "locus_1.bed").write_text("hchr1\t5100\t7500\tgene_loc\t1e-40\t+\n")
+    home = ["##gff-version 3"]
+    for g, s, e in HOME:
+        home += [f"hchr1\tRefSeq\tgene\t{s}\t{e}\t.\t+\t.\tID=gene-{g};Name={g}",
+                 f"hchr1\tRefSeq\tmRNA\t{s}\t{e}\t.\t+\t.\tID=rna-{g};Parent=gene-{g}",
+                 f"hchr1\tRefSeq\tCDS\t{s}\t{e}\t.\t+\t0\tID=cds-{g};Parent=rna-{g}"]
+    (tmp_path / "home.gff").write_text("\n".join(home) + "\n")
+    gffs = sorted(search["locus_1"].iterdir())
+    _apply(tmp_path, report_path, gffs, out="pin")
+    assert "\tmRNA\t3000000" in (tmp_path / "pin" / "GCA_000000002.1.fna.gff").read_text()   # the kept answer stays
+    assert ids["G1"]["answer"] not in (tmp_path / "pin" / "GCA_000000001.1.fna.gff").read_text()
+
+    def plot(name, targets, with_report):
+        proc = subprocess.run(
+            [sys.executable, os.path.join(BIN, "plot_synteny.py"),
+             "--home_bed", str(tmp_path / "synteny_block_locus_1.bed"), "--query_bed", str(tmp_path / "locus_1.bed"),
+             "--home_gff", str(tmp_path / "home.gff"), "--target_gffs", *map(str, targets),
+             *(["--report", str(report_path)] if with_report else []),
+             "--output", str(tmp_path / f"{name}_synteny_plot.html"), "--no_network", "--common_names", "off",
+             "--no_fragment_variant"],
+            capture_output=True, text=True, cwd=tmp_path,
+            env=dict(os.environ, PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1"))
+        assert proc.returncode == 0, proc.stderr
+        with open(tmp_path / f"{name}_anchor_grid_print.source.tsv", newline="") as fh:
+            rows = [r for r in csv.DictReader(fh, delimiter="\t") if r["column"] == "QRY1" and r["genome_id"] != "home"]
+        legend = (tmp_path / f"{name}_anchor_grid_print.legend.txt").read_text()
+        return {(r["genome_id"], r["model_id"]): r for r in rows if r["model_id"]}, legend, proc.stdout
+
+    rows, legend, log = plot("marked", [tmp_path / "pin" / g.name for g in gffs], True)
+    view = {k: (r["state"], r["drawn_as"], r["position"], r["report"], r["also_found_from"]) for k, r in rows.items()}
+    assert view[("GCA_000000001.1", ids["G1"]["wide"])][:2] == ("placed", "not drawn")
+    assert view[("GCA_000000001.1", ids["G1"]["compact"])][0:3:2] == ("placed", "locus")
+    assert ("GCA_000000001.1", ids["G1"]["answer"]) not in view                  # dropped: not in the inputs
+    assert view[("GCA_000000002.1", ids["G2"]["kept"])] == (
+        ps.STRONG_HIT_NOTE, "outline", "elsewhere", "genome_wide_strong_hit", "")
+    assert view[("GCA_000000003.1", ids["G3"]["compact"])][0:3:2] == ("placed", "elsewhere")  # outside the view
+    assert view[("GCA_000000003.1", ids["G3"]["wide"])][:2] == ("placed", "not drawn")      # its twin, listed
+    assert view[("GCA_000000004.1", ids["G4"]["answer"])] == (
+        ps.STRONG_HIT_NOTE, "outline", "elsewhere", "genome_wide_strong_hit", "locus_2")
+    assert ("GCA_000000006.1", ids["G6"]["amb"]) not in view and ("GCA_000000006.1", ids["G6"]["amb2"]) not in view
+    assert view[("GCA_000000007.1", a7)][0:4:3] == ("placed", "paralog_not_goi")
+    assert "2 further QRY1 models are not drawn" in legend
+    assert ("1 QRY1 call in the QRY1 column is not counted by the report: another home gene's call "
+            "(paralog_not_goi, 1)") in legend
+    assert "is no copy (2 in this figure; synvoy_report.json, summary.genome_wide_strong_hits)" in legend
+    assert "1 QRY1 call was also found from another home locus" in legend
+    assert "carry no report marks" not in log
+
+    rows, legend, log = plot("plain", gffs, False)
+    view = {k: (r["state"], r["drawn_as"], r["report"]) for k, r in rows.items()}
+    assert "6 of 6 target GFF(s) carry no report marks" in log
+    assert not any(v[1] == "not drawn" or v[2] for v in view.values())
+    assert view[("GCA_000000001.1", ids["G1"]["wide"])][0] == "placed"            # both drawn, as before
+    assert view[("GCA_000000001.1", ids["G1"]["answer"])][:2] == (ps.STRONG_HIT_NOTE, "outline")
+    assert view[("GCA_000000007.1", a7)][:2] == (ps.STRONG_HIT_NOTE, "outline")    # no outcome: an answer
+    assert "not counted by the report" not in legend and "further QRY1 model" not in legend

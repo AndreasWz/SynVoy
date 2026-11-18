@@ -1,4 +1,4 @@
-"""The flank walk over a home genome without a GFF (freeze item 45; bin/extract_flanking_genes.py).
+"""The flank walk over a home genome without a GFF (bin/extract_flanking_genes.py).
 
 Such a home genome is annotated only in stretches: genes are predicted around each home hit of
 the query (prodigal_on_regions.py, pred_flank_window on each side) and gene models of a target
@@ -113,7 +113,7 @@ def test_a_borrowed_window_extends_the_stretch(tmp_path):
 
 
 def test_a_prediction_window_inside_the_transfer_window_is_not_walked_into(tmp_path):
-    """Review of item 45: borrow_annotations.py wrote the whole home window miniprot searched
+    """borrow_annotations.py wrote the whole home window miniprot searched
     (it grows to about 800 kb) as 'borrowed', so the prediction window of another home hit
     inside it (B, 40-56 kb) joined the locus's stretch and the walk took B's genes past the
     unannotated DNA between. The merged GFF now names the stretch the transferred models

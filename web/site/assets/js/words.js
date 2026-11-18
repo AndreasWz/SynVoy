@@ -107,6 +107,10 @@ export function headline(result) {
       parts.push((s.none === 1 ? "In the other one" : "In the other " + s.none) + " it was not found; the table says how much of its neighbourhood is there.");
     }
   }
+  if (s.strong_hits > 0) {
+    parts.push(strongHitCount(s.strong_hits) + ", not counted, " + plural(s.strong_hits, "is", "are")
+      + " listed under the table.");
+  }
   if (s.not_searched > 0) {
     parts.push(s.not_searched + " " + plural(s.not_searched, "genome was", "genomes were")
       + " left out because the assembly is too fragmented.");
@@ -150,10 +154,45 @@ export function neighbourMore(genome) {
   return "";
 }
 
+// "1 strong hit without synteny": an answer of the genome-wide path, a strong match where
+// no neighbourhood places the gene. The report and the figures use the same words; none
+// is counted as the gene, and none is a weak match.
+export function strongHitCount(n) {
+  return n + " strong " + plural(n, "hit", "hits") + " without synteny";
+}
+
+export const STRONG_HIT_MEANS = "Each meets the terms of a confident call, but no neighbourhood "
+  + "places the gene there. Read it as a lead for a closer look; it is not counted as the gene.";
+
+// The calls listed under the table: those set aside as not the gene, and apart from
+// them the strong hits without synteny.
+export function setAsideHeading(n) {
+  return "Set aside: " + n + " " + plural(n, "call that is not the gene", "calls that are not the gene");
+}
+
+export function strongHitHeading(n) {
+  return "Not counted: " + strongHitCount(n);
+}
+
+export function setAsideReason(call) {
+  if (call.reason === "related_gene") {
+    return "matches " + (call.related_gene ? "the related gene " + call.related_gene : "a related gene") + " better than the query";
+  }
+  if (call.reason === "strong_hit") return "a strong match where no neighbourhood places the gene";
+  return "matches only a short piece of the query";
+}
+
+export function asideFact(s) {
+  const strong = s.strong_hits || 0;
+  return s.candidates + " ambiguous, " + s.set_aside + " set aside"
+    + (strong ? " (" + strongHitCount(strong) + " among them)" : "");
+}
+
 // What a genome without a call still tells.
 export function notFoundText(genome) {
   const n = genome.neighbours;
   const leads = genome.leads;
+  const strong = (genome.calls || []).filter((c) => c.reason === "strong_hit").length;
   const parts = [];
   if (n && n.total) {
     // Five neighbours side by side is what the search itself takes as a firm neighbourhood.
@@ -169,6 +208,10 @@ export function notFoundText(genome) {
       if (leads.coverage !== null && leads.coverage !== undefined) text += " over " + percent(leads.coverage * 100) + " of the protein";
     }
     parts.push(text + ": not enough for a call.");
+  }
+  if (strong) {
+    parts.push(strong === 1 ? "A strong hit without synteny, not counted, is listed under the table."
+      : strongHitCount(strong) + ", not counted, are listed under the table.");
   }
   return parts.join(" ");
 }

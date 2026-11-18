@@ -343,12 +343,27 @@ def _is_fragment_goi(gene):
 STRONG_HIT_NOTE = "strong hit without synteny, not counted"
 
 
+def _places_no_locus(gene):
+    """A GOI model of the genome-wide path (GOIClass=genome_wide_strong_hit), whatever the report
+    did with it: the search found it outside every searched GOI zone, so it has no synteny and
+    places no locus. A row's view is chosen without it (select_target_genes, get_anchor_center), as
+    cluster_grs chooses its regions without it, and the row's place in the anchor grid and the
+    gene-position map (its scaffold, its stretch, the reach of a copy) is that of its other
+    models."""
+    return _is_goi_target_gene(gene) and (gene.get("goi_class") or "") == GENOME_WIDE_CLASS
+
+
 def _is_genome_wide_answer(gene):
     """An answer of the genome-wide path (GOIClass=genome_wide_strong_hit, written MEDIUM): a
     strong hit without synteny, which the report never counts. The figures count it as no call
     and no copy, never take it as a genome's best call, and draw it outlined, as a kind of its
-    own ("strong hit without synteny, not counted")."""
-    return _is_goi_target_gene(gene) and (gene.get("goi_class") or "") == GENOME_WIDE_CLASS
+    own ("strong hit without synteny, not counted"). In a GFF with the report's marks it is an
+    answer only where the report kept it as one (ReportOutcome=genome_wide_strong_hit): a model of
+    the path that the report gives another outcome (paralog_not_goi when the ownership check gives
+    it to another home gene: such a record is no answer) is a call the report does not count, and
+    is drawn by its label like every such call. Either way it places no locus (_places_no_locus)."""
+    return (_places_no_locus(gene)
+            and (gene.get("report_outcome") or "") in ("", GENOME_WIDE_CLASS))
 
 
 # What the report did with a GOI model (ReportOutcome=, which apply_report_drops.py writes from the
@@ -376,10 +391,12 @@ def _report_left_out(gene):
     return _is_goi_target_gene(gene) and (gene.get("report_outcome") or "") in REPORT_LEFT_OUT
 
 
-def _report_note(gene):
+def _report_note(gene, outcome_said=False):
     """The report's outcome of a GOI call as tooltip text ('' without one): why the report does not
-    count it, and the other home loci that found its record."""
-    outcome = (gene or {}).get("report_outcome") or ""
+    count it, and the other home loci that found its record. ``outcome_said``: the tooltip already
+    says what the call is (an answer of the genome-wide path, STRONG_HIT_NOTE), so only the other
+    home loci are named."""
+    outcome = "" if outcome_said else ((gene or {}).get("report_outcome") or "")
     parts = []
     if outcome in REPORT_LEFT_OUT:
         parts.append(f"report: {REPORT_OUTCOME_TEXT[outcome]}")
@@ -747,11 +764,15 @@ def parse_target_gff(gff_file, cap=True, raw=False):
                 "basis":        attrs.get("Basis", ""),
                 "inference_reason": attrs.get("InferenceReason", ""),
                 "gff_id":       gene_id,
-                # The report's outcome of a GOI model, its record's span and the other home loci
-                # that found that record (apply_report_drops.py; '' / [] without the marks).
+                # The report's outcome of a GOI model, its record's span, the model that draws a
+                # merged model's record and the other home loci that found that record
+                # (apply_report_drops.py; '' / [] without the marks).
                 "report_outcome": attrs.get("ReportOutcome", ""),
                 "report_record": attrs.get("ReportRecord", ""),
+                "report_drawn_by": attrs.get("ReportDrawnBy", ""),
                 "also_found_from": [x for x in attrs.get("AlsoFoundFrom", "").split(",") if x],
+                # an answer of the genome-wide path inside a block's searched window: its number
+                "near_block": attrs.get("NearBlock", ""),
             })
 
     if raw:
@@ -1773,9 +1794,13 @@ def get_anchor_center(genes):
     """
     Find the center coordinate (plot) of the GOI.
     If multiple GOIs, average them. If none, usage center of the range.
+    A model of the genome-wide path places no locus (_places_no_locus): the track is not
+    centred on it, nor is its range widened by it while other genes are there.
     """
     goi_centers = []
     for g in genes:
+        if _places_no_locus(g):
+            continue
         if _is_goi_target_gene(g) or is_goi(g.get("name")) or is_goi(g.get("home_gene_id")):
             goi_centers.append((g["start_plot"] + g["end_plot"]) / 2)
 
@@ -1785,8 +1810,9 @@ def get_anchor_center(genes):
     # Fallback: center of the entire cluster
     if not genes:
         return 0
-    start = min(g["start_plot"] for g in genes)
-    end   = max(g["end_plot"]   for g in genes)
+    placed = [g for g in genes if not _places_no_locus(g)] or genes
+    start = min(g["start_plot"] for g in placed)
+    end   = max(g["end_plot"]   for g in placed)
     return (start + end) / 2
 
 
@@ -4887,6 +4913,18 @@ def _home_locus_span(anchors):
     return max(a["end"] for a in placed) - min(a["start"] for a in placed)
 
 
+def _row_place(tmap, goi_key):
+    """Where a target row's neighbourhood lies, from its columns ``tmap`` (_grid_target_map, or a
+    part of it): ``(chrom, lo, hi, n_other)`` of _dominant_chrom_span over the midpoints of the
+    columns' best models, on the scaffold of the best GOI call when there is one. A model of the
+    genome-wide path (_places_no_locus) is left out, so it never sets the row's scaffold or
+    stretch; ('', 0.0, 0.0, 0) when nothing else is placed."""
+    placed = {k: e["best"] for k, e in tmap.items() if not _places_no_locus(e["best"])}
+    goi_chrom = placed[goi_key].get("chrom", "") if goi_key in placed else ""
+    return _dominant_chrom_span(
+        [(b.get("chrom", ""), (b["start"] + b["end"]) / 2.0) for b in placed.values()], goi_chrom)
+
+
 def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
     """Map a target track's genes onto anchor columns.
 
@@ -4899,7 +4937,9 @@ def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
     stretch). A track also carries that gene's paralog hits elsewhere in the genome
     -- one yeast flanking gene had nine models on six chromosomes -- and counting
     all of them printed "x9" above a single-copy ortholog. The GOI column keeps
-    every model of the chosen view; its cell draws them.
+    every model of the chosen view; its cell draws them. A model of the genome-wide path
+    (_places_no_locus) is the GOI column's best only when it is the column's only model, and
+    never sets the row's stretch: an answer alone in view put the row on its scaffold.
     """
     buckets = defaultdict(list)
     for g in track.get("genes", []):
@@ -4911,8 +4951,8 @@ def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
             buckets[hid].append(g)
     out = {}
     for key, genes in buckets.items():
-        # an answer of the genome-wide path is the best GOI gene only when it is the only one
-        genes.sort(key=lambda g: (not _is_genome_wide_answer(g),
+        # a model of the genome-wide path is the best GOI gene only when it is the only one
+        genes.sort(key=lambda g: (not _places_no_locus(g),
                                   _confidence_rank(g.get("confidence")),
                                   _model_strength(g)), reverse=True)
         # `genes` (all copies, genomic order) lets the GOI column enrol every
@@ -4920,10 +4960,7 @@ def _grid_target_map(track, anchor_keys, goi_key, locus_span_bp=0):
         out[key] = {"best": genes[0], "n": len(genes),
                     "genes": sorted(genes, key=lambda g: _get_coords(g)[0])}
 
-    goi_chrom = out[goi_key]["best"].get("chrom", "") if goi_key in out else ""
-    _, lo, hi, _ = _dominant_chrom_span(
-        [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
-         for e in out.values()], goi_chrom)
+    _, lo, hi, _ = _row_place(out, goi_key)
     reach = max(float(locus_span_bp or 0), hi - lo)
     for key, entry in out.items():
         if key != goi_key:
@@ -5436,20 +5473,73 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                 flags = [c for _, c in _goi_copies_and_weak(calls + outside)][:len(calls)]
                 n_here, n_weak, n_out = sum(flags), len(flags) - sum(flags), len(outside)
                 n_strong = len(entry["genes"]) - len(calls)
+            answer = is_g and _is_genome_wide_answer(g)
             pts.append({"x": (gs + ge) / 2.0, "gx": (g["start"] + g["end"]) / 2.0, "key": key,
+                        "start": g["start"], "end": g["end"],
                         "colour": GOI_COLOUR if is_g else anchor_colour.get(key, UNMATCHED_CLR),
                         "is_goi": is_g, "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
                         "strand": g.get("strand", "+"), "n": n_here, "weak": n_weak,
                         "elsewhere": n_out, "strong": n_strong,
-                        "answer": is_g and _is_genome_wide_answer(g),
-                        # what the report did with the GOI call drawn (_report_note)
-                        "report": _report_note(g) if is_g else "",
+                        "answer": answer,
+                        # a model of the genome-wide path: it places no locus (_row_layout)
+                        "no_locus": is_g and _places_no_locus(g),
+                        # what the report did with the GOI call drawn (_report_note); an answer's
+                        # own outcome is said by STRONG_HIT_NOTE, the other home loci are not
+                        "report": _report_note(g, outcome_said=answer) if is_g else "",
                         "label": anchor_label.get(key, key) if not is_g else goi_label,
                         "chrom": g.get("chrom", "")})
         return pts
 
     row_pts = [_row_points(ri) for ri in range(len(row_tracks))]
+    locus_span = _home_locus_span(anchors)
+
+    def _row_layout(ri):
+        """What row ``ri`` draws: ``pts`` (its points on its scaffold), ``label`` (the scaffold and
+        stretch of its neighbourhood, (+N) for the scaffolds of its genes not drawn) and ``tip``
+        (what of it is not drawn). The row's place is that of its flanking genes and of a GOI
+        call that is no model of the genome-wide path (_places_no_locus). The GOI point is such a
+        model only when it is the row's only GOI call in view; it is drawn where it lies when it
+        lies at the row's locus by the anchor grid's test (synvoy_grid.split_calls: on the row's
+        scaffold, no farther from its stretch than the neighbourhood is long), else named in the
+        tooltip of the label, and counted in (+N) when it lies on another scaffold. The tooltip
+        also names the row's answers outside the view, which the anchor grid lists."""
+        pts = row_pts[ri]
+        place = [p for p in pts if not p.get("no_locus")]
+        others = [p for p in pts if p.get("no_locus")]
+        prim, n_other, label, drawn = "", 0, "", []
+        if place:
+            goi_ch = next((p["chrom"] for p in place if p["is_goi"] and p["chrom"]), "")
+            prim, _plo, _phi, n_other = _dominant_chrom_span(
+                [(p["chrom"], p["x"]) for p in place], goi_ch)
+            on = ([p for p in place if p["chrom"] == prim] if prim else []) or place
+            gxs = [p.get("gx", p["x"]) for p in on]
+            lo, hi = min(gxs), max(gxs)
+            here = {"chrom": prim, "start": lo, "end": hi}
+            reach = max(float(locus_span or 0), hi - lo)
+            drawn = [p for p in others if p["chrom"] == prim and _is_local_copy(p, here, reach)]
+            n_other += len({p["chrom"] for p in others if p["chrom"] != prim}
+                           - {p["chrom"] for p in place})
+            label = _span_gutter_label(prim, lo, hi, n_other)
+            pts = on + drawn
+        else:
+            pts = []
+        hidden = [p for p in others if not any(p is d for d in drawn)]
+        # the row's answers outside the view (_strong_hits_outside_view), which the anchor grid lists
+        hidden += [{"label": goi_label, "chrom": g.get("chrom", ""), "start": g["start"], "end": g["end"],
+                    "answer": True, "report": _report_note(g, outcome_said=True)}
+                   for g in (row_tracks[ri].get("goi_strong_outside_view") or []) if ri]
+        tip = "; ".join(
+            f'{p["label"]} {p["chrom"]}:{int(p["start"]):,}-{int(p["end"]):,}, '
+            + (STRONG_HIT_NOTE if p.get("answer") else f'{p["conf"]}, genome-wide path')
+            + (f'; {p["report"]}' if p.get("report") else '')
+            + ': not drawn, it lies outside this neighbourhood (anchor grid)'
+            + (f'; {p["elsewhere"]} counted call(s) outside this neighbourhood (anchor grid)'
+               if p.get("elsewhere") else '')
+            for p in hidden)
+        return {"pts": pts, "label": label, "tip": tip}
+
+    layouts = [_row_layout(ri) for ri in range(len(row_tracks))]
 
     # ---- Layout -----------------------------------------------------------
     GRID_HEADER = "#f5f7fb"
@@ -5466,16 +5556,7 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
     # Right gutter for the per-row "chrom: lo–hi Mb" span label. Sized to the
     # LONGEST actual label (accession + range) so long scaffold/contig names
     # (e.g. 'WUUM01000001.1: 9.44–9.58 Mb') aren't clipped at the canvas edge.
-    def _span_label_len(ri):
-        pts = row_pts[ri]
-        if not pts:
-            return 0
-        goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
-        c, lo, hi, n_other = _dominant_chrom_span(
-            [(p["chrom"], p.get("gx", p["x"])) for p in pts], goi_ch)
-        return len(_span_gutter_label(c, lo, hi, n_other))
-    max_span_len = max((_span_label_len(ri) for ri in range(len(row_tracks))),
-                       default=14)
+    max_span_len = max((len(lay["label"]) for lay in layouts), default=14)
     SPAN_W = max(150, int(max_span_len * 6.0 + 30))
 
     POS_LABEL_SIZE = 14
@@ -5512,8 +5593,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             (_lg_diamond(_shade_by_identity(GOI_COLOUR, 95), GOI_BORDER), "best GOI call"),
             ("×N", "N GOI copies in the neighbourhood")]
             + ([(_lg_diamond("#ffffff", GOI_BORDER),
-                 STRONG_HIT_NOTE + " (genome-wide path), drawn where no other GOI call is")]
-               if any(p.get("answer") for pts in row_pts for p in pts) else [])),
+                 STRONG_HIT_NOTE + " (genome-wide path): the row's only GOI call, drawn where "
+                 "it lies in the neighbourhood")]
+               if any(p.get("answer") for lay in layouts for p in lay["pts"]) else [])),
     ]
     content_w = max(PLOT_W + SPAN_W, 640)
     width = LEFT + content_w + RIGHT
@@ -5549,20 +5631,20 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                  f'font-size="{POS_LABEL_SIZE}" fill="#1a1d26" font-style="italic" '
                  f'font-weight="{"700" if is_home else "400"}">{labels[ri] or "Home"}</text>')
 
-        pts = sorted(row_pts[ri], key=lambda p: p["x"])
-        if not pts:
-            P.append(f'<text x="{(bx0 + bx1) / 2:.1f}" y="{cy + 4:.1f}" '
-                     f'text-anchor="middle" font-size="10" fill="#aab2c0" '
-                     f'font-style="italic">no orthologs mapped</text>')
-            continue
         # On a fragmented assembly a row's genes can straddle >1 scaffold; mixing
         # their coordinates on one normalised line is meaningless, so keep the
-        # dominant (or GOI-bearing) scaffold and note any dropped ones as "(+N)".
-        goi_ch = next((p["chrom"] for p in pts if p["is_goi"] and p["chrom"]), "")
-        prim, _plo, _phi, n_other = _dominant_chrom_span(
-            [(p["chrom"], p["x"]) for p in pts], goi_ch)
-        if prim:
-            pts = [p for p in pts if p["chrom"] == prim] or pts
+        # dominant (or GOI-bearing) scaffold and note any dropped ones as "(+N)"
+        # (_row_layout; a model of the genome-wide path places no locus).
+        lay = layouts[ri]
+        pts = sorted(lay["pts"], key=lambda p: p["x"])
+
+        def _titled(svg):       # what of the row is not drawn, as the tooltip of its text
+            return f'<g><title>{_svg_esc(lay["tip"])}</title>{svg}</g>' if lay["tip"] else svg
+        if not pts:
+            P.append(_titled(f'<text x="{(bx0 + bx1) / 2:.1f}" y="{cy + 4:.1f}" '
+                             f'text-anchor="middle" font-size="10" fill="#aab2c0" '
+                             f'font-style="italic">no orthologs mapped</text>'))
+            continue
         xs = [p["x"] for p in pts]
         lo, hi = min(xs), max(xs)
         def _px(xr):
@@ -5575,11 +5657,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                  f'y2="{cy:.1f}" stroke="{GRID_BACKBONE}" stroke-width="1.6"/>')
 
         # Coordinate-span label in the right gutter.
-        gxs = [p.get("gx", p["x"]) for p in pts]
-        span_txt = _span_gutter_label(prim, min(gxs), max(gxs), n_other)
-        if span_txt:
-            P.append(f'<text x="{grid_x1 + 10:.1f}" y="{cy + 3.5:.1f}" font-size="9" '
-                     f'fill="{GRID_AXIS_TEXT}">{_svg_esc(span_txt)}</text>')
+        if lay["label"]:
+            P.append(_titled(f'<text x="{grid_x1 + 10:.1f}" y="{cy + 3.5:.1f}" font-size="9" '
+                             f'fill="{GRID_AXIS_TEXT}">{_svg_esc(lay["label"])}</text>'))
 
         # Dots (GOI last so it sits on top).
         for p in sorted(pts, key=lambda q: q["is_goi"]):
@@ -5613,8 +5693,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                          f'(anchor grid)' if p.get("elsewhere") else '')
                       + (f' ({STRONG_HIT_NOTE})' if p.get("answer") else
                          f', {p["strong"]} {STRONG_HIT_NOTE}' if p.get("strong") else '')
-                      # the report's note; an answer's own outcome is said by the note above
-                      + (f'; {p["report"]}' if p.get("report") and not p.get("answer") else '')))
+                      # the report's note (for an answer, the other home loci only: its own
+                      # outcome is said by the note above)
+                      + (f'; {p["report"]}' if p.get("report") else '')))
             g = [f'<title>{_svg_esc(tip)}</title>']
             if p["is_goi"]:
                 r = GOI_R
@@ -5924,13 +6005,22 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     the models lie on 20 sequences or fewer, the GOI sequences with flanking support, every
     sequence with >= 3 flanking genes and every sequence that holds a flanking gene placed on
     none of those; then the capped GOI models inside that view. The counted calls the view
-    leaves out are listed by _counted_calls_outside_view. Taken
+    leaves out are listed by _counted_calls_outside_view. A model of the genome-wide path
+    (_places_no_locus) takes part in none of these steps, so the view is the one a run with
+    --goi_genome_wide_path false gets; such a model is added where it lies inside that view (on
+    a sequence the view shows, between its first and last model, as the capped GOI models),
+    and the anchor grid lists the others (_strong_hits_outside_view). Taken
     out of _run_figures unchanged (2026-10-19), so scripts/compare_plot_selection.py reads
     today's choice from the same code; it prints its choices as before. A step meant to take the
     richest search block when the regions gave two genes or fewer read the block number from the
     Name attribute, which holds none, so it never acted; with a GOI named like Ly6e_b3_l1 it took
     every GOI model and no flanking gene (fix item 26, removed 2026-11-09)."""
-    genes_all, capped_goi = _cap_goi_genes(parse_target_gff(gff_file, cap=False),
+    parsed = parse_target_gff(gff_file, cap=False)
+    # A model of the genome-wide path has no synteny and places no locus: it took a region of its
+    # own and the row's GOI-first choices (a GOI-centred view of it alone, its scaffold kept as the
+    # GOI's), so the row lost neighbourhood models the search had placed (2026-11-18).
+    path_models = [g for g in parsed if _places_no_locus(g)]
+    genes_all, capped_goi = _cap_goi_genes([g for g in parsed if not _places_no_locus(g)],
                                            _MAX_GOI_PER_GENOME)
     candidate_regions = _match_regions_for_genome(candidate_regions_by_genome, genome_id)
     genes = filter_genes_to_candidate_regions(genes_all, candidate_regions)
@@ -6073,11 +6163,14 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     # The cap steered the neighbourhood choice only: every GOI model inside the
     # chosen view is drawn (tandem arrays), and counted in the anchor grid.
     restored = _restore_goi_in_view(genes, capped_goi)
+    # A model of the genome-wide path is drawn where it lies inside the view chosen without it.
+    beside = _restore_goi_in_view(genes, path_models)
     if restored:
         genes = genes + restored
         print(f"[plot] {genome_id}: restored {len(restored)} capped GOI model(s) "
               f"inside the displayed neighbourhood")
-
+    if beside:
+        genes = genes + beside
     return genes, candidate_regions
 
 
@@ -6161,7 +6254,7 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
     and its block `table` (read_block_table; None: none, so only step 1, with E_syn from the
     models' BlockEsyn):
     1. the block of every GOI model whose label is in call_labels, best call first
-       (_goi_priority_key), an answer of the genome-wide path left out;
+       (_goi_priority_key), the models of the genome-wide path left out (_places_no_locus);
     2. the other blocks of the table that hold a model, by E_syn ascending, while fewer than
        max_blocks are drawn: those the search calls significant (its `significant` column),
        or with context_max_esyn those with E_syn <= context_max_esyn.
@@ -6170,10 +6263,11 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
     by_block = defaultdict(list)
     for g in genes:
         by_block[block_of[g["gff_id"]]].append(g)
-    # An answer of the genome-wide path is no call here: its window is no block of the
-    # neighbourhood, and the anchor grid lists it (_strong_hits_outside_view).
+    # A model of the genome-wide path is no call here, also one the report gave another
+    # outcome: its window is no block of the neighbourhood, and the anchor grid lists it
+    # (_strong_hits_outside_view, _counted_calls_outside_view).
     counted = {b for b, gs in by_block.items()
-               if any(_is_goi_target_gene(g) and not _is_genome_wide_answer(g)
+               if any(_is_goi_target_gene(g) and not _places_no_locus(g)
                       and g["confidence"] in COUNTED_LABELS for g in gs)}
     blocks = set(table or ()) | {b for b in by_block if b is not None}
     esyn = {}
@@ -6191,7 +6285,7 @@ def choose_blocks(genes, tag, table, max_blocks=BLOCK_RULE_MAX_BLOCKS,
 
     predicted = {b for b in blocks if significant(b) and b not in counted}
     drawn = {}
-    calls = sorted((g for g in genes if _is_goi_target_gene(g) and not _is_genome_wide_answer(g)
+    calls = sorted((g for g in genes if _is_goi_target_gene(g) and not _places_no_locus(g)
                     and g["confidence"] in call_labels),
                    key=_goi_priority_key, reverse=True)
     for g in calls:                                                     # step 1
@@ -6313,15 +6407,22 @@ def _strong_hits_outside_view(gff_file, genes):
             and (g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) not in drawn]
 
 
-def _report_left_out_models(gff_file):
+def _report_left_out_models(gff_file, listed_ids=None):
     """The row's GOI models that the report merged into the call drawn for their gene, or dropped
     (_report_left_out; only in a GFF with the report's marks), in genomic order. They are not drawn:
     the anchor grid lists them in its source data (drawn_as 'not drawn', with the report's outcome).
-    Fragments only in the figures that show fragments."""
+    Fragments only in the figures that show fragments. A merged model is listed only where the
+    model that draws its record (ReportDrawnBy) is in ``listed_ids``, the row's GOI models the
+    anchor grid lists (the view and the calls it lists outside it): a record outside the view
+    whose model the grid does not list (an AMBIGUOUS one), or whose model is a fragment the
+    figure hides, is in no figure, nor are its merged models. Without ``listed_ids``, and for a
+    mark without ReportDrawnBy, every such model is listed."""
     if not _has_report_marks(gff_file):
         return []
     return sorted((g for g in parse_target_gff(gff_file, raw=True)
-                   if _report_left_out(g) and (_SHOW_GOI_FRAGMENTS or not _is_fragment_goi(g))),
+                   if _report_left_out(g) and (_SHOW_GOI_FRAGMENTS or not _is_fragment_goi(g))
+                   and (listed_ids is None or not g.get("report_drawn_by")
+                        or g["report_drawn_by"] in listed_ids)),
                   key=lambda g: (g["chrom"], g["start"], g["end"], g.get("gff_id", "")))
 
 
@@ -6509,7 +6610,10 @@ def _run_figures(args, show_fragments=False, suffix=""):
         if strong_outside:
             print(f"[plot] {genome_id}: {len(strong_outside)} strong hit(s) without synteny outside "
                   f"the neighbourhood drawn: listed in the anchor grid, not counted")
-        report_left_out = _report_left_out_models(gff_file)
+        # the merged models whose record the anchor grid lists (the view and both outside lists)
+        report_left_out = _report_left_out_models(
+            gff_file, {g.get("gff_id", "") for g in genes + outside_view + strong_outside
+                       if _is_goi_target_gene(g)})
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])

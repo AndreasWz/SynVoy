@@ -1,15 +1,15 @@
-"""The end summary and the task logs of a run (items 32 and 38 of the bug list of 16 Nov 2026).
+"""The end summary and the task logs of a run.
 
-Item 32: the summary listed regions/*.regions.bed at the top level of regions/, but CLUSTER_REGIONS
+The summary listed regions/*.regions.bed at the top level of regions/, but CLUSTER_REGIONS
 publishes regions/<locus>/, so the line never printed; every *_tree.nwk was "(GOI phylogeny)", also
 the placeholder of --skip_tree (which the launcher's default low_mem sets); and the main figure,
 the anchor grid, was not named. lib/RunSummary.groovy lists the region tables per home locus and
 tells a tree from a placeholder (a tree has its <locus>_tree.info.json, not placeholder_tree).
-Review of the series (fix round 1): the info must be this run's. A placeholder tree published into a
+The info must be this run's. A placeholder tree published into a
 reused output folder sat next to an earlier run's info and was named "(GOI phylogeny)"; an info that
 the caller's fromThisRun refuses, or that is older than its tree, now counts as absent.
 
-Item 38: logs/ was filled by a recursive walk of the whole work folder, so it held the tasks of
+logs/ was filled by a recursive walk of the whole work folder, so it held the tasks of
 earlier runs (and walked into work/conda/), with __2, __3 counters in the file system's listing
 order. lib/TaskLogs.groovy takes only the task folders (<2 hex>/<30 hex>/) whose .command.run this
 session wrote, names each folder by process, first output and task hash, and copies non-empty logs.

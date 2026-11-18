@@ -1,13 +1,13 @@
-"""The configs, demos, scripts and the image the repository ships (bug list of 16 Nov 2026).
+"""The configs, demos, scripts and the image the repository ships.
 
-* item 39a: demo/run_uniprot.sh searched a genome that nothing downloaded (Anopheles gambiae), and
+* demo/run_uniprot.sh searched a genome that nothing downloaded (Anopheles gambiae), and
   demo/run_demo_insect.sh took every genome in the folder. The insect fetch script downloads every
   target of the two demos, the insect demo names its three targets, and the uniprot demo stops
   with a hint when one is missing.
-* item 39c: the profiles test, test_melettin and test_tetramorium needed a test_data/ the
+* the profiles test, test_melettin and test_tetramorium needed a test_data/ the
   repository does not hold and set a parameter SynVoy does not have (gene); they are gone.
-* item 39d: scripts/slurm_submit.sh defaulted to hpc_singularity without a slot for the image.
-* item 25: the image put its tools on the PATH only through its Docker entrypoint, which
+* scripts/slurm_submit.sh defaulted to hpc_singularity without a slot for the image.
+* the image put its tools on the PATH only through its Docker entrypoint, which
   Singularity and Apptainer do not run.
 """
 import os

@@ -1,5 +1,4 @@
-"""Every task of the launcher's default profile fits a machine sold with 8 GB (item 20 of the bug
-list of 16 Nov 2026).
+"""Every task of the launcher's default profile fits a machine sold with 8 GB.
 
 Nextflow's local executor does not start a task that asks for more memory than the machine has, and
 a laptop sold with 8 GB reports about 7.7 GB. PHYLO_SORT asked for 8 GB in every profile, so a

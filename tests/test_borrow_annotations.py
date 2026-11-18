@@ -121,9 +121,8 @@ def test_the_merged_gff_names_the_annotated_windows(tmp_path):
     """The prediction windows (prodigal_on_regions.py) stay in the merged GFF's header, and the
     stretch the transferred models cover, from the locus to the outermost model, is added as
     'borrowed' only when gene models were transferred: the flank walk does not step beyond them
-    (extract_flanking_genes.walk_extent). Not the whole window miniprot searched (review of item
-    45): window B, around another home hit at 40-56 kb, lay inside that window and joined the
-    locus's stretch."""
+    (extract_flanking_genes.walk_extent). Not the whole window miniprot searched: window B,
+    around another home hit at 40-56 kb, lay inside that window and joined the locus's stretch."""
     from sequence_utils import annotated_window_line, read_annotated_windows
     pred = tmp_path / "pred.gff"
     pred.write_text("\n".join(["##gff-version 3", annotated_window_line("h", 0, 12000, "predicted"),

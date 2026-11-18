@@ -6,10 +6,10 @@
   length, which reaches 1.0 for any long model;
 * the specificity gets the GOI's home neighbourhood (it got None);
 * the 40 % identity gate stays as a cost filter in front of the judge (decision, 15 Oct).
-* the place is the main path's (older item 51): the core or window of a significant block of the
+* the place is the main path's: the core or window of a significant block of the
   genome's block table that holds the model, its E-value there times SigBlocks; else the genome.
   It was always the genome, ~G/W times the E of the same model in a block's core, without the
-  positional tie-break: a hull twin read AMBIGUOUS where the main path held MEDIUM (item 41).
+  positional tie-break: a hull twin read AMBIGUOUS where the main path held MEDIUM.
 """
 import json
 import os
@@ -92,9 +92,9 @@ def test_the_hull_process_hands_over_the_home_database_folder():
     assert "--effective_params ${effective_params}" in module
     main_nf = open(os.path.join(root, "main.nf")).read()
     assert ("RESOLVE_SETTINGS.out.json,\n            ANNOTATE_GOI.out.info.first(),\n"
-            "            ANNOTATE_GOI.out.exons.first()") in main_nf   # item 17: the panel's q (inputs added since follow it)
+            "            ANNOTATE_GOI.out.exons.first()") in main_nf   # the panel's q (inputs added since follow it)
     assert "home_db.map { d -> d.resolve('home_proteome.faa') }" in sub
-    # Older item 51: the search's block table of the same (locus, genome) reaches the hull task.
+    # The search's block table of the same (locus, genome) reaches the hull task.
     assert "ITERATIVE_SEARCH.out.hits,\n            ITERATIVE_SEARCH.out.blocks,\n" in main_nf
     assert "iter_blocks" in sub and ".join(hull_blocks_ch, remainder: true)" in sub
     assert "assets/sentinels/NO_BLOCKS" in sub
@@ -102,7 +102,7 @@ def test_the_hull_process_hands_over_the_home_database_folder():
     assert "path(region_gff), path(blocks_tsv)" in module and "--blocks_tsv ${blocks_tsv}" in module
 
 
-# ---- the place (older item 51) ------------------------------------------------------------
+# ---- the place ----------------------------------------------------------------------------
 
 ROWS = [  # blocks/<locus>_<genome>.blocks.tsv rows: span and neighbourhood 0-based, half-open
     {"chrom": "chr1", "start": "100000", "end": "200000", "hood_start": "50000", "hood_end": "250000",
@@ -182,7 +182,7 @@ def test_the_judge_takes_the_place_and_the_multiplier(monkeypatch):
 
 
 def test_a_twin_now_reads_the_main_paths_label(monkeypatch):
-    """Item 41's case: another home protein explains the model within 3.3 bits, and it lies
+    """The hull twin's case: another home protein explains the model within 3.3 bits, and it lies
     outside the GOI's home neighbourhood. In the core of a significant block the position decides
     for the gene (MEDIUM, as on the main path); in the genome place it cannot (AMBIGUOUS)."""
     _fake_terms(monkeypatch, margin=1.0, real=True, near=False)
