@@ -160,3 +160,36 @@ def test_the_report_names_the_genomes_without_flanking_hits(tmp_path):
     clean = _report_dir(other, [("GOI_q|G_fna_b0_l1", "c1", 1_001, "HIGH", "confident_goi", 80, 0.9, "")])
     assert clean["summary"]["genomes_without_flanking_hits"] == []
     assert not any("flanking gene" in w for w in clean["warnings"])
+
+
+def _two_locus_report(tmp_path, flags):
+    """One gene of genome G modelled at the same coordinates from two home loci; ``flags`` says
+    which locus's model carries DispersedRescue=1."""
+    for sub in ("regions", "hits", "scores"):
+        (tmp_path / sub).mkdir(exist_ok=True)
+    for locus, flagged in flags:
+        (tmp_path / "regions" / f"{locus}__G.fna.gff").write_text(
+            "##gff-version 3\n"
+            "c1\tx\tmRNA\t901\t1500\t.\t+\t.\tID=GOI_Def|G_fna_b0_l1;SynVoy_Parent=GOI_Def;"
+            "SynVoyRole=goi;Confidence=HIGH;GOIClass=probable_goi;EvidenceType=exon_annotation;"
+            f"Identity=70;QueryCoverage=0.9{FLAG if flagged else ''}\n")
+    return gr.build_report(str(tmp_path))
+
+
+def test_a_gene_one_locus_found_in_its_own_block_is_no_rescue_born_call(tmp_path):
+    """Review fix (2026-11-17): the dedup record took the flag from its representative alone, so a
+    gene found through the rescue by one home locus and in a normal block by another was counted as
+    rescue-born, or not, depending on which locus came first. Now the flag needs every member."""
+    for i, flags in enumerate(((("locus_1", True), ("locus_2", False)),
+                               (("locus_1", False), ("locus_2", True)))):
+        d = tmp_path / str(i)
+        d.mkdir()
+        report = _two_locus_report(d, flags)
+        (rec,) = report["goi_dedup"]["records"]
+        assert rec["provenance"] == ["locus_1", "locus_2"]
+        assert "dispersed_rescue" not in rec and report["summary"]["dispersed_rescue_goi"] == 0
+    d = tmp_path / "both"
+    d.mkdir()
+    report = _two_locus_report(d, (("locus_1", True), ("locus_2", True)))
+    (rec,) = report["goi_dedup"]["records"]
+    assert rec["dispersed_rescue"] is True and report["summary"]["dispersed_rescue_goi"] == 1

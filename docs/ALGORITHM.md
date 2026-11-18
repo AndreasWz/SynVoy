@@ -1222,9 +1222,12 @@ A refused GOI hit is listed in the report under `rejected_candidates`, with the 
 and the nearest flanking gene, and merged with the other rows of its place, so the report can
 say "found, not syntenic" (`summary.goi_found_but_not_syntenic`: genomes without a counted call
 that hold a place no counted call of the run overlaps; LOW or AMBIGUOUS models there do not take a
-genome out). The hits outside every searched GOI zone that fail the
-quality bar, and the dead-zone hits, are listed under `rejected_candidates.dropped`, with the
-test each failed (the strongest 200 per genome search). Each flanking gene counts at its best
+genome out). A refused hit that the GOI zone of a block seeded by the rescue then holds (another
+exon of a gene whose near hit seeded that block) was searched there and is no candidate. The hits
+outside every searched GOI zone that fail the quality bar, and the dead-zone hits, are listed under
+`rejected_candidates.dropped`, with the test each failed (the strongest 200 per genome search).
+The searched GOI zones are the blocks'; a window of the genome-wide path (below) is not one of them.
+Each flanking gene counts at its best
 hit in the genome only. As a measure, each refused row also gives the flanking genes with any
 hit on its sequence (`genes_on_sequence`), and `dispersed_refused_per_piece_pass` counts the
 refused hits that counting each gene on every sequence where it has a hit would have seeded.
@@ -1234,8 +1237,8 @@ zone and outside every model the search wrote, where no block predicted the gene
 of its own when it is strong: the strong hit without synteny. The step runs in every searched
 genome that has the home proteome, with or without a block, after its windows:
 
-- the GOI hits outside every searched GOI zone (block ± the GOI margin; a window of this step is
-  a zone as a whole) and outside every written model are grouped per home GOI and sequence into
+- the GOI hits outside every searched GOI zone (block ± the GOI margin) and outside every
+  written model are grouped per home GOI and sequence into
   places: hits within the larger of the model margin and the GOI's intron bound of each other,
   never across a zone. A hit between a GOI zone and the edge of its block's window (searched by
   the window, not kept by the zone) is such a hit; its place is near that block (`NearBlock`);
@@ -1243,17 +1246,24 @@ genome that has the home proteome, with or without a block, after its windows:
   (in their frames, in pieces between stops), from one blastp run in the genome place
   (`-searchsp` = |q| × ⌊genome/3⌋): E ≤ 1e-6; the union of its HSPs with E ≤ 1 (at most one
   chance alignment that good in the genome) covers ≥ 0.7 of the query (with
-  `core_completeness`, the larger of the query's and its core's coverage); no HSP covers an
-  exon junction of an annotated home gene of ≥ 2 exons with 10 residues on each side (the
-  target would encode both exons without an intron, as a retrocopy does); and no other home
-  protein is a real competitor within 10 bits (§7.12);
+  `core_completeness`, the larger of the query's and its core's coverage); and no other home
+  protein is a real competitor within 10 bits (§7.12). The HSPs are not tested against the home
+  gene's exon junctions: a local alignment of an ortholog with its introns can run 10 to 20
+  residues past an exon end into the intron, so its query span says nothing about the target's
+  structure;
 - per home GOI the places are tried in the order E (equal below 1e-10), bits, coverage,
   position, until one gives an answer, at most `max_blocks_per_genome` windows per genome
   (`genome_wide_tries_cap`; the decoy pass below has a bound of its own): a window of the
-  place ± the model margin, cut at the GOI zones, searched without the flanking pass, its
+  place ± the model margin, cut at the GOI zones and at the step's earlier windows (a place that
+  an earlier window covers gets none; these windows are kept apart from the blocks' GOI zones, so
+  the dead-zone count and `rejected_candidates.dropped` are as without the step), searched
+  without the flanking pass, its
   candidates judged in the genome place (no multiplier);
-- a candidate is an answer when the judge labels it HIGH there, no CDS of it and no hit of the
-  home query inside it spans a home junction (`RetrocopyCandidate=1`), it is not frame-broken
+- a candidate is an answer when the judge labels it HIGH there, no exon of its own gene model
+  covers an exon junction of an annotated home gene of ≥ 2 exons with 10 residues on each side
+  (`RetrocopyCandidate=1`: the target encodes both exons without an intron, as a retrocopy does;
+  the test reads the model's miniprot exons only, so a hit chain, a tandem copy and a relative's
+  model rebased onto the home protein carry no `RetrocopyCandidate`), it is not frame-broken
   without an intron (`FrameBroken=1` with every gap between its CDS rows shorter than 40 bp:
   miniprot can split a frameshifted copy into two pieces a few bp apart), and it overlaps no
   model written before. A window keeps its best answer and writes nothing else, so the step

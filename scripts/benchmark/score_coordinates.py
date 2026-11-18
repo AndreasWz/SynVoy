@@ -43,7 +43,8 @@ Usage
 `--run` may be a SynVoy output directory (every `*.gff` under it is scanned for
 `SynVoyRole=goi` mRNA features) or a single GFF file. Decoy models (`--decoy_mode`) are the
 search's own null test, not calls: `decoys/` and every model of a `~rev` or `~shuf` parent are
-left out of the calls.
+left out of the calls. An answer of the genome-wide path (`GOIClass=genome_wide_strong_hit`, a strong
+hit where no block placed the gene) is never counted by the report and is no call here either.
 """
 import argparse
 import csv
@@ -51,6 +52,9 @@ import glob
 import os
 import re
 import sys
+
+# The class of an answer of the genome-wide path (synvoy_label.GENOME_WIDE_CLASS): never a call.
+GENOME_WIDE_CLASS = "genome_wide_strong_hit"
 
 # AMBIGUOUS sits between LOW and MEDIUM, as in the pipeline; it was missing, so an
 # AMBIGUOUS call was dropped even with --min_confidence LOW (bug hunt 2026-10-13, A14).
@@ -172,7 +176,9 @@ def load_calls_from_gff(paths):
     (iterative_search_runner.py, `tandem_copy`), and reading mRNA alone scored LRZ
     det_rep R2 as having LOST the T. bicarinatum melittin when it had modelled the
     same locus as a tandem copy. A `gene` that is the Parent of an mRNA is skipped so a
-    gene+mRNA pair is never counted twice. A decoy's model is not a call, wherever it stands.
+    gene+mRNA pair is never counted twice. A decoy's model is not a call, wherever it stands,
+    and neither is an answer of the genome-wide path (GOIClass=genome_wide_strong_hit), which the
+    report never counts.
     """
     calls, seen = [], set()
     for p in paths:
@@ -190,6 +196,8 @@ def load_calls_from_gff(paths):
                 continue
             a = _attrs(f[8])
             if a.get("SynVoyRole") != "goi" or is_decoy_model(a):
+                continue
+            if a.get("GOIClass") == GENOME_WIDE_CLASS:
                 continue
             if f[2] == "gene" and a.get("ID") in parents:
                 continue

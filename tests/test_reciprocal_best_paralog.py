@@ -1,14 +1,12 @@
-"""Tests for docs/TODO.md §1j Phase B — reciprocal-best paralog check.
+"""Tests for the reciprocal-best check (bin/reciprocal_best_paralog_check.py), which locus
+ownership (§1m, ASSIGN_LOCUS_OWNERSHIP) runs with the home-paralog panel.
 
-Covers both halves of the implementation:
+1. The per-(locus, genome) script: the single-sequence no-op, the GFF/.faa join, and a smoke
+   that a multi-sequence query produces well-formed rows with non-trivial bitscore gaps.
 
-1. ``bin/reciprocal_best_paralog_check.py`` — the per-(locus, genome) script:
-   the single-paralog no-op, the GFF/.faa join, and a smoke that a multi-paralog
-   query produces well-formed rows with non-trivial bitscore gaps.
-
-2. ``generate_report.build_paralog_confusion_flags`` — aggregation across (locus,
-   genome) cells: modal-paralog inference, ``paralog_confusion`` flag when a row
-   diverges from the modal best with a sufficient bitscore gap.
+2. The report reads its tables for locus ownership only: the reciprocal-best paralog check of
+   the query file (RECIPROCAL_BEST_PARALOG) and its ``paralog_confusion`` flag were removed on
+   2026-11-16.
 """
 from __future__ import annotations
 
@@ -122,109 +120,44 @@ def test_multi_paralog_writes_rows_and_picks_best(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2) Aggregation in generate_report.build_paralog_confusion_flags
+# 2) The report reads the tables of locus ownership only
 # ──────────────────────────────────────────────────────────────────────
 
-def _row(genome, locus, chrom, start, end, best, best_bit, second_bit):
-    return {
-        "genome": genome, "locus": locus, "chrom": chrom,
-        "start": str(start), "end": str(end),
-        "mrna_id": f"GOI_{chrom}_{start}",
-        "best_paralog": best, "best_bit": str(best_bit),
-        "second_paralog": "OTHER", "second_bit": str(second_bit),
-        "bitscore_gap": str(best_bit - second_bit),
-        # post-processed fields the loader adds:
-        "best_bit_f": best_bit, "second_bit_f": second_bit,
-        "gap_f": best_bit - second_bit,
-        "start_i": start, "end_i": end,
-    }
-
-
-def test_no_paralog_rows_means_no_flags() -> None:
-    flags, per_call, modal = gr.build_paralog_confusion_flags([], min_gap=5.0)
-    assert flags == [] and per_call == [] and modal == {}
-
-
-def test_modal_paralog_per_locus_emits_confusion_for_outliers() -> None:
-    """Locus has 5 calls best-matching TP63 and 1 call best-matching TP73 with
-    a 10-bit gap → 1 paralog_confusion flag; ties don't fire."""
-    rows = [
-        _row("GenomeA", "locus_3", "chr3", 100, 200, "TP63", 900, 850),
-        _row("GenomeA", "locus_3", "chr3", 300, 400, "TP63", 880, 800),
-        _row("GenomeA", "locus_3", "chr3", 500, 600, "TP63", 870, 810),
-        _row("GenomeA", "locus_3", "chr3", 700, 800, "TP63", 860, 820),
-        _row("GenomeA", "locus_3", "chr3", 900, 1000, "TP63", 855, 825),
-        _row("GenomeA", "locus_3", "chr3", 1100, 1200, "TP73", 800, 790),  # gap=10, FLAG
-    ]
-    flags, per_call, modal = gr.build_paralog_confusion_flags(rows, min_gap=5.0)
-    assert modal[("GenomeA", "locus_3")] == "TP63"
-    assert len(flags) == 1
-    f = flags[0]
-    assert f["type"] == "paralog_confusion"
-    assert f["best_match_paralog"] == "TP73"
-    assert f["assigned_paralog"] == "TP63"
-    assert f["bitscore_gap"] == 10
-    # All 6 calls present in per_call summary, 5 marked not-confused.
-    assert sum(1 for c in per_call if c["confused"]) == 1
-    assert sum(1 for c in per_call if not c["confused"]) == 5
-
-
-def test_min_gap_suppresses_borderline_calls() -> None:
-    """Same outlier as above but with a 2-bit gap — should NOT flag at min_gap=5."""
-    rows = [
-        _row("GenomeA", "locus_3", "chr3", 100, 200, "TP63", 900, 850),
-        _row("GenomeA", "locus_3", "chr3", 300, 400, "TP63", 880, 800),
-        _row("GenomeA", "locus_3", "chr3", 500, 600, "TP63", 870, 810),
-        _row("GenomeA", "locus_3", "chr3", 700, 800, "TP73", 800, 798),  # gap=2
-    ]
-    flags, _, _ = gr.build_paralog_confusion_flags(rows, min_gap=5.0)
-    assert flags == []
-
-
 def test_loader_skips_header_only_files(tmp_path: Path) -> None:
-    """Single-paralog runs leave a header-only TSV; loader must yield zero rows."""
-    pdir = tmp_path / "paralog_check"
+    """A one-sequence panel leaves a header-only TSV; the loader yields zero rows from it."""
+    pdir = tmp_path / "locus_ownership"
     pdir.mkdir()
     header = "\t".join(rbp.HEADER) + "\n"
-    (pdir / "GenomeA.paralog_check.tsv").write_text(header)
-    (pdir / "GenomeB.paralog_check.tsv").write_text(
+    (pdir / "locus_1__GenomeA.locus_ownership.tsv").write_text(header)
+    (pdir / "locus_1__GenomeB.locus_ownership.tsv").write_text(
         header + "\t".join([
             "GenomeB", "locus_1", "chr1", "100", "200", "GOI_m1", "50",
-            "TP53", "800", "92.0", "TP63", "750", "50.0", "2",
+            "locus_1|gene-a", "800", "92.0", "locus_2|gene-b", "750", "50.0", "2",
         ]) + "\n"
     )
     rows = gr.load_paralog_check_rows(str(pdir))
     assert len(rows) == 1
-    assert rows[0]["best_paralog"] == "TP53"
+    assert rows[0]["best_paralog"] == "locus_1|gene-a"
     assert rows[0]["genome"] == "GenomeB"
 
 
-def test_self_consistency_threads_paralog_flags_through() -> None:
-    """When paralog flags are provided, build_self_consistency surfaces them in
-    flags + summary, and lists paralog_confusion as a check_performed."""
-    paralog_flags = [{
-        "type": "paralog_confusion",
-        "genome": "G", "locus": "locus_3", "chrom": "c", "start": 1, "end": 2,
-        "assigned_paralog": "TP63", "best_match_paralog": "TP73",
-        "bitscore_gap": 8.0, "mrna_id": "GOI_x", "advice": "...",
-    }]
-    paralog_per_call = [{"genome": "G", "locus": "locus_3", "confused": True,
-                         "best_paralog": "TP73", "bitscore_gap": 8.0,
-                         "chrom": "c", "start": 1, "end": 2,
-                         "mrna_id": "GOI_x", "best_bit": 800,
-                         "second_paralog": "TP63", "second_bit": 792,
-                         "locus_modal_paralog": "TP63"}]
-    res = gr.build_self_consistency(
-        goi_annotations=[], goi_dedup={"records": []}, flanking_per_locus={},
-        paralog_flags=paralog_flags,
-        paralog_per_call=paralog_per_call,
-        paralog_modal_per_locus={("G", "locus_3"): "TP63"},
-        paralog_min_gap=5.0,
-    )
-    assert "paralog_confusion" in res["checks_performed"]
-    assert res["summary"]["n_paralog_confusion"] == 1
-    assert res["summary"]["total_flags"] == 1
-    assert res["flags"][0]["type"] == "paralog_confusion"
-    assert res["modal_paralog_per_locus"] == [
-        {"genome": "G", "locus": "locus_3", "paralog": "TP63"}
-    ]
+def test_the_paralog_confusion_path_is_gone(tmp_path: Path) -> None:
+    """Review fix (2026-11-17): RECIPROCAL_BEST_PARALOG went on 2026-11-16 (it always received one
+    query sequence and could flag nothing), but the report still took --paralog_confusion_min_gap,
+    read paralog_check/ and wrote the check's keys. They go with it."""
+    import subprocess
+    assert not hasattr(gr, "build_paralog_confusion_flags")
+    assert "RECIPROCAL_BEST_PARALOG" not in gr._STEP_FAILURE_SENTENCE
+    res = gr.build_self_consistency(goi_annotations=[], goi_dedup={"records": []}, flanking_per_locus={})
+    assert "paralog_confusion" not in res["checks_performed"] + res["deferred_checks"]
+    assert "paralog_confusion_min_gap" not in res["thresholds"]
+    assert not {"paralog_alignment_table", "modal_paralog_per_locus"} & set(res)
+    assert "n_paralog_confusion" not in res["summary"]
+    for sub in ("regions", "hits", "scores"):
+        (tmp_path / sub).mkdir()
+    report = gr.build_report(str(tmp_path))
+    assert "paralog_confusion_flags" not in report["summary"]
+    out = subprocess.run([sys.executable, str(ROOT / "bin" / "generate_report.py"), "--results_dir",
+                          str(tmp_path), "--output", str(tmp_path / "r.json"),
+                          "--paralog_confusion_min_gap", "5"], capture_output=True, text=True)
+    assert out.returncode == 2 and "unrecognized arguments" in out.stderr

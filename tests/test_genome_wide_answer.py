@@ -1,8 +1,9 @@
 """The strong hit without synteny (bug list items 2 and 3, 2026-11-16): the genome-wide path
 (--goi_genome_wide_path) gives a GOI hit outside every searched GOI zone one answer when the
 judge's HIGH terms hold in the genome place -- E <= 1e-6 over the genome, >= 0.7 of the query
-covered by the hits' HSPs, no HSP across a home exon junction, no real competitor within 10 bits
--- and the model there is judged HIGH, is no retrocopy and not frame-broken without an intron. It
+covered by the hits' HSPs, no real competitor within 10 bits -- and the model there is judged
+HIGH, has no exon across a home exon junction (no retrocopy) and is not frame-broken without an
+intron. It
 is written as MEDIUM with its own class (genome_wide_strong_hit), never seeds, never enters the
 tree, and the report keeps it out of the counted calls: one per genome, only where nothing is
 counted. Its decoys are searched in the genome place in decoy mode. The switch
@@ -45,20 +46,20 @@ def test_the_answer_is_the_judges_high_written_as_medium():
 
 
 # ====================================================================== place decisions
-def _place(parent="GOI_q", chrom="c1", start=0, e=1e-30, cov=0.9, retro="", real=1, margin=20.0, bits=200.0):
+def _place(parent="GOI_q", chrom="c1", start=0, e=1e-30, cov=0.9, real=1, margin=20.0, bits=200.0):
     return {"parent": parent, "chrom": chrom, "start": start, "end": start + 300, "evalue": e,
-            "coverage_value": cov, "retrocopy_hits": retro, "real_competitor": real,
+            "coverage_value": cov, "real_competitor": real,
             "margin_value": margin, "bits_value": bits, "hits": 1}
 
 
 def test_a_place_is_tried_only_with_the_judges_high_terms():
     places = [_place(e=1e-5), _place(chrom="c2", real=1, margin=5.0), _place(chrom="c3", real=1, margin=12.0),
               _place(chrom="c4", real=0, margin=-40.0), _place(chrom="c5", cov=0.67),
-              _place(chrom="c6", retro=1), _place(chrom="c7", real="", margin=None)]
+              _place(chrom="c7", real="", margin=None)]
     tried = isr.choose_genome_wide_places(places)
     assert [p["chrom"] for p in tried] == ["c3", "c4"] or [p["chrom"] for p in tried] == ["c4", "c3"]
     assert {p["chrom"]: p.get("decision") for p in places if p not in tried} == {
-        "c1": "evalue", "c2": "specificity", "c5": "coverage", "c6": "retrocopy_hits", "c7": "specificity"}
+        "c1": "evalue", "c2": "specificity", "c5": "coverage", "c7": "specificity"}
     assert sorted(p["rank"] for p in tried) == [1, 2]
 
 
@@ -73,7 +74,7 @@ def test_places_are_ranked_by_e_then_bits_not_by_the_sequence_name():
     assert [p["chrom"] for p in isr.choose_genome_wide_places([x, y])] == ["y", "x"]
 
 
-def _evaluate(monkeypatch, hsps, junctions=(), q=Q):
+def _evaluate(monkeypatch, hsps, q=Q):
     called = []
     monkeypatch.setattr(isr, "_hit_pieces", lambda genome_seqs, h: ["PIECE" + str(h["start"])])
     monkeypatch.setattr(synvoy_evalue, "blastp_hsps", lambda query, subjects, sp: list(hsps))
@@ -85,8 +86,7 @@ def _evaluate(monkeypatch, hsps, junctions=(), q=Q):
     monkeypatch.setattr(synvoy_specificity, "specificity", spec)
     p = {"parent": "GOI_q", "chrom": "c1", "start": 100, "end": 1000,
          "hit_list": [{"start": 100, "end": 1000, "pident": 81.25}], "hits": 1}
-    isr.evaluate_genome_wide_place(p, q, {}, 10_000_000, "proteome", "hood", 10, own_gene_id="gene-q",
-                                   junctions=list(junctions))
+    isr.evaluate_genome_wide_place(p, q, {}, 10_000_000, "proteome", "hood", 10, own_gene_id="gene-q")
     return p, called
 
 
@@ -131,17 +131,16 @@ def test_a_piece_spans_a_junction_with_ten_residues_on_each_side():
     assert not isr.spans_a_junction([(5, 30)], [])                      # single-exon home gene
 
 
-def test_an_hsp_across_a_home_junction_is_a_retrocopy_place(monkeypatch):
-    junctions = isr.home_exon_junctions([100, 80, 120])           # at 100 and 180
-    p, called = _evaluate(monkeypatch, [(1e-80, 500.0, 5, 295, 0)], junctions)
-    assert p["retrocopy_hits"] == 1 and called == []
-    isr.choose_genome_wide_places([p])
-    assert p["decision"] == "retrocopy_hits"
-    p, _ = _evaluate(monkeypatch, [(1e-30, 180.0, 3, 100, 0), (1e-25, 150.0, 101, 180, 1),
-                                   (1e-30, 190.0, 181, 298, 2)], junctions)
-    assert p["retrocopy_hits"] == 0 and isr.choose_genome_wide_places([p]) == [p]
-    p, _ = _evaluate(monkeypatch, [(1e-80, 500.0, 5, 295, 0)], ())
-    assert p["retrocopy_hits"] == "" and isr.choose_genome_wide_places([p]) == [p]
+def test_an_hsp_across_a_home_junction_does_not_refuse_a_place(monkeypatch):
+    """Review fix (2026-11-17): the place's HSPs are local alignments, and one of an ortholog with
+    its introns can run 10-20 residues past an exon end into the intron (exon 1 = q1-120, its HSP
+    q1-131). The place-level test refused such places; the model's own exons decide now."""
+    p, called = _evaluate(monkeypatch, [(1e-60, 300.0, 1, 131, 0), (1e-40, 200.0, 121, 220, 1),
+                                        (1e-30, 150.0, 221, 300, 2)])
+    assert "retrocopy_hits" not in p and called == ["gene-q"]
+    assert isr.choose_genome_wide_places([p]) == [p] and "decision" not in p
+    assert "retrocopy_hits" not in isr.GENOME_WIDE_COLUMNS
+    assert "retrocopy_hits" not in isr.GENOME_WIDE_DECISIONS
 
 
 # ====================================================================== the tries
@@ -172,7 +171,7 @@ def _stub_pass(monkeypatch, places, outcomes, bits=None):
 
     def evaluate(p, q, *a, **k):
         p.update(evalue=1e-50, evalue_genome="1e-50", coverage_value=0.95, coverage="0.950",
-                 retrocopy_hits="", real_competitor=0, margin_value=30.0, margin="30.0",
+                 real_competitor=0, margin_value=30.0, margin="30.0",
                  bits_value=(bits or {}).get(p["start"], 300.0), bits="300.0", best_hit_identity=80.0)
     monkeypatch.setattr(isr, "evaluate_genome_wide_place", evaluate)
 
@@ -205,6 +204,31 @@ def test_the_first_answer_ends_the_tries_of_its_home_gene(monkeypatch, tmp_path)
     assert {p["model_decision"] for p in table if p.get("model_decision")} <= set(isr.GENOME_WIDE_MODEL_DECISIONS)
     assert [by_start[s]["block"] for s in (1000, 50_000)] == [5000, 5001]
     assert by_start[1000]["significant_blocks"] == 0 and by_start[1000]["median_flank_identity"] == "72.2"
+
+
+def test_the_pass_windows_clip_its_later_places_but_are_no_goi_zones(monkeypatch, tmp_path):
+    """Review fix (2026-11-17): every window of the pass went to goi_cores, the blocks' searched
+    GOI zones, so the genome-end tables (the rescue's dropped hits in nonsyntenic.tsv, the dead-zone
+    count) read differently with the path on, also for a window that gave no answer. The windows go
+    to a list of their own now, which only clips and refuses the later places of the pass."""
+    places = [_gw_place(10_000, parent="GOI_a"), _gw_place(11_500, parent="GOI_b"),
+              _gw_place(12_500, parent="GOI_c")]
+    searched, table = _stub_pass(monkeypatch, places, {}, bits={10_000: 500.0, 11_500: 400.0, 12_500: 300.0})
+
+    def fake_block(number, block, hits, genome_seqs, db_sequences, genome_name, args, *a, **k):
+        searched.append((number, block["start"], block["window"]))
+        args.genome_ctx.setdefault("genome_wide_windows", []).append((block["chrom"],) + tuple(block["window"]))
+        args.genome_ctx.setdefault("genome_wide_outcome", {})[number] = "judge_not_high"
+        return [], []
+    monkeypatch.setattr(isr, "process_region_block", fake_block)
+    args = _pass_args(tmp_path)
+    args.genome_ctx["goi_cores"] = [("c1", 0, 5_000)]
+    isr.genome_wide_goi_pass(args, [], {"c1": "A" * 200_000}, {}, "G.fna", "u", 1, None, "", 5000)
+    # GOI_a's window 9,000-11,900 (margin 1,000); GOI_b's place overlaps it: no window; GOI_c's
+    # window is cut at GOI_a's end
+    assert [(s[1], s[2]) for s in searched] == [(10_000, (9_000, 11_900)), (12_500, (11_900, 14_400))]
+    assert {p["start"]: p["decision"] for p in table}[11_500] == "no_window"
+    assert args.genome_ctx["goi_cores"] == [("c1", 0, 5_000)]
 
 
 def test_each_home_gene_gets_its_own_tries(monkeypatch, tmp_path):
@@ -310,25 +334,53 @@ def test_what_is_no_answer():
     assert isr.genome_wide_keep([]) == ([], [])
 
 
+def _model_cand(exons, model_parent="GOI_q", parent="GOI_q"):
+    return {"start": 1001, "end": 1870, "model_parent": model_parent,
+            "model_exons": [{"qstart": a, "qend": b} for a, b in exons],
+            "gff": [f"c1\tx\tmRNA\t1001\t1870\t.\t+\t.\tID=m;SynVoy_Parent={parent}"]}
+
+
 def test_the_marks_of_a_genome_wide_candidate():
     junctions = [100, 180]
-    hits_by_gene = {"GOI_q": [{"qstart": 5, "qend": 295, "gstart": 0, "gend": 870}]}
-    c = {"start": 1001, "end": 1870, "gff": ["c1\tx\tmRNA\t1001\t1870\t.\t+\t.\tID=m;SynVoy_Parent=GOI_q"]}
-    isr.mark_genome_wide_candidates([c], hits_by_gene, 1000, junctions,
+    c = _model_cand([(5, 295)])                                # one exon across both junctions
+    isr.mark_genome_wide_candidates([c], junctions,
                                     {"coverage": 0.9123, "neighbour_median": 68.04, "near_block": 4})
     a = isr._parse_gff_attr_string(c["gff"][0].split("\t")[8])
     assert (a["GenomeWide"], a["RetrocopyCandidate"], a["GenomeWideCoverage"],
             a["NeighbourMedianIdentity"], a["NearBlock"]) == ("1", "1", "0.912", "68.0", "4")
-    exon_by_exon = {"GOI_q": [{"qstart": 3, "qend": 100, "gstart": 0, "gend": 294},
-                              {"qstart": 101, "qend": 180, "gstart": 400, "gend": 640}]}
-    c = {"start": 1001, "end": 1640, "gff": ["c1\tx\tmRNA\t1001\t1640\t.\t+\t.\tID=m;SynVoy_Parent=GOI_q"]}
-    isr.mark_genome_wide_candidates([c], exon_by_exon, 1000, junctions,
+    c = _model_cand([(3, 100), (101, 180), (181, 295)])        # an intron at each junction
+    isr.mark_genome_wide_candidates([c], junctions,
                                     {"coverage": 0.6, "neighbour_median": None, "near_block": ""})
     a = isr._parse_gff_attr_string(c["gff"][0].split("\t")[8])
     assert a["RetrocopyCandidate"] == "0" and "NeighbourMedianIdentity" not in a and "NearBlock" not in a
-    c = {"start": 1001, "end": 1640, "gff": ["c1\tx\tmRNA\t1001\t1640\t.\t+\t.\tID=m;SynVoy_Parent=GOI_q"]}
-    isr.mark_genome_wide_candidates([c], hits_by_gene, 1000, [], {})
+    c = _model_cand([(5, 295)])
+    isr.mark_genome_wide_candidates([c], [], {})
     assert c["gff"][0].endswith(";GenomeWide=1")               # untestable without junctions
+
+
+def test_the_retrocopy_test_reads_only_the_models_own_exons():
+    """Review fix (2026-11-17): the test read every hit of the window beside the model; a hit
+    that ran past an exon end into the intron flagged an ortholog with all its introns."""
+    junctions = isr.home_exon_junctions([120, 100, 80])         # at 120 and 220
+    c = _model_cand([(1, 120), (121, 220), (221, 300)])
+    assert isr.retrocopy_test_pieces(c) == [(1, 120), (121, 220), (221, 300)]
+    isr.mark_genome_wide_candidates([c], junctions, {})
+    assert ";RetrocopyCandidate=0" in c["gff"][0]
+    c["window_label"], c["window_basis"] = "HIGH", "significant_specific"
+    assert isr.genome_wide_drop_reason(c) is None
+    # a single-exon model across a home junction is a retrocopy candidate, and no answer
+    c = _model_cand([(3, 298)])
+    isr.mark_genome_wide_candidates([c], junctions, {})
+    assert ";RetrocopyCandidate=1" in c["gff"][0]
+    c["window_label"], c["window_basis"] = "HIGH", "significant_specific"
+    assert isr.genome_wide_drop_reason(c) == "retrocopy_cds"
+    # a hit chain or a tandem copy (no model exons), and a relative's model rebased onto the
+    # home protein (exons in the relative's coordinates), carry no test
+    for c in ({"start": 1, "end": 900, "gff": ["c1\tx\tmRNA\t1\t900\t.\t+\t.\tID=m;SynVoy_Parent=GOI_q"]},
+              _model_cand([(3, 298)], model_parent="GOI_q~rel")):
+        assert isr.retrocopy_test_pieces(c) is None
+        isr.mark_genome_wide_candidates([c], junctions, {})
+        assert "RetrocopyCandidate" not in c["gff"][0] and ";GenomeWide=1" in c["gff"][0]
 
 
 # ====================================================================== the window itself
@@ -396,8 +448,44 @@ def test_a_genome_wide_window_writes_its_answer_with_the_marks(tmp_path, monkeyp
     assert (a["GenomeWide"], a["GenomeWideCoverage"], a["NeighbourMedianIdentity"], a["NearBlock"]) == (
         "1", "0.930", "70.0", "2")
     assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
-    assert args.genome_ctx["goi_cores"] == [("c1", 40_000, 43_000)]       # a searched zone as a whole
+    # the window as a whole, apart from the blocks' GOI zones (review fix 2026-11-17)
+    assert args.genome_ctx["genome_wide_windows"] == [("c1", 40_000, 43_000)]
+    assert args.genome_ctx["goi_cores"] == []
     assert "block_windows" not in args.genome_ctx and 5000 not in args.genome_ctx.get("block_context", {})
+
+
+def _three_exon_model(*a, **k):
+    """A miniprot model of a 300-aa query with an intron at each home junction (120, 220)."""
+    exons = [{"qstart": qs, "qend": qe, "gstart": gs, "gend": gs + 3 * (qe - qs + 1), "strand": "+",
+              "pident": 85.0, "seq": "M" * (qe - qs + 1), "phase": 0}
+             for qs, qe, gs in ((1, 120, 1_000), (121, 220, 1_900), (221, 300, 2_600))]
+    return [(exons, "M" * 300)]
+
+
+@pytest.mark.parametrize("structure, flagged", [("intron", False), ("one_exon", True)])
+def test_the_window_flags_a_retrocopy_on_its_model_not_on_its_hits(tmp_path, monkeypatch, structure, flagged):
+    """Review fix (2026-11-17): the window held the over-extended hit q1-131 of exon 1 (11 residues
+    into intron 1) beside a correct three-exon model; RetrocopyCandidate=1 came from that hit and the
+    ortholog lost its answer (retrocopy_cds). The model's own exons decide: three exons with introns
+    at the junctions -> 0, an answer; one exon across both junctions -> 1, no answer."""
+    if structure == "intron":
+        _stub_window(monkeypatch, [_hit(1, 131, start=1_000), _hit(121, 220, start=1_900),
+                                   _hit(221, 300, start=2_600)])
+        monkeypatch.setattr(isr, "annotate_models_from_hit_list", _three_exon_model)
+    else:
+        _stub_window(monkeypatch, [_hit(1, 300, start=1_000)])
+        monkeypatch.setattr(isr, "annotate_models_from_hit_list", lambda *a, **k: [(
+            [{"qstart": 1, "qend": 300, "gstart": 1_000, "gend": 1_900, "strand": "+", "pident": 85.0,
+              "seq": "M" * 300, "phase": 0}], "M" * 300)])
+    args = _window_args(tmp_path, home_goi_junctions=isr.home_exon_junctions([120, 100, 80]))
+    _genes, gff = isr.process_region_block(5000, _gw_block(), [], {"c1": "ATG" * 30_000}, DB, "G.fna",
+                                           args, "u", 1)
+    if flagged:
+        assert gff == [] and args.genome_ctx["genome_wide_outcome"] == {5000: "retrocopy_cds"}
+    else:
+        rows = [ln for ln in gff if ln.split("\t")[2] == "mRNA" and "SynVoyRole=goi" in ln]
+        assert len(rows) == 1 and ";RetrocopyCandidate=0" in rows[0]
+        assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
 
 
 def test_a_genome_wide_window_without_an_answer_writes_nothing(tmp_path, monkeypatch):
@@ -422,6 +510,7 @@ def test_a_window_of_the_decoy_pass_searches_its_decoy_alone(tmp_path, monkeypat
     assert len([ln for ln in lines if ln.split("\t")[2] in ("mRNA", "gene")]) == 1
     assert "SynVoy_Parent=GOI_x~rev" in lines[0] and ";GenomeWide=1" in lines[0]
     assert args.genome_ctx["goi_cores"] == []             # the real search's zones are not its
+    assert "genome_wide_windows" not in args.genome_ctx
     assert args.genome_ctx["genome_wide_outcome"] == {5001: "answer"}
     assert "genome_wide_dropped" not in args.genome_ctx
 

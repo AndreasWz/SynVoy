@@ -179,12 +179,9 @@ class TestUnit(unittest.TestCase):
         out_hi = build_self_consistency(annos, dedup, flanking, strong_flanking_min=15)
         self.assertEqual(out_lo["summary"]["n_strong_synteny_no_goi"], 1)
         self.assertEqual(out_hi["summary"]["n_strong_synteny_no_goi"], 0)
-        # When no paralog-check data is staged (the single-paralog case), the
-        # paralog_confusion check is reported as deferred for transparency.
-        # When the per-call paralog data IS staged, build_self_consistency moves it
-        # from deferred_checks into checks_performed; that path is covered by
-        # tests/test_reciprocal_best_paralog.py::test_self_consistency_threads_paralog_flags_through.
-        self.assertIn("paralog_confusion", out_lo["deferred_checks"])
+        # The reciprocal-best paralog check went with its step (2026-11-16): neither run
+        # nor deferred (tests/test_reciprocal_best_paralog.py::test_the_paralog_confusion_path_is_gone).
+        self.assertNotIn("paralog_confusion", out_lo["deferred_checks"] + out_lo["checks_performed"])
 
     def test_identity_coverage_decoupled_flag(self):
         # docs/TODO_JUN.md QW3: a high-%identity GOI call with missing/low query

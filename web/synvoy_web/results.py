@@ -15,8 +15,10 @@ The page says:
     found       HIGH       counted as the gene
     probable    MEDIUM     counted as the gene
     candidate   AMBIGUOUS  right neighbourhood, sequence does not confirm it
-    set_aside   class paralog_not_goi or identity_coverage_decoupled: the report
-                itself leaves these out of its headline
+    set_aside   class paralog_not_goi or identity_coverage_decoupled, or an answer of
+                the genome-wide path (genome_wide_strong_hit: a strong match where no
+                neighbourhood places the gene): the report itself leaves these out of
+                its headline
 
 ``self_check`` in the result compares the counts made here with the report's own
 headline numbers, so a new rule in the pipeline cannot silently change what the page
@@ -111,10 +113,14 @@ def _copy(source, root, files_dir, name):
 
 
 def classify_call(record):
-    """(label, reason) for one record of ``goi_dedup.records``."""
+    """(label, reason) for one record of ``goi_dedup.records``. An answer of the genome-wide
+    path is read from its field, not from its class (a cross-locus relabel can overwrite the
+    class): the report never counts it, so it is set aside as ``strong_hit``."""
     reason = _SET_ASIDE.get(record.get("goi_class") or "")
     if reason:
         return "set_aside", reason
+    if record.get("genome_wide_strong_hit"):
+        return "set_aside", "strong_hit"
     label = _LABELS.get((record.get("confidence") or "").upper())
     return (label, "") if label else (None, "")
 
@@ -422,7 +428,9 @@ def genome_table(genomes):
         for call in calls:
             note = {"related_gene": "matches the related gene %s better" % call["related_gene"]
                     if call["related_gene"] else "matches a related gene better",
-                    "short_match": "matches only a short piece of the query"}.get(call["reason"], "")
+                    "short_match": "matches only a short piece of the query",
+                    "strong_hit": "strong match where no neighbourhood places the gene; not counted",
+                    }.get(call["reason"], "")
             rows.append(dict(
                 common, result=_RESULT_WORD[call["label"]], confidence=call["confidence"],
                 identity_pct="" if call["identity"] is None else "%.1f" % call["identity"],

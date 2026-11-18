@@ -15,6 +15,7 @@ _spec = importlib.util.spec_from_file_location(
     "score_coordinates_decoys", os.path.join(ROOT, "scripts", "benchmark", "score_coordinates.py"))
 sc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sc)
+sys.path.insert(0, os.path.join(ROOT, "bin"))
 
 
 def _row(chrom, start, end, attrs, kind="gene"):
@@ -122,3 +123,20 @@ def test_a_scaffold_seen_only_in_decoys_is_a_real_miss(tmp_path):
     _, _, summary = sc.score(_truth(), calls, searched_chroms=narrow,
                              searched_species=sc.load_searched_species(str(r)))
     assert summary["truth_models_assembly_mismatch"] == 1
+
+
+def test_an_answer_of_the_genome_wide_path_is_no_call(tmp_path):
+    """Review fix (2026-11-17): the report never counts an answer of the genome-wide path
+    (GOIClass=genome_wide_strong_hit, MEDIUM), but the scorer read its rows as calls."""
+    p = str(tmp_path / "regions" / "Sp_one.fna.gff")
+    answer = _row("c1", 1200, 1400, "ID=GOI_x|a;SynVoy_Parent=GOI_x;SynVoyRole=goi;Confidence=MEDIUM;"
+                  "GOIClass=genome_wide_strong_hit;GenomeWide=1", kind="mRNA")
+    main = _row("c1", 5000, 5100, "ID=GOI_x|b;SynVoy_Parent=GOI_x;SynVoyRole=goi;Confidence=MEDIUM;"
+                "GOIClass=probable_goi", kind="mRNA")
+    _write(p, answer, main)
+    calls = sc.load_calls_from_gff([p])
+    assert [c["id"] for c in calls] == ["GOI_x|b"]
+    _, _, summary = sc.score(_truth(), calls, searched_chroms={"c1"})
+    assert summary["truth_models_hit"] == 0
+    import synvoy_label
+    assert sc.GENOME_WIDE_CLASS == synvoy_label.GENOME_WIDE_CLASS

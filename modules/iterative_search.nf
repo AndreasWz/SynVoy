@@ -15,6 +15,10 @@ process ITERATIVE_SEARCH {
     // a file inside the hits/ output folder is published only with that whole folder.
     publishDir path: { "${params.outdir}/blocks/${locus_id}" }, mode: 'copy',
         pattern: 'iterative_results/blocks/*', saveAs: { fn -> file(fn).name }
+    // The GOI rows of each genome's genome-wide hit table (goi_hits/<genome>.goi.m8.gz, gzipped):
+    // the hits behind the rescue's refusals and drops. Its own folder, for the same reason.
+    publishDir path: { "${params.outdir}/goi_hits/${locus_id}" }, mode: 'copy',
+        pattern: 'iterative_results/goi_hits/*', saveAs: { fn -> file(fn).name }
 
     input:
     tuple val(locus_id), path(initial_db)
@@ -37,6 +41,7 @@ process ITERATIVE_SEARCH {
     tuple val(locus_id), path("iterative_results/regions/*.homology.tsv"), emit: homology, optional: true
     tuple val(locus_id), path("iterative_results/decoys/*"), emit: decoys, optional: true
     tuple val(locus_id), path("iterative_results/blocks/*"), emit: blocks, optional: true
+    tuple val(locus_id), path("iterative_results/goi_hits/*"), emit: goi_hits, optional: true
 
 
     script:

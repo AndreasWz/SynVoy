@@ -64,6 +64,29 @@ def test_labels_and_counts():
     assert check["agrees"] is True
 
 
+def test_a_strong_hit_without_synteny_is_set_aside():
+    """An answer of the genome-wide path (genome_wide_strong_hit) is never counted by the report:
+    it was read as an ordinary MEDIUM call, 'probable', its genome 'found', and the self-check
+    disagreed with the report's counts. The field decides, not the class (a cross-locus relabel
+    overwrites the class)."""
+    data = report([
+        record("G1", "MEDIUM", "genome_wide_strong_hit", "90.0", genome_wide_strong_hit=True),
+        record("G2", "MEDIUM", "cross_locus_duplicate", "88.0", genome_wide_strong_hit=True),
+        record("G3", "MEDIUM", "paralog_not_goi", "70.0", genome_wide_strong_hit=True,
+               owning_gene="gene-BGN"),
+        record("G4", "MEDIUM", "probable_goi", "60.0"),
+    ], ["G1", "G2", "G3", "G4"], high=0, medium=1, genome_wide_strong_hits=2)
+    genomes, summary, check = results.summarise(data)
+    by_id = {g["id"]: g for g in genomes}
+    assert [(c["label"], c["reason"]) for g in ("G1", "G2", "G3") for c in by_id[g]["calls"]] == [
+        ("set_aside", "strong_hit"), ("set_aside", "strong_hit"), ("set_aside", "related_gene")]
+    assert [by_id[g]["status"] for g in ("G1", "G2", "G3", "G4")] == ["none", "none", "none", "found"]
+    assert (summary["copies"], summary["copies_probable"], summary["set_aside"]) == (1, 1, 3)
+    assert check == {"agrees": True, "report_high": 0, "report_medium": 1}
+    table = results.genome_table(genomes)
+    assert "strong match where no neighbourhood places the gene; not counted" in table
+
+
 def test_disagreement_with_the_report_is_flagged():
     data = report([record("A_a", "HIGH", "confident_goi")], ["A_a"], high=0, medium=0)
     assert results.summarise(data)[2] == {"agrees": False, "report_high": 0, "report_medium": 0}
@@ -535,7 +558,8 @@ def test_report_still_has_the_fields_the_result_page_reads():
     for field in ('"goi_dedup"', '"records"', "high_confidence_goi", "medium_confidence_goi",
                   "low_confidence_goi", "paralog_not_goi", "identity_coverage_decoupled",
                   "query_cov", "owning_gene", "model_status", "low_quality_assembly",
-                  "low_quality_genomes_searched", "failed_qc_genomes_with_downstream_results"):
+                  "low_quality_genomes_searched", "failed_qc_genomes_with_downstream_results",
+                  '"genome_wide_strong_hit"'):
         assert field in source, "generate_report.py no longer mentions %s" % field
     output_doc = read("docs", "OUTPUT.md")
     for name in ("synvoy_report.json", "anchor_grid", "synteny_plot.html", "gene_positions"):

@@ -258,7 +258,9 @@ function genomeTable(result, fileUrl) {
     for (const call of genome.calls.filter((c) => c.label === "set_aside")) {
       const reason = call.reason === "related_gene"
         ? "matches " + (call.related_gene ? "the related gene " + call.related_gene : "a related gene") + " better than the query"
-        : "matches only a short piece of the query";
+        : call.reason === "strong_hit"
+          ? "a strong match where no neighbourhood places the gene; not counted"
+          : "matches only a short piece of the query";
       aside.push(el("li", {}, species(genome.species), ", ", where(call), ": ", reason,
         call.identity === null ? "" : " (" + words.percent(call.identity) + " identical)", "."));
     }

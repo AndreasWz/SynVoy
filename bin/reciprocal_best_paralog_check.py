@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-"""Reciprocal-best paralog check per (locus, genome) — docs/TODO.md §1j Phase B.
+"""Reciprocal-best check of the GOI calls of one (locus, genome) against a set of home proteins.
 
-For paralog-family queries (multi-sequence home FASTA like TP53 + TP63 + TP73),
-the iterative search at MEDIUM confidence can drag in sibling paralogs at the
-"wrong" locus. This script aligns each recovered GOI target protein against
-every home paralog with Smith–Waterman (parasail) and emits a TSV recording
-the best-matching paralog + bitscore gap to the runner-up.
+The script aligns each recovered GOI target protein against every sequence of --home_query with
+Smith–Waterman (parasail) and emits a TSV recording the best-matching sequence + bitscore gap to
+the runner-up. ASSIGN_LOCUS_OWNERSHIP (§1m) runs it with the home-paralog panel
+(build_home_paralog_panel.py, entries ``locus_<id>|<gene>``) as --home_query, and
+generate_report.build_locus_ownership reads the tables (locus_ownership/).
 
-generate_report.py reads these TSVs, joins them onto the GOI annotation list,
-and flags a call as ``paralog_confusion`` when its best home paralog differs
-from the *modal* best-paralog at the same locus (with a bitscore gap >= 5).
-The flag goes into ``self_consistency.flags`` in synvoy_report.json so the
-paper text can cite an exact confusion count.
+(The step that ran it with the query file, RECIPROCAL_BEST_PARALOG, and the report's
+``paralog_confusion`` flag were removed on 2026-11-16: the query file holds one sequence.)
 
-Single-paralog queries (one sequence in --home_query) are a no-op: there's
-nothing to be reciprocal against.
+A --home_query of one sequence is a no-op: there's nothing to be reciprocal against.
 """
 from __future__ import annotations
 

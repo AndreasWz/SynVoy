@@ -14,6 +14,7 @@ import types
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "bin"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # test_dispersed_rescue_zones
 
 import generate_report as gr  # noqa: E402
 import iterative_search_runner as isr  # noqa: E402
@@ -131,3 +132,64 @@ def test_the_target_policy_records_the_total(tmp_path):
     path = str(tmp_path / "hits" / "locus_2_G.fna.target_policy.tsv")
     assert gr.sum_target_policy_column([path, path], "rescue_dropped_outside_zones") == 690
     assert gr.sum_target_policy_column([path], "no_such_column") is None
+
+
+# ------------------------------------------------------------------ review fixes (2026-11-17)
+def _rescued(hits, record=True):
+    """The rescue of test_dispersed_rescue_zones' synthetic genome, recorded as the search
+    records it (apply_rescue), with the searched GOI cores of its blocks."""
+    import test_dispersed_rescue_zones as T
+    import logging
+    logging.disable(logging.CRITICAL)
+    try:
+        a = T.make_args()
+        hits = T.canonical(hits)
+        flanking = [h for h in hits if not isr.is_goi_query_id(h["query"])]
+        select = isr.rescue_selector(hits, flanking, a, "g.fna", record=record)
+        blocks, _v, rescue = isr.genome_axis_blocks(flanking, flanking, a, "g.fna",
+                                                    select_rescue=select, **T.opts())
+        isr.apply_rescue(a, "g.fna", rescue, blocks)
+        return a, isr.goi_zones(blocks, T.GOI_MARGIN), rescue
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_the_dropped_hits_are_counted_also_without_records():
+    """--report_nonsyntenic_candidates false kept no dropped records, so target_policy's
+    rescue_dropped_outside_zones read 0 (and the report's dropped.hits 0, "none dropped") while
+    the limit counts showed the drops. Now they are counted either way; no row is written."""
+    import test_dispersed_rescue_zones as T
+    hits = T.ENVELOPE_ELSEWHERE + [T.goi("chr9", 5_000_000, pident=30.0), T.goi("chr9", 6_000_000, pident=20.0)]
+    on, cores_on, _r = _rescued(hits, record=True)
+    off, cores_off, _r = _rescued(hits, record=False)
+    assert on.genome_ctx["limits"]["dispersed_identity"] == off.genome_ctx["limits"]["dispersed_identity"] == 2
+    rows_on, n_on = isr.rescue_table_rows(on.genome_ctx, cores_on)
+    rows_off, n_off = isr.rescue_table_rows(off.genome_ctx, cores_off)
+    assert n_on == n_off == 2 and len(rows_on) == 2 and rows_off == []
+
+
+def test_a_refused_hit_that_a_rescue_seeded_block_searched_is_no_candidate(tmp_path):
+    """Another exon of a gene whose near hit seeded a block (near_neighbour, beside a lone anchor)
+    lies 6.5 kb past the anchor, beyond the GOI margin: refused (chromosome_lacks_min_anchors) when
+    the rescue was chosen, then held by the seeded block's GOI zone and searched there. It was listed
+    as refused and became a place of its own in the report; now its row says outcome searched and
+    the report leaves it out of the candidates, the counts and the places."""
+    import test_dispersed_rescue_zones as T
+    near = T.goi("ctg7", 51_200)
+    exon3 = T.goi("ctg7", 57_500, query="GOI_q|exon_3")
+    a, cores, rescue = _rescued(T.ENVELOPE_ELSEWHERE + [T.LONE, near, exon3])
+    assert [(r["query"], r["rejected_by"]) for r in rescue.rejected] == [
+        ("GOI_q|exon_3", "chromosome_lacks_min_anchors")]
+    assert isr.overlaps_any("ctg7", 57_500, 58_100, cores)       # the seeded block's zone holds it
+    rows, _n = isr.rescue_table_rows(a.genome_ctx, cores)
+    assert [(r["query"], r["outcome"]) for r in rows] == [("GOI_q|exon_3", "searched")]
+    a.prefix = "locus_1_"
+    a.output_dir = str(tmp_path)
+    isr._write_nonsyntenic_candidates(a, "locus_1_", "g.fna", rows)
+    path = tmp_path / "hits" / "locus_1_g.fna.nonsyntenic.tsv"
+    dropped = []
+    records, per_genome = gr.collect_nonsyntenic_candidates([str(path)], dropped_out=dropped)
+    assert records == [] and per_genome == {} and dropped == []
+    # outside the searched zones the same hit stays a refused candidate
+    rows, _n = isr.rescue_table_rows(a.genome_ctx, [])
+    assert [r["outcome"] for r in rows] == ["refused"]

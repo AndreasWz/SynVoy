@@ -166,6 +166,47 @@ def test_a_decoys_lift_is_flagged_but_not_counted(tmp_path, monkeypatch):
     assert rows[0]["RefusalLifted"] == "long_qcov,long_aln"
 
 
+def test_a_relatives_lifted_chain_the_rebase_drops_is_not_counted(tmp_path, monkeypatch):
+    """Review fix (2026-11-17): the lift was counted when the chain was built, before the rebase
+    drops a relative's (~rel) chain beside a model of the home protein; such a chain never reached
+    the judge, so fallback_lifted counted more than the RefusalLifted rows. It is counted after the
+    rebase now."""
+    home_seq, rel_seq = "M" * 300, "MW" * 145
+    hits = [_window_hit(1, 280), _window_hit(101, 120, start=6_300, query="GOI_x~rel")]
+    _stub_window(monkeypatch, hits)
+    monkeypatch.setattr(isr, "_relative_score", lambda home, m: 1.0)
+
+    def miniprot(work_hits, query_seq, *a, **k):
+        if query_seq != home_seq:
+            return []                                   # the relative's hits: no model, a chain
+        return [([{"qstart": 1, "qend": 280, "gstart": 6_000, "gend": 6_840, "strand": "+",
+                   "pident": 70.0, "seq": "M" * 280, "phase": 0}], "M" * 280)]
+    monkeypatch.setattr(isr, "annotate_models_from_hit_list", miniprot)
+    args = _window_args(tmp_path, RANKS)
+    args.home_goi_ids = {"GOI_x"}
+    anchors = [_anchor(g, 10_000 + 1_000 * i) for i, g in enumerate(RANKS)]
+    block = {"chrom": "c1", "start": 10_000, "end": 14_000, "genes": list(RANKS), "genes_count": 4}
+    db = {"GOI_x": {"id": "GOI_x", "seq": home_seq, "header": "GOI_x"},
+          "GOI_x|H_fna_b0_l1_exon_ann": {"id": "GOI_x|H_fna_b0_l1_exon_ann", "seq": rel_seq,
+                                         "header": "GOI_x|H_fna_b0_l1_exon_ann"}}
+    _genes, gff = isr.process_region_block(0, block, anchors, {"c1": "ATG" * 10_000}, db, "G.fna", args,
+                                           "u", 1)
+    rows = [ln for ln in gff if ln.split("\t")[2] == "mRNA" and "SynVoyRole=goi" in ln]
+    assert rows and not any("RefusalLifted" in ln for ln in rows)
+    assert "fallback_lifted" not in args.genome_ctx.get("limits", {})
+
+
+def test_the_lifted_chains_are_counted_where_they_reach_the_judge():
+    lifted = _cand("GOI_x", 11_001, 11_060, "fallback_hit_span", ";RefusalLifted=long_qcov")
+    decoy = _cand("GOI_x~rev", 11_001, 11_060, "fallback_hit_span", ";RefusalLifted=long_qcov")
+    plain = _cand("GOI_x", 12_001, 12_060, "fallback_hit_span")
+    assert isr.count_lifted_chains([lifted, decoy, plain, {"gff": []}]) == 1
+    body = open(os.path.join(ROOT, "bin", "iterative_search_runner.py")).read().split(
+        "def process_region_block(", 1)[1].split("\ndef ", 1)[0]
+    assert body.count("'fallback_lifted'") == 1
+    assert body.index("rebase_relative_candidates(") < body.index("'fallback_lifted'")
+
+
 # ------------------------------------------------------------------ the relative's query
 def _cand(parent, start, end, evidence, extra=""):
     attrs = (f"ID={parent}|G_fna_b0_l1_x;Name={parent};SynVoy_Parent={parent};SynVoyRole=goi;"

@@ -1597,16 +1597,16 @@ its hits in the genome place ([ALGORITHM.md § 7.11](ALGORITHM.md#711-goi-hits-f
 - the home protein's blastp E-value against them over the whole genome is at most 1e-6;
 - the HSPs with an E-value of at most 1 cover at least 0.7 of the query, their union (with
   [`core_completeness`](#core_completeness), the larger of the query's and its core's coverage);
-- no HSP runs across an exon junction of the annotated home gene (≥ 2 exons), with 10 residues on
-  each side: the target would encode both exons without an intron, as a retrocopy does;
 - no other home protein is a real competitor within 10 bits of it.
 
 Per home gene the places are tried best first (E-value, then bits, then coverage) until one gives
 an answer, at most [`max_blocks_per_genome`](#max_blocks_per_genome) windows per genome
 (`genome_wide_tries_cap` in the limit counts). A try searches the place ± the model margin, cut at
-the GOI zones, without flanking genes, and judges its models in the genome place. Its best model
-is the answer when the judge labels it HIGH there, no CDS or hit of it runs across a home junction
-(`RetrocopyCandidate=1`), it is not frame-broken without an intron (a frameshifted copy split into
+the GOI zones and at the earlier tries' windows, without flanking genes, and judges its models in the genome place. Its best model
+is the answer when the judge labels it HIGH there, no exon of its gene model runs across an exon
+junction of the annotated home gene (≥ 2 exons) with 10 residues on each side (`RetrocopyCandidate=1`:
+the target would encode both exons without an intron, as a retrocopy does; the model's exons are
+tested, not the hits, whose ends can run into an intron), it is not frame-broken without an intron (a frameshifted copy split into
 two pieces a few bp apart), and it overlaps no model the search wrote before.
 
 An answer is written as MEDIUM, `GOIClass=genome_wide_strong_hit`, with `GenomeWide=1`,
@@ -2083,7 +2083,8 @@ merged into places, and a genome with such a place that no counted call of the r
 call, reads `goi_found_but_not_syntenic` instead of looking like a genome without a hit. They are
 not calls. The same table keeps the GOI hits outside every searched GOI zone that failed the
 rescue's quality tests (`rejected_candidates.dropped`, the strongest 200 per genome search, with the
-test each failed).
+test each failed). With `false` no table is written; `target_policy`'s `rescue_dropped_outside_zones`
+still counts the dropped hits.
 
 ---
 

@@ -120,7 +120,7 @@ def test_the_report_lists_the_places_and_the_decoy_places_apart(tmp_path):
     path = tmp_path / "locus_1_G.fna.genome_wide.tsv"
     rows = [dict(genome="G.fna", parent="GOI_q", chrom="c1", start=100, end=400, hits=2,
                  best_hit_identity=87.5, evalue_genome="2e-80", bits="260.1", coverage="0.910",
-                 retrocopy_hits="0", best_other="gene-p", margin="47.0", real_competitor=1, specific=1,
+                 best_other="gene-p", margin="47.0", real_competitor=1, specific=1,
                  rank=1, decision="modelled", block=5003, model_decision="answer", near_block="",
                  significant_blocks=0, median_flank_identity="71.2"),
             dict(genome="G.fna", parent="GOI_q", chrom="c2", start=100, end=400, hits=1,

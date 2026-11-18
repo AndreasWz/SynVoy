@@ -976,8 +976,10 @@ def collect_nonsyntenic_candidates(paths, dropped_out=None):
     The same tables list the GOI hits the rescue dropped (column ``outcome`` = dropped:
     below its quality bar, or in the GOI zone of a block that was not searched, outside every
     searched GOI zone); they are appended to ``dropped_out`` when it is a list, and are never
-    refused candidates. A table without the column (before 2026-11-16) holds refused hits
-    only; one without a ``locus`` column takes the locus from its file name.
+    refused candidates. A row with ``outcome`` = searched (a refused hit that the GOI zone of a
+    block seeded by the rescue then held) is left out altogether. A table without the column
+    (before 2026-11-16) holds refused hits only; one without a ``locus`` column takes the locus
+    from its file name.
 
     Returns (records, per_genome_map) of the refused hits. Malformed or unreadable files are
     skipped rather than failing the report — this is diagnostic output, never a reason to lose
@@ -1021,7 +1023,12 @@ def collect_nonsyntenic_candidates(paths, dropped_out=None):
                         "modelled_here": row.get("modelled_here", "") or "",
                         "modelled_by": row.get("modelled_by", "") or "",
                     }
-                    if (row.get("outcome") or "refused") != "refused":
+                    outcome = row.get("outcome") or "refused"
+                    if outcome == "searched":
+                        # A refused hit that a block seeded by the rescue then searched: no
+                        # candidate, no count, no place.
+                        continue
+                    if outcome != "refused":
                         if dropped_out is not None:
                             dropped_out.append(rec)
                         continue
@@ -1214,11 +1221,11 @@ def genomes_without_flanking_hits(paths):
 GENOME_WIDE_NOTE = ("Places of GOI hits outside every searched GOI zone and every written row, from "
                     "the genome-wide path (--goi_genome_wide_path). A place is tried when the home "
                     "protein's blastp E against its hits over the whole genome (-searchsp = |q| x "
-                    "genome/3) is <= 1e-6, its HSPs at E <= 1 cover >= 0.7 of the query, none runs "
-                    "across a home exon junction and no other home protein is a real competitor "
-                    "within 10 bits; per home GOI the places are tried best first until one gives an "
-                    "answer: a model the judge labels HIGH in the genome place, no retrocopy, not "
-                    "frame-broken without an intron, overlapping no row. An answer is written as "
+                    "genome/3) is <= 1e-6, its HSPs at E <= 1 cover >= 0.7 of the query and no "
+                    "other home protein is a real competitor within 10 bits; per home GOI the places "
+                    "are tried best first until one gives an answer: a model the judge labels HIGH "
+                    "in the genome place, with no exon across a home exon junction (no retrocopy), "
+                    "not frame-broken without an intron, overlapping no row. An answer is written as "
                     "MEDIUM, GOIClass=genome_wide_strong_hit, GenomeWide=1; it never seeds and is "
                     "never counted; the report keeps one per genome, only in a genome without a "
                     "counted call (summary.genome_wide_strong_hits; one inside a block's window is "
@@ -1250,7 +1257,6 @@ def collect_genome_wide_places(paths):
                         "evalue_genome": row.get("evalue_genome", ""),
                         "bits": row.get("bits", "") or "",
                         "coverage": row.get("coverage", "") or "",
-                        "retrocopy_hits": row.get("retrocopy_hits", "") or "",
                         "best_other": row.get("best_other", ""), "margin": row.get("margin", ""),
                         "real_competitor": row.get("real_competitor", ""),
                         "rank": row.get("rank", ""),
@@ -1713,11 +1719,14 @@ def dedupe_goi_annotations(annotations, min_overlap=0.8, contain_min=0.9,
                 **({"copy_lineage": rep["copy_lineage"], "home_identity": rep.get("home_identity", ""),
                     "home_query_cov": rep.get("home_query_cov", ""), "home_bits": rep.get("home_bits", "")}
                    if rep.get("copy_lineage") else {}),
-                # Only on a model the dispersed-GOI rescue alone made the search find.
+                # Only on a call the dispersed-GOI rescue alone made the search find: every
+                # model merged into the record carries DispersedRescue=1. One home locus's rescue
+                # and another's own block finding the same gene is no rescue-born call (which
+                # member was the representative depended on the order of the loci).
                 **({"dispersed_rescue": True, "rescue_rule": rep.get("rescue_rule", ""),
                     "rescue_anchors": rep.get("rescue_anchors", ""),
                     "rescue_anchor_bp": rep.get("rescue_anchor_bp", "")}
-                   if rep.get("dispersed_rescue") else {}),
+                   if all(m.get("dispersed_rescue") for m in members) else {}),
                 # Only on a call of the genome-wide path (GenomeWide=1): frame_broken says that its
                 # model has no clean frame (an answer then has an intron).
                 **({"genome_wide": True,
@@ -1959,14 +1968,13 @@ def _ownership_scores(row):
                                       (row.get("second_paralog"), row.get("second_bit_f"))) if label}
 
 
-def load_paralog_check_rows(paralog_check_dir, suffix=".paralog_check.tsv"):
-    """Read every ``<genome><suffix>`` TSV produced by RECIPROCAL_BEST_PARALOG
-    (docs/TODO.md §1j Phase B) — also reused for the §1m locus-ownership TSVs,
-    which share the same column layout but carry ``locus_<id>|<gene>`` panel
-    labels in ``best_paralog`` (pass ``suffix='.locus_ownership.tsv'``).
+def load_paralog_check_rows(paralog_check_dir, suffix=".locus_ownership.tsv"):
+    """Read every ``<locus>__<genome><suffix>`` TSV of reciprocal_best_paralog_check.py: the §1m
+    locus-ownership tables of ASSIGN_LOCUS_OWNERSHIP (locus_ownership/), whose ``best_paralog``
+    names a ``locus_<id>|<gene>`` entry of the home-paralog panel.
 
-    Returns a list of dicts keyed by the TSV header. Skips header-only files (the
-    rescue/single-paralog no-op case) and silently tolerates missing dirs."""
+    Returns a list of dicts keyed by the TSV header. Skips header-only files and silently
+    tolerates missing dirs."""
     rows = []
     if not paralog_check_dir or not os.path.isdir(paralog_check_dir):
         return rows
@@ -2002,7 +2010,6 @@ _STEP_FAILURE_SENTENCE = {
                               "another home gene's (ownership_not_checked)",
     "BUILD_HOME_PARALOG_PANEL": "no call was checked against the other home genes, so any call may be another home "
                                 "gene's (ownership_not_checked)",
-    "RECIPROCAL_BEST_PARALOG": "no paralog_confusion flag can be raised there",
     "RESCUE_GOI_HULL": "a gene only the hull rescue would model is missing there",
     "RESCUE_STRONG_SYNTENY": "a gene only the strong-synteny rescue would model is missing there",
 }
@@ -2010,10 +2017,10 @@ _STEP_FAILURE_SENTENCE = {
 
 def collect_step_failures(results_dir):
     """The steps that failed and were recorded instead of being ignored (bin/run_step.py,
-    fix-phase d5): the marker line in a staged region GFF (the rescues), ownership table, paralog
-    table or the panel's meta table. Sorted list of {step, locus, genome, exit, reason}."""
+    fix-phase d5): the marker line in a staged region GFF (the rescues), ownership table or the
+    panel's meta table. Sorted list of {step, locus, genome, exit, reason}."""
     found = set()
-    for sub in ("regions", "locus_ownership", "paralog_check"):
+    for sub in ("regions", "locus_ownership"):
         folder = os.path.join(results_dir, sub)
         if not os.path.isdir(folder):
             continue
@@ -2135,69 +2142,6 @@ def build_gene_family_advisory(records, n_home_loci=0,
             "§1j self-consistency flags over raw identity." if is_family else ""
         ),
     }
-
-
-def build_paralog_confusion_flags(paralog_rows, min_gap):
-    """Emit a ``paralog_confusion`` flag for each call whose best home paralog
-    differs from the modal best paralog at the same (genome, locus), provided
-    the bitscore gap to the runner-up exceeds ``min_gap`` (so near-ties don't
-    fire).
-
-    Per-call summary (``best_paralog_per_call``) is also returned for transparency
-    so the report carries the alignment evidence behind every flag.
-    """
-    if not paralog_rows:
-        return [], [], {}
-
-    # Modal best-paralog per (genome, locus).
-    by_locus = defaultdict(Counter)
-    for r in paralog_rows:
-        by_locus[(r["genome"], r["locus"])][r["best_paralog"]] += 1
-    modal_per_locus = {key: ctr.most_common(1)[0][0] for key, ctr in by_locus.items()}
-
-    flags = []
-    per_call_summary = []
-    for r in paralog_rows:
-        key = (r["genome"], r["locus"])
-        modal = modal_per_locus.get(key, "")
-        is_confused = (r["best_paralog"] != modal) and (r["gap_f"] >= min_gap)
-        per_call_summary.append({
-            "genome": r["genome"],
-            "locus": r["locus"],
-            "chrom": r["chrom"],
-            "start": r["start_i"],
-            "end": r["end_i"],
-            "mrna_id": r.get("mrna_id", ""),
-            "best_paralog": r["best_paralog"],
-            "best_bit": r["best_bit_f"],
-            "second_paralog": r.get("second_paralog", ""),
-            "second_bit": r["second_bit_f"],
-            "bitscore_gap": r["gap_f"],
-            "locus_modal_paralog": modal,
-            "confused": is_confused,
-        })
-        if is_confused:
-            flags.append({
-                "type": "paralog_confusion",
-                "genome": r["genome"],
-                "locus": r["locus"],
-                "chrom": r["chrom"],
-                "start": r["start_i"],
-                "end": r["end_i"],
-                "mrna_id": r.get("mrna_id", ""),
-                "assigned_paralog": modal,           # the locus's "own" paralog (modal best)
-                "best_match_paralog": r["best_paralog"],
-                "bitscore_gap": r["gap_f"],
-                "advice": (
-                    f"Recovered protein aligns best to '{r['best_paralog']}' (bit={r['best_bit_f']:.1f}) "
-                    f"but the modal best paralog at this locus is '{modal}' "
-                    f"(bit-gap {r['gap_f']:.1f} >= {min_gap}). Likely a sibling paralog "
-                    "dragged in by MEDIUM-confidence iterative search — re-check the call's "
-                    "family assignment before reporting it as an ortholog of the locus paralog."
-                ),
-            })
-
-    return flags, per_call_summary, modal_per_locus
 
 
 def load_panel_meta(panel_meta_path):
@@ -2564,9 +2508,6 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
 
 def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                            *, strong_flanking_min=20,
-                           paralog_flags=None, paralog_per_call=None,
-                           paralog_modal_per_locus=None,
-                           paralog_min_gap=5.0,
                            ownership_flags=None, ownership_summary=None,
                            phylo_flags=None, phylo_summary=None,
                            identity_decoupled_min_identity=50.0,
@@ -2588,15 +2529,10 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
       ``dedupe_goi_annotations``; surfaced here so it is visible in the report
       alongside other self-consistency outputs).
 
-    * ``paralog_confusion`` (§1j Phase B, landed) — a call whose best home paralog
-      (parasail SW vs every sequence in the multi-FASTA query) differs from the
-      modal best at the same (genome, locus) and the bitscore gap to the runner-up
-      exceeds ``paralog_min_gap``. Catches TP53/63/73-style sibling leakage at
-      MEDIUM confidence (the residual issue from docs/notes/TP53_PARALOG_ASSESSMENT.md).
-
-    For single-paralog queries the §1j check is a no-op and ``paralog_flags`` is
-    empty; for multi-paralog runs the RECIPROCAL_BEST_PARALOG process produces a
-    TSV per (locus, genome) that ``load_paralog_check_rows`` then aggregates.
+    The reciprocal-best paralog check's ``paralog_confusion`` flag went with its step
+    (RECIPROCAL_BEST_PARALOG, removed on 2026-11-16: it always received one query sequence and
+    could flag nothing); locus ownership compares each call with the home genes
+    (``ownership_flags``).
     """
     # Count HIGH-conf GOI per (genome, locus, chrom) for the identity-decay check.
     high_goi_count = defaultdict(int)
@@ -2671,14 +2607,6 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
                 ),
             })
 
-    # §1j Phase B paralog confusion flags (computed in build_paralog_confusion_flags
-    # and threaded through; we only attach them here so the existing flag-summary
-    # plumbing carries them).
-    paralog_flags = paralog_flags or []
-    paralog_per_call = paralog_per_call or []
-    paralog_modal_per_locus = paralog_modal_per_locus or {}
-    flags.extend(paralog_flags)
-
     # §1m locus-ownership flags (locus_reattributed / goi_owner_search_fumble /
     # paralog_misassignment) computed in build_locus_ownership and threaded through.
     ownership_flags = ownership_flags or []
@@ -2690,10 +2618,6 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
     checks_performed = ["strong_synteny_no_goi", "cross_locus_duplicate",
                         "identity_coverage_decoupled"]
     deferred_checks = []
-    if paralog_per_call:
-        checks_performed.append("paralog_confusion")
-    else:
-        deferred_checks.append("paralog_confusion")
     if ownership_summary.get("evaluated"):
         checks_performed.append("locus_ownership")
     else:
@@ -2708,24 +2632,15 @@ def build_self_consistency(goi_annotations, goi_dedup, flanking_per_locus,
         "deferred_checks": deferred_checks,
         "thresholds": {
             "strong_flanking_min": strong_flanking_min,
-            "paralog_confusion_min_gap": paralog_min_gap,
             "identity_decoupled_min_identity": identity_decoupled_min_identity,
             "identity_decoupled_max_qcov": identity_decoupled_max_qcov,
         },
         "flags": flags,
-        # Carry the full per-call paralog alignment table so the paper can
-        # cite exact numbers without re-running anything.
-        "paralog_alignment_table": paralog_per_call,
-        "modal_paralog_per_locus": [
-            {"genome": g, "locus": l, "paralog": p}
-            for (g, l), p in sorted(paralog_modal_per_locus.items())
-        ],
         "locus_ownership_summary": ownership_summary,
         "phylo_placement_summary": phylo_summary or {},
         "summary": {
             "n_strong_synteny_no_goi": sum(1 for f in flags if f["type"] == "strong_synteny_no_goi"),
             "n_cross_locus_duplicates": sum(1 for f in flags if f["type"] == "cross_locus_duplicate"),
-            "n_paralog_confusion": sum(1 for f in flags if f["type"] == "paralog_confusion"),
             "n_locus_reattributed": sum(1 for f in flags if f["type"] == "locus_reattributed"),
             "n_goi_owner_search_fumble": sum(1 for f in flags if f["type"] == "goi_owner_search_fumble"),
             "n_paralog_misassignment": sum(1 for f in flags if f["type"] == "paralog_misassignment"),
@@ -2787,7 +2702,7 @@ def apply_coverage_demotion(goi_dedup, min_identity=50.0, max_qcov=0.35, core_co
     }
 
 
-def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_min_gap=5.0,
+def build_report(results_dir, qc_json=None, qc_policy=None,
                  locus_ownership_tiebreak_gap=10.0, coverage_demotion=True,
                  identity_decoupled_min_identity=50.0, identity_decoupled_max_qcov=0.35,
                  phylo_placement_dir=None,
@@ -2891,17 +2806,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     dedup_high = goi_dedup["high_confidence_goi_deduped"]
     dedup_medium = goi_dedup["medium_confidence_goi_deduped"]
 
-    # §1j Phase B: per-call reciprocal-best paralog check (run by RECIPROCAL_BEST_PARALOG
-    # per (locus, genome) and staged under paralog_check/). Aggregated here so the
-    # self-consistency block can emit paralog_confusion flags for any call whose best
-    # home paralog differs from the modal best at the same locus.
-    paralog_check_rows = load_paralog_check_rows(
-        os.path.join(results_dir, "paralog_check")
-    )
-    paralog_flags, paralog_per_call, paralog_modal = build_paralog_confusion_flags(
-        paralog_check_rows, min_gap=paralog_confusion_min_gap,
-    )
-
     # §1m locus ownership: reciprocal-best of each deduped GOI ortholog against the
     # home-paralog panel (built by build_home_paralog_panel.py, RBH run by
     # ASSIGN_LOCUS_OWNERSHIP and staged under locus_ownership/). Re-attributes
@@ -2983,16 +2887,12 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
     needs_curation_by_basis = dict(Counter(r.get("basis") or "unlabelled" for r in _curation))
 
     # End-of-run self-consistency checks (docs/TODO.md §1j): identity-decay sanity +
-    # cross-locus duplicate visibility + paralog confusion + locus ownership (§1m).
+    # cross-locus duplicate visibility + locus ownership (§1m).
     # The flanking-only-block surfacing is the §1e piece that lives in cluster_grs.py.
     goi_dedup["coverage_demotion"] = coverage_demotion_summary
     self_consistency = build_self_consistency(
         goi_annotations, goi_dedup, flanking_per_locus,
         strong_flanking_min=strong_flanking_min,
-        paralog_flags=paralog_flags,
-        paralog_per_call=paralog_per_call,
-        paralog_modal_per_locus=paralog_modal,
-        paralog_min_gap=paralog_confusion_min_gap,
         ownership_flags=ownership_flags,
         phylo_flags=phylo_flags,
         phylo_summary=phylo_summary,
@@ -3134,7 +3034,6 @@ def build_report(results_dir, qc_json=None, qc_policy=None, paralog_confusion_mi
             "goi_hits_collapsed_by_dedup": goi_dedup["hits_collapsed_by_dedup"],
             "self_consistency_flag_count": self_consistency["summary"]["total_flags"],
             "strong_synteny_no_goi_flags": self_consistency["summary"]["n_strong_synteny_no_goi"],
-            "paralog_confusion_flags": self_consistency["summary"]["n_paralog_confusion"],
             "locus_reattributed_orthologs": self_consistency["summary"]["n_locus_reattributed"],
             "goi_owner_search_fumbles": self_consistency["summary"]["n_goi_owner_search_fumble"],
             "paralog_misassignments": self_consistency["summary"]["n_paralog_misassignment"],
@@ -3554,10 +3453,6 @@ def main():
     parser.add_argument("--qc_policy", default="unspecified", help="QC handling policy used in the workflow")
     parser.add_argument("--output", required=True, help="Report JSON")
     parser.add_argument(
-        "--paralog_confusion_min_gap", type=float, default=5.0,
-        help="Bitscore gap required to flag a paralog_confusion (docs/TODO.md §1j Phase B)",
-    )
-    parser.add_argument(
         "--locus_ownership_tiebreak_gap", type=float, default=10.0,
         help="Panel score margin a paralog needs over the GOI's best entry to take a call; below "
              "it the call stays the GOI's, and between two entries that are both the GOI or both "
@@ -3629,7 +3524,6 @@ def main():
         args.results_dir,
         qc_json=args.qc_json,
         qc_policy=args.qc_policy,
-        paralog_confusion_min_gap=args.paralog_confusion_min_gap,
         locus_ownership_tiebreak_gap=args.locus_ownership_tiebreak_gap,
         coverage_demotion=not args.disable_coverage_demotion,
         phylo_placement_dir=args.phylo_placement_dir,

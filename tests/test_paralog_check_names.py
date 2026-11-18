@@ -1,10 +1,11 @@
-"""Fix-phase item 20: the reciprocal-best paralog check of each home locus reaches the report.
+"""Fix-phase item 20: the reciprocal-best check of each home locus reaches the report.
 
 RECIPROCAL_BEST_PARALOG wrote <genome>.paralog_check.tsv, without the locus. GENERATE_REPORT
-stages every check into numbered folders (paralog_check/?/*) and copies them into one folder, so
-with two or more home loci the checks of all but one locus were overwritten, and which one
-survived depended on the order in which the tasks finished. The file is now named like
-ASSIGN_LOCUS_OWNERSHIP's (<locus>__<genome>...), and every list the report stages is sorted.
+stages every check into numbered folders and copies them into one folder, so with two or more
+home loci the checks of all but one locus were overwritten, and which one survived depended on
+the order in which the tasks finished. That step is gone (2026-11-16); the tables the report
+reads are ASSIGN_LOCUS_OWNERSHIP's, named <locus>__<genome>.locus_ownership.tsv, and every list
+the report stages is sorted.
 """
 import csv
 import os
@@ -46,17 +47,17 @@ def _check(path, locus, genome, best):
 
 
 def test_two_loci_of_one_genome_both_reach_the_report(tmp_path):
-    """Both files of one genome are read, one row per locus; with the old name the second
-    copy into the staging folder replaced the first."""
-    staged = tmp_path / "paralog_check"
+    """Both ownership tables of one genome are read, one row per locus; with a name without the
+    locus the second copy into the staging folder replaced the first."""
+    staged = tmp_path / "locus_ownership"
     staged.mkdir()
     for locus in ("locus_1", "locus_2"):
-        _check(staged / f"{locus}__G.fna.paralog_check.tsv", locus, "G.fna", f"p_{locus}")
+        _check(staged / f"{locus}__G.fna.locus_ownership.tsv", locus, "G.fna", f"p_{locus}")
     rows = gr.load_paralog_check_rows(str(staged))
     assert sorted((r["locus"], r["best_paralog"]) for r in rows) == [("locus_1", "p_locus_1"),
                                                                       ("locus_2", "p_locus_2")]
     old = tmp_path / "old"
     old.mkdir()
-    for locus in ("locus_1", "locus_2"):            # what the flat copy of the old names left
-        _check(old / "G.fna.paralog_check.tsv", locus, "G.fna", f"p_{locus}")
+    for locus in ("locus_1", "locus_2"):            # what a flat copy of names without the locus left
+        _check(old / "G.fna.locus_ownership.tsv", locus, "G.fna", f"p_{locus}")
     assert [r["locus"] for r in gr.load_paralog_check_rows(str(old))] == ["locus_2"]
