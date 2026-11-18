@@ -265,6 +265,7 @@ def test_of_two_home_genes_the_figures_name_the_one_the_models_carry(goi, relati
     names = {f"gene-{g}": {"label": g, "full": "", "id": f"gene-{g}", "source": "gff_symbol"} for g in (goi, relative)}
     monkeypatch.setattr(ps, "_GENE_NAMES", names)
     monkeypatch.setattr(ps, "_GOI_NAMES", set(names))
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])     # both under the query hits' CDS
     home = {"genes": [{"name": f"gene-{relative}"}, {"name": f"gene-{goi}"}]}
     assert ps._goi_display_label([home, {"genes": [_target_model(goi)]}]) == goi
 

@@ -330,24 +330,45 @@ def is_copy(gene, best):
     return _PS._goi_is_copy(gene, best)
 
 
-def split_calls(tmap, span_bp):
+def copy_lineage(gene):
+    """The seeded tandem copy a GOI model was found from (``GOI_copy_<n>``), else ''.
+
+    With ``--tandem_copy_parent seed`` a single-segment tandem copy is added to the queries
+    of the next wave as a GOI of its own. The models it finds carry
+    ``SynVoy_Parent=GOI_copy_<n>``: their identity, query coverage and bits are to that
+    copy, not to the query.
+    """
+    parent = (gene or {}).get("home_gene_id") or ""
+    return parent if parent.startswith("GOI_copy_") else ""
+
+
+def split_calls(tmap, span_bp, outside=()):
     """The GOI calls of one target row: (best, [(gene, elsewhere, is_copy)] in genomic order).
 
     Calls at the locus come first, in the order of the oriented chromosome; calls
-    on another scaffold, or farther away than the neighbourhood is long, follow.
+    on another scaffold, or farther away than the neighbourhood is long, follow, together
+    with `outside`: the row's counted calls that lie outside the neighbourhood the figures
+    draw (plot_synteny._counted_calls_outside_view), which are always elsewhere. The locus
+    is that of the best call in the neighbourhood drawn; `best`, the call the copy rule
+    names, is the best call of the genome, `outside` included.
     """
     ps = _PS
     genes = (tmap.get(GOI_KEY) or {}).get("genes", [])
-    if not genes:
+    outside = list(outside or ())
+    if not genes and not outside:
         return None, []
-    best = ps._goi_best([g for g in genes if not ps._is_fragment_goi(g)] or genes)
+
+    def best_of(pool):
+        return ps._goi_best([g for g in pool if not ps._is_fragment_goi(g)] or pool)
+    here = best_of(genes or outside)
+    best = best_of(genes + outside) if outside else here
     _, lo, hi, _ = ps._dominant_chrom_span(
         [(e["best"].get("chrom", ""), (e["best"]["start"] + e["best"]["end"]) / 2.0)
-         for e in tmap.values()], best.get("chrom", ""))
+         for e in tmap.values()], here.get("chrom", ""))
     reach = max(float(span_bp or 0), hi - lo)
-    local = sorted((g for g in genes if ps._is_local_copy(g, best, reach)),
+    local = sorted((g for g in genes if ps._is_local_copy(g, here, reach)),
                    key=lambda g: g.get("start_plot", g["start"]))
-    away = sorted((g for g in genes if not ps._is_local_copy(g, best, reach)),
+    away = sorted([g for g in genes if not ps._is_local_copy(g, here, reach)] + outside,
                   key=lambda g: (g.get("chrom", ""), g["start"]))
     return best, ([(g, False, is_copy(g, best)) for g in local]
                   + [(g, True, is_copy(g, best)) for g in away])
@@ -430,6 +451,7 @@ def goi_tooltip(gene, label, is_home, note=""):
     ident = gene.get("identity", 0.0) or 0.0
     cov = gene.get("query_coverage")
     conf = (gene.get("confidence") or "").upper()
+    lineage = "" if is_home else copy_lineage(gene)
     return (f'{gene.get("name", "GOI")} in {label}: '
             f'{len(blocks)} exon{"s" if len(blocks) != 1 else ""}, CDS {cds_bp(gene):,} bp, '
             f'{gene.get("chrom", "")}:{blocks[0][0]:,}-{blocks[-1][1]:,} '
@@ -437,6 +459,8 @@ def goi_tooltip(gene, label, is_home, note=""):
             f'{", scaffold drawn reversed" if "genomic_strand" in gene else ""})'
             + (f', identity {ident:.0f}%' if (ident and not is_home) else '')
             + (f', coverage {_PS._coverage_pct(cov)}%' if (cov is not None and not is_home) else '')
+            + (f' (to {lineage}, a seeded tandem copy, not to the query)'
+               if (lineage and (ident or cov is not None)) else '')
             + (f', {conf}' if conf else '')
             + (f', {gene.get("evidence_type")}' if gene.get("evidence_type") else '')
             + (f' ({note})' if note else ''))
@@ -645,9 +669,11 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
     calls = [[(g, False, True) for g in home_goi]]      # per row: (gene, elsewhere, is_copy)
     bests = [None]
     for ri in range(1, n_rows):
-        best, row_calls = split_calls(tmaps[ri], span_bp)
+        # The row's counted calls outside the neighbourhood the figures draw are listed too.
+        best, row_calls = split_calls(tmaps[ri], span_bp, rows[ri].get("goi_outside_view"))
         bests.append(best)
         calls.append(row_calls)
+    n_outside_view = sum(1 for rc in calls[1:] for g, _, _ in rc if g.get("outside_view"))
     n_copies = [sum(1 for _, _, c in rc if c) for rc in calls]
     in_column = max(n_copies + [0]) <= 1     # no genome has two: the model goes in the column
     clade_of, clade_info = goi_clades(args, calls) if st.clade else ({}, None)
@@ -705,6 +731,12 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
 
     def number_of(gene, ri):
         return "" if ri == 0 else ps._goi_number_label(gene)
+
+    # Models drawn with a number whose identity and coverage are to a seeded tandem copy, not
+    # to the query (copy_lineage): the legend, the legend text and the source data say so.
+    n_copy_lineage = sum(1 for ri in range(1, n_rows) for g, _, c in calls[ri]
+                         if c and copy_lineage(g) and number_of(g, ri)
+                         and (in_column or any(g is p for p, _ in cells[ri]["panel"])))
 
     def item_w(it, bp_pt, caret, ri):
         if it[0] == "full":
@@ -870,7 +902,7 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                               any(c["more"] for c in cells), any_copies, cov_mode,
                               tree_root is not None, is_species_tree, bool(spans),
                               has_axis_for(cols), tiers, low_quality=low_quality,
-                              clades=clade_info)
+                              clades=clade_info, copy_lineage=bool(n_copy_lineage))
         legend_w = _legend.natural_width(groups, tw, st.fs_small)
         # A narrow grid is widened for its legend, but not beyond one journal column
         # (89 mm); past that the legend groups continue on a second band.
@@ -1060,7 +1092,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                     fill = copy_colour(g)
                     dash = DASH.get((g.get("confidence") or "").upper(), "") if not is_home else ""
                 dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
-                where = "elsewhere in the genome" if away else ""
+                where = ("outside the neighbourhood drawn for this genome" if g.get("outside_view")
+                         else "elsewhere in the genome" if away else "")
                 if st.clade and kind == "mark":
                     kind = "clade_mark"
                 if kind == "full":
@@ -1127,6 +1160,8 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
                 body += text_svg(x + mw + 2.0, y + st.fs_num * 0.35, st.fs_num, num, INK,
                                  bold=(g.get("confidence") or "").upper() == "HIGH")
             P.append(titled(goi_tooltip(g, labels[ri], is_home,
+                                        "outside the neighbourhood drawn for this genome"
+                                        if g.get("outside_view") else
                                         "elsewhere in the genome" if away else ""), body, tips))
         if cell["more"]:
             P.append(text_svg(x0, ys[-1] + st.fs_small * 0.35, st.fs_small,
@@ -1307,6 +1342,10 @@ def render(ps, all_tracks, gene_colours, home_products, args, st):
         "home_copies": n_copies[0], "most_copies_in_a_target": max(n_copies[1:] + [0]),
         "genomes_with_several_copies": sum(1 for n in n_copies if n > 1),
         "copies_not_drawn": sum(c["more"] for c in cells),
+        # counted GOI calls outside the neighbourhood drawn for their genome, listed after //
+        "goi_calls_outside_view": n_outside_view,
+        # GOI models drawn with a number that is the identity to a seeded tandem copy
+        "copy_lineage_models": n_copy_lineage,
         # rows whose assembly failed the quality check (marked with a dagger)
         "low_quality_rows": [row_label(t) for t in rows if ps._is_low_quality(t)],
         # target rows without any GOI call, with the flanking genes placed there
@@ -1459,8 +1498,9 @@ def draw_tree(root, order, x0, x1, y_mid):
 
 def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_more, any_copies,
                  low_cov, has_tree, is_species_tree, has_location, has_axis, tiers,
-                 low_quality=False, clades=None):
-    """The legend as titled groups (see synvoy_legend)."""
+                 low_quality=False, clades=None, copy_lineage=False):
+    """The legend as titled groups (see synvoy_legend). `copy_lineage`: a GOI model is drawn
+    with a number that is its identity to a seeded tandem copy, not to the query."""
     ps = _PS
     fs = st.fs_small
     base = flank_colour(ps.GENE_PALETTE[0], st.flank_tone)
@@ -1546,8 +1586,8 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
             numbers.append(("(44)", "under an arrow: query coverage in %, given when below 80 %"))
         elif low_cov == "star":
             numbers.append(("87*", "the same, query coverage below 80 %"))
-    else:
-        flank.append((ramp(), "paler = lower identity to the home gene"))
+    else:       # only a high-confidence fill follows the identity to the home gene (cell_style)
+        flank.append((ramp(), "high confidence: paler = lower identity"))
     if any_copies:
         flank.append((arrow(fill_hi, stroke, stacked=True), "more than one copy at the locus"))
     if st.compact:      # one stack per side: the count is all it shows
@@ -1622,8 +1662,10 @@ def build_legend(st, goi_label, kinds, full_drawn, in_column, any_numbered, any_
             goi.append((None, "fill and outline: confidence, as for the flanking genes"))
         groups.append((f"GOI: {goi_label}", goi))
         if full_drawn:
-            numbers.append(("78", "after a GOI model: % identity to the query; bold = high "
-                                  "confidence"))
+            numbers.append(("78", "after a GOI model: % identity to the query"
+                                  + (", or to the tandem copy of the gene it was found from "
+                                     "(source data)" if copy_lineage else "")
+                                  + "; bold = high confidence"))
             numbers.append(("56 (44)", "identity (query coverage, when below 80 %)"))
     if numbers:
         groups.append(("Numbers", numbers))
@@ -1668,22 +1710,23 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
     if not st.compact:      # the compact version draws no single flanking gene
         s.append("An arrow is the ortholog placed in that genome's neighbourhood and points in its "
                  "coding direction, with each scaffold oriented like the home genome.")
+        # The fill follows the identity only for a high-confidence ortholog (cell_style).
+        shade = ("a high-confidence ortholog is paler the lower its protein identity to the home "
+                 "gene; a medium- or low-confidence one has a fixed pale fill.")
         if st.flank_tone == "grey":
-            s.append("Flanking genes are drawn in one grey; paler fill = lower protein identity "
-                     "to the home gene.")
+            s.append("Flanking genes are drawn in one grey; " + shade)
         elif st.flank_tone == "muted":
             s.append("Colour: the home gene the ortholog belongs to, in muted tones so that the "
-                     f"{goi} clades stand out; paler fill = lower protein identity to it.")
+                     f"{goi} clades stand out; " + shade)
         elif st.numbers:
-            s.append("Colour: the home gene the ortholog belongs to. Number: protein identity to "
-                     "the home gene in %" + (
+            s.append("Colour: the home gene the ortholog belongs to, paler the lower the "
+                     "confidence. Number: protein identity to the home gene in %" + (
                          "; a number in brackets under an arrow is the query coverage in %, given "
                          "when it is below 80 %." if low_cov == "line" else
                          ", with * when the query coverage is below 80 %." if low_cov == "star"
                          else "."))
         else:
-            s.append("Colour: the home gene the ortholog belongs to; paler fill = lower protein "
-                     "identity to it.")
+            s.append("Colour: the home gene the ortholog belongs to; " + shade)
     s.append("Outline: solid = high, dashed = medium, dotted = low confidence.")
     if any_copies:
         s.append("A second arrow behind the first marks more than one copy at the locus.")
@@ -1733,13 +1776,26 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
                      + (f" At most {st.max_marks} are drawn in a cell; +N counts the rest."
                         if "count" in kinds else ""))
         if "break" in kinds:
+            n_out = info.get("goi_calls_outside_view", 0)
             s.append("Calls after // lie on another scaffold or farther from the locus than the "
-                     "neighbourhood is long.")
+                     "neighbourhood is long"
+                     + (f"; {n_out} of them {'is a counted call' if n_out == 1 else 'are counted calls'}"
+                        " (high or medium confidence) outside the stretch of "
+                        f"{'its' if n_out == 1 else 'their'} genome that the ribbon plot and the "
+                        "gene-position map draw." if n_out else "."))
         if full_drawn:
             s.append("Coding exons are to scale (bar), ∧ = intron (not to scale); thin boxes are "
                      "aligned hit segments without a gene model (drawn no longer than the longest "
                      "model). The numbers are the protein identities to the query in %, with the "
                      "query coverage in brackets when it is below 80 %.")
+            n_cl = info.get("copy_lineage_models", 0)
+            if n_cl:
+                s.append(f"{n_cl} of these models {'was' if n_cl == 1 else 'were'} found from a "
+                         f"tandem copy of {goi} that the search of an earlier genome added to the "
+                         "queries (GOI_copy_<n>): "
+                         f"{'its numbers are' if n_cl == 1 else 'their numbers are'} the identity "
+                         "and coverage to that copy, not to the query (source data, column "
+                         "identity_to).")
     missing = info.get("rows_without_goi") or []
     if missing:
         total = info.get("home_flanking_genes", 0)
@@ -1761,9 +1817,13 @@ def build_legend_text(st, info, cols, anchors, is_species_tree, has_tree, any_co
     return " ".join(s) + "\n"
 
 
+# identity_to: what identity_pct and query_coverage_pct are measured against: "query" for a GOI
+# call, the seeded tandem copy (GOI_copy_<n>) for a model found from one (copy_lineage), "home
+# gene" for a flanking ortholog; empty for the home row and a cell where nothing was placed.
 SOURCE_COLUMNS = ("row", "species", "genome_id", "column", "home_gene_id", "state", "drawn_as",
-                  "copy_number", "position", "identity_pct", "query_coverage_pct", "confidence",
-                  "copies", "strand_drawn", "scaffold", "start", "end", "exons", "evidence")
+                  "copy_number", "position", "identity_pct", "query_coverage_pct", "identity_to",
+                  "confidence", "copies", "strand_drawn", "scaffold", "start", "end", "exons",
+                  "evidence")
 # The clade version adds the clade of every GOI call (1-based, as in its legend).
 SOURCE_COLUMNS_CLADES = SOURCE_COLUMNS + ("clade",)
 
@@ -1784,6 +1844,8 @@ def source_row(ri, track, label, anchor, gene, n, is_home, is_goi_col, drawn_as,
     row.update(state="home" if is_home else "placed",
                identity_pct="" if is_home else f"{gene.get('identity') or 0:.1f}",
                query_coverage_pct="" if (is_home or cov is None) else str(_PS._coverage_pct(cov)),
+               identity_to="" if is_home else ((copy_lineage(gene) or "query") if is_goi_col
+                                               else "home gene"),
                confidence=gene.get("confidence", "") or "", copies=n,
                strand_drawn=gene.get("strand", ""), scaffold=gene.get("chrom", ""),
                start=gene.get("start", ""), end=gene.get("end", ""),

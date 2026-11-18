@@ -1298,7 +1298,9 @@ hit at a place where no gene model lies (`EvidenceType=tandem_copy`).
 - `seed`: the copy is recorded as `GOI_copy_<n>|<genome>_b<block>_l<locus>_by_<parent>`, where the
   parent is the query it was found with. Once it seeds, `GOI_copy_<n>` is a gene of interest of its
   own in the later waves: the models it finds are judged against the copy, not against the home
-  protein.
+  protein, and their identity and coverage (in the GFF, the report and the figures) are to the
+  copy. The anchor grid's legend text says how many such models it draws with a number, and its
+  source table names the reference of every value (`identity_to`).
 - `home`: the copy is recorded under the home gene (`<parent>|<genome>_b<block>_l<locus>_tc<n>`),
   so it can become that gene's relative query, and every model it finds is reported and judged
   against the home protein.
@@ -1851,10 +1853,12 @@ genomes out of the figures when at least one genome has a call; the report keeps
 **Default:** `false`
 
 What the row of a target genome shows. `false`: the candidate regions that the region scorer kept
-([`max_regions`](#max_regions)). `true`: the search's own blocks, chosen as the label sees them:
-the block of every HIGH, MEDIUM and AMBIGUOUS GOI call, then the significant blocks (E_syn ≤ 0.1,
-the predicted places) that hold no counted call, by E_syn, up to 6 blocks in all. A LOW call draws
-no block of its own, and a block that is neither significant nor holds a call is not drawn.
+([`max_regions`](#max_regions)), narrowed to those with a GOI model and the strong neighbourhoods
+without one when those hold most of the row's models ([ALGORITHM.md § 12](ALGORITHM.md#12-figures)).
+`true`: the search's own blocks, chosen as the label sees them: the block of every HIGH, MEDIUM and
+AMBIGUOUS GOI call, then the significant blocks (E_syn ≤ 0.1, the predicted places) that hold no
+counted call, by E_syn, up to 6 blocks in all. A LOW call draws no block of its own, and a block
+that is neither significant nor holds a call is not drawn.
 Fragment models take part in the choice and stay hidden, so the `*_with_fragments` figures show
 the same blocks. A genome with nothing to draw keeps its row, empty. The cap of 6 and the
 threshold are fixed in the figure code.
@@ -1869,10 +1873,12 @@ same rule. A run made with `false` has its tables in `blocks/` only; to draw it 
 How many GOI models of a genome steer the choice of the neighbourhood its row shows: the best
 ones, by label, then by the strength of the match. Every GOI model inside the chosen view is
 drawn, so the cap hides no copy there; it keeps many weak calls elsewhere in a genome from pulling
-the view away. With A1, a tandem array larger than ten steers the view with every copy. The figures
-read the value from `effective_params.json`, which the plot step copies into each `plot_inputs_*`
-folder, so a re-draw uses the run's value. `--max_goi_per_genome` given in `plot_extra_args` wins
-over it.
+the view away. A counted call (HIGH or MEDIUM) outside the chosen view, for example in a second
+neighbourhood whose models fell below the cap, is listed in the anchor grid after `//` and counted
+in the ribbon plot's label (`+N elsewhere`). With A1, a tandem array larger than ten steers the
+view with every copy. The figures read the value from `effective_params.json`, which the plot step
+copies into each `plot_inputs_*` folder, so a re-draw uses the run's value. `--max_goi_per_genome`
+given in `plot_extra_args` wins over it.
 
 ### `plot_extra_args`
 **Default:** none

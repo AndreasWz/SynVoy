@@ -1615,10 +1615,30 @@ from those copies.
   call of a row, the overlap dedup and the GOI cap rank by label, then by the strength of
   the match (E in its place, the block's E_syn, bits). The GOI cap (`max_goi_per_genome`,
   10; the `local_family` module max(10, `c` + 1)) only steers which neighbourhood a row
-  shows: every GOI model inside the chosen view is drawn.
+  shows: every GOI model inside the chosen view is drawn. A counted call (HIGH or MEDIUM)
+  that the view leaves out is listed in the anchor grid after `//` and counted in the
+  ribbon plot's label (`+N elsewhere`).
+- **GOI name.** The GOI column, the titles, the legends and the home row's label name the
+  GOI after the annotated home gene on whose CDS the query hits fall. Without such a gene the
+  name is the GOI's own, as its target models carry it: a home gene that only overlaps the
+  hits (an lncRNA, a gene with the GOI in an intron) is still drawn in the GOI's place on the
+  home row, but it does not name the GOI.
 
 - **Home row.** The GOI is drawn from the home annotation: the transcript whose CDS
   covers the hits best. Only coding exons are drawn.
+- **What a target row shows** (without block tables). The models inside the genome's
+  candidate regions ([§8](#8-region-scores)), after the GOI cap. When the regions that hold
+  a GOI model hold at least half of these models (and at least 3), the row is narrowed to
+  them and to the regions the scorer wrote as `goi_missing_but_strong_synteny`
+  (`Reg<k>_FLANKonly<N>_…`): a neighbourhood without a GOI model, such as a homeolog that
+  lost the gene, stays in the row. The plot log names every region left out that holds a
+  model. When the regions hold no GOI model, the row shows the models within
+  `flank_fallback_bp` of the GOI models on the scaffold that holds most of them. When the
+  models lie on 20 sequences or fewer, a GOI scaffold without flanking genes is left out
+  when another GOI scaffold has them, and the row keeps the GOI scaffolds, every scaffold
+  with at least 3 flanking genes, and every scaffold that holds a flanking gene placed on
+  none of those (most flanking genes first); when that would keep fewer than 30 % of the
+  models on more than 3 scaffolds, it keeps them all.
 - **Target rows.** A scaffold with at least 3 flanking genes is mirrored when at least
   70 % of them are on the opposite strand to home and their order does not contradict it,
   or when their order is clearly reversed and at least half of them are on the opposite
@@ -1631,7 +1651,15 @@ from those copies.
   figure (`*_gene_positions.html`) writes that count as `×N`. The GOI
   column has one small arrow per copy; a genome with more than ten copies shows the
   first ten models and `+N more` (`--grid_max_models`, a drawing setting that drops no
-  copy, so no rule sets it).
+  copy, so no rule sets it). The number after a GOI model is its identity to the query;
+  for a model found from a seeded tandem copy (`SynVoy_Parent=GOI_copy_<n>`,
+  [§7.12](#712-what-is-added-to-the-query-set)) it is the identity to that copy, which the
+  legend text and the source table (`identity_to`) say. Without the numbers, a flanking
+  arrow of a HIGH ortholog is paler the lower its identity to the home gene; a MEDIUM or
+  LOW one has a fixed pale fill.
+- **Tree page.** The midpoint-rooted gene tree is split into `--clade_count` (4) clades from
+  the root: the clade with the most leaves is split into its children, splits that leave no
+  one-leaf clade first; branch lengths are not used.
 
 ## 13. Reproducibility
 

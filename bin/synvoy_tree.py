@@ -11,8 +11,9 @@ Public surface:
     parse_newick_tree(text)  — newick → TreeNode root (None on empty)
     parse_newick_leaf_order(text)  — newick → leaf names left→right
     midpoint_root(root)      — re-root at midpoint of longest leaf-to-leaf path
-    partition_clades(root, depth_frac=0.4)
-                             — leaf name → clade_id; depth-threshold partition
+    partition_clades(root, target_k=4)
+                             — leaf name → clade_id; top-down split of the largest
+                               clade (depth_frac=...: the legacy depth-threshold mode)
     CLADE_PALETTE            — 12 distinct, color-blind-friendly hex colours
     species_from_leaf(name)  — `GOI_X|Sp_genus_fna_b0...` → `Sp_genus`
 """

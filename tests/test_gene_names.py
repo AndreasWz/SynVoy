@@ -544,7 +544,8 @@ def test_load_gene_names_end_to_end(tmp_path, gff, monkeypatch, capsys):
     assert (tmp_path / "second.tsv").exists()
 
 
-def test_goi_title_label_comes_from_the_annotated_home_gene(names):
+def test_goi_title_label_comes_from_the_annotated_home_gene(names, monkeypatch):
+    monkeypatch.setattr(ps, "_GOI_FROM_CDS", [True])     # the query hits fall on its CDS
     assert ps._goi_display_label(_tracks()) == "Melt"
 
 

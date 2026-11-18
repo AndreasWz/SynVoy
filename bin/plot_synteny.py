@@ -232,7 +232,8 @@ def text_width(text, size, bold=False):
 
 def parse_candidate_regions(candidate_beds):
     """
-    Parse candidate region BEDs grouped by genome ID inferred from filename.
+    Parse candidate region BEDs grouped by genome ID inferred from filename:
+    {genome_id: [(chrom, start0, end, name)]}, name = the BED name ('' without one).
     """
     regions_by_genome = defaultdict(list)
     for bed in candidate_beds or []:
@@ -256,8 +257,21 @@ def parse_candidate_regions(candidate_beds):
                 except ValueError:
                     continue
                 if end > start:
-                    regions_by_genome[genome_id].append((chrom, start, end))
+                    regions_by_genome[genome_id].append(
+                        (chrom, start, end, p[3] if len(p) > 3 else ""))
     return regions_by_genome
+
+
+# The name cluster_grs.py gives a region that holds a strong neighbourhood of flanking genes
+# (>= strong_synteny_min_flanking HIGH flanking models) and no GOI model (region_class
+# goi_missing_but_strong_synteny): Reg<k>_FLANKonly<N>_C<confidence>_S<score>, after the species
+# and '|' when the species is known.
+STRONG_NO_GOI_REGION_RE = re.compile(r"(?:^|\|)Reg\d+_FLANKonly\d+_")
+
+
+def _is_strong_no_goi_region(region):
+    """A candidate region the region scorer named a strong neighbourhood without a GOI model."""
+    return len(region) > 3 and bool(STRONG_NO_GOI_REGION_RE.search(region[3] or ""))
 
 
 def _match_regions_for_genome(regions_by_genome, genome_id):
@@ -283,7 +297,7 @@ def filter_genes_to_candidate_regions(genes, candidate_regions):
     for g in genes:
         g_start0 = max(0, int(g["start"]) - 1)
         g_end0 = int(g["end"])
-        for chrom, rs, re in candidate_regions:
+        for chrom, rs, re, *_ in candidate_regions:
             if g["chrom"] != chrom:
                 continue
             ov = max(0, min(g_end0, re) - max(g_start0, rs))
@@ -394,7 +408,7 @@ def _format_bp_label(length_bp):
 
 
 def _region_overlaps_gene(region, gene):
-    chrom, rs, re = region
+    chrom, rs, re = region[:3]
     if gene.get("chrom") != chrom:
         return False
     # Candidate BED is 0-based half-open; GFF genes are 1-based closed.
@@ -2233,7 +2247,8 @@ def _track_label_jobs(track, home_products):
     """The on-canvas labels of one track as ``[(gene, text)]``: at most one.
 
     The GOI is named once, on the home track ("★ name"). Another track carries only
-    its copy count ("×N", "+N weak") at its best GOI call (by label, then
+    its copy count ("×N", "+N weak", and "+N elsewhere" for counted calls outside the
+    neighbourhood drawn) at its best GOI call (by label, then
     _model_strength), and nothing when it has a single copy: one rotated name per
     track repeated the same word down the figure, and one per copy of a tandem
     family stacked into an unreadable pile. Every copy stays drawn, with its
@@ -2255,14 +2270,26 @@ def _track_label_jobs(track, home_products):
     goi_genes.sort(key=lambda gr: (gr[1], _confidence_rank(gr[0].get("confidence")),
                                    _model_strength(gr[0])), reverse=True)
     best_gene, best_resolved = goi_genes[0]
-    # "xN" counts gene copies; most extra GOI calls of a genome are weak hits.
-    flags = [c for _, c in _goi_copies_and_weak([g for g, _ in goi_genes], is_home)]
+    # "xN" counts gene copies; most extra GOI calls of a genome are weak hits. "+N elsewhere":
+    # counted calls outside the neighbourhood drawn (_counted_calls_outside_view), which also
+    # take part in the copy rule (the best call of the genome).
+    outside = [] if is_home else list(track.get("goi_outside_view") or [])
+    flags = [c for _, c in _goi_copies_and_weak([g for g, _ in goi_genes] + outside,
+                                                is_home)][:len(goi_genes)]
     n_copies, n_weak = sum(flags), len(flags) - sum(flags)
+    n_elsewhere = len(outside)
     counts = ([f"×{n_copies}"] if n_copies > 1 else []) + \
-             ([f"+{n_weak} weak"] if n_weak else [])
+             ([f"+{n_weak} weak"] if n_weak else []) + \
+             ([f"+{n_elsewhere} elsewhere"] if n_elsewhere else [])
     if is_home:
-        label = _clip_label(_gene_display_label(best_gene, track, home_products,
-                                                True, best_resolved))
+        # The GOI's name: the label of the home gene whose CDS the query hits fall on; without
+        # one (_GOI_FROM_CDS), the GOI's display label, as in the GOI column and the legends: a
+        # home gene that only the span overlap found does not name the GOI (_goi_display_label).
+        if not _GOI_FROM_CDS[0] and _GOI_DISPLAY_LABEL[0]:
+            label = _clip_label(_GOI_DISPLAY_LABEL[0])
+        else:
+            label = _clip_label(_gene_display_label(best_gene, track, home_products,
+                                                    True, best_resolved))
         return [(best_gene, "★ " + " ".join([label] + counts))]
     return [(best_gene, " ".join(counts))] if counts else []
 
@@ -2394,8 +2421,9 @@ def _gene_names_table(rows, x, y, avail_w, args):
                                    lookup_note=_GENE_NAMES_NOTE[0], goi_stroke=GOI_BORDER)
 
 
-def _ribbon_legend_groups(goi_label, low_quality=False):
-    """Legend of the ribbon plot (interactive HTML and its static SVG)."""
+def _ribbon_legend_groups(goi_label, low_quality=False, elsewhere=False):
+    """Legend of the ribbon plot (interactive HTML and its static SVG). `elsewhere`: a track
+    has counted GOI calls outside the neighbourhood drawn ("+N elsewhere")."""
     base = GENE_PALETTE[0]
     stroke = _darken_hex(base, 0.65)
 
@@ -2439,7 +2467,9 @@ def _ribbon_legend_groups(goi_label, low_quality=False):
              "call that needs curation, or no significant match"),
             ("★", "GOI name, on the home row"),
             ("×N", "N copies (the best call and every call of at least medium confidence)"),
-            ("+N weak", "further weak calls; all calls are drawn")]),
+            ("+N weak", "further weak calls; all calls are drawn")]
+            + ([("+N elsewhere", "counted calls outside the neighbourhood drawn; listed in the "
+                                 "anchor grid after //")] if elsewhere else [])),
     ]
 
 
@@ -2590,7 +2620,8 @@ def render_synteny_html(all_tracks, gene_colours,
     # Legend below the plot, then the caption block.
     _legend_svg, _legend_h = _legend_block(
         _ribbon_legend_groups(_goi_display_label(all_tracks),
-                              low_quality=any(_is_low_quality(tr) for tr in all_tracks)),
+                              low_quality=any(_is_low_quality(tr) for tr in all_tracks),
+                              elsewhere=any(tr.get("goi_outside_view") for tr in all_tracks)),
         24, total_h + 6, plot_w - 48)
     total_h += (_legend_h + 22) if _legend_h else 0
     _caption_y0 = total_h
@@ -3360,11 +3391,12 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
                      clade_count=4, gene_legend=True, support_note=None, not_counted=None):
     """Render a horizontal dendrogram of the GOI phylogenetic tree as SVG HTML.
 
-    The tree is midpoint-rooted and split into ``clade_count`` clades by
-    cutting the K−1 longest non-root branches (see
-    ``synvoy_tree.partition_clades``). Each clade gets one distinct colour
-    from the colour-blind-safe ``CLADE_PALETTE``; leaves within the same
-    cut subtree share that colour and so form visually contiguous groups.
+    The tree is midpoint-rooted and split into ``clade_count`` clades from the
+    top (``synvoy_tree.partition_clades``): the clade with the most leaves is
+    split into its children, splits that leave no one-leaf clade first, until
+    there are ``clade_count``; branch lengths are not used. Each clade gets one
+    distinct colour from the colour-blind-safe ``CLADE_PALETTE``; leaves within
+    the same clade share that colour and so form visually contiguous groups.
 
     The legacy per-genome ``goi_genome_colours`` is kept as a fallback for
     leaves that cannot be assigned to a clade (e.g. trees with <2 leaves).
@@ -3393,9 +3425,8 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
     if len(leaves) < 2:
         return
 
-    # Clade partition — leaf name → 0-based clade id. K-longest-branches mode
-    # (default K=4): cuts the K−1 deepest splits near the root so the
-    # rendered colours track the natural major lineages.
+    # Clade partition — leaf name → 0-based clade id: split from the top, the
+    # largest clade first, by topology (branch lengths are not used).
     leaf_clade = _stree.partition_clades(t, target_k=clade_count)
 
     # Assign coordinates via recursive DFS using the rooted tree.
@@ -3577,8 +3608,9 @@ def _render_tree_svg(tree_file, goi_genome_colours, output_path, species_map=Non
                if any(l.name in not_counted for l in leaves) else [])),
         ("Colour", [
             (_lg_dot(_stree.color_for_clade(0), "#333", r=6.0),
-             f"leaves and branches of one clade share a colour; the tree is cut into "
-             f"{n_clades} clade{'s' if n_clades != 1 else ''} at its longest branches")]),
+             f"leaves and branches of one clade share a colour; the tree is split from the "
+             f"root into {n_clades} clade{'s' if n_clades != 1 else ''}, the largest clade "
+             f"first (by topology, not branch length)")]),
     ]
     legend_svg, legend_h = _legend_block(legend_groups, 24, total_h + 4, total_w - 48)
     svg_parts.append('<g class="figure-legend">' + "".join(legend_svg) + '</g>')
@@ -4582,16 +4614,20 @@ def _goi_query_name(all_tracks):
 def _goi_display_label(all_tracks):
     """Label of the GOI column and figure title (e.g. 'Melt'), else 'GOI'.
 
-    The annotated home GOI gene gives the label. Without one, the GOI's name as the target models
-    carry it (SynVoy_Parent GOI_<name>), whole: a name with '.', '_' or more than 12 characters
-    (orf19.1562, 14-3-3epsilon, Ly6e_1) read 'GOI' (fix item 28). Not a name: the home BED's
-    GOI_<chrom>_<start> placeholders (a chromosome name with '|', ctg1|pilon, passed the old test),
-    tandem copies (GOI_copy_<n>), a relative's or a decoy's query alias (~rel, ~rev, ~shuf).
+    The annotated home GOI gene gives the label, but only the gene whose CDS the query hits
+    fall on (_GOI_FROM_CDS, _resolve_home_goi_models). A home gene that only the span overlap
+    found (identify_goi_names: an lncRNA over a curated seed's hit, or a gene that holds the GOI
+    in an intron) does not name the GOI, as on the home row (_preferred_home_label). Without
+    such a gene, the GOI's name as the target models carry it (SynVoy_Parent GOI_<name>),
+    whole: a name with '.', '_' or more than 12 characters (orf19.1562, 14-3-3epsilon, Ly6e_1)
+    read 'GOI' (fix item 28). Not a name: the home BED's GOI_<chrom>_<start> placeholders (a
+    chromosome name with '|', ctg1|pilon, passed the old test), tandem copies (GOI_copy_<n>), a
+    relative's or a decoy's query alias (~rel, ~rev, ~shuf).
     """
     cand = _goi_name_counts(all_tracks)
     home_goi = [g for g in (all_tracks[0].get("genes", []) if all_tracks else [])
                 if is_goi(g.get("name", "") or "") and _named(g.get("name"))]
-    if home_goi:
+    if home_goi and _GOI_FROM_CDS[0]:
         # Several annotated genes under the query hits: the one the target models
         # are named after, else the first in genomic order.
         top = cand.most_common(1)[0][0] if cand else ""
@@ -5148,15 +5184,20 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
             g = entry["best"]
             gs, ge = _get_coords(g)
             is_g = (key == goi_key)
-            n_here, n_weak = entry["n"], 0
+            n_here, n_weak, n_out = entry["n"], 0, 0
             if is_g:      # copies, not every call: most extra GOI calls are weak hits
-                flags = [c for _, c in _goi_copies_and_weak(entry["genes"])]
-                n_here, n_weak = sum(flags), len(flags) - sum(flags)
+                # counted calls outside the neighbourhood drawn take part in the copy rule
+                # and are named in the tooltip only
+                outside = list(row_tracks[ri].get("goi_outside_view") or [])
+                flags = [c for _, c in _goi_copies_and_weak(entry["genes"] + outside)][
+                    :len(entry["genes"])]
+                n_here, n_weak, n_out = sum(flags), len(flags) - sum(flags), len(outside)
             pts.append({"x": (gs + ge) / 2.0, "gx": (g["start"] + g["end"]) / 2.0, "key": key,
                         "colour": GOI_COLOUR if is_g else anchor_colour.get(key, UNMATCHED_CLR),
                         "is_goi": is_g, "ident": g.get("identity", 0.0),
                         "conf": (g.get("confidence") or "").upper(),
                         "strand": g.get("strand", "+"), "n": n_here, "weak": n_weak,
+                        "elsewhere": n_out,
                         "label": anchor_label.get(key, key) if not is_g else goi_label,
                         "chrom": g.get("chrom", "")})
         return pts
@@ -5315,7 +5356,9 @@ def render_anchor_grid_positional(all_tracks, gene_colours, goi_genome_colours,
                       + (f', {conf}' if conf else '')
                       + (', inverted' if inverted else '')
                       + (f', {p["n"]} copies' if p["n"] > 1 else '')
-                      + (f', {p["weak"]} weak call(s)' if p.get("weak") else '')))
+                      + (f', {p["weak"]} weak call(s)' if p.get("weak") else '')
+                      + (f', {p["elsewhere"]} counted call(s) outside this neighbourhood '
+                         f'(anchor grid)' if p.get("elsewhere") else '')))
             g = [f'<title>{_svg_esc(tip)}</title>']
             if p["is_goi"]:
                 r = GOI_R
@@ -5619,9 +5662,13 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     row's chromosome label falls back to the first one). In order: the row's models
     (parse_target_gff), the GOI cap steering the choice (_cap_goi_genes); the models inside
     this genome's CLUSTER_REGIONS regions (--candidate_beds), narrowed to the regions with a
-    GOI model when those keep enough flanking context; a GOI-centred window when the regions
-    miss every GOI model; on a chromosome-level assembly, the GOI chromosomes with flanking support plus
-    every chromosome with >= 3 flanking genes; then the capped GOI models inside that view. Taken
+    GOI model and the strong neighbourhoods without one (_is_strong_no_goi_region) when the
+    GOI regions keep enough flanking context, with a console line naming every region left
+    out that holds a model; a GOI-centred window when the regions miss every GOI model; when
+    the models lie on 20 sequences or fewer, the GOI sequences with flanking support, every
+    sequence with >= 3 flanking genes and every sequence that holds a flanking gene placed on
+    none of those; then the capped GOI models inside that view. The counted calls the view
+    leaves out are listed by _counted_calls_outside_view. Taken
     out of _run_figures unchanged (2026-10-19), so scripts/compare_plot_selection.py reads
     today's choice from the same code; it prints its choices as before. A step meant to take the
     richest search block when the regions gave two genes or fewer read the block number from the
@@ -5640,9 +5687,33 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
     if goi_candidate_regions:
         goi_only_genes = filter_genes_to_candidate_regions(genes_all, goi_candidate_regions)
         if len(goi_only_genes) >= max(3, len(genes) * 0.5):
-            # GOI regions contain enough flanking context — use them.
-            genes = goi_only_genes
-            candidate_regions = goi_candidate_regions
+            # GOI regions contain enough flanking context — use them, together with every
+            # region the region scorer named a strong neighbourhood without a GOI model
+            # (Reg<k>_FLANKonly<N>_...): a homeolog or segmental copy that lost the gene, or
+            # the orthologous neighbourhood whose GOI was too divergent to model.
+            strong = [r for r in candidate_regions
+                      if r not in goi_candidate_regions and _is_strong_no_goi_region(r)]
+            keep = [r for r in candidate_regions if r in goi_candidate_regions or r in strong]
+            genes = (filter_genes_to_candidate_regions(genes_all, keep) if strong
+                     else goi_only_genes)
+            # The regions left out that hold a model (with the GOI models below the cap)
+            left_out = [(r, len(filter_genes_to_candidate_regions(genes_all, [r])),
+                         len(filter_genes_to_candidate_regions(capped_goi, [r])))
+                        for r in candidate_regions if r not in keep]
+            left_out = [(r, n, k) for r, n, k in left_out if n + k]
+            candidate_regions = keep
+            if left_out:
+                def _where(r, n, k):
+                    name = (r[3] if len(r) > 3 else "").split("|")[-1]
+                    m = n + k
+                    return (f"{name + ' ' if name else ''}{r[0]}:{r[1] + 1}-{r[2]} "
+                            f"({m} model{'' if m == 1 else 's'}"
+                            + (f", incl. {k} GOI model{'' if k == 1 else 's'} below the GOI cap"
+                               if k else "") + ")")
+                print(f"[plot] {genome_id}: kept the {len(keep) - len(strong)} region(s) with a "
+                      f"GOI model"
+                      + (f" and {len(strong)} strong neighbourhood(s) without one" if strong else "")
+                      + f"; left out {', '.join(_where(*x) for x in left_out)}")
         else:
             # GOI is isolated from flanking genes; keep ALL candidate
             # regions so flanking context is preserved.
@@ -5697,7 +5768,7 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
             ]
             print(
                 f"[plot] {genome_id}: dropped {n_dropped} unsupported GOI "
-                f"hits on {unsupported_goi_chroms} (no flanking genes = "
+                f"hits on {', '.join(sorted(unsupported_goi_chroms))} (no flanking genes = "
                 f"no synteny evidence)"
             )
             # Refresh GOI chroms after drop
@@ -5709,11 +5780,28 @@ def select_target_genes(gff_file, genome_id, candidate_regions_by_genome, flank_
             if cnt >= 3:
                 important_chroms.add(ch)
 
+        # The count above is of the sequences that hold models, not of the assembly: a
+        # fragmented assembly whose neighbourhood lies on few contigs comes here too. A
+        # sequence that holds a home flanking gene placed on no kept sequence is kept as well
+        # (most flanking genes first, then by name), so every placed neighbour stays in the
+        # row; a sequence that only repeats neighbours placed on a kept one (paralog hits)
+        # is still dropped.
+        def _flank_ids(ch):
+            return {g.get("home_gene_id") for g in genes
+                    if g["chrom"] == ch and not _is_goi_target_gene(g) and g.get("home_gene_id")}
+        held = set().union(*(_flank_ids(ch) for ch in important_chroms))
+        for ch in sorted((c for c in chrom_flank_counts if c not in important_chroms),
+                         key=lambda c: (-chrom_flank_counts[c], c)):
+            ids = _flank_ids(ch)
+            if ids - held:
+                important_chroms.add(ch)
+                held |= ids
+
         # Only filter if we'd still have enough genes
         filtered = [g for g in genes if g["chrom"] in important_chroms]
         if len(filtered) >= len(genes) * 0.3 or len(important_chroms) <= 3:
             if len(filtered) < len(genes):
-                dropped_chroms = {g["chrom"] for g in genes} - important_chroms
+                dropped_chroms = ", ".join(sorted({g["chrom"] for g in genes} - important_chroms))
                 print(
                     f"[plot] {genome_id}: keeping {len(important_chroms)} informative "
                     f"chromosomes ({len(filtered)} genes), dropped {dropped_chroms}"
@@ -5913,6 +6001,30 @@ def select_target_genes_by_blocks(gff_file, genome_id, choice):
     return genes, choice.spans
 
 
+def _counted_calls_outside_view(gff_file, genes):
+    """The row's counted GOI calls (HIGH or MEDIUM, _is_resolved_goi_target_gene) that the
+    chosen view `genes` leaves out, each as a copy marked ``outside_view``.
+
+    The view of a row is chosen for its neighbourhood: the GOI cap steers it
+    (_cap_goi_genes), a region whose GOI models fell below the cap is narrowed away, and a
+    GOI on a sequence without flanking genes is dropped when another GOI sequence has them
+    (select_target_genes). The anchor grid lists these calls after '//' and the ribbon plot
+    counts them ('+N elsewhere'), so no counted call is missing from the figures. The row's
+    GFF is parsed as for the view (fragments hidden in the default figures, overlap dedup,
+    no cap); its console lines and fragment count are not repeated.
+    """
+    count = _HIDDEN_FRAGMENT_COUNT[0]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            parsed = parse_target_gff(gff_file, cap=False)
+    finally:
+        _HIDDEN_FRAGMENT_COUNT[0] = count
+    drawn = {(g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) for g in genes}
+    return [dict(g, outside_view=True) for g in parsed
+            if _is_resolved_goi_target_gene(g)
+            and (g.get("gff_id", ""), g["chrom"], g["start"], g["end"]) not in drawn]
+
+
 def _run_figures(args, show_fragments=False, suffix=""):
     """Build the tracks and write every figure for one fragment-display variant.
 
@@ -6089,6 +6201,10 @@ def _run_figures(args, show_fragments=False, suffix=""):
         else:
             genes, candidate_regions = select_target_genes(
                 gff_file, genome_id, candidate_regions_by_genome, args.flank_fallback_bp)
+        outside_view = _counted_calls_outside_view(gff_file, genes)
+        if outside_view:
+            print(f"[plot] {genome_id}: {len(outside_view)} counted GOI call(s) outside the "
+                  f"neighbourhood drawn: listed in the anchor grid after //")
 
         # Don't skip target track if there are no genes found; we want to show it's empty
         genes.sort(key=lambda g: g["start"])
@@ -6114,6 +6230,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "species":      species,
             "genes":        genes,
             "chrom":        target_chrom,
+            "goi_outside_view": outside_view,
         })
 
     # Order targets by phylogenetic distance (if tree available), else alphabetically by species name
@@ -6129,7 +6246,9 @@ def _run_figures(args, show_fragments=False, suffix=""):
         target_tracks.sort(key=lambda t: t["display_name"])
 
     for tt in target_tracks:
-        tt["goi_status"] = _track_goi_status({"genes": tt.get("genes", [])})
+        # A counted call outside the drawn neighbourhood counts too: such a genome has the gene.
+        tt["goi_status"] = _track_goi_status(
+            {"genes": tt.get("genes", []) + tt.get("goi_outside_view", [])})
     target_tracks = _absent_tracks_last(target_tracks)
 
     hidden_absent_tracks = 0
@@ -6177,6 +6296,7 @@ def _run_figures(args, show_fragments=False, suffix=""):
             "is_home":      False,
             "genome_id":    tt["genome_id"],
             "goi_status":   tt.get("goi_status", _track_goi_status({"genes": genes})),
+            "goi_outside_view": tt.get("goi_outside_view", []),
         })
 
     all_tracks = []
