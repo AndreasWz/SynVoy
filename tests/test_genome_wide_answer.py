@@ -2,7 +2,9 @@
 hit outside every searched GOI zone one answer when the judge's HIGH terms hold in the genome
 place -- E <= 1e-6 over the genome, >= 0.7 of the query covered by the hits' HSPs, no real
 competitor within 10 bits -- and the model there is judged HIGH, has no exon across a home exon
-junction (no retrocopy; an exon long enough to hold a read-through intron there does not count)
+junction (no retrocopy; an exon long enough to hold a read-through intron there does not count;
+the junctions of an annotated home gene, or of a miniprot home model with canonical splice sites;
+a candidate the test did not run on is no answer unless the home gene model has one exon)
 and is not frame-broken without an intron. It is written as MEDIUM with its own class
 (genome_wide_strong_hit), never seeds, never enters the tree, and the report keeps it out of the
 counted calls: one per genome, only where nothing is counted. Its decoys are searched in the
@@ -119,6 +121,54 @@ def test_with_core_completeness_the_core_coverage_counts(monkeypatch):
 def test_home_exon_junctions_are_the_last_residues_of_all_exons_but_the_last():
     assert isr.home_exon_junctions([17, 39, 73]) == [17, 56]
     assert isr.home_exon_junctions([120]) == [] and isr.home_exon_junctions([]) == []
+
+
+def _home_info(path, method, lengths, sites=None, copies=0):
+    """A goi_info.json of ANNOTATE_GOI: one exon per length, ``sites`` (donor, acceptor) per exon
+    (canonical GT/AG by default), ``copies`` tandem-copy records behind them."""
+    sites = sites or [("GT", "AG")] * len(lengths)
+    exons = [{"id": f"GOI_x|exon_{i}", "exon_num": i, "length_aa": n, "splice_donor": d,
+              "splice_acceptor": a} for i, (n, (d, a)) in enumerate(zip(lengths, sites), 1)]
+    exons += [{"id": f"GOI_copy_{k}", "exon_num": len(lengths) + k, "length_aa": 90, "splice_donor": None,
+               "splice_acceptor": None} for k in range(1, copies + 1)]
+    path.write_text(json.dumps({"method": method, "exons": exons}))
+    return str(path)
+
+
+def _home_terms(path):
+    """The retrocopy test's terms as main() sets them from a goi_info.json."""
+    method, lengths = isr.read_home_exons(path)
+    junctions, single = isr.home_junction_terms(method, lengths, isr.read_home_splice_sites(path))
+    return {"home_goi_junctions": junctions, "home_goi_single_exon": single}
+
+
+def test_which_home_gene_models_give_the_retrocopy_test_its_junctions(tmp_path):
+    """F1 (laptop gate of 18 Nov 2026): only an annotated home gene (gff_annotation) gave the
+    junctions, so without a home GFF the test never ran. A miniprot home model (hit_annotation, or
+    tandem_duplication with its main model) gives them when every exon-exon boundary has
+    canonical splice sites: the donor of the exon before it GT or GC, the acceptor after it AG.
+    The outer sites (exon 1's acceptor, the last exon's donor) are no junction's."""
+    p = tmp_path / "goi_info.json"
+    outer = [("GT", "CC"), ("GC", "AG"), ("GA", "AG")]
+    assert isr.read_home_splice_sites(_home_info(p, "hit_annotation", [40, 120, 90], outer)) == outer
+    assert _home_terms(str(p)) == {"home_goi_junctions": [40, 160], "home_goi_single_exon": False}
+    assert _home_terms(_home_info(p, "tandem_duplication", [40, 120, 90], copies=2))["home_goi_junctions"] == [40, 160]
+    for bad in ([("AT", "AG"), ("GT", "AG"), ("GT", "AG")],         # exon 1's donor
+                [("GT", "AG"), ("GT", "AC"), ("GT", "AG")],         # exon 2's acceptor
+                [("GT", "AG"), ("GT", "AG"), ("GT", None)]):        # exon 3's acceptor unknown
+        assert _home_terms(_home_info(p, "hit_annotation", [40, 120, 90], bad)) == {
+            "home_goi_junctions": [], "home_goi_single_exon": False}
+    # an annotated gene: its junctions whatever its sites (the GFF draws the exons)
+    assert _home_terms(_home_info(p, "gff_annotation", [40, 120, 90], [("GT", None), ("GT", "TT"),
+                                                                       (None, "AG")]))["home_goi_junctions"] == [40, 160]
+    # one exon: nothing to test; no model or no file: no junctions and not one exon
+    for method in ("gff_annotation", "hit_annotation", "tandem_duplication"):
+        assert _home_terms(_home_info(p, method, [300], [(None, None)])) == {
+            "home_goi_junctions": [], "home_goi_single_exon": True}
+    assert _home_terms(_home_info(p, "full_protein_only", [])) == {
+        "home_goi_junctions": [], "home_goi_single_exon": False}
+    assert _home_terms(str(tmp_path / "missing.json")) == {"home_goi_junctions": [], "home_goi_single_exon": False}
+    assert isr.read_home_splice_sites(str(tmp_path / "missing.json")) == [] and isr.read_home_splice_sites(None) == []
 
 
 def test_a_piece_spans_a_junction_with_ten_residues_on_each_side():
@@ -309,29 +359,54 @@ def _cand(start, end, label="HIGH", basis="significant_specific", extra="", cds=
 
 
 def test_the_window_keeps_its_best_answer_only():
+    # a one-exon home gene: no retrocopy test, so these candidates without one can be answers
     best, second = _cand(1001, 2000, rank=(0,)), _cand(5001, 6000, rank=(1,))
-    kept, dropped = isr.genome_wide_keep([second, best])
+    kept, dropped = isr.genome_wide_keep([second, best], single_exon_home=True)
     assert kept == [best] and dropped == [(second, "second_in_window")]
 
 
 def test_what_is_no_answer():
+    one = {"single_exon_home": True}            # no retrocopy test needed (see the next test)
     medium = _cand(1001, 2000, label="MEDIUM")
     retro = _cand(3001, 4000, extra=";RetrocopyCandidate=1")
     broken_no_intron = _cand(5001, 6000, extra=";FrameBroken=1", cds=[(5001, 5500), (5511, 6000)])
     broken_intron = _cand(7001, 8000, extra=";FrameBroken=1", cds=[(7001, 7300), (7501, 8000)])
     for c, reason in ((medium, "judge_not_high"), (retro, "retrocopy_cds"),
                       (broken_no_intron, "frame_broken_no_intron")):
-        assert isr.genome_wide_drop_reason(c) == reason
-    assert isr.genome_wide_drop_reason(broken_intron) is None
+        assert isr.genome_wide_drop_reason(c, **one) == reason
+    assert isr.genome_wide_drop_reason(broken_intron, **one) is None
     assert isr.genome_wide_drop_reason(_cand(1001, 2000, extra=";RetrocopyCandidate=0")) is None
     index = isr.intervals_by_chrom([("c1", 1500, 1600)])
-    assert isr.genome_wide_drop_reason(_cand(1001, 2000), index) == "overlaps_record"
-    assert isr.genome_wide_drop_reason(_cand(1601, 2000), index) is None
-    kept, dropped = isr.genome_wide_keep([medium, retro, broken_no_intron, broken_intron])
+    assert isr.genome_wide_drop_reason(_cand(1001, 2000), index, **one) == "overlaps_record"
+    assert isr.genome_wide_drop_reason(_cand(1601, 2000), index, **one) is None
+    kept, dropped = isr.genome_wide_keep([medium, retro, broken_no_intron, broken_intron], **one)
     assert kept == [broken_intron] and [r for _c, r in dropped] == [
         "judge_not_high", "retrocopy_cds", "frame_broken_no_intron"]
     assert {r for _c, r in dropped} <= set(isr.GENOME_WIDE_MODEL_DECISIONS)
     assert isr.genome_wide_keep([]) == ([], [])
+
+
+def test_a_candidate_the_retrocopy_test_did_not_run_on_is_no_answer():
+    """F1 (laptop gate of 18 Nov 2026): a candidate without RetrocopyCandidate was an answer, so
+    where the test could not run (no known junctions, or a model it cannot read) a retrocopy
+    could be one. Now it is retrocopy_untested, unless the home gene model has one exon."""
+    untested = _cand(1001, 2000)                                   # no RetrocopyCandidate
+    assert isr.genome_wide_drop_reason(untested) == "retrocopy_untested"
+    assert isr.genome_wide_drop_reason(untested, single_exon_home=True) is None
+    assert isr.genome_wide_drop_reason(_cand(1001, 2000, extra=";RetrocopyCandidate=0")) is None
+    for single in (False, True):
+        assert isr.genome_wide_drop_reason(_cand(1001, 2000, extra=";RetrocopyCandidate=1"),
+                                           single_exon_home=single) == "retrocopy_cds"
+    # the judge's label comes first, the retrocopy test before the frame and the written rows
+    assert isr.genome_wide_drop_reason(_cand(1001, 2000, label="MEDIUM")) == "judge_not_high"
+    broken = _cand(5001, 6000, extra=";FrameBroken=1", cds=[(5001, 5500), (5511, 6000)])
+    assert isr.genome_wide_drop_reason(broken) == "retrocopy_untested"
+    index = isr.intervals_by_chrom([("c1", 1500, 1600)])
+    assert isr.genome_wide_drop_reason(untested, index) == "retrocopy_untested"
+    tested = _cand(5001, 6000, extra=";RetrocopyCandidate=0", rank=(1,))
+    kept, dropped = isr.genome_wide_keep([_cand(1001, 2000, rank=(0,)), tested])
+    assert kept == [tested] and [r for _c, r in dropped] == ["retrocopy_untested"]
+    assert "retrocopy_untested" in isr.GENOME_WIDE_MODEL_DECISIONS
 
 
 def _model_cand(exons, model_parent="GOI_q", parent="GOI_q"):
@@ -443,7 +518,8 @@ DB = {"GOI_x": {"id": "GOI_x", "seq": "M" * 300, "header": "GOI_x"}}
 
 def test_a_genome_wide_window_writes_its_answer_with_the_marks(tmp_path, monkeypatch):
     _stub_window(monkeypatch, [_hit(1, 280)])
-    args = _window_args(tmp_path)
+    # a one-exon home gene, so the window's hit chain needs no retrocopy test to be an answer
+    args = _window_args(tmp_path, home_goi_single_exon=True)
     _genes, gff = isr.process_region_block(5000, _gw_block(), [], {"c1": "ATG" * 30_000}, DB, "G.fna",
                                            args, "u", 1)
     rows = [ln for ln in gff if ln.split("\t")[2] in ("mRNA", "gene") and "SynVoyRole=goi" in ln]
@@ -490,6 +566,98 @@ def test_the_window_flags_a_retrocopy_on_its_model_not_on_its_hits(tmp_path, mon
         rows = [ln for ln in gff if ln.split("\t")[2] == "mRNA" and "SynVoyRole=goi" in ln]
         assert len(rows) == 1 and ";RetrocopyCandidate=0" in rows[0]
         assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
+
+
+def _one_exon_model(*a, **k):
+    """A miniprot model of the 300-aa query with one exon across both home junctions (120, 220)."""
+    return [([{"qstart": 1, "qend": 300, "gstart": 1_000, "gend": 1_900, "strand": "+", "pident": 85.0,
+               "seq": "M" * 300, "phase": 0}], "M" * 300)]
+
+
+def _run_gw_window(tmp_path, args, block=None, number=5000):
+    _genes, gff = isr.process_region_block(number, block or _gw_block(), [], {"c1": "ATG" * 30_000}, DB,
+                                           "G.fna", args, "u", 1)
+    return gff
+
+
+@pytest.mark.parametrize("structure, outcome", [("intron", "answer"), ("one_exon", "retrocopy_cds")])
+def test_a_miniprot_home_model_gives_the_window_its_retrocopy_test(tmp_path, monkeypatch, structure, outcome):
+    """F1 (laptop gate of 18 Nov 2026): without a home GFF an intronless retrocopy of a three-exon
+    home gene became an answer, because the junctions of the miniprot home model (hit_annotation)
+    were never read. With canonical splice sites at its junctions they are: one exon across both
+    junctions -> retrocopy_cds, no answer; an intron at each junction -> RetrocopyCandidate=0."""
+    terms = _home_terms(_home_info(tmp_path / "goi_info.json", "hit_annotation", [120, 100, 80]))
+    assert terms == {"home_goi_junctions": [120, 220], "home_goi_single_exon": False}
+    if structure == "intron":
+        _stub_window(monkeypatch, [_hit(1, 120, start=1_000), _hit(121, 220, start=1_900),
+                                   _hit(221, 300, start=2_600)])
+        monkeypatch.setattr(isr, "annotate_models_from_hit_list", _three_exon_model)
+    else:
+        _stub_window(monkeypatch, [_hit(1, 300, start=1_000)])
+        monkeypatch.setattr(isr, "annotate_models_from_hit_list", _one_exon_model)
+    args = _window_args(tmp_path, **terms)
+    gff = _run_gw_window(tmp_path, args)
+    assert args.genome_ctx["genome_wide_outcome"] == {5000: outcome}
+    if outcome == "answer":
+        rows = [ln for ln in gff if ln.split("\t")[2] == "mRNA" and "SynVoyRole=goi" in ln]
+        assert len(rows) == 1 and ";RetrocopyCandidate=0" in rows[0]
+    else:
+        assert gff == [] and args.genome_ctx["genome_wide_dropped"] == {"retrocopy_cds": 1}
+
+
+def test_a_hit_chain_under_a_multi_exon_home_gene_is_no_answer(tmp_path, monkeypatch):
+    """F1: the test reads a candidate's own miniprot exons, and a hit chain has none. It was the
+    answer, untested; now the window has none (retrocopy_untested)."""
+    _stub_window(monkeypatch, [_hit(1, 280)])                       # miniprot finds no model
+    args = _window_args(tmp_path, home_goi_junctions=[120, 220], home_goi_single_exon=False)
+    gff = _run_gw_window(tmp_path, args)
+    assert gff == [] and args.genome_ctx["genome_wide_outcome"] == {5000: "retrocopy_untested"}
+    assert args.genome_ctx["genome_wide_dropped"] == {"retrocopy_untested": 1}
+
+
+def test_without_known_junctions_a_multi_exon_home_gene_gives_no_answer(tmp_path, monkeypatch):
+    """F1: a three-exon miniprot home model with a non-canonical site at one junction gives no
+    junctions, so no candidate can be tested: not even a model with an intron at each junction is
+    an answer (the strict rule's cost)."""
+    terms = _home_terms(_home_info(tmp_path / "goi_info.json", "hit_annotation", [120, 100, 80],
+                                   [("GT", "AG"), ("CT", "AG"), ("GT", "AG")]))
+    assert terms == {"home_goi_junctions": [], "home_goi_single_exon": False}
+    _stub_window(monkeypatch, [_hit(1, 120, start=1_000), _hit(121, 220, start=1_900), _hit(221, 300, start=2_600)])
+    monkeypatch.setattr(isr, "annotate_models_from_hit_list", _three_exon_model)
+    args = _window_args(tmp_path, **terms)
+    gff = _run_gw_window(tmp_path, args)
+    assert gff == [] and args.genome_ctx["genome_wide_outcome"] == {5000: "retrocopy_untested"}
+
+
+@pytest.mark.parametrize("method", ["gff_annotation", "hit_annotation"])
+def test_a_single_exon_home_gene_gives_an_answer_as_before(tmp_path, monkeypatch, method):
+    """With a one-exon home gene model there is no junction to test: the window's hit chain is
+    its answer, without RetrocopyCandidate, as before F1."""
+    terms = _home_terms(_home_info(tmp_path / "goi_info.json", method, [300]))
+    assert terms == {"home_goi_junctions": [], "home_goi_single_exon": True}
+    _stub_window(monkeypatch, [_hit(1, 280)])
+    args = _window_args(tmp_path, **terms)
+    gff = _run_gw_window(tmp_path, args)
+    rows = [ln for ln in gff if ln.split("\t")[2] in ("mRNA", "gene") and "SynVoyRole=goi" in ln]
+    assert len(rows) == 1 and "RetrocopyCandidate" not in rows[0] and ";GenomeWide=1" in rows[0]
+    assert args.genome_ctx["genome_wide_outcome"] == {5000: "answer"}
+
+
+def test_a_decoy_of_the_decoy_pass_follows_the_same_rule(tmp_path, monkeypatch):
+    """F1: a window of the genome-wide path's decoy pass is kept by the same rule as a real one
+    (_keep_genome_wide): its hit chain is no answer under a multi-exon home gene, and is one under
+    a one-exon home gene. Its drops are not counted with the real candidates'."""
+    decoy = {"id": "GOI_x~rev", "seq": ("M" * 300)[::-1]}
+    for single, outcome, answers in ((False, "retrocopy_untested", 0), (True, "answer", 1)):
+        _stub_window(monkeypatch, [_hit(1, 280)])
+        args = _window_args(tmp_path, decoy_mode=True, home_goi_junctions=[] if single else [120, 220],
+                            home_goi_single_exon=single)
+        gff = _run_gw_window(tmp_path, args, _gw_block(decoy_case="GOI_x~rev", decoy_query=decoy), 5001)
+        assert gff == []                                            # a decoy never reaches the result
+        assert args.genome_ctx["genome_wide_outcome"] == {5001: outcome}, single
+        rows = [ln for ln in args.genome_ctx["decoy_lines"] if ln.split("\t")[2] in ("mRNA", "gene")]
+        assert len(rows) == answers and all("SynVoy_Parent=GOI_x~rev" in ln for ln in rows)
+        assert "genome_wide_dropped" not in args.genome_ctx
 
 
 def test_the_read_through_of_an_exon_leaves_out_the_terminal_walk():
@@ -629,7 +797,7 @@ def test_a_genome_wide_window_without_an_answer_writes_nothing(tmp_path, monkeyp
 def test_a_window_of_the_decoy_pass_searches_its_decoy_alone(tmp_path, monkeypatch):
     seen = []
     _stub_window(monkeypatch, [_hit(1, 280)], seen=seen)
-    args = _window_args(tmp_path, decoy_mode=True)
+    args = _window_args(tmp_path, decoy_mode=True, home_goi_single_exon=True)   # a one-exon home gene
     decoy = {"id": "GOI_x~rev", "seq": ("M" * 300)[::-1]}
     block = _gw_block(decoy_case="GOI_x~rev", decoy_query=decoy)
     _genes, gff = isr.process_region_block(5001, block, [], {"c1": "ATG" * 30_000}, DB, "G.fna", args, "u", 1)

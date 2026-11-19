@@ -1266,14 +1266,19 @@ genome that has the home proteome, with or without a block, after its windows:
   without the flanking pass, its
   candidates judged in the genome place (no multiplier);
 - a candidate is an answer when the judge labels it HIGH there, no exon of its own gene model
-  covers an exon junction of an annotated home gene of ≥ 2 exons with 10 residues on each side
-  (`RetrocopyCandidate=1`: the target encodes both exons without an intron, as a retrocopy does;
-  the test reads the model's miniprot exons only, so a hit chain, a tandem copy and a relative's
-  model rebased onto the home protein carry no `RetrocopyCandidate`), it is not frame-broken
-  without an intron (`FrameBroken=1` with every gap between its CDS rows shorter than 40 bp:
-  miniprot can split a frameshifted copy into two pieces a few bp apart), and it overlaps no
-  model written before. A window keeps its best answer and writes nothing else, so the step
-  adds no LOW row and no call that needs curation;
+  covers an exon junction of the home gene model with 10 residues on each side
+  (`RetrocopyCandidate=1`: the target encodes both exons without an intron, as a retrocopy does),
+  it is not frame-broken without an intron (`FrameBroken=1` with every gap between its CDS rows
+  shorter than 40 bp: miniprot can split a frameshifted copy into two pieces a few bp apart), and
+  it overlaps no model written before. The junctions are those of a home gene model of ≥ 2 exons
+  (§5.6): the annotated gene, or the miniprot model when every exon-exon boundary has canonical
+  splice sites (the donor of the exon before it GT or GC, the acceptor of the exon after it AG).
+  The test reads the candidate's miniprot exons only, so a hit chain, a tandem copy and a
+  relative's model rebased onto the home protein carry no `RetrocopyCandidate`. A candidate
+  the test did not run on (no known junctions, or such a model) is no answer
+  (`retrocopy_untested`), unless the home gene model has one exon: there is no junction to
+  test. A window keeps its best answer and writes nothing else, so the step adds no LOW row
+  and no call that needs curation;
 - an exon across junctions whose CDS is at least 30 nt per junction longer than 3 × its aligned
   query span is taken to hold an intron at each, read as coding, and does not count as crossing
   them: miniprot aligns a short intron that is a multiple of 3 and free of stops as an insertion
@@ -1292,7 +1297,7 @@ genome that has the home proteome, with or without a block, after its windows:
 
 An answer is written as MEDIUM (no synteny supports it), `GOIClass=genome_wide_strong_hit`,
 `Basis=significant_specific`, with `GenomeWide=1`, `GenomeWideCoverage` (the place's union
-coverage), `RetrocopyCandidate=0` where the test applies, `NeighbourMedianIdentity` and, inside a
+coverage), `RetrocopyCandidate=0` (absent only with a one-exon home gene model), `NeighbourMedianIdentity` and, inside a
 block's searched window, `NearBlock` (that block's number). `NeighbourMedianIdentity` is the
 median identity of the flanking genes' best hits in the genome, recorded for the curator and never
 a test: it has no stated false-call rate, flanking genes are the conserved anchors and so do not

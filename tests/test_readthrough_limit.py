@@ -6,7 +6,8 @@ candidate (RetrocopyCandidate=1, no answer), unless the exon's CDS is READTHROUG
 intron that is a multiple of 3 and free of stops as coding. The excess is counted, not located, so
 an exon across two junctions is excused by 60 nt wherever they lie, also when they are one
 read-through intron next to a junction whose intron was lost. Every text that describes the test
-says so. All synthetic."""
+says so, and every text that says when it runs names the miniprot home model with canonical
+splice sites and the candidate it did not run on (retrocopy_untested). All synthetic."""
 import ast
 import os
 import re
@@ -91,3 +92,30 @@ def test_every_description_of_the_retrocopy_test_names_the_read_through_rule_and
         assert "retrocop" in text, where
         assert re.search(r"read as coding|read-through", text), where
         assert limit.search(text), (where, text)
+
+
+def test_every_statement_of_when_the_retrocopy_test_runs_names_the_untested_rule():
+    """F1 (laptop gate of 18 Nov 2026): the test ran only with an annotated home gene, and a
+    candidate it did not run on could be an answer. The texts that say when it runs name the
+    miniprot home model with canonical splice sites, retrocopy_untested and the one-exon case; the
+    removed parameter's row no longer says that the test is always on."""
+    def read(*parts):
+        return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
+    texts = _texts()
+    runner = read("bin", "iterative_search_runner.py")
+    statements = {
+        "ALGORITHM.md 7.11": texts["ALGORITHM.md 7.11"],
+        "OUTPUT.md RetrocopyCandidate": texts["OUTPUT.md RetrocopyCandidate"],
+        "PARAMETERS.md goi_genome_wide_path": texts["PARAMETERS.md goi_genome_wide_path"],
+        "runner comment": _between(runner, "# FINAL step 5 (--goi_genome_wide_path)", "GENOME_WIDE_COLUMNS = "),
+        "CHANGELOG": next(line for line in read("CHANGELOG.md").splitlines()
+                          if line.startswith("- **A strong hit without synteny")),
+    }
+    for where, text in statements.items():
+        text = _norm(text)
+        assert "retrocopy_untested" in text, where
+        assert "canonical splice sites" in text, where
+        assert "one exon" in text, where
+    removed = next(line for line in read("docs", "PARAMETERS.md").splitlines()
+                   if line.startswith("| `goi_genome_wide_without_blocks` |"))
+    assert "always on" not in removed

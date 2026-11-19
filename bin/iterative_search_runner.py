@@ -1117,6 +1117,23 @@ def read_home_exons(goi_info_path) -> Tuple[Optional[str], List[int]]:
         return None, []
 
 
+def read_home_splice_sites(goi_info_path) -> List[Tuple[str, str]]:
+    """``(splice_donor, splice_acceptor)`` of each exon that :func:`read_home_exons` reads, in
+    the same order ('' where goi_info.json gives none); [] without the file. Read only by the
+    genome-wide path's retrocopy test (home_junction_terms)."""
+    if not goi_info_path:
+        return []
+    try:
+        with open(goi_info_path) as fh:
+            info = json.load(fh)
+        exons = [e for e in (info.get("exons") or []) if not str(e.get("id", "")).startswith("GOI_copy_")]
+        exons.sort(key=lambda e: int(e.get("exon_num", 0) or 0))
+        return [(str(e.get("splice_donor") or "").upper(), str(e.get("splice_acceptor") or "").upper())
+                for e in exons]
+    except (OSError, TypeError, ValueError, AttributeError):
+        return []
+
+
 def home_exon_terms(method, lengths):
     """``(exon count, structure)`` of the home gene from :func:`read_home_exons`. The count
     (ExonsKept) is unknown when ANNOTATE_GOI built no gene model (tandem_duplication /
@@ -6119,9 +6136,10 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
     if genome_wide:
         # The genome-wide path's origin flag (FINAL step 5): the rules below and the report are
         # keyed on it, not on Place=genome, which hull models and weak blocks' candidates share;
-        # with the junction test of an annotated multi-exon home gene on the model's own exons
-        # (RetrocopyCandidate), the place's coverage, the genome's median neighbour identity and
-        # NearBlock. Decoys of the decoy pass carry the same.
+        # with the junction test of a multi-exon home gene model on the model's own exons
+        # (RetrocopyCandidate; home_junction_terms), the place's coverage, the genome's median
+        # neighbour identity and NearBlock. Decoys of the decoy pass carry the same, and both
+        # are kept by the same rule (_keep_genome_wide).
         mark_genome_wide_candidates(raw_candidates, _gw_junctions, block.get('place_attrs') or {})
         mark_genome_wide_candidates(decoy_candidates, _gw_junctions, block.get('place_attrs') or {})
     # A block the dispersed-GOI rescue seeded: its GOI models outside every GOI zone of the
@@ -6184,12 +6202,14 @@ def process_region_block(block_idx, block, hits, genome_seqs, db_sequences, geno
         return joined
 
     def _keep_genome_wide(cands):
-        """The answer of a genome-wide window (genome_wide_keep: judged HIGH, no retrocopy, not
-        frame-broken without an intron, no written row under it; the best one): nothing else of
+        """The answer of a genome-wide window (genome_wide_keep: judged HIGH, tested and no
+        retrocopy unless the home gene model has one exon, not frame-broken without an intron,
+        no written row under it; the best one): nothing else of
         the window is written, so the path adds no LOW rows and nothing to "needs curation". The
         drops of real candidates are counted by reason and the window's outcome is recorded
         (genome_wide_goi_pass writes it to the table)."""
-        kept, dropped = genome_wide_keep(cands, block.get('records_index'))
+        kept, dropped = genome_wide_keep(cands, block.get('records_index'),
+                                         bool(getattr(args, 'home_goi_single_exon', False)))
         _ctx = getattr(args, 'genome_ctx', None)
         if _ctx is not None:
             if not decoy_case:
@@ -7906,11 +7926,18 @@ def apply_rescue(args, genome_name, rescue, blocks, scatter=None) -> None:
 #     so the dead zone and the §1x table read as with the path off), searched without the flanking
 #     pass and judged in the genome place (no multiplier);
 #   - a candidate of such a window is an answer (genome_wide_keep) when the judge labels it HIGH,
-#     no exon of its own gene model runs across an exon junction of an annotated multi-exon home
-#     gene (RetrocopyCandidate; RETROCOPY_JUNCTION_FLANK_AA residues on each side) without holding
+#     no exon of its own gene model runs across an exon junction of the home gene model
+#     (RetrocopyCandidate=0; RETROCOPY_JUNCTION_FLANK_AA residues on each side) without holding
 #     an intron there that miniprot read as coding (READTHROUGH_INTRON_MIN_NT per spanned
 #     junction, counted over the exon, not located), it is not
-#     frame-broken without an intron, and it overlaps no row written before; the best one per window
+#     frame-broken without an intron, and it overlaps no row written before. The junctions are
+#     known for a home gene model of >= 2 exons from the home GFF or, where ANNOTATE_GOI built
+#     its own miniprot model (no home GFF, or no annotated gene matches the query), from that
+#     model with canonical splice sites at every junction (GT or GC ... AG; home_junction_terms). A
+#     candidate the test did not run on (junctions unknown, or a model the test cannot read: a
+#     hit chain, a tandem copy, a relative's model rebased onto the home protein) is no answer
+#     (retrocopy_untested), unless the home gene model has one exon, where there is nothing to
+#     test. The best answer per window
 #     is kept and labelled MEDIUM, GOIClass=genome_wide_strong_hit (synvoy_label.
 #     genome_wide_answer). It never seeds the next wave and never reaches the tree; the report
 #     keeps it apart from the counted calls, one per genome, only in a genome without a counted
@@ -7930,8 +7957,9 @@ GENOME_WIDE_COLUMNS = ['genome', 'parent', 'decoy', 'chrom', 'start', 'end', 'hi
                        'median_flank_identity', 'own_copy_set_aside', 'own_copy_bits']
 # What became of a place (decision) and of its window (model_decision, for a modelled place).
 GENOME_WIDE_DECISIONS = ('evalue', 'coverage', 'specificity', 'not_tried', 'no_window', 'modelled')
-GENOME_WIDE_MODEL_DECISIONS = ('answer', 'judge_not_high', 'retrocopy_cds', 'frame_broken_no_intron',
-                               'overlaps_record', 'second_in_window', 'no_candidate')
+GENOME_WIDE_MODEL_DECISIONS = ('answer', 'judge_not_high', 'retrocopy_cds', 'retrocopy_untested',
+                               'frame_broken_no_intron', 'overlaps_record', 'second_in_window',
+                               'no_candidate')
 
 
 def genome_wide_places(hits, cores, home_parents, max_gap: int, records=(),
@@ -8093,6 +8121,39 @@ def home_exon_junctions(lengths) -> List[int]:
     return out
 
 
+# The splice sites that make the exon junctions of ANNOTATE_GOI's own miniprot model of the home
+# gene (no home GFF, or no annotated gene matches the query) the retrocopy test's: at every
+# exon-exon boundary, the donor of the exon before it and the acceptor of the exon after it.
+RETROCOPY_HOME_DONORS = ('GT', 'GC')
+RETROCOPY_HOME_ACCEPTORS = ('AG',)
+
+
+def home_junction_terms(method, lengths, sites=()) -> Tuple[List[int], bool]:
+    """``(junctions, single_exon)`` of the home gene for the retrocopy test of the genome-wide
+    path, from :func:`read_home_exons` (``method``, exon lengths) and
+    :func:`read_home_splice_sites` (``sites``). The junctions (home_exon_junctions) are known for
+    a home gene model of >= 2 exons that the home GFF annotates (``gff_annotation``), or that
+    ANNOTATE_GOI built with miniprot (``hit_annotation``, or ``tandem_duplication`` with its main
+    model) when every exon-exon boundary has canonical splice sites: the donor of the exon before
+    it GT or GC, the acceptor of the exon after it AG. Otherwise []. ``single_exon``: the model has
+    exactly one exon, so there is no junction to test. A candidate of a genome-wide window is an
+    answer only with RetrocopyCandidate=0, or with ``single_exon`` (genome_wide_drop_reason). The
+    exon count (ExonsKept) and the first-exon guard's structure are home_exon_terms', unchanged."""
+    lengths = list(lengths or [])
+    if len(lengths) == 1:
+        return [], True
+    if len(lengths) < 2:
+        return [], False
+    if method == "gff_annotation":
+        return home_exon_junctions(lengths), False
+    sites = list(sites or [])
+    if (method in ("hit_annotation", "tandem_duplication") and len(sites) == len(lengths)
+            and all(before[0] in RETROCOPY_HOME_DONORS and after[1] in RETROCOPY_HOME_ACCEPTORS
+                    for before, after in zip(sites, sites[1:]))):
+        return home_exon_junctions(lengths), False
+    return [], False
+
+
 def junctions_spanned(piece, junctions, flank: int = RETROCOPY_JUNCTION_FLANK_AA) -> int:
     """How many home junctions one piece (query start, end) spans, ``flank`` residues aligned on
     each side."""
@@ -8145,10 +8206,11 @@ def retrocopy_test_pieces(cand, junctions=()) -> Optional[List[Tuple[int, int]]]
 
 def mark_genome_wide_candidates(candidates, junctions, place_attrs) -> None:
     """The attributes of a candidate of a genome-wide window, on its feature row: GenomeWide=1;
-    with ``junctions`` (an annotated home gene of >= 2 exons) and a gene model of its own
-    (retrocopy_test_pieces) RetrocopyCandidate=1 when one exon of the model spans a junction
-    (spans_a_junction) without holding a read-through intron for it (readthrough_nt), else 0,
-    and no RetrocopyCandidate when the test cannot be read;
+    with ``junctions`` (a home gene model of >= 2 exons, home_junction_terms) and a gene model of
+    its own (retrocopy_test_pieces) RetrocopyCandidate=1 when one exon of the model spans a
+    junction (spans_a_junction) without holding a read-through intron for it (readthrough_nt),
+    else 0, and no RetrocopyCandidate when the test cannot be read (such a candidate is no
+    answer unless the home gene model has one exon: genome_wide_drop_reason);
     GenomeWideCoverage (the place's union coverage), and when known NeighbourMedianIdentity (the
     genome's median flanking identity, recorded only) and NearBlock (``place_attrs``: coverage,
     neighbour_median, near_block)."""
@@ -8179,12 +8241,16 @@ def _has_intron(gff_rows) -> bool:
     return any(b[0] - a[1] - 1 >= GOI_CHAIN_MIN_INTRON_BP for a, b in zip(cds, cds[1:]))
 
 
-def genome_wide_drop_reason(cand, records_index=None) -> Optional[str]:
+def genome_wide_drop_reason(cand, records_index=None, single_exon_home: bool = False) -> Optional[str]:
     """Why a judged candidate of a genome-wide window is no answer, None when it is one: the
     judge's window label is not HIGH (``judge_not_high``), it is a retrocopy candidate
-    (``retrocopy_cds``), frame-broken without an intron (``frame_broken_no_intron``), or it
-    overlaps a row the search wrote before the pass (``overlaps_record``; ``records_index``:
-    intervals_by_chrom of (chrom, start, end), 0-based half-open)."""
+    (``retrocopy_cds``), the retrocopy test did not run on it (``retrocopy_untested``: no
+    RetrocopyCandidate=0, because the home gene's junctions are unknown or its model is one the
+    test cannot read, retrocopy_test_pieces; not with ``single_exon_home``, a home gene model of
+    one exon, where there is nothing to test), it is frame-broken without an intron
+    (``frame_broken_no_intron``), or it overlaps a row the search wrote before the pass
+    (``overlaps_record``; ``records_index``: intervals_by_chrom of (chrom, start, end), 0-based
+    half-open)."""
     gff = cand.get('gff') or []
     cols = gff[0].split('\t') if gff else []
     if len(cols) < 9 or synvoy_label.genome_wide_answer(cand.get('window_label'),
@@ -8193,6 +8259,8 @@ def genome_wide_drop_reason(cand, records_index=None) -> Optional[str]:
     a = _parse_gff_attr_string(cols[8])
     if a.get('RetrocopyCandidate') == '1':
         return 'retrocopy_cds'
+    if a.get('RetrocopyCandidate') != '0' and not single_exon_home:
+        return 'retrocopy_untested'
     if a.get('FrameBroken') == '1' and not _has_intron(gff[1:]):
         return 'frame_broken_no_intron'
     if records_index and overlaps_indexed(records_index, cols[0], int(cols[3]) - 1, int(cols[4])):
@@ -8200,9 +8268,11 @@ def genome_wide_drop_reason(cand, records_index=None) -> Optional[str]:
     return None
 
 
-def genome_wide_keep(cands, records_index=None) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], str]]]:
+def genome_wide_keep(cands, records_index=None,
+                     single_exon_home: bool = False) -> Tuple[List[Dict[str, Any]], List[Tuple[Dict[str, Any], str]]]:
     """The answer of one genome-wide window: of its judged candidates in the judge's order
-    (rank_key), the first that genome_wide_drop_reason passes. Returns ``(kept, dropped)``:
+    (rank_key), the first that genome_wide_drop_reason passes (``single_exon_home``: a home gene
+    model of one exon, so a candidate needs no retrocopy test). Returns ``(kept, dropped)``:
     ``kept`` that one (or none), ``dropped`` every other candidate with its reason, in the same
     order (``second_in_window`` for an answer behind the first)."""
     if cands and all('rank_key' in c for c in cands):
@@ -8211,7 +8281,7 @@ def genome_wide_keep(cands, records_index=None) -> Tuple[List[Dict[str, Any]], L
         ordered = sorted(cands, key=goi_candidate_order)
     kept, dropped = [], []
     for c in ordered:
-        reason = genome_wide_drop_reason(c, records_index)
+        reason = genome_wide_drop_reason(c, records_index, single_exon_home)
         if reason is None and kept:
             reason = 'second_in_window'
         if reason is None:
@@ -10224,10 +10294,16 @@ def main():
     # exon lengths of an annotated multi-exon home gene (the first-exon guard of G3A).
     _home_method, _home_lengths = read_home_exons(getattr(args, "goi_info", None))
     args.home_goi_exons, args.home_goi_structure = home_exon_terms(_home_method, _home_lengths)
-    # The junctions of an annotated multi-exon home gene: a genome-wide gene model with one exon
-    # across one is a retrocopy candidate (RetrocopyCandidate=1), and no answer, unless the exon
-    # is long enough to hold a read-through intron there (retrocopy_test_pieces).
-    args.home_goi_junctions = home_exon_junctions(_home_lengths) if args.home_goi_structure else []
+    # The junctions of a home gene model of >= 2 exons, annotated or ANNOTATE_GOI's own miniprot
+    # model (no home GFF, or none matches) with canonical splice sites at every junction: a
+    # genome-wide gene model with one exon across one is a retrocopy candidate
+    # (RetrocopyCandidate=1), and no answer, unless the exon is long enough to hold a read-through
+    # intron there (retrocopy_test_pieces). A candidate the test did not run on is no answer
+    # either, unless the home gene model has one exon (home_junction_terms,
+    # genome_wide_drop_reason). Computed apart from home_exon_terms: home_goi_exons and
+    # home_goi_structure stay as they were.
+    args.home_goi_junctions, args.home_goi_single_exon = home_junction_terms(
+        _home_method, _home_lengths, read_home_splice_sites(getattr(args, "goi_info", None)))
 
     # Model-status and ML thresholds from CLI args (the GOI label itself is synvoy_label's)
     CLASSIFY_THRESHOLDS["fragment_max_qcov"] = args.classify_fragment_max_qcov

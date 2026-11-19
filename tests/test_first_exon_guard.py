@@ -81,3 +81,22 @@ def test_which_parents_get_the_guard(tmp_path):
     assert isr.first_exon_guard_structure(args, "GOI_copy_1|g_b0_l1") is None      # a seeded copy
     args.goi_first_exon_guard = False
     assert isr.first_exon_guard_structure(args, "GOI_q") is None
+
+
+def test_the_retrocopy_junctions_of_a_miniprot_home_model_leave_the_guard_alone(tmp_path):
+    """F1 (laptop gate of 18 Nov 2026): the genome-wide path's retrocopy test also reads the
+    junctions of a miniprot home model (hit_annotation) with canonical splice sites now. The
+    first-exon guard and ExonsKept read home_exon_terms, which stays as it was: the exon count,
+    and a structure only for an annotated gene."""
+    info = tmp_path / "goi_info.json"
+    info.write_text(json.dumps({"method": "hit_annotation", "exons": [
+        {"id": "GOI_q|exon_1", "exon_num": 1, "length_aa": 17, "splice_donor": "GT", "splice_acceptor": "CC"},
+        {"id": "GOI_q|exon_2", "exon_num": 2, "length_aa": 39, "splice_donor": "GT", "splice_acceptor": "AG"},
+        {"id": "GOI_q|exon_3", "exon_num": 3, "length_aa": 73, "splice_donor": "TA", "splice_acceptor": "AG"}]}))
+    method, lengths = isr.read_home_exons(str(info))
+    assert (method, lengths) == ("hit_annotation", [17, 39, 73])
+    assert isr.home_exon_terms(method, lengths) == (3, None)                  # as before
+    assert isr.home_junction_terms(method, lengths, isr.read_home_splice_sites(str(info))) == ([17, 56], False)
+    # the same gene from the home GFF: the guard gets its structure, the test the same junctions
+    assert isr.home_exon_terms("gff_annotation", lengths) == (3, LY6E_LIKE)
+    assert isr.home_junction_terms("gff_annotation", lengths, []) == ([17, 56], False)

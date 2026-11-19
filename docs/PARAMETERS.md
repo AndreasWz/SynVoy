@@ -1628,14 +1628,20 @@ an answer, at most [`max_blocks_per_genome`](#max_blocks_per_genome) windows per
 (`genome_wide_tries_cap` in the limit counts). A try searches the place ± the model margin, cut at
 the GOI zones and at the earlier tries' windows, without flanking genes, and judges its models in the genome place. Its best model
 is the answer when the judge labels it HIGH there, no exon of its gene model runs across an exon
-junction of the annotated home gene (≥ 2 exons) with 10 residues on each side (`RetrocopyCandidate=1`:
+junction of the home gene model with 10 residues on each side (`RetrocopyCandidate=1`:
 the target would encode both exons without an intron, as a retrocopy does; the model's exons are
 tested, not the hits, whose ends can run into an intron; an exon that is at least 30 nt per
 junction longer than 3 × its aligned query span is taken to hold a short in-frame intron at each
 that miniprot read as coding, and does not count; the excess is counted, not located, so one
 read-through intron of 60 nt or more next to a lost intron does not count either), it is not
 frame-broken without an intron (a frameshifted copy split into two pieces a few bp apart), and it
-overlaps no model the search wrote before.
+overlaps no model the search wrote before. The junctions are those of a home gene model of
+≥ 2 exons: the annotated gene, or the miniprot model the home step builds when there is none (no
+home GFF, or no annotated gene that matches the query), if every exon-exon boundary has canonical
+splice sites (GT or GC, then AG). A candidate the test did not
+run on, because no junctions are known or because it is no miniprot model of the home protein (a
+hit chain, a tandem copy, a relative's model rebased onto the home protein), is no answer
+(`retrocopy_untested`), unless the home gene model has one exon: then there is nothing to test.
 
 An answer is written as MEDIUM, `GOIClass=genome_wide_strong_hit`, with `GenomeWide=1`,
 `GenomeWideCoverage`, `NeighbourMedianIdentity` (the genome's median flanking identity, recorded
@@ -2226,7 +2232,7 @@ These parameters were removed before version 1.0.0, or after version 1.0.1 where
 
 | Parameter | Why it went |
 |---|---|
-| `goi_genome_wide_without_blocks` | removed on 2026-11-16 (after 1.0.1). With `goi_genome_wide_path` it ran the genome-wide path also in a genome without a significant block and marked retrocopy candidates. The path now runs in every searched genome, with or without a block (the genome place does not depend on the blocks), and its retrocopy test is always on. To search no genome-wide places, use `--goi_genome_wide_path false` |
+| `goi_genome_wide_without_blocks` | removed on 2026-11-16 (after 1.0.1). With `goi_genome_wide_path` it ran the genome-wide path also in a genome without a significant block and marked retrocopy candidates. The path now runs in every searched genome, with or without a block (the genome place does not depend on the blocks), and its retrocopy test runs wherever the home gene's exon junctions are known; a candidate it cannot test is no answer, unless the home gene model has one exon ([`goi_genome_wide_path`](#goi_genome_wide_path)). To search no genome-wide places, use `--goi_genome_wide_path false` |
 
 **The LLM parameter advisor** (read only by the advisor, which was removed with them)
 
