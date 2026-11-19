@@ -29,6 +29,7 @@ from build_home_paralog_panel import (  # noqa: E402
     locus_span,
     find_family_paralogs,
 )
+import generate_report as gr  # noqa: E402
 from generate_report import build_locus_ownership  # noqa: E402
 
 # A realistic base protein + a ~half-mutated paralog + an unrelated sequence, for the
@@ -453,6 +454,86 @@ class TestBuildLocusOwnership(unittest.TestCase):
         self.assertEqual(flags, [])
         self.assertEqual(summary["evaluated"], 0)
         self.assertNotIn("owning_locus", rec)
+
+
+class TestAnswerOwnership(unittest.TestCase):
+    """F2 (laptop gate of 18 Nov 2026): ownership runs before the report drops the answers of the
+    genome-wide path (drop_genome_wide_strong_hits). An answer recovered from locus_2 at the place
+    of locus_1's counted HIGH call aligned best to the GOI's own entry at locus_1, so it was given
+    locus_reattributed and a false goi_owner_search_fumble ("did NOT recover") although locus_1
+    called the gene. An answer lies outside synteny by construction: it raises neither flag. A
+    paralog that owns it still demotes it. All synthetic."""
+
+    META = {"locus_1|gene-q": {"locus": "locus_1", "gene": "gene-q", "is_goi": True},
+            "locus_2|gene-p": {"locus": "locus_2", "gene": "gene-p", "is_goi": False}}
+
+    @staticmethod
+    def _rows(best="locus_1|gene-q", second="locus_2|gene-p"):
+        return [_ownership_row("G1", "c1", 1001, 1900, best_label=best, best_bit=400.0,
+                               second_label=second, second_bit=150.0, locus=locus, mrna=f"m_{locus}")
+                for locus in ("locus_1", "locus_2")]
+
+    @staticmethod
+    def _answer(provenance):
+        return dict(_dedup_record("G1", "c1", 1001, 1900, provenance=provenance, confidence="MEDIUM",
+                                  goi_class="genome_wide_strong_hit"), genome_wide_strong_hit=True)
+
+    def test_an_answer_at_the_place_of_another_locus_call_raises_no_locus_flag(self):
+        counted = _dedup_record("G1", "c1", 1001, 1900, provenance=["locus_1"])
+        answer = self._answer(["locus_2"])
+        flags, summary = build_locus_ownership({"records": [counted, answer]}, self._rows(), self.META, {})
+        self.assertEqual(flags, [])
+        self.assertEqual((summary["n_reattributed"], summary["n_owner_search_fumble"]), (0, 0))
+        self.assertFalse(answer["locus_reattributed"])
+        self.assertEqual((answer["owning_locus"], answer["goi_class"]), ("locus_1", "genome_wide_strong_hit"))
+        # the same record without the mark (a call of the search): both flags, as before
+        plain = _dedup_record("G1", "c1", 1001, 1900, provenance=["locus_2"])
+        flags, summary = build_locus_ownership({"records": [plain]}, self._rows(), self.META, {})
+        self.assertEqual(sorted(f["type"] for f in flags), ["goi_owner_search_fumble", "locus_reattributed"])
+
+    def test_an_answer_a_paralog_owns_is_still_demoted(self):
+        answer = self._answer(["locus_1"])
+        flags, summary = build_locus_ownership(
+            {"records": [answer]}, self._rows(best="locus_2|gene-p", second="locus_1|gene-q"), self.META, {})
+        self.assertEqual((answer["goi_class"], answer["inferred_paralog"]), ("paralog_not_goi", "gene-p"))
+        self.assertEqual([f["type"] for f in flags], ["paralog_misassignment"])
+        self.assertEqual((summary["n_paralog_misassignment"], summary["n_reattributed"],
+                          summary["n_owner_search_fumble"]), (1, 0, 0))
+        self.assertEqual(gr.genome_wide_answer_records([answer], {"paralog_not_goi"}), [])   # no answer
+
+    def test_the_report_counts_no_locus_flag_for_the_dropped_answer(self):
+        """Through build_report: locus_1's HIGH call is counted, locus_2's answer at its place is
+        dropped (genome_has_counted_call), and the summary's two counters stay 0."""
+        gff = ("c1\tx\tmRNA\t1001\t1900\t.\t+\t.\tID={mid};SynVoy_Parent=GOI_q;SynVoyRole=goi;"
+               "Confidence={conf};GOIClass={cls};EvidenceType=exon_annotation;Identity=80.0;"
+               "QueryCoverage=0.95;Basis=significant_specific;Eeff=1e-40;Place=genome;BlockEsyn=inf{extra}\n")
+        own_cols = ["genome", "locus", "chrom", "start", "end", "mrna_id", "best_paralog", "best_bit",
+                    "second_paralog", "second_bit", "bitscore_gap"]
+        with tempfile.TemporaryDirectory() as d:
+            for sub in ("regions", "hits", "scores", "locus_ownership"):
+                os.makedirs(os.path.join(d, sub))
+            for locus, mid, conf, cls, extra in (
+                    ("locus_1", "GOI_q|G1_b0_l1", "HIGH", "confident_goi", ""),
+                    ("locus_2", "GOI_q|G1_b5000_l1", "MEDIUM", "genome_wide_strong_hit",
+                     ";GenomeWide=1;GenomeWideCoverage=0.950;RetrocopyCandidate=0")):
+                with open(os.path.join(d, "regions", f"{locus}__G1.fna.gff"), "w") as fh:
+                    fh.write("##gff-version 3\n" + gff.format(mid=mid, conf=conf, cls=cls, extra=extra))
+                with open(os.path.join(d, "locus_ownership", f"{locus}__G1.fna.locus_ownership.tsv"), "w") as fh:
+                    fh.write("\t".join(own_cols) + "\n" + "\t".join(
+                        ["G1.fna", locus, "c1", "1001", "1900", mid, "locus_1|gene-q", "400.0",
+                         "locus_2|gene-p", "150.0", "250.0"]) + "\n")
+            with open(os.path.join(d, "locus_ownership", "home_paralog_panel.faa.meta.tsv"), "w") as fh:
+                fh.write("panel_id\tlocus_id\tgene\tchrom\tis_goi_gene\tgoi_found_by\n"
+                         "locus_1|gene-q\tlocus_1\tgene-q\th1\t1\tgoi_info\n"
+                         "locus_2|gene-p\tlocus_2\tgene-p\th2\t0\t\n")
+            report = gr.build_report(d)
+        s = report["summary"]
+        self.assertEqual((s["goi_owner_search_fumbles"], s["locus_reattributed_orthologs"]), (0, 0))
+        self.assertFalse({"locus_reattributed", "goi_owner_search_fumble"}
+                         & {f["type"] for f in report["self_consistency"]["flags"]})
+        self.assertEqual([r["reason"] for r in report["goi_dedup"]["genome_wide_strong_hits_dropped_records"]],
+                         ["genome_has_counted_call"])
+        self.assertEqual(s["high_confidence_goi"], 1)
 
 
 if __name__ == "__main__":

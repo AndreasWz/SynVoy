@@ -2352,7 +2352,9 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
     GOI's own entry (_is_goi_for_call). A demo had 30 of 30 true orthologs relabelled when another
     home copy was identical to the GOI, a margin of 0 (fix-phase item 10). Neither case says the
     GOI's locus failed to recover the call, so neither raises locus_reattributed or
-    goi_owner_search_fumble.
+    goi_owner_search_fumble; nor does an answer of the genome-wide path (genome_wide_strong_hit),
+    which is never counted and is dropped where its genome has a counted call. A paralog that
+    owns an answer still demotes it (paralog_not_goi), so it is no answer.
 
     Mutates the records in ``goi_dedup['records']`` in place (adds owning_* keys) and
     returns (flags, summary)."""
@@ -2445,8 +2447,11 @@ def build_locus_ownership(goi_dedup, ownership_rows, panel_meta, flanking_per_lo
         # GOI ortholog to its correct home locus). When the best match is a home PARALOG
         # (owning_is_goi=False — e.g. a homology-family entry like home_gene-BGN), that's a
         # paralog_misassignment, not a reattribution to a searched locus. A near tie or an own copy
-        # says nothing about which home locus the call belongs to.
-        cannot_tell = near_tie or own_copy_owner
+        # says nothing about which home locus the call belongs to. Nor does an answer of the
+        # genome-wide path: it lies outside synteny by construction, and the report drops it where
+        # the genome has a counted call (drop_genome_wide_strong_hits), so it says nothing about
+        # which home locus recovered the gene. Its paralog demotion below stays.
+        cannot_tell = near_tie or own_copy_owner or bool(rec.get("genome_wide_strong_hit"))
         reattributed = owning_is_goi and not cannot_tell and (owning_locus not in provenance or (
             len(provenance) > 1 and provenance[0] != owning_locus
         ))
