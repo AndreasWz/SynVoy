@@ -50,6 +50,10 @@ process ITERATIVE_SEARCH {
     // The genome axis (lib/GenomeAxis.groovy): '' and anchor_max_places 'auto' as 0 under
     // --modules legacy, so a legacy task is the one it was before.
     def axis_args = GenomeAxis.args(params)
+    // The blocks of a genome side by side (bin/synvoy_parallel.py). A retried attempt (Nextflow
+    // retries after a memory kill, exit 137, among others) searches them one after another, as
+    // 1.0.1 did: the same results, with one window search at a time per genome.
+    def block_workers = task.attempt > 1 ? 1 : params.iterative_search_block_workers
     """
     ${projectDir}/bin/iterative_search_runner.py \\
         --initial_db $initial_db \\
@@ -65,6 +69,7 @@ process ITERATIVE_SEARCH {
         --mmseqs_verbosity ${params.mmseqs_verbosity} \\
         --mmseqs_max_seqs ${params.mmseqs_max_seqs} \\
         --deterministic_goi_search ${params.deterministic_goi_search} \\
+        --block_workers ${block_workers} \\
         --evalue ${params.search_evalue} \\
         --min_identity ${settings.min_hit_identity} \\
         --min_length ${settings.min_hit_length} \\

@@ -560,6 +560,9 @@ def validateNumericParams(validationErrors, validationWarnings) {
             validationErrors << "Invalid --${guardName} (${params[guardName]}). Must be a whole number of seconds >= 1."
         }
     }
+    if (!(params.iterative_search_block_workers.toString() ==~ /auto|[1-9][0-9]*/)) {
+        validationErrors << "Invalid --iterative_search_block_workers (${params.iterative_search_block_workers}). Must be 'auto' or a whole number >= 1 (1: the blocks of a genome one after another)."
+    }
     if (!(params.sw_method in ['auto', 'parasail', 'ssearch36'])) {
         validationErrors << "Invalid --sw_method '${params.sw_method}'. Must be: auto, parasail, or ssearch36."
     }

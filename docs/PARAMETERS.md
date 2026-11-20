@@ -2020,6 +2020,46 @@ exit code 104, 134 or 139, and the region scoring (CLUSTER_REGIONS) is not retri
 CPUs of one search task. The genomes of one wave are searched at the same time by workers, at most
 this many (a wave holds 1, 2, 3 or 5 genomes), and MMseqs2 uses the CPUs too. The memory a task
 asks for grows with the number of genomes it searches at once (`iterative_search_memory auto`).
+The blocks of each genome share the genome's CPUs (`iterative_search_block_workers`).
+
+### `iterative_search_block_workers`
+**Default:** `auto`
+
+How many blocks of one genome are searched at the same time. After the genome-wide search, each
+block of a genome is searched on its own: the window search, tblastn, Smith-Waterman, miniprot and
+the labels ([ALGORITHM.md § 7.5](ALGORITHM.md#75-windows) to § 7.10). `auto` searches as many
+blocks at once as the genome has CPUs, that is `iterative_search_cpus` divided among the genomes of
+its wave, so a wave of one genome uses all of them. A number is the most at once; `1` searches the
+blocks one after another, as 1.0.1 did. Every setting gives the same calls, records, decoys and
+log lines; only the time and the memory change. A genome searched by more than one worker gets one
+more log line, which names them:
+
+```
+[Candida_dubliniensis.fna] Blocks: 15 searched by 4 workers at a time (auto: 4 core(s) for this genome).
+```
+
+On the Candida pilot (5 target genomes, 4 CPUs, so waves of 1, 2 and 2 genomes with 4 or 2
+workers each) the search step took 12:20 instead of 23:55 over its 6 tasks, 1.9 times faster, with
+the same CPU time. The gain grows with the CPUs per genome and with the number of blocks; the
+genome-wide search and the steps after the blocks take as long as before.
+
+Each block runs in a worker process that starts as a copy of the genome's worker, so the genome in
+memory is shared, not copied (a worker adds about 25 MB of its own). Each worker runs its own
+MMseqs2 search of its window, though, about 0.9 GiB on the Candida pilot, so the task needs about
+that much more for each worker beyond one per genome: 3.5 GiB at the peak instead of 1.9 on the
+pilot. The memory the task asks for is unchanged; on a machine with less than about 1 GB per CPU
+of the task, give a number. A retried attempt of the task (Nextflow retries it after a memory
+kill, exit 137, and a few other exits) searches the blocks one after another, as 1.0.1 did.
+Nextflow's trace adds up the memory of every process of a task (`peak_rss`), so it counts the
+shared genome once per worker and shows more than the task uses.
+
+The blocks are searched one after another, whatever the setting, while a language-model or
+structure layer is on (`enable_plm_search`, `enable_structural_search`,
+`enable_structural_discovery`), whose models stay in the genome's worker, and on a system other
+than Linux (on macOS a forked worker can crash in the system's libraries). `auto` also searches
+them one after another with `deterministic_goi_search false` or the ssearch36 Smith-Waterman
+backend, where each window search already uses all the genome's CPUs; a number is used there as
+given.
 
 ### `iterative_search_memory`
 **Default:** `auto` · `low_mem` 4 GB, `laptop_safe` 8 GB, `docker_max` the machine's memory − 2 GB

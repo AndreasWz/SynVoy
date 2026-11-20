@@ -857,6 +857,11 @@ blocks first (§7.4).
    block is logged and counted (`blocks_capped`). On the genome axis (§7.1) a genome where
    the cap binds is built again from the 5 best places of each flanking gene; the same
    steps (`build_genome_blocks`, the rescue) then filter, sort and cap the rebuild.
+4. **Search.** The kept blocks are searched one by one (§7.5 to §7.10). Nothing a block
+   finds depends on another block, so up to `iterative_search_block_workers` blocks are
+   searched at the same time, each in a worker process (`auto`: as many as the genome has
+   CPUs). Their models, records, counts and log lines are taken back in block order, so the
+   result is that of one block after another.
 
 ### 7.5 Windows
 
@@ -1794,6 +1799,8 @@ The same inputs give the same output files:
 - the searches inside a window run on one thread: MMseqs2 because of
   `deterministic_goi_search`, tblastn and parasail always;
 - the results of a wave are joined in genome order and sorted by id;
+- the blocks of a genome searched at the same time (`iterative_search_block_workers`) are
+  joined in block order, with their counts and log lines, so the setting changes no output;
 - sets are sorted before they are iterated, and `PYTHONHASHSEED` is fixed to 0;
 - region hits are put into one total order before scoring;
 - the permutation test uses a fixed seed;

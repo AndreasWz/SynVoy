@@ -179,6 +179,7 @@ try:
     import synvoy_specificity
     import synvoy_evalue
     import synvoy_label
+    import synvoy_parallel
 except ImportError:
     # Fallback if not in path - add bin directory
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +202,7 @@ except ImportError:
     import synvoy_specificity
     import synvoy_evalue
     import synvoy_label
+    import synvoy_parallel
 
 # Import fragment utilities if available
 try:
@@ -8509,6 +8511,51 @@ def goi_proxy_parents(ids) -> set:
             and (rid[len('gene-'):] if rid.startswith('gene-') else rid) in bare}
 
 
+def block_workers_serial_reason(args) -> Optional[str]:
+    """Why the blocks of a genome are searched one after another whatever --block_workers says:
+    the protein language model and structure searches keep a model (and a GPU context) in this
+    process, which a forked worker cannot share. None when nothing stands in the way."""
+    for flag in ('enable_plm_search', 'enable_structural_search', 'enable_structural_discovery'):
+        if getattr(args, flag, False):
+            return f"--{flag} on: its model stays in this process"
+    return None
+
+
+def block_workers_auto_serial_reason(args) -> Optional[str]:
+    """Why --block_workers auto searches the blocks one after another: a window search that
+    takes all the genome's threads (--deterministic_goi_search false, or the ssearch36
+    Smith-Waterman backend) would run that many times over. A number given is used."""
+    if not getattr(args, 'deterministic_goi_search', True):
+        return "--deterministic_goi_search false: each window search uses all the genome's threads"
+    if (getattr(args, 'enable_smith_waterman', False)
+            and (getattr(args, 'sw_record', None) or {}).get('backend') == 'ssearch36'):
+        return "the ssearch36 Smith-Waterman search of each window uses all the genome's threads"
+    return None
+
+
+def block_worker_state() -> Dict[str, Any]:
+    """What the blocks of a genome change besides args.genome_ctx, for
+    synvoy_parallel.search_blocks: counts (added back in block order), keys of warnings given
+    once and flags (kept). The caches the blocks fill (_RELATIVE_SCORE_CACHE, the home
+    proteome, the codon tables, synvoy_evalue's run probabilities, the GOI exon offsets of
+    run_augmented_search) hold values that follow from their keys, so each worker keeps its own."""
+    import annotate_goi_exons as _age
+    return {'counters': [_age.LIMIT_COUNTS, synvoy_evalue.BLASTP_FAILURES,
+                         synvoy_specificity.FAMILY_TEST_FAILURES],
+            'once_sets': [_WARNED_COPY_PARENTS, synvoy_specificity._WARNED],
+            'flags': [_SW_BITS_FAILED, _HOME_TERMS_FAILED]}
+
+
+def warm_block_caches(args) -> None:
+    """Load what the blocks would each load once (the home proteome, _home_proteome) into this
+    process before its block workers are forked, so that they share it. A missing proteome is
+    left to the first block that asks for it, which warns as before."""
+    folder = getattr(args, 'home_db_dir', None) or ''
+    faa = os.path.join(folder, synvoy_specificity.PROTEOME_FILE) if folder else ''
+    if faa and folder not in _HOME_PROTEOME_CACHE and os.path.isfile(faa) and os.path.getsize(faa) > 0:
+        _home_proteome(args)
+
+
 def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threads_per_job):
     """
     Worker function to search a single genome.
@@ -8828,8 +8875,9 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
         # Numbers taken by this genome's blocks; an extra block (proxy, sweep, genome-wide
         # window) takes the next free one, so no two blocks share a number (next_block_number).
         _block_numbers = set(range(len(synteny_blocks)))
-        for i, block in enumerate(synteny_blocks):
-            block_genes, block_gff = process_region_block(
+
+        def _search_block(i, block):
+            return process_region_block(
                 i,
                 block,
                 hits,
@@ -8841,6 +8889,21 @@ def process_single_genome(genome_path, db_path, args, home_db_dir, prefix, threa
                 threads_per_job,
                 native_annot_index=native_annot_index,
             )
+
+        # The blocks side by side in worker processes (--block_workers, synvoy_parallel): the
+        # same results, records and counts as one after another, taken back in block order.
+        _workers, _workers_why = synvoy_parallel.block_worker_count(
+            getattr(args, 'block_workers', 'auto'), threads_per_job, len(synteny_blocks),
+            serial_reason=block_workers_serial_reason(args),
+            auto_serial_reason=block_workers_auto_serial_reason(args))
+        if _workers > 1:
+            logger.info(f"[{genome_name}] Blocks: {len(synteny_blocks)} searched by {_workers} "
+                        f"workers at a time ({_workers_why}).")
+            warm_block_caches(args)
+        for i, (block_genes, block_gff) in enumerate(synvoy_parallel.search_blocks(
+                synteny_blocks, _search_block, args, _workers,
+                work_dir=f"{args.output_dir}/tmp_{unique_id}_{genome_name}_block_workers",
+                **block_worker_state())):
             all_genes.extend(block_genes)
             all_gff_lines.extend(block_gff)
 
@@ -9956,6 +10019,13 @@ def main():
              "thread anyway, and a window is small, so it costs little time. false: the "
              "window search uses --threads, faster but not reproducible (default: true)"
     )
+    parser.add_argument(
+        "--block_workers", type=str, default="auto",
+        help="How many search blocks of one genome are searched at the same time, each in a "
+             "worker process (bin/synvoy_parallel.py; the same calls, records and decoys as one "
+             "after another, only faster). 'auto' (default): the genome's cores (--threads "
+             "divided among the genomes of a wave); a number: at most that many; 1: one after "
+             "another")
     parser.add_argument("--region_padding", type=bp_or_auto, default=None,
                         help="Window margin in bp. 'auto' (default) = derive it from "
                              "--window_margin_genes. With a number the margin of each block is "
