@@ -2,7 +2,7 @@
 
 What changed between SynVoy versions. Results of different versions are not comparable in detail, so keep the version and the commit that `./run_synvoy.sh` prints with your results (for example `SynVoy v1.0.1` and `main@1281e47`).
 
-## Unreleased (changes after 1.0.1, November 2026)
+## 1.1.0 (21 November 2026)
 
 Counted calls can differ from 1.0.1. These points change which genes the search finds or how it labels them: the rescue beside a single neighbour, the length floors, refused hit chains in significant blocks, hull models judged in their place, the masked-round model floor and the places E_syn counts, the runs without a home GFF, and easy mode's choice of related genomes. The strong-hit answer adds records that are never counted.
 

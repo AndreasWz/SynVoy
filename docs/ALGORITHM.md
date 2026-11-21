@@ -1,6 +1,6 @@
 # SynVoy: the algorithm
 
-This document describes what SynVoy 1.0.1 computes, step by step, with the rule and the
+This document describes what SynVoy 1.1.0 computes, step by step, with the rule and the
 default value at every decision. It is written from the code. Code locations are given as
 `file` → `function`, because line numbers drift.
 

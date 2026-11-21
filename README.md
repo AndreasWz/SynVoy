@@ -164,7 +164,7 @@ SynVoy is for **divergent genes with few copies**, found through conserved gene 
 
 SynVoy is distributed under the **[GNU AGPLv3](LICENSE)**. If SynVoy contributes to your research, please cite it (GitHub's "Cite this repository" button gives the same from [CITATION.cff](CITATION.cff)):
 
-> Weitz, F. A., & Koludarov, I. (2026). SynVoy: Synteny-guided orthology discovery (Version 1.0.1) [Computer software]. https://github.com/AndreasWz/SynVoy
+> Weitz, F. A., & Koludarov, I. (2026). SynVoy: Synteny-guided orthology discovery (Version 1.1.0) [Computer software]. https://github.com/AndreasWz/SynVoy
 
 <details>
 <summary>BibTeX</summary>
@@ -174,7 +174,7 @@ SynVoy is distributed under the **[GNU AGPLv3](LICENSE)**. If SynVoy contributes
   author  = {Weitz, Frank Andreas and Koludarov, Ivan},
   title   = {SynVoy: Synteny-guided orthology discovery},
   year    = {2026},
-  version = {1.0.1},
+  version = {1.1.0},
   url     = {https://github.com/AndreasWz/SynVoy}
 }
 ```
